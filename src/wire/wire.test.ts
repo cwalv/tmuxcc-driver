@@ -1,0 +1,354 @@
+/**
+ * Control-plane wire schema tests.
+ *
+ * These tests verify:
+ *   1. Representative control messages can be constructed with correct shapes.
+ *   2. Type guards (isControlMessage, isDaemonMessage, isClientMessage) narrow
+ *      correctly at runtime.
+ *   3. The discriminated union covers all expected message types.
+ *
+ * Full encode/decode round-trip across a transport is tc-fwb's job. The tests
+ * here focus on structural correctness and type-guard behaviour.
+ */
+
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+
+import {
+  WIRE_PROTOCOL_VERSION,
+  paneId,
+  windowId,
+  sessionId,
+  isControlMessage,
+  isDaemonMessage,
+  isClientMessage,
+} from "./index.js";
+
+import type {
+  PaneOpenedMessage,
+  PaneClosedMessage,
+  PaneResizedMessage,
+  LayoutUpdatedMessage,
+  FocusChangedMessage,
+  DaemonCapabilitiesMessage,
+  InputMessage,
+  ResizeRequestMessage,
+  ClientCapabilitiesMessage,
+  ControlMessage,
+  WindowLayout,
+} from "./index.js";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+const P0 = paneId("p0");
+const P1 = paneId("p1");
+const W0 = windowId("w0");
+const S0 = sessionId("s0");
+
+/** A minimal window layout for testing layout messages. */
+const sampleLayout: WindowLayout = {
+  cols: 80,
+  rows: 24,
+  root: {
+    kind: "hsplit",
+    rect: { x: 0, y: 0, cols: 80, rows: 24 },
+    children: [
+      { kind: "pane", paneId: P0, rect: { x: 0, y: 0, cols: 40, rows: 24 } },
+      { kind: "pane", paneId: P1, rect: { x: 40, y: 0, cols: 40, rows: 24 } },
+    ],
+  },
+};
+
+// ---------------------------------------------------------------------------
+// WIRE_PROTOCOL_VERSION
+// ---------------------------------------------------------------------------
+
+describe("WIRE_PROTOCOL_VERSION", () => {
+  it("is a positive integer", () => {
+    assert.strictEqual(typeof WIRE_PROTOCOL_VERSION, "number");
+    assert.ok(WIRE_PROTOCOL_VERSION >= 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PaneId / WindowId / SessionId construction
+// ---------------------------------------------------------------------------
+
+describe("id constructors", () => {
+  it("paneId() round-trips through string comparison", () => {
+    const id = paneId("p42");
+    // Branded type — underlying value is the string
+    assert.strictEqual(id as string, "p42");
+  });
+
+  it("windowId() and sessionId() are distinct brands (structural)", () => {
+    const w = windowId("w1");
+    const s = sessionId("s1");
+    assert.strictEqual(w as string, "w1");
+    assert.strictEqual(s as string, "s1");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Daemon → Client message construction
+// ---------------------------------------------------------------------------
+
+describe("PaneOpenedMessage", () => {
+  it("constructs correctly", () => {
+    const msg: PaneOpenedMessage = {
+      type: "pane.opened",
+      seq: 1,
+      paneId: P0,
+      windowId: W0,
+      sessionId: S0,
+      cols: 80,
+      rows: 24,
+      active: true,
+    };
+    assert.strictEqual(msg.type, "pane.opened");
+    assert.strictEqual(msg.cols, 80);
+    assert.strictEqual(msg.rows, 24);
+    assert.strictEqual(msg.active, true);
+    assert.strictEqual(msg.paneId as string, "p0");
+  });
+});
+
+describe("PaneClosedMessage", () => {
+  it("constructs correctly", () => {
+    const msg: PaneClosedMessage = {
+      type: "pane.closed",
+      seq: 2,
+      paneId: P0,
+      windowId: W0,
+      sessionId: S0,
+    };
+    assert.strictEqual(msg.type, "pane.closed");
+  });
+});
+
+describe("PaneResizedMessage", () => {
+  it("constructs correctly", () => {
+    const msg: PaneResizedMessage = {
+      type: "pane.resized",
+      seq: 3,
+      paneId: P0,
+      cols: 120,
+      rows: 40,
+    };
+    assert.strictEqual(msg.type, "pane.resized");
+    assert.strictEqual(msg.cols, 120);
+  });
+});
+
+describe("LayoutUpdatedMessage", () => {
+  it("constructs with a structured layout tree", () => {
+    const msg: LayoutUpdatedMessage = {
+      type: "layout.updated",
+      seq: 4,
+      windowId: W0,
+      sessionId: S0,
+      layout: sampleLayout,
+    };
+    assert.strictEqual(msg.type, "layout.updated");
+    assert.strictEqual(msg.layout.root.kind, "hsplit");
+    // Narrowing the layout tree
+    const root = msg.layout.root;
+    assert.ok(root.kind === "hsplit");
+    assert.strictEqual(root.children.length, 2);
+    const left = root.children[0];
+    assert.ok(left !== undefined && left.kind === "pane");
+    assert.strictEqual(left.paneId as string, "p0");
+  });
+});
+
+describe("FocusChangedMessage", () => {
+  it("constructs with a paneId", () => {
+    const msg: FocusChangedMessage = {
+      type: "focus.changed",
+      seq: 5,
+      paneId: P1,
+      windowId: W0,
+      sessionId: S0,
+    };
+    assert.strictEqual(msg.type, "focus.changed");
+    assert.strictEqual(msg.paneId as string, "p1");
+  });
+
+  it("constructs with null paneId when no pane is active", () => {
+    const msg: FocusChangedMessage = {
+      type: "focus.changed",
+      seq: 6,
+      paneId: null,
+      windowId: null,
+      sessionId: null,
+    };
+    assert.strictEqual(msg.paneId, null);
+  });
+});
+
+describe("DaemonCapabilitiesMessage", () => {
+  it("constructs with protocol version and features", () => {
+    const msg: DaemonCapabilitiesMessage = {
+      type: "daemon.capabilities",
+      seq: 7,
+      capabilities: {
+        protocolVersion: WIRE_PROTOCOL_VERSION,
+        features: ["pane-lifecycle", "layout-updates", "focus-events", "input-forwarding"],
+      },
+    };
+    assert.strictEqual(msg.capabilities.protocolVersion, 1);
+    assert.ok(msg.capabilities.features.includes("pane-lifecycle"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Client → Daemon message construction
+// ---------------------------------------------------------------------------
+
+describe("InputMessage", () => {
+  it("constructs with UTF-8 data string", () => {
+    const msg: InputMessage = {
+      type: "input",
+      seq: 1,
+      paneId: P0,
+      data: "ls -la\r",
+    };
+    assert.strictEqual(msg.type, "input");
+    assert.strictEqual(msg.data, "ls -la\r");
+  });
+
+  it("can carry escape sequences as string data", () => {
+    const msg: InputMessage = {
+      type: "input",
+      seq: 2,
+      paneId: P0,
+      data: "\x1b[A", // cursor up — pre-encoded by client
+    };
+    assert.strictEqual(msg.data, "\x1b[A");
+  });
+});
+
+describe("ResizeRequestMessage", () => {
+  it("constructs correctly", () => {
+    const msg: ResizeRequestMessage = {
+      type: "resize.request",
+      seq: 3,
+      paneId: P0,
+      cols: 132,
+      rows: 50,
+    };
+    assert.strictEqual(msg.type, "resize.request");
+    assert.strictEqual(msg.cols, 132);
+  });
+});
+
+describe("ClientCapabilitiesMessage", () => {
+  it("constructs correctly", () => {
+    const msg: ClientCapabilitiesMessage = {
+      type: "client.capabilities",
+      seq: 1,
+      capabilities: {
+        protocolVersion: WIRE_PROTOCOL_VERSION,
+        features: ["pane-lifecycle", "input-forwarding"],
+      },
+    };
+    assert.strictEqual(msg.type, "client.capabilities");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Type guards
+// ---------------------------------------------------------------------------
+
+describe("isControlMessage", () => {
+  it("accepts a valid daemon message", () => {
+    const msg: ControlMessage = {
+      type: "pane.opened",
+      seq: 1,
+      paneId: P0,
+      windowId: W0,
+      sessionId: S0,
+      cols: 80,
+      rows: 24,
+      active: false,
+    };
+    assert.strictEqual(isControlMessage(msg), true);
+  });
+
+  it("rejects null", () => {
+    assert.strictEqual(isControlMessage(null), false);
+  });
+
+  it("rejects objects missing type", () => {
+    assert.strictEqual(isControlMessage({ seq: 1 }), false);
+  });
+
+  it("rejects objects with non-string type", () => {
+    assert.strictEqual(isControlMessage({ type: 42, seq: 1 }), false);
+  });
+
+  it("rejects objects missing seq", () => {
+    assert.strictEqual(isControlMessage({ type: "pane.opened" }), false);
+  });
+});
+
+describe("isDaemonMessage / isClientMessage", () => {
+  it("identifies daemon→client messages", () => {
+    const daemonTypes = [
+      "pane.opened",
+      "pane.closed",
+      "pane.resized",
+      "layout.updated",
+      "focus.changed",
+      "daemon.capabilities",
+    ] as const;
+
+    for (const t of daemonTypes) {
+      const msg = { type: t, seq: 1 } as ControlMessage;
+      assert.strictEqual(isDaemonMessage(msg), true, `${t} should be daemon message`);
+      assert.strictEqual(isClientMessage(msg), false, `${t} should not be client message`);
+    }
+  });
+
+  it("identifies client→daemon messages", () => {
+    const clientTypes = ["input", "resize.request", "client.capabilities"] as const;
+
+    for (const t of clientTypes) {
+      const msg = { type: t, seq: 1 } as ControlMessage;
+      assert.strictEqual(isClientMessage(msg), true, `${t} should be client message`);
+      assert.strictEqual(isDaemonMessage(msg), false, `${t} should not be daemon message`);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Invariant smoke test: no tmux vocabulary in message shapes
+// ---------------------------------------------------------------------------
+
+describe("wire invariant", () => {
+  it("InputMessage uses string data, not tmux send-keys syntax", () => {
+    // This is a documentation test: we verify that `data` is just a string
+    // (the client is responsible for encoding — not tmux command syntax).
+    const msg: InputMessage = { type: "input", seq: 1, paneId: P0, data: "hello" };
+    assert.ok(typeof msg.data === "string");
+    // No %output, no begin/end markers in any message type field names
+    assert.ok(!("output" in msg));
+    assert.ok(!("begin" in msg));
+    assert.ok(!("end" in msg));
+  });
+
+  it("LayoutUpdatedMessage carries structured tree, not a tmux layout string", () => {
+    const msg: LayoutUpdatedMessage = {
+      type: "layout.updated",
+      seq: 1,
+      windowId: W0,
+      sessionId: S0,
+      layout: sampleLayout,
+    };
+    // layout.root is a LayoutNode, not a string
+    assert.ok(typeof msg.layout.root === "object");
+    assert.ok(!("layoutString" in msg.layout));
+  });
+});
