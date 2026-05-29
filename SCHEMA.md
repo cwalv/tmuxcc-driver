@@ -667,11 +667,75 @@ src/wire/
 
 ---
 
-## TODO: Handshake flow (bead tc-666)
+## Handshake flow (bead tc-666)
 
-The handshake sequence — who sends capabilities first, version-mismatch handling, fallback negotiation — is defined by bead **tc-666**. The data shapes (`Capabilities`, `DaemonCapabilitiesMessage`, `ClientCapabilitiesMessage`) are defined in this document (control plane).
+The handshake establishes a shared `NegotiatedSession` — agreed protocol version + effective feature set — before any data flows.  Implementation: `src/wire/handshake.ts`.
 
-> **Stub**: document handshake sequence here once tc-666 is complete.
+### Sequence
+
+**The daemon initiates.**  This follows the convention of server-first protocols (SSH server banner, SMTP server greeting): the connecting client waits to learn what the server supports before committing any state, and the daemon is always the authoritative source of truth.
+
+```
+Daemon                                  Client
+  |                                       |
+  |---- daemon.capabilities (seq=1) ----->|   (1) daemon advertises version + features
+  |<---- client.capabilities (seq=1) -----|   (2) client responds with its own
+  |                                       |
+  |  both sides independently compute:   |
+  |    agreedVersion  (must match)        |
+  |    features = intersection(D ∩ C)    |
+  |                                       |
+  |---- snapshot (seq=2) ---------------->|   (3) normal data flow begins
+```
+
+Steps:
+1. Immediately after transport connection is established, the daemon sends `daemon.capabilities` (seq=1).
+2. The client receives it and sends `client.capabilities` (seq=1) in response.
+3. Both sides independently compute the negotiated session.  If negotiation succeeds, normal data flow begins (daemon sends `snapshot`, then deltas).  If it fails, the connection is closed.
+
+### Version-negotiation policy (v1 — alpha)
+
+**Exact match required.**  Both sides MUST advertise the same `WIRE_PROTOCOL_VERSION`.  If `daemonCapabilities.protocolVersion !== clientCapabilities.protocolVersion`, the handshake FAILS immediately.
+
+There is no version downgrade or fallback negotiation: this is alpha software and version bookkeeping would hide real breaking changes.  Increment `WIRE_PROTOCOL_VERSION` in `control.ts` for any breaking schema change; update both sides in lockstep.
+
+### Feature-intersection rule
+
+Each side advertises its supported `WireFeature[]` set independently.  The **effective feature set** after a successful handshake is the **set intersection** of the two sides' advertised arrays.  Only features present in both advertisements are considered active.
+
+Unknown feature strings received from the remote are silently ignored (forward-compatible: a new feature added to a future peer does not cause older implementations to fail).
+
+### Failure modes
+
+| Code                           | Cause                                                                           |
+|--------------------------------|---------------------------------------------------------------------------------|
+| `"protocol.version-mismatch"`  | The two sides' `protocolVersion` values differ.                                 |
+| `"protocol.unexpected-message"`| Wrong message type received during handshake (e.g. daemon gets `input` instead of `client.capabilities`). |
+| `"transport.closed"`           | The transport closed before the handshake completed.                            |
+
+All failures are represented as `HandshakeError` (typed class with a `code` field).  After any failure the caller MUST close the transport.  The `error` control-plane message with code `"protocol.version-mismatch"` may optionally be sent by the daemon before closing, so that a human-readable log appears on the client side, but this is advisory — the `HandshakeError` rejection is the authoritative signal.
+
+### Negotiated result type
+
+```typescript
+interface NegotiatedSession {
+  protocolVersion: 1;                   // agreed version (equal to WIRE_PROTOCOL_VERSION)
+  features: readonly WireFeature[];     // intersection of both sides' advertised features
+}
+```
+
+Post-handshake code consumes `NegotiatedSession` to know which features are safe to use.  Neither side needs to re-check capabilities after this point.
+
+### API summary (`src/wire/handshake.ts`)
+
+| Export                  | Description                                                     |
+|-------------------------|-----------------------------------------------------------------|
+| `runDaemonHandshake`    | Daemon-side: send `daemon.capabilities`, await `client.capabilities`, return `NegotiatedSession` or throw `HandshakeError`. |
+| `runClientHandshake`    | Client-side: await `daemon.capabilities`, send `client.capabilities`, return `NegotiatedSession` or throw `HandshakeError`. |
+| `negotiateCapabilities` | Pure function: version-check + feature intersection. Used by both sides. |
+| `intersectFeatures`     | Pure function: set intersection of two `WireFeature[]` arrays.  |
+| `HandshakeError`        | Typed error class with `code: HandshakeErrorCode`.              |
+| `NegotiatedSession`     | Result type capturing agreed version + features.                |
 
 ---
 
@@ -679,10 +743,14 @@ The handshake sequence — who sends capabilities first, version-mismatch handli
 
 ```
 src/wire/
-  ids.ts        — PaneId, WindowId, SessionId (shared with data plane)
-  layout.ts     — WindowLayout, LayoutNode, Rect (structured layout tree)
-  control.ts    — All control-plane message types + type guards
-  index.ts      — Public barrel; re-exports all wire surface
-  wire.test.ts  — node:test structural + type-guard tests
-SCHEMA.md       — This document (repo root)
+  ids.ts          — PaneId, WindowId, SessionId (shared with data plane)
+  layout.ts       — WindowLayout, LayoutNode, Rect (structured layout tree)
+  control.ts      — All control-plane message types + type guards
+  transport.ts    — Transport seam (control + data plane) + in-memory pair
+  framing.ts      — Data-plane binary frame format + streaming decoder (tc-2mq)
+  handshake.ts    — Handshake sequence + version/feature negotiation (tc-666)
+  index.ts        — Public barrel; re-exports all wire surface
+  wire.test.ts    — node:test structural + type-guard tests
+  transport.test.ts / framing.test.ts / handshake.test.ts — per-module tests
+SCHEMA.md         — This document (repo root)
 ```
