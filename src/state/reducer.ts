@@ -217,9 +217,19 @@ function parseLayoutChangeLine(rawLine: Uint8Array): LayoutChangeFields | null {
   if (i >= rawLine.length || rawLine[i] !== BYTE_SPACE) return null;
   i++; // skip space
 
-  // Rest of line (strip trailing newline) is the layout string
-  let end = rawLine.length;
-  if (end > i && rawLine[end - 1] === BYTE_LF) end--;
+  // Extract the layout string: first whitespace-delimited token from here.
+  //
+  // tmux 3.4 %layout-change format (from control-notify.c):
+  //   %layout-change @<winId> <layout> <layout> <flags>
+  // The line contains the layout string TWICE (current and previous) followed
+  // by optional flags (e.g. "*"). We must take only the FIRST token; if we
+  // take rest-of-line, parseLayout will reject the trailing extra tokens.
+  // Earlier tmux versions emitted only: %layout-change @<winId> <layout>
+  // so we fall back to rest-of-line when there is no trailing space.
+  let end = i;
+  while (end < rawLine.length && rawLine[end] !== BYTE_SPACE && rawLine[end] !== BYTE_LF) {
+    end++;
+  }
 
   if (end <= i) return null; // empty layout string
 
