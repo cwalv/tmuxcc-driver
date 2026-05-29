@@ -34,18 +34,53 @@ export type {
 export { WIRE_PROTOCOL_VERSION } from "./control.js";
 export type { Capabilities, WireFeature } from "./control.js";
 export type {
-  // Daemon → Client
+  // Snapshot
+  SnapshotSession,
+  SnapshotWindow,
+  SnapshotPane,
+  SnapshotMessage,
+  // Daemon → Client (pane deltas)
   PaneOpenedMessage,
   PaneClosedMessage,
   PaneResizedMessage,
+  PaneMode,
+  PaneModeChangedMessage,
+  // Daemon → Client (window deltas)
+  WindowAddedMessage,
+  WindowClosedMessage,
+  WindowRenamedMessage,
+  // Daemon → Client (layout deltas)
   LayoutUpdatedMessage,
+  // Daemon → Client (focus deltas)
   FocusChangedMessage,
+  // Daemon → Client (session deltas)
+  SessionAddedMessage,
+  SessionClosedMessage,
+  SessionChangedMessage,
+  SessionRenamedMessage,
+  // Daemon → Client (capabilities)
   DaemonCapabilitiesMessage,
+  // Daemon → Client (command response + error)
+  CommandOkPayload,
+  CommandResponseMessage,
+  WireErrorCode,
+  ErrorMessage,
+  // Daemon union
   DaemonMessage,
-  // Client → Daemon
+  // Client → Daemon (input + resize)
   InputMessage,
   ResizeRequestMessage,
   ClientCapabilitiesMessage,
+  // Client → Daemon (commands)
+  WireCommand,
+  OpenWindowCommand,
+  SplitPaneCommand,
+  ClosePaneCommand,
+  RenameWindowCommand,
+  SelectPaneCommand,
+  ResizePaneCommand,
+  CommandRequestMessage,
+  // Client union
   ClientMessage,
   // Either direction
   ControlMessage,

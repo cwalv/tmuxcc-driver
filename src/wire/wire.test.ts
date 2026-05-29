@@ -36,6 +36,19 @@ import type {
   ClientCapabilitiesMessage,
   ControlMessage,
   WindowLayout,
+  // New types
+  SnapshotMessage,
+  PaneModeChangedMessage,
+  WindowAddedMessage,
+  WindowClosedMessage,
+  WindowRenamedMessage,
+  SessionAddedMessage,
+  SessionClosedMessage,
+  SessionChangedMessage,
+  SessionRenamedMessage,
+  CommandRequestMessage,
+  CommandResponseMessage,
+  ErrorMessage,
 } from "./index.js";
 
 // ---------------------------------------------------------------------------
@@ -320,6 +333,423 @@ describe("isDaemonMessage / isClientMessage", () => {
       assert.strictEqual(isClientMessage(msg), true, `${t} should be client message`);
       assert.strictEqual(isDaemonMessage(msg), false, `${t} should not be daemon message`);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SnapshotMessage
+// ---------------------------------------------------------------------------
+
+describe("SnapshotMessage", () => {
+  it("constructs a full-state snapshot with sessions, windows, panes, focus", () => {
+    const S1 = sessionId("s1");
+    const W1 = windowId("w1");
+    const msg: SnapshotMessage = {
+      type: "snapshot",
+      seq: 1,
+      sessions: [{ sessionId: S0, name: "main", active: true }],
+      windows: [
+        {
+          windowId: W0,
+          sessionId: S0,
+          name: "editor",
+          active: true,
+          layout: sampleLayout,
+        },
+      ],
+      panes: [
+        { paneId: P0, windowId: W0, sessionId: S0, cols: 40, rows: 24 },
+        { paneId: P1, windowId: W0, sessionId: S0, cols: 40, rows: 24 },
+      ],
+      focus: { paneId: P0, windowId: W0, sessionId: S0 },
+    };
+    assert.strictEqual(msg.type, "snapshot");
+    assert.strictEqual(msg.sessions.length, 1);
+    assert.strictEqual(msg.windows.length, 1);
+    assert.strictEqual(msg.panes.length, 2);
+    assert.strictEqual(msg.focus.paneId as string, "p0");
+    // Ensure the session id didn't bleed from the unused variable (satisfies TS)
+    void S1;
+    void W1;
+  });
+
+  it("allows null focus when no pane is active", () => {
+    const msg: SnapshotMessage = {
+      type: "snapshot",
+      seq: 2,
+      sessions: [],
+      windows: [],
+      panes: [],
+      focus: { paneId: null, windowId: null, sessionId: null },
+    };
+    assert.strictEqual(msg.focus.paneId, null);
+  });
+
+  it("is recognized as a daemon message by isDaemonMessage", () => {
+    const msg = { type: "snapshot", seq: 1 } as ControlMessage;
+    assert.strictEqual(isDaemonMessage(msg), true);
+    assert.strictEqual(isClientMessage(msg), false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Window delta messages
+// ---------------------------------------------------------------------------
+
+describe("WindowAddedMessage", () => {
+  it("constructs correctly", () => {
+    const msg: WindowAddedMessage = {
+      type: "window.added",
+      seq: 10,
+      windowId: W0,
+      sessionId: S0,
+      name: "vim",
+      active: false,
+    };
+    assert.strictEqual(msg.type, "window.added");
+    assert.strictEqual(msg.name, "vim");
+    assert.strictEqual(msg.active, false);
+  });
+
+  it("is a daemon message", () => {
+    const msg = { type: "window.added", seq: 1 } as ControlMessage;
+    assert.strictEqual(isDaemonMessage(msg), true);
+  });
+});
+
+describe("WindowClosedMessage", () => {
+  it("constructs correctly", () => {
+    const msg: WindowClosedMessage = {
+      type: "window.closed",
+      seq: 11,
+      windowId: W0,
+      sessionId: S0,
+    };
+    assert.strictEqual(msg.type, "window.closed");
+    assert.strictEqual(msg.windowId as string, "w0");
+  });
+});
+
+describe("WindowRenamedMessage", () => {
+  it("constructs correctly", () => {
+    const msg: WindowRenamedMessage = {
+      type: "window.renamed",
+      seq: 12,
+      windowId: W0,
+      newName: "server",
+    };
+    assert.strictEqual(msg.type, "window.renamed");
+    assert.strictEqual(msg.newName, "server");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Session delta messages
+// ---------------------------------------------------------------------------
+
+describe("SessionAddedMessage", () => {
+  it("constructs correctly", () => {
+    const S1 = sessionId("s1");
+    const msg: SessionAddedMessage = {
+      type: "session.added",
+      seq: 20,
+      sessionId: S1,
+      name: "work",
+      active: false,
+    };
+    assert.strictEqual(msg.type, "session.added");
+    assert.strictEqual(msg.name, "work");
+  });
+});
+
+describe("SessionClosedMessage", () => {
+  it("constructs correctly", () => {
+    const msg: SessionClosedMessage = {
+      type: "session.closed",
+      seq: 21,
+      sessionId: S0,
+    };
+    assert.strictEqual(msg.type, "session.closed");
+    assert.strictEqual(msg.sessionId as string, "s0");
+  });
+});
+
+describe("SessionChangedMessage", () => {
+  it("constructs correctly", () => {
+    const S1 = sessionId("s1");
+    const msg: SessionChangedMessage = {
+      type: "session.changed",
+      seq: 22,
+      newActiveSessionId: S1,
+    };
+    assert.strictEqual(msg.type, "session.changed");
+    assert.strictEqual(msg.newActiveSessionId as string, "s1");
+  });
+
+  it("is a daemon message", () => {
+    const msg = { type: "session.changed", seq: 1 } as ControlMessage;
+    assert.strictEqual(isDaemonMessage(msg), true);
+  });
+});
+
+describe("SessionRenamedMessage", () => {
+  it("constructs correctly", () => {
+    const msg: SessionRenamedMessage = {
+      type: "session.renamed",
+      seq: 23,
+      sessionId: S0,
+      newName: "prod",
+    };
+    assert.strictEqual(msg.type, "session.renamed");
+    assert.strictEqual(msg.newName, "prod");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PaneModeChangedMessage
+// ---------------------------------------------------------------------------
+
+describe("PaneModeChangedMessage", () => {
+  it("constructs with 'copy' mode", () => {
+    const msg: PaneModeChangedMessage = {
+      type: "pane.mode-changed",
+      seq: 30,
+      paneId: P0,
+      mode: "copy",
+    };
+    assert.strictEqual(msg.type, "pane.mode-changed");
+    assert.strictEqual(msg.mode, "copy");
+  });
+
+  it("constructs with 'normal' mode (returning from copy mode)", () => {
+    const msg: PaneModeChangedMessage = {
+      type: "pane.mode-changed",
+      seq: 31,
+      paneId: P0,
+      mode: "normal",
+    };
+    assert.strictEqual(msg.mode, "normal");
+  });
+
+  it("accepts an unknown future mode string", () => {
+    const msg: PaneModeChangedMessage = {
+      type: "pane.mode-changed",
+      seq: 32,
+      paneId: P0,
+      mode: "some-future-mode",
+    };
+    assert.strictEqual(msg.mode, "some-future-mode");
+  });
+
+  it("is a daemon message", () => {
+    const msg = { type: "pane.mode-changed", seq: 1 } as ControlMessage;
+    assert.strictEqual(isDaemonMessage(msg), true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Command request / response
+// ---------------------------------------------------------------------------
+
+describe("CommandRequestMessage", () => {
+  it("constructs an open-window command", () => {
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: 1,
+      correlationId: "req-001",
+      command: { kind: "open-window", sessionId: S0, name: "logs" },
+    };
+    assert.strictEqual(msg.type, "command.request");
+    assert.strictEqual(msg.correlationId, "req-001");
+    assert.strictEqual(msg.command.kind, "open-window");
+  });
+
+  it("constructs a split-pane command", () => {
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: 2,
+      correlationId: "req-002",
+      command: { kind: "split-pane", paneId: P0, direction: "horizontal" },
+    };
+    assert.ok(msg.command.kind === "split-pane");
+    assert.strictEqual(msg.command.direction, "horizontal");
+  });
+
+  it("constructs a close-pane command", () => {
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: 3,
+      correlationId: "req-003",
+      command: { kind: "close-pane", paneId: P0 },
+    };
+    assert.ok(msg.command.kind === "close-pane");
+    assert.strictEqual(msg.command.paneId as string, "p0");
+  });
+
+  it("constructs a rename-window command", () => {
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: 4,
+      correlationId: "req-004",
+      command: { kind: "rename-window", windowId: W0, name: "editor" },
+    };
+    assert.ok(msg.command.kind === "rename-window");
+    assert.strictEqual(msg.command.name, "editor");
+  });
+
+  it("constructs a select-pane command", () => {
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: 5,
+      correlationId: "req-005",
+      command: { kind: "select-pane", paneId: P1 },
+    };
+    assert.ok(msg.command.kind === "select-pane");
+  });
+
+  it("constructs a resize-pane command", () => {
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: 6,
+      correlationId: "req-006",
+      command: { kind: "resize-pane", paneId: P0, cols: 100, rows: 30 },
+    };
+    assert.ok(msg.command.kind === "resize-pane");
+    assert.strictEqual(msg.command.cols, 100);
+  });
+
+  it("is recognized as a client message", () => {
+    const msg = { type: "command.request", seq: 1 } as ControlMessage;
+    assert.strictEqual(isClientMessage(msg), true);
+    assert.strictEqual(isDaemonMessage(msg), false);
+  });
+});
+
+describe("CommandResponseMessage — success", () => {
+  it("constructs a successful response with payload", () => {
+    const W1 = windowId("w1");
+    const msg: CommandResponseMessage = {
+      type: "command.response",
+      seq: 10,
+      correlationId: "req-001",
+      result: { ok: true, payload: { windowId: W1 } },
+    };
+    assert.strictEqual(msg.type, "command.response");
+    assert.strictEqual(msg.correlationId, "req-001");
+    assert.strictEqual(msg.result.ok, true);
+  });
+
+  it("constructs a successful response without payload", () => {
+    const msg: CommandResponseMessage = {
+      type: "command.response",
+      seq: 11,
+      correlationId: "req-005",
+      result: { ok: true },
+    };
+    assert.strictEqual(msg.result.ok, true);
+  });
+
+  it("is recognized as a daemon message", () => {
+    const msg = { type: "command.response", seq: 1 } as ControlMessage;
+    assert.strictEqual(isDaemonMessage(msg), true);
+  });
+});
+
+describe("CommandResponseMessage — failure", () => {
+  it("constructs a failed response with error code and message", () => {
+    const msg: CommandResponseMessage = {
+      type: "command.response",
+      seq: 12,
+      correlationId: "req-003",
+      result: { ok: false, code: "pane.not-found", message: "Pane p0 does not exist" },
+    };
+    assert.strictEqual(msg.result.ok, false);
+    if (!msg.result.ok) {
+      assert.strictEqual(msg.result.code, "pane.not-found");
+      assert.ok(msg.result.message.length > 0);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ErrorMessage
+// ---------------------------------------------------------------------------
+
+describe("ErrorMessage", () => {
+  it("constructs an unsolicited protocol error", () => {
+    const msg: ErrorMessage = {
+      type: "error",
+      seq: 100,
+      code: "protocol.malformed",
+      message: "Required field 'paneId' is missing",
+    };
+    assert.strictEqual(msg.type, "error");
+    assert.strictEqual(msg.code, "protocol.malformed");
+    assert.ok(!("correlationId" in msg));
+  });
+
+  it("constructs a correlated error (command aborted mid-flight)", () => {
+    const msg: ErrorMessage = {
+      type: "error",
+      seq: 101,
+      code: "session.unavailable",
+      message: "Session s0 was destroyed before the command could complete",
+      correlationId: "req-007",
+    };
+    assert.strictEqual(msg.correlationId, "req-007");
+    assert.strictEqual(msg.code, "session.unavailable");
+  });
+
+  it("accepts an unknown future error code", () => {
+    const msg: ErrorMessage = {
+      type: "error",
+      seq: 102,
+      code: "future.error-kind",
+      message: "Something unexpected happened",
+    };
+    assert.strictEqual(msg.code, "future.error-kind");
+  });
+
+  it("is recognized as a daemon message", () => {
+    const msg = { type: "error", seq: 1 } as ControlMessage;
+    assert.strictEqual(isDaemonMessage(msg), true);
+    assert.strictEqual(isClientMessage(msg), false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Guard coverage — all new daemon types
+// ---------------------------------------------------------------------------
+
+describe("isDaemonMessage covers all new daemon type strings", () => {
+  const newDaemonTypes = [
+    "snapshot",
+    "pane.mode-changed",
+    "window.added",
+    "window.closed",
+    "window.renamed",
+    "session.added",
+    "session.closed",
+    "session.changed",
+    "session.renamed",
+    "command.response",
+    "error",
+  ] as const;
+
+  for (const t of newDaemonTypes) {
+    it(`isDaemonMessage returns true for "${t}"`, () => {
+      const msg = { type: t, seq: 1 } as ControlMessage;
+      assert.strictEqual(isDaemonMessage(msg), true, `${t} should be daemon message`);
+      assert.strictEqual(isClientMessage(msg), false, `${t} should not be client message`);
+    });
+  }
+});
+
+describe("isClientMessage covers command.request", () => {
+  it("returns true for command.request", () => {
+    const msg = { type: "command.request", seq: 1 } as ControlMessage;
+    assert.strictEqual(isClientMessage(msg), true);
+    assert.strictEqual(isDaemonMessage(msg), false);
   });
 });
 

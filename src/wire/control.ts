@@ -208,6 +208,386 @@ export interface DaemonCapabilitiesMessage extends MessageBase {
 }
 
 // ---------------------------------------------------------------------------
+// Snapshot (daemon→client, sent once on connect)
+// ---------------------------------------------------------------------------
+
+/**
+ * A session as represented in a Snapshot.
+ */
+export interface SnapshotSession {
+  readonly sessionId: SessionId;
+  readonly name: string;
+  /** True if this is the currently active session. */
+  readonly active: boolean;
+}
+
+/**
+ * A window as represented in a Snapshot.
+ */
+export interface SnapshotWindow {
+  readonly windowId: WindowId;
+  readonly sessionId: SessionId;
+  readonly name: string;
+  /** True if this is the currently active window in its session. */
+  readonly active: boolean;
+  /** Structured pane layout for this window. */
+  readonly layout: WindowLayout;
+}
+
+/**
+ * A pane as represented in a Snapshot.
+ */
+export interface SnapshotPane {
+  readonly paneId: PaneId;
+  readonly windowId: WindowId;
+  readonly sessionId: SessionId;
+  /** Width in columns. */
+  readonly cols: number;
+  /** Height in rows. */
+  readonly rows: number;
+}
+
+/**
+ * Full-state snapshot, sent once by the daemon immediately after the
+ * capabilities handshake.
+ * direction: daemon→client
+ *
+ * Design: normalized (flat arrays) rather than deeply nested. The client
+ * builds its own in-memory tree by joining on ids. This avoids deeply
+ * nested JSON and makes incremental Delta application straightforward —
+ * each collection is independently patchable.
+ *
+ * After receiving Snapshot, the client applies subsequent Delta messages
+ * (ordered by seq) to maintain an up-to-date local model. The Snapshot
+ * seq acts as the baseline; any Delta with a higher seq is applied on top.
+ *
+ * Focus state (active pane/window/session) is carried separately in the
+ * `focus` field to avoid scattering active-flag logic across three lists.
+ */
+export interface SnapshotMessage extends MessageBase {
+  readonly type: "snapshot";
+  /** All sessions in the daemon's model. */
+  readonly sessions: readonly SnapshotSession[];
+  /** All windows across all sessions. */
+  readonly windows: readonly SnapshotWindow[];
+  /** All panes across all windows. */
+  readonly panes: readonly SnapshotPane[];
+  /**
+   * Currently focused pane/window/session triple.
+   * All three are null if no pane is focused (e.g. no sessions exist).
+   */
+  readonly focus: {
+    readonly paneId: PaneId | null;
+    readonly windowId: WindowId | null;
+    readonly sessionId: SessionId | null;
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Additional Deltas — window lifecycle (daemon→client)
+// ---------------------------------------------------------------------------
+
+/**
+ * A new window was added to a session.
+ * direction: daemon→client
+ */
+export interface WindowAddedMessage extends MessageBase {
+  readonly type: "window.added";
+  readonly windowId: WindowId;
+  readonly sessionId: SessionId;
+  readonly name: string;
+  /**
+   * True if the new window immediately became the active window in its session.
+   * Clients may use this to avoid a separate focus event.
+   */
+  readonly active: boolean;
+}
+
+/**
+ * A window was closed (all its panes exited or it was explicitly destroyed).
+ * direction: daemon→client
+ */
+export interface WindowClosedMessage extends MessageBase {
+  readonly type: "window.closed";
+  readonly windowId: WindowId;
+  readonly sessionId: SessionId;
+}
+
+/**
+ * A window was renamed.
+ * direction: daemon→client
+ */
+export interface WindowRenamedMessage extends MessageBase {
+  readonly type: "window.renamed";
+  readonly windowId: WindowId;
+  readonly newName: string;
+}
+
+// ---------------------------------------------------------------------------
+// Additional Deltas — session lifecycle (daemon→client)
+// ---------------------------------------------------------------------------
+
+/**
+ * A new session was created.
+ * direction: daemon→client
+ *
+ * Included for completeness — clients that track the full session set need
+ * this to stay in sync without reconnecting.
+ */
+export interface SessionAddedMessage extends MessageBase {
+  readonly type: "session.added";
+  readonly sessionId: SessionId;
+  readonly name: string;
+  /**
+   * True if this session immediately became the active session.
+   */
+  readonly active: boolean;
+}
+
+/**
+ * A session was destroyed (detached and killed, or all windows closed).
+ * direction: daemon→client
+ */
+export interface SessionClosedMessage extends MessageBase {
+  readonly type: "session.closed";
+  readonly sessionId: SessionId;
+}
+
+/**
+ * The active session changed (user switched sessions).
+ * direction: daemon→client
+ */
+export interface SessionChangedMessage extends MessageBase {
+  readonly type: "session.changed";
+  /** The session that is now active. */
+  readonly newActiveSessionId: SessionId;
+}
+
+/**
+ * A session was renamed.
+ * direction: daemon→client
+ */
+export interface SessionRenamedMessage extends MessageBase {
+  readonly type: "session.renamed";
+  readonly sessionId: SessionId;
+  readonly newName: string;
+}
+
+// ---------------------------------------------------------------------------
+// Additional Deltas — pane mode (daemon→client)
+// ---------------------------------------------------------------------------
+
+/**
+ * Model-level pane mode.
+ *
+ * "normal"  — the pane is in its default interactive mode.
+ * "copy"    — the pane is in copy/scroll mode (user is browsing history).
+ * "view"    — the pane output is being viewed in a pager-like mode.
+ *
+ * The type is open-ended (`string & {}`) so future modes can be added without
+ * a breaking schema change. Clients MUST treat unknown modes as opaque strings
+ * and not crash; they may render them as "unknown mode".
+ *
+ * Note: tmux-internal copy-mode sub-states (vi vs emacs keybindings, cursor
+ * position, etc.) are NOT represented here. This is a model-level signal only.
+ */
+export type PaneMode = "normal" | "copy" | "view" | (string & Record<never, never>);
+
+/**
+ * A pane entered or left a mode (e.g. entered copy mode, or returned to normal).
+ * direction: daemon→client
+ */
+export interface PaneModeChangedMessage extends MessageBase {
+  readonly type: "pane.mode-changed";
+  readonly paneId: PaneId;
+  readonly mode: PaneMode;
+}
+
+// ---------------------------------------------------------------------------
+// Command request / response (client↔daemon, correlated)
+// ---------------------------------------------------------------------------
+
+/**
+ * Open a new window in a session.
+ * The daemon chooses the pane id(s); the created window/pane ids arrive via
+ * CommandResponseMessage on success (payload.windowId, payload.paneId).
+ */
+export interface OpenWindowCommand {
+  readonly kind: "open-window";
+  readonly sessionId: SessionId;
+  /** Optional name for the new window. If omitted the daemon picks one. */
+  readonly name?: string;
+}
+
+/**
+ * Split an existing pane into two.
+ * The new pane's id arrives in CommandResponseMessage on success (payload.paneId).
+ */
+export interface SplitPaneCommand {
+  readonly kind: "split-pane";
+  readonly paneId: PaneId;
+  /** "horizontal" = side-by-side; "vertical" = stacked top-to-bottom. */
+  readonly direction: "horizontal" | "vertical";
+}
+
+/**
+ * Close (kill) a pane. The daemon emits a pane.closed delta on success.
+ */
+export interface ClosePaneCommand {
+  readonly kind: "close-pane";
+  readonly paneId: PaneId;
+}
+
+/**
+ * Rename a window. The daemon emits a window.renamed delta on success.
+ */
+export interface RenameWindowCommand {
+  readonly kind: "rename-window";
+  readonly windowId: WindowId;
+  readonly name: string;
+}
+
+/**
+ * Focus (select) a pane. The daemon emits a focus.changed delta on success.
+ */
+export interface SelectPaneCommand {
+  readonly kind: "select-pane";
+  readonly paneId: PaneId;
+}
+
+/**
+ * Resize a pane. The daemon emits a pane.resized delta on success.
+ * Distinct from ResizeRequestMessage (viewport-driven); this is an explicit
+ * user-initiated resize command.
+ */
+export interface ResizePaneCommand {
+  readonly kind: "resize-pane";
+  readonly paneId: PaneId;
+  readonly cols: number;
+  readonly rows: number;
+}
+
+/**
+ * Discriminated union of all model-level commands a client may issue.
+ * Narrow with `cmd.kind` to get the specific shape.
+ *
+ * All commands are model-level — no raw tmux command strings are exposed.
+ * The daemon translates each command kind to the appropriate tmux operation
+ * internally (south-side boundary). The E4 daemon runtime implements the
+ * actual tmux side; this is the wire shape only.
+ */
+export type WireCommand =
+  | OpenWindowCommand
+  | SplitPaneCommand
+  | ClosePaneCommand
+  | RenameWindowCommand
+  | SelectPaneCommand
+  | ResizePaneCommand;
+
+/**
+ * Client issues a model-level command to the daemon.
+ * direction: client→daemon
+ *
+ * `correlationId` is a client-generated opaque string (e.g. a UUID or
+ * monotonic counter string) that the daemon echoes back in
+ * `CommandResponseMessage`. Clients use it to match responses to outstanding
+ * requests. The daemon does NOT assign correlation ids.
+ */
+export interface CommandRequestMessage extends MessageBase {
+  readonly type: "command.request";
+  /** Client-generated opaque string, echoed in the matching response. */
+  readonly correlationId: string;
+  /** The model operation to perform. */
+  readonly command: WireCommand;
+}
+
+/**
+ * Successful command result payload. Fields are optional because not every
+ * command produces a new entity. The daemon includes ids for newly created
+ * entities (open-window → windowId + paneId, split-pane → paneId).
+ */
+export interface CommandOkPayload {
+  readonly windowId?: WindowId;
+  readonly paneId?: SessionId;
+}
+
+/**
+ * The daemon's response to a CommandRequestMessage.
+ * direction: daemon→client
+ *
+ * Error handling: command-specific failures (unknown pane, invalid size,
+ * permission denied) arrive HERE as `result.ok = false`. The separate
+ * `ErrorMessage` (type: "error") is for UNSOLICITED / protocol-level errors
+ * (malformed message, unknown message type, session in bad state) where there
+ * is no in-flight command to correlate. If a failure is attributable to a
+ * specific command request, the error comes in CommandResponseMessage, not
+ * ErrorMessage. This keeps the contract simple: command.request always gets
+ * exactly one command.response.
+ */
+export interface CommandResponseMessage extends MessageBase {
+  readonly type: "command.response";
+  /** Echoed from the matching CommandRequestMessage. */
+  readonly correlationId: string;
+  /** Discriminated result: success or failure. */
+  readonly result:
+    | { readonly ok: true; readonly payload?: CommandOkPayload }
+    | { readonly ok: false; readonly code: string; readonly message: string };
+}
+
+// ---------------------------------------------------------------------------
+// Error — unsolicited / protocol-level errors (daemon→client)
+// ---------------------------------------------------------------------------
+
+/**
+ * Daemon-level error codes.
+ *
+ * "protocol.unknown-message"   — the daemon received a message type it does not
+ *                                recognise; the message was dropped.
+ * "protocol.malformed"         — the daemon could not parse the message
+ *                                (e.g. missing required field, wrong type).
+ * "protocol.version-mismatch"  — protocol version negotiation failed.
+ * "session.unavailable"        — the tmux session the connection was bound to
+ *                                has gone away unexpectedly.
+ * "internal"                   — unexpected daemon-side error not attributable
+ *                                to a specific command.
+ *
+ * The type is open-ended for forward compatibility.
+ */
+export type WireErrorCode =
+  | "protocol.unknown-message"
+  | "protocol.malformed"
+  | "protocol.version-mismatch"
+  | "session.unavailable"
+  | "internal"
+  | (string & Record<never, never>);
+
+/**
+ * Unsolicited error pushed by the daemon.
+ * direction: daemon→client
+ *
+ * ONLY for errors that are NOT attributable to a specific outstanding
+ * CommandRequestMessage. If the error IS attributable to a command, the daemon
+ * sends a CommandResponseMessage with `result.ok = false` instead.
+ *
+ * `correlationId` is OPTIONAL: if present, it ties the error to an earlier
+ * command request that the daemon is now aborting without a normal response
+ * (e.g. the session died mid-execution). If absent, the error is fully
+ * unsolicited (e.g. protocol parse failure on an unrelated frame).
+ *
+ * Clients SHOULD display or log the `message` and MAY use `code` to trigger
+ * specific recovery logic. After "protocol.version-mismatch" or
+ * "session.unavailable", the client should consider the connection dead.
+ */
+export interface ErrorMessage extends MessageBase {
+  readonly type: "error";
+  readonly code: WireErrorCode;
+  /** Human-readable error description (English, for logging/debugging). */
+  readonly message: string;
+  /** If set, ties this error to a prior CommandRequestMessage. */
+  readonly correlationId?: string;
+}
+
+// ---------------------------------------------------------------------------
 // Client → Daemon messages (client requests)
 // ---------------------------------------------------------------------------
 
@@ -265,20 +645,55 @@ export interface ClientCapabilitiesMessage extends MessageBase {
 /**
  * All messages the daemon pushes to the client.
  * Narrow with `msg.type` to get the specific shape.
+ *
+ * Grouped by family:
+ *   Capabilities:  DaemonCapabilitiesMessage
+ *   Snapshot:      SnapshotMessage
+ *   Pane deltas:   PaneOpenedMessage | PaneClosedMessage | PaneResizedMessage | PaneModeChangedMessage
+ *   Window deltas: WindowAddedMessage | WindowClosedMessage | WindowRenamedMessage
+ *   Layout deltas: LayoutUpdatedMessage
+ *   Focus deltas:  FocusChangedMessage
+ *   Session delta: SessionAddedMessage | SessionClosedMessage | SessionChangedMessage | SessionRenamedMessage
+ *   Commands:      CommandResponseMessage
+ *   Errors:        ErrorMessage
  */
 export type DaemonMessage =
+  // Capabilities
+  | DaemonCapabilitiesMessage
+  // Snapshot
+  | SnapshotMessage
+  // Pane deltas
   | PaneOpenedMessage
   | PaneClosedMessage
   | PaneResizedMessage
+  | PaneModeChangedMessage
+  // Window deltas
+  | WindowAddedMessage
+  | WindowClosedMessage
+  | WindowRenamedMessage
+  // Layout deltas
   | LayoutUpdatedMessage
+  // Focus deltas
   | FocusChangedMessage
-  | DaemonCapabilitiesMessage;
+  // Session deltas
+  | SessionAddedMessage
+  | SessionClosedMessage
+  | SessionChangedMessage
+  | SessionRenamedMessage
+  // Command responses
+  | CommandResponseMessage
+  // Unsolicited errors
+  | ErrorMessage;
 
 /**
  * All messages the client sends to the daemon.
  * Narrow with `msg.type` to get the specific shape.
  */
-export type ClientMessage = InputMessage | ResizeRequestMessage | ClientCapabilitiesMessage;
+export type ClientMessage =
+  | InputMessage
+  | ResizeRequestMessage
+  | ClientCapabilitiesMessage
+  | CommandRequestMessage;
 
 /**
  * Any control-plane message (either direction).
@@ -310,17 +725,42 @@ export function isControlMessage(value: unknown): value is ControlMessage {
 export function isDaemonMessage(msg: ControlMessage): msg is DaemonMessage {
   const t = msg.type;
   return (
+    // Capabilities
+    t === "daemon.capabilities" ||
+    // Snapshot
+    t === "snapshot" ||
+    // Pane deltas
     t === "pane.opened" ||
     t === "pane.closed" ||
     t === "pane.resized" ||
+    t === "pane.mode-changed" ||
+    // Window deltas
+    t === "window.added" ||
+    t === "window.closed" ||
+    t === "window.renamed" ||
+    // Layout deltas
     t === "layout.updated" ||
+    // Focus deltas
     t === "focus.changed" ||
-    t === "daemon.capabilities"
+    // Session deltas
+    t === "session.added" ||
+    t === "session.closed" ||
+    t === "session.changed" ||
+    t === "session.renamed" ||
+    // Command responses
+    t === "command.response" ||
+    // Unsolicited errors
+    t === "error"
   );
 }
 
 /** Narrows a ControlMessage to a specific client→daemon message type. */
 export function isClientMessage(msg: ControlMessage): msg is ClientMessage {
   const t = msg.type;
-  return t === "input" || t === "resize.request" || t === "client.capabilities";
+  return (
+    t === "input" ||
+    t === "resize.request" ||
+    t === "client.capabilities" ||
+    t === "command.request"
+  );
 }
