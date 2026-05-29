@@ -470,8 +470,8 @@ direction: daemon→client
 
 | Field      | Type        | Description                                                  |
 |------------|-------------|--------------------------------------------------------------|
-| `windowId` | `WindowId?` | Set by `open-window` command for the newly created window.   |
-| `paneId`   | `PaneId?`   | Set by `open-window` and `split-pane` for the new pane.      |
+| `windowId` | `WindowId?` | Set by `open-window` for the newly created window.  |
+| `paneId`   | `PaneId?`   | Set by `open-window` and `split-pane` for the new pane. |
 
 ---
 

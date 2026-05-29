@@ -508,7 +508,7 @@ export interface CommandRequestMessage extends MessageBase {
  */
 export interface CommandOkPayload {
   readonly windowId?: WindowId;
-  readonly paneId?: SessionId;
+  readonly paneId?: PaneId;
 }
 
 /**
