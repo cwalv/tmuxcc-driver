@@ -2,3 +2,11 @@
 // input remuxing via `send-keys -H`.
 
 export const RUNTIME_PLACEHOLDER = true;
+
+// tc-4fo: runtime pipeline — tmux stdout→tokenizer→parser→reducer→live model
+export { createRuntimePipeline } from "./pipeline.js";
+export type {
+  RuntimePipeline,
+  RuntimePipelineOptions,
+  ModelChangeHandler,
+} from "./pipeline.js";
