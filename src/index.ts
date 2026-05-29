@@ -13,3 +13,37 @@ export interface DaemonHandle {
 // single import path for all wire types and utilities. Client packages import:
 //   import { encodeFrame, decodeFrame, ... } from "@tmuxcc/daemon";
 export * from "./wire/index.js";
+
+// State model + projection — exported so client tests can run round-trip proofs
+// (applySnapshot(prev) + diffModel(prev, next) == applySnapshot(next)).
+// State model types and helpers:
+export type {
+  SessionModel,
+  Session,
+  Window,
+  Pane,
+  FocusState,
+  PaneMode,
+  WindowLayout,
+  ScrollbackHandle,
+  InvariantViolation,
+  CheckInvariantsOptions,
+} from "./state/index.js";
+export {
+  emptyModel,
+  addSession,
+  removeSession,
+  updateSession,
+  addWindow,
+  removeWindow,
+  updateWindow,
+  addPane,
+  removePane,
+  updatePane,
+  setFocus,
+  checkInvariants,
+  scrollbackHandle,
+} from "./state/index.js";
+// Projection functions for client round-trip tests:
+export { projectSnapshot, diffModel } from "./state/projection.js";
+export type { ProjectSnapshotOpts } from "./state/projection.js";
