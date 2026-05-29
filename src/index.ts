@@ -15,3 +15,16 @@ export const CLIENT_PLACEHOLDER = true;
 export interface ClientSession {
   readonly id: string;
 }
+
+// ---------------------------------------------------------------------------
+// Connection + handshake (tc-ahh — E5 serial head)
+// ---------------------------------------------------------------------------
+
+export { DaemonConnection } from "./connection.js";
+export type {
+  ConnectionState,
+  DaemonConnectionOptions,
+  DaemonMessageHandler,
+  DataFrameHandler,
+  StateChangeHandler,
+} from "./connection.js";
