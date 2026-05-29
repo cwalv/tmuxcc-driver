@@ -3,6 +3,10 @@
 
 export const RUNTIME_PLACEHOLDER = true;
 
+// tc-kyp: tmux -CC subprocess host (spawn/lifecycle/pipes)
+export { createTmuxHost } from "./tmux-host.js";
+export type { TmuxHost, TmuxHostOptions } from "./tmux-host.js";
+
 // tc-4fo: runtime pipeline — tmux stdout→tokenizer→parser→reducer→live model
 export { createRuntimePipeline } from "./pipeline.js";
 export type {
