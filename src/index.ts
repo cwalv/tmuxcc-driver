@@ -54,3 +54,10 @@ export * from "./input.js";
 // ---------------------------------------------------------------------------
 
 export * from "./render-hook.js";
+
+// ---------------------------------------------------------------------------
+// createClient (tc-emo) — top-level integration: wires all E5 modules together
+// ---------------------------------------------------------------------------
+
+export { createClient } from "./client.js";
+export type { CreateClientOptions, ClientHandle } from "./client.js";
