@@ -6,6 +6,8 @@
  *   2. Multi-client: two clients each get their own snapshot + independent seq.
  *   3. Seq monotonicity: 1, 2, 3, … with no gaps.
  *   4. Client disconnect: removeClient / transport close → no more sends, no crash.
+ *   5. Snapshot timing (tc-3eh.2): snapshot arrives after async-transport delivery,
+ *      not at the no-op handler that runClientHandshake leaves in place.
  *
  * # Test strategy
  *
@@ -30,7 +32,7 @@ import {
   runClientHandshake,
   WIRE_PROTOCOL_VERSION,
 } from "../wire/index.js";
-import type { Transport, ControlMessage, DaemonMessage, SnapshotMessage } from "../wire/index.js";
+import type { Transport, ControlMessage, DaemonMessage, SnapshotMessage, ControlHandler, CloseHandler } from "../wire/index.js";
 import type { RuntimePipeline, ModelChangeHandler } from "./pipeline.js";
 import {
   emptyModel,
@@ -514,6 +516,267 @@ describe("createControlServer", () => {
       assert.deepEqual(negotiated.features, ["pane-lifecycle"]);
     });
 
+  });
+
+});
+
+// ---------------------------------------------------------------------------
+// Async-transport pair — regression test helper (tc-3eh.2)
+//
+// createAsyncTransportPair() wraps the in-memory transport so that all
+// sendControl deliveries are deferred via queueMicrotask.  This simulates
+// the semantics of a real socket transport: bytes are written synchronously
+// into a kernel buffer, but the remote's read handler fires asynchronously
+// (on the next event-loop iteration).
+//
+// Timing contract being verified (tc-3eh.2):
+//
+//   Daemon side:
+//     1. await runDaemonHandshake() — resolves; settle() set daemonTransport.onControl
+//        to a no-op.
+//     2. Install delta subscription + onClose (synchronous).
+//     3. await Promise.resolve() — yield one microtask so the client's
+//        runClientHandshake continuation can install its post-handshake onControl.
+//     4. sendControl(snapshot).
+//
+//   Client side:
+//     1. await runClientHandshake() — resolves; settle() set clientTransport.onControl
+//        to a no-op.
+//     2. SYNCHRONOUSLY install post-handshake onControl (no await between steps 1
+//        and 2 — DaemonConnection.#installPostHandshakeRouting() is called directly
+//        after runClientHandshake returns, before any awaits).
+//
+//   With async delivery: by the time the snapshot arrives on the client transport,
+//   step 2 has already run.  Snapshot reaches the real handler, not the no-op.
+// ---------------------------------------------------------------------------
+
+/**
+ * A wrapped Transport pair whose sendControl calls defer delivery to the
+ * remote endpoint via queueMicrotask, simulating a real async socket transport.
+ * sendData and close remain synchronous for simplicity.
+ */
+function createAsyncTransportPair(): { daemon: Transport; client: Transport } {
+  const { daemon: rawDaemon, client: rawClient } = createInMemoryTransportPair();
+
+  // clientControlHandler and daemonControlHandler are accessed via the raw
+  // transport's delivery mechanism.  We override sendControl on each side to
+  // queue the delivery, but the raw onControl replacement still works because
+  // the raw transport's closure captures the handler by reference.
+  //
+  // To defer delivery without touching raw internals, we layer over sendControl:
+  // instead of calling rawDaemon.sendControl (which delivers synchronously to
+  // clientControlHandler), we capture the current clientControlHandler at
+  // send time via a closure over the raw transport pair's state.
+  //
+  // Simpler: build our own minimal async transport pair from scratch.
+
+  let daemonControlHandler: ControlHandler = () => {};
+  let daemonCloseHandler: CloseHandler = () => {};
+
+  let clientControlHandler: ControlHandler = () => {};
+  let clientCloseHandler: CloseHandler = () => {};
+
+  let closed = false;
+
+  const daemon: Transport = {
+    sendControl(msg) {
+      if (closed) return;
+      // Defer delivery to the client's onControl handler via a microtask.
+      // This simulates a real socket where the write() completes synchronously
+      // but the remote read() fires on the next event-loop turn.
+      const handler = clientControlHandler;
+      queueMicrotask(() => { if (!closed) handler(msg); });
+    },
+    onControl(handler) { daemonControlHandler = handler; },
+    sendData(paneId, bytes) {
+      if (closed) return;
+      // Data plane: synchronous for test simplicity.
+    },
+    onData(_handler) { /* not used in this test */ },
+    onClose(handler) { daemonCloseHandler = handler; },
+    close(err) {
+      if (closed) return;
+      closed = true;
+      clientCloseHandler(err);
+      daemonCloseHandler(err);
+    },
+  };
+
+  const client: Transport = {
+    sendControl(msg) {
+      if (closed) return;
+      // Client → daemon: also async for symmetry.
+      const handler = daemonControlHandler;
+      queueMicrotask(() => { if (!closed) handler(msg); });
+    },
+    onControl(handler) { clientControlHandler = handler; },
+    sendData(paneId, bytes) {
+      if (closed) return;
+    },
+    onData(_handler) { /* not used in this test */ },
+    onClose(handler) { clientCloseHandler = handler; },
+    close(err) {
+      if (closed) return;
+      closed = true;
+      daemonCloseHandler(err);
+      clientCloseHandler(err);
+    },
+  };
+
+  return { daemon, client };
+}
+
+// ---------------------------------------------------------------------------
+// tc-3eh.2 regression tests — snapshot not dropped on async transport
+// ---------------------------------------------------------------------------
+
+describe("tc-3eh.2: addClient snapshot timing — async transport regression", () => {
+
+  /**
+   * Core timing scenario:
+   *   - Async transport pair (sendControl defers via queueMicrotask).
+   *   - Both addClient and runClientHandshake run concurrently.
+   *   - After runClientHandshake resolves, the client installs its onControl
+   *     handler SYNCHRONOUSLY (before any await).
+   *   - Daemon defers snapshot by one microtask after handshake.
+   *   - Snapshot must arrive at the client's real handler, not the no-op.
+   *
+   * WITHOUT the fix (no `await Promise.resolve()` in addClient before send):
+   *   The snapshot would be queued for delivery at queueMicrotask time with
+   *   the no-op handler that settle() installed.  The handler replacement
+   *   (clientControlHandler = realHandler) happens in the microtask that runs
+   *   runClientHandshake's continuation — but there is a race: the snapshot's
+   *   queueMicrotask callback captures clientControlHandler at queue time, so
+   *   whether it sees the old or new handler depends on microtask ordering.
+   *   In practice with the async transport, the snapshot queueMicrotask fires
+   *   before the client's continuation runs (since addClient enqueues it first),
+   *   so it hits the no-op → snapshot dropped.
+   *
+   * WITH the fix (`await Promise.resolve()` before send):
+   *   The daemon yields one microtask, allowing the client's runClientHandshake
+   *   continuation to run (installing the real onControl).  Then the daemon
+   *   sends the snapshot.  Its queueMicrotask fires after the handler is set.
+   */
+  it("client receives snapshot on async transport after microtask-deferred send", async () => {
+    const model = makeModel1();
+    const pipeline = createFakePipeline(model);
+    const server = createControlServer(pipeline);
+
+    const { daemon: daemonTransport, client: clientTransport } = createAsyncTransportPair();
+
+    // Received messages on the client side (installed AFTER handshake, mimicking
+    // DaemonConnection.#installPostHandshakeRouting's synchronous installation).
+    const received: ControlMessage[] = [];
+
+    // Run both handshake halves concurrently, just as production code does.
+    const [, ] = await Promise.all([
+      server.addClient(daemonTransport),
+      (async () => {
+        await runClientHandshake(clientTransport, CLIENT_CAPS);
+        // Install the post-handshake handler SYNCHRONOUSLY after runClientHandshake
+        // resolves — no await in between.  This matches DaemonConnection behavior.
+        clientTransport.onControl((msg) => {
+          received.push(msg);
+        });
+      })(),
+    ]);
+
+    // addClient resolves only after the snapshot has been sent (awaited one microtask
+    // internally).  The snapshot's queueMicrotask delivery may still be pending.
+    // Wait one more event-loop turn for it to deliver.
+    await new Promise<void>((r) => setImmediate(r));
+
+    // The snapshot must have arrived.
+    const snapshot = received.find((m) => m.type === "snapshot") as SnapshotMessage | undefined;
+    assert.ok(
+      snapshot !== undefined,
+      `snapshot must arrive on async transport; received ${received.length} message(s): ${received.map((m) => m.type).join(", ")}`,
+    );
+    assert.equal(snapshot!.seq, 1, "snapshot seq must be 1");
+    assert.equal(snapshot!.sessions.length, 1, "snapshot must reflect the current model");
+
+    daemonTransport.close();
+  });
+
+  it("snapshot arrives before any deltas on async transport", async () => {
+    const model1 = makeModel1();
+    const model2 = makeModel2();
+    const pipeline = createFakePipeline(model1);
+    const server = createControlServer(pipeline);
+
+    const { daemon: daemonTransport, client: clientTransport } = createAsyncTransportPair();
+    const received: ControlMessage[] = [];
+
+    await Promise.all([
+      server.addClient(daemonTransport),
+      (async () => {
+        await runClientHandshake(clientTransport, CLIENT_CAPS);
+        clientTransport.onControl((msg) => { received.push(msg); });
+      })(),
+    ]);
+
+    // Fire a model change after addClient resolves (snapshot already sent).
+    pipeline.fireChange(model2, model1);
+
+    // Let all queued microtasks + setImmediate deliver.
+    await new Promise<void>((r) => setImmediate(r));
+    await new Promise<void>((r) => setImmediate(r));
+
+    // Filter to application messages (skip daemon.capabilities if any leaked through).
+    const appMsgs = received.filter((m) => m.type !== "daemon.capabilities");
+
+    assert.ok(appMsgs.length >= 2, `expected snapshot + at least one delta, got ${appMsgs.length} messages`);
+
+    // First message must be the snapshot.
+    assert.equal(appMsgs[0]!.type, "snapshot", "first message must be snapshot");
+    assert.equal(appMsgs[0]!.seq, 1, "snapshot seq must be 1");
+
+    // All subsequent messages must have seq > 1.
+    for (let i = 1; i < appMsgs.length; i++) {
+      assert.ok(
+        (appMsgs[i]!.seq ?? 0) > 1,
+        `delta at index ${i} must have seq > 1; got seq=${appMsgs[i]!.seq}`,
+      );
+    }
+
+    daemonTransport.close();
+  });
+
+  it("snapshot is not dropped when client installs onControl synchronously after handshake", async () => {
+    // Demonstrate the exact timing that production DaemonConnection uses:
+    // install onControl synchronously (no await gap) after runClientHandshake.
+    // The microtask defer in addClient makes this safe.
+    const model = makeModel1();
+    const pipeline = createFakePipeline(model);
+    const server = createControlServer(pipeline);
+
+    const { daemon: daemonTransport, client: clientTransport } = createAsyncTransportPair();
+
+    let snapshotReceived = false;
+    let snapshotSeq = -1;
+
+    const [, ] = await Promise.all([
+      server.addClient(daemonTransport),
+      (async () => {
+        // This await runClientHandshake simulates the client's async handshake.
+        await runClientHandshake(clientTransport, CLIENT_CAPS);
+        // No await between here and onControl install — synchronous install.
+        clientTransport.onControl((msg) => {
+          if (msg.type === "snapshot") {
+            snapshotReceived = true;
+            snapshotSeq = msg.seq;
+          }
+        });
+      })(),
+    ]);
+
+    // Allow async delivery to complete.
+    await new Promise<void>((r) => setImmediate(r));
+
+    assert.ok(snapshotReceived, "snapshot must be received when onControl is installed synchronously after handshake");
+    assert.equal(snapshotSeq, 1, "received snapshot must have seq=1");
+
+    daemonTransport.close();
   });
 
 });

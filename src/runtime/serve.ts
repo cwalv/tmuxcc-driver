@@ -119,11 +119,14 @@ export interface ControlServer {
    *
    * Steps performed:
    *   1. Run `runDaemonHandshake(transport, daemonCapabilities)`.
-   *   2. Send `projectSnapshot(pipeline.getModel(), { seq: 1 })` as the
-   *      client's first message.
-   *   3. Subscribe to `pipeline.onModelChange` to forward subsequent deltas
+   *   2. Subscribe to `pipeline.onModelChange` to forward subsequent deltas
    *      (with per-connection seq stamping, starting at seq = 2).
-   *   4. Register an `onClose` handler so cleanup happens automatically.
+   *   3. Register an `onClose` handler so cleanup happens automatic.
+   *   4. Yield one microtask (`await Promise.resolve()`) so the client's
+   *      post-handshake `onControl` handler is installed before the snapshot
+   *      arrives (see timing contract in serve.ts addClient implementation).
+   *   5. Send `projectSnapshot(pipeline.getModel(), { seq: 1 })` as the
+   *      client's first message.
    *
    * Resolves with the `NegotiatedSession` from the handshake once the initial
    * snapshot has been sent.  The caller may use `NegotiatedSession.features` to
@@ -205,6 +208,25 @@ class ControlServerImpl implements ControlServer {
     //   • Send daemon.capabilities (seq=1, handled internally by runDaemonHandshake)
     //   • Wait for the client to send client.capabilities
     //   • Negotiate the session (version check + feature intersection)
+    //
+    // IMPORTANT: runDaemonHandshake resets transport.onControl to a no-op when
+    // it settles (via its internal settle() function).  The client side
+    // (DaemonConnection.connect / runClientHandshake) installs its own
+    // post-handshake onControl handler SYNCHRONOUSLY after runClientHandshake
+    // resolves — before yielding to the event loop.  We must therefore defer the
+    // snapshot send by at least one microtask after the handshake resolves, so
+    // the client's onControl installation has a chance to run.
+    //
+    // Timing contract (both sides):
+    //   Daemon: await handshake → install delta subscription + onClose
+    //           → await one microtask (Promise.resolve())
+    //           → send snapshot
+    //   Client: await handshake → install onControl synchronously (no await)
+    //           → now safe to receive snapshot
+    //
+    // With a synchronous (in-memory) transport the microtask yield is enough.
+    // With an async (socket) transport the delivery itself is deferred, so by
+    // the time the snapshot bytes arrive the client's onControl is already set.
     let session: NegotiatedSession;
     try {
       session = await runDaemonHandshake(transport, this._capabilities);
@@ -222,16 +244,10 @@ class ControlServerImpl implements ControlServer {
     };
     this._clients.set(transport, state);
 
-    // Send the initial snapshot. seq = 1.
-    const snapshot = projectSnapshot(this._pipeline.getModel(), { seq: state.nextSeq });
-    state.nextSeq++;
-    transport.sendControl(snapshot);
-
-    // Subscribe to model changes. Each batch of deltas from diffModel is
-    // stamped with consecutive seq values starting at state.nextSeq.
-    //
-    // NOTE: pipeline.onModelChange gives (newModel, prevModel). We call
-    // diffModel(prev, next) ourselves to get the delta array, then stamp seq.
+    // Subscribe to model changes BEFORE sending the snapshot so that any model
+    // changes that fire during the microtask gap below are not silently dropped.
+    // Deltas queued before the snapshot is sent would have seq >= 2 (correct) and
+    // would arrive AFTER the snapshot (also correct, since sendControl is ordered).
     const unsub = this._pipeline.onModelChange((newModel, prevModel) => {
       // Guard: client may have been removed before this fires.
       if (!this._clients.has(transport)) return;
@@ -250,6 +266,21 @@ class ControlServerImpl implements ControlServer {
     transport.onClose(() => {
       this._cleanupClient(transport);
     });
+
+    // Defer the snapshot by one microtask so the client's post-handshake
+    // onControl handler (installed synchronously in DaemonConnection.connect()
+    // after runClientHandshake resolves) is registered before the snapshot
+    // arrives.  See timing contract in the comment above.
+    await Promise.resolve();
+
+    // Send the initial snapshot. seq = 1.
+    // Guard: the client may have been removed during the microtask gap (e.g.
+    // transport closed between handshake settle and here).
+    if (this._clients.has(transport)) {
+      const snapshot = projectSnapshot(this._pipeline.getModel(), { seq: state.nextSeq });
+      state.nextSeq++;
+      transport.sendControl(snapshot);
+    }
 
     return session;
   }
