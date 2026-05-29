@@ -100,3 +100,13 @@ export {
   runDaemonHandshake,
   runClientHandshake,
 } from "./handshake.js";
+
+// Transport seam — in-process pair + interface types (tc-em3)
+export type {
+  Transport,
+  InMemoryTransportPair,
+  ControlHandler,
+  DataHandler,
+  CloseHandler,
+} from "./transport.js";
+export { createInMemoryTransportPair } from "./transport.js";
