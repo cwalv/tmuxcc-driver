@@ -263,6 +263,9 @@ export function createClient(
     resizePane(_paneId: PaneId, _cols: number, _rows: number): void {
       throw new Error("createClient: call connect() before using the controller");
     },
+    sendCommand(_cmd): void {
+      throw new Error("createClient: call connect() before using the controller");
+    },
   };
 
   let _stop: (() => void) | null = null;

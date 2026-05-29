@@ -55,6 +55,10 @@ export * from "./input.js";
 
 export * from "./render-hook.js";
 
+// WireCommand is re-exported from render-hook.js (imported from @tmuxcc/daemon).
+// Consumers can also import it directly from @tmuxcc/daemon if they need the
+// full command type union (OpenWindowCommand, SplitPaneCommand, etc.).
+
 // ---------------------------------------------------------------------------
 // createClient (tc-emo) — top-level integration: wires all E5 modules together
 // ---------------------------------------------------------------------------

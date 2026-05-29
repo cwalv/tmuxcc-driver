@@ -61,7 +61,7 @@
  * # NO DOM, NO vscode, NO host API, NO Pseudoterminal
  */
 
-import type { PaneId, InputMessage, ResizeRequestMessage } from "@tmuxcc/daemon";
+import type { PaneId, InputMessage, ResizeRequestMessage, CommandRequestMessage, WireCommand } from "@tmuxcc/daemon";
 
 // ---------------------------------------------------------------------------
 // Public interface
@@ -130,6 +130,24 @@ export interface InputApi {
    * No-op when `coalesceResizes` is false.
    */
   flush(): void;
+
+  /**
+   * Send a model-level command to the daemon (VS Code → tmux direction).
+   *
+   * Wraps `cmd` in a `command.request` wire message with a unique
+   * correlationId (monotonic counter string) and fires it immediately.
+   * The command is NOT coalesced — each call produces exactly one wire message.
+   *
+   * The resulting tmux operation (new window, split, close, etc.) flows back
+   * through the normal model-change path as onWindowAdded / onPaneOpened /
+   * onPaneClosed callbacks.
+   *
+   * tc-9hk: consumed by ClientController.sendCommand, which is called from
+   * VS Code commands `tmuxcc.newWindow` / `tmuxcc.splitPane` in extension.ts.
+   *
+   * @param cmd - The model-level command to send.
+   */
+  sendCommand(cmd: WireCommand): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -142,7 +160,7 @@ export interface InputApi {
  * testable without a full handshake — a mock `{ send }` suffices.
  */
 export interface InputSender {
-  send(msg: InputMessage | ResizeRequestMessage): void;
+  send(msg: InputMessage | ResizeRequestMessage | CommandRequestMessage): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -234,6 +252,17 @@ export function createInputApi(
       if (coalesce && pending.size > 0) {
         flushResizes();
       }
+    },
+
+    sendCommand(cmd: WireCommand): void {
+      // Each sendCommand call consumes a seq and generates a unique correlationId.
+      const msg: CommandRequestMessage = {
+        type: "command.request",
+        seq: nextSeq(),
+        correlationId: String(seq - 1), // use the seq we just consumed
+        command: cmd,
+      };
+      sender.send(msg);
     },
   };
 }

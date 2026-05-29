@@ -156,6 +156,9 @@ class FakeInputSink implements InputSink {
   resizePane(paneId: PaneId, cols: number, rows: number): void {
     this.calls.push({ kind: "resize", paneId, cols, rows });
   }
+
+  // tc-9hk: stub — render-hook.test.ts tests don't exercise sendCommand.
+  sendCommand(_cmd: import("@tmuxcc/daemon").WireCommand): void {}
 }
 
 // ---------------------------------------------------------------------------

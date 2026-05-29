@@ -56,13 +56,13 @@
  * createRenderHookDriver is called from the top-level client entry point).
  */
 
-import type { PaneId, WindowId, SessionId, WindowLayout, PaneMode } from "@tmuxcc/daemon";
+import type { PaneId, WindowId, SessionId, WindowLayout, PaneMode, WireCommand } from "@tmuxcc/daemon";
 
 // ---------------------------------------------------------------------------
 // Re-export wire primitives that renderers reference (convenience)
 // ---------------------------------------------------------------------------
 
-export type { PaneId, WindowId, SessionId, WindowLayout, PaneMode };
+export type { PaneId, WindowId, SessionId, WindowLayout, PaneMode, WireCommand };
 
 // ---------------------------------------------------------------------------
 // Value types used in callbacks
@@ -322,6 +322,28 @@ export interface ClientController {
    * the driver will translate into an onPaneResized callback.
    */
   resizePane(paneId: PaneId, cols: number, rows: number): void;
+
+  /**
+   * Send a model-level command to the daemon (VS Code → tmux direction).
+   *
+   * Wraps `cmd` in a `command.request` wire message with a monotonically-
+   * increasing correlationId and sends it over the connection.  The resulting
+   * tmux state change (new pane opened, window closed, etc.) flows back as
+   * normal `onWindowAdded` / `onPaneOpened` / `onPaneClosed` callbacks.
+   *
+   * Fire-and-forget: this does not wait for the matching `command.response`.
+   * Errors from the daemon (malformed command, unknown pane id, etc.) arrive
+   * as `onDisconnected` or are silently ignored by the daemon depending on the
+   * error type.
+   *
+   * Common commands:
+   *   { kind: "open-window", sessionId }         — tmux new-window
+   *   { kind: "split-pane", paneId, direction }  — tmux split-window
+   *
+   * tc-9hk: used by the VS Code `tmuxcc.newWindow` / `tmuxcc.splitPane`
+   * commands in extension.ts to drive tmux from the editor.
+   */
+  sendCommand(cmd: WireCommand): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -409,6 +431,11 @@ export interface InputSink {
   sendInput(paneId: PaneId, data: string): void;
   /** Forward a resize notification for a pane. */
   resizePane(paneId: PaneId, cols: number, rows: number): void;
+  /**
+   * Send a model-level command to the daemon (e.g. open-window, split-pane).
+   * tc-9hk: wired to DaemonConnection.send() via a command.request wrapper.
+   */
+  sendCommand(cmd: WireCommand): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -594,6 +621,9 @@ export function createRenderHookDriver(
         },
         resizePane(paneId: PaneId, cols: number, rows: number): void {
           inputSink.resizePane(paneId, cols, rows);
+        },
+        sendCommand(cmd: WireCommand): void {
+          inputSink.sendCommand(cmd);
         },
       };
 
