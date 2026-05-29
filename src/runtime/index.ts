@@ -26,3 +26,11 @@ export type { InputPath, InputPathOptions } from "./input-path.js";
 // tc-dv3: serve control-plane — per-client handshake + snapshot + delta stream
 export { createControlServer } from "./serve.js";
 export type { ControlServer, ControlServerOptions } from "./serve.js";
+
+// tc-1ho: flow-control coordinator — high/low-water backpressure + refresh-client -A
+export {
+  createFlowController,
+  DEFAULT_HIGH_WATER_BYTES,
+  DEFAULT_LOW_WATER_BYTES,
+} from "./flow-control.js";
+export type { FlowController, FlowControllerOptions } from "./flow-control.js";
