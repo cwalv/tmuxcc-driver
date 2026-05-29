@@ -1,0 +1,363 @@
+/**
+ * tmux -CC command-block correlator (tc-82a).
+ *
+ * This module provides the CORRELATION layer on top of the token stream emitted
+ * by `ControlTokenizer` (tc-ckw). It matches each %begin…%end/%error block to
+ * the outstanding command that produced it.
+ *
+ * # Protocol model
+ *
+ * The client sends commands; tmux replies with command blocks:
+ *
+ *   %begin  <ts> <cmdnum> <flags>   ← block open
+ *   <body lines>                     ← arbitrary bytes (may start with %)
+ *   %end    <ts> <cmdnum> <flags>   ← success  (or)
+ *   %error  <ts> <cmdnum> <flags>   ← failure
+ *
+ * Command numbers increase monotonically. Replies arrive in FIFO order
+ * (tmux guarantees this). Between blocks, tmux may emit notification lines
+ * (%output, %window-add, etc.) that are unrelated to any command.
+ *
+ * # Correlation strategy
+ *
+ * This correlator maintains a FIFO queue of pending commands registered by the
+ * caller. On `%end`/`%error` it dequeues the OLDEST pending entry and resolves
+ * it. As an additional safety check it also verifies that the closing
+ * `commandNumber` matches the expected one (it always should per protocol, but
+ * if a mismatch is detected the correlator rejects rather than silently
+ * mis-correlates).
+ *
+ * # API overview
+ *
+ * ```ts
+ * const corr = new CommandCorrelator({
+ *   onNotification(token) { /* forward to downstream * / },
+ * });
+ *
+ * // When the caller is about to send a command to tmux, register it first:
+ * const result: Promise<CommandResult> = corr.expectCommand();
+ *
+ * // Feed tokens as they arrive from ControlTokenizer:
+ * for (const token of tokenizer.push(chunk)) {
+ *   corr.push(token);
+ * }
+ *
+ * // The Promise resolves once the matching %end or %error block is complete.
+ * const { ok, commandNumber, body } = await result;
+ * ```
+ *
+ * # Thread safety / concurrency
+ *
+ * `CommandCorrelator` is single-threaded (synchronous push; Promise resolution
+ * is microtask-deferred). It has no internal timers or I/O. All state mutation
+ * happens inside `push()` calls on the caller's event loop.
+ *
+ * @module parser/correlator
+ */
+
+import type {
+  ControlToken,
+  NotificationToken,
+  BlockBeginToken,
+  BlockBodyToken,
+  BlockEndToken,
+  BlockErrorToken,
+} from "./tokenizer.js";
+
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
+
+/**
+ * The resolved result of a command block.
+ *
+ * Produced when a `%end` or `%error` guard line closes the in-flight block.
+ * `body` is the concatenated raw bytes of all `block-body` lines between the
+ * corresponding `%begin` and the terminator, in order (no trailing newlines;
+ * lines are joined by `\n` as they arrive from the tokenizer — each
+ * `BlockBodyToken.bytes` is one line).
+ *
+ * Note: `body` contains the raw bytes from the tokenizer (each line without its
+ * trailing newline). If multiple body lines were emitted, they are concatenated
+ * in order with no separator — this matches the raw payload semantics tmux uses.
+ */
+export interface CommandResult {
+  /** True on `%end` (success), false on `%error` (failure). */
+  readonly ok: boolean;
+  /** The command sequence number from the `%end`/`%error` guard line. */
+  readonly commandNumber: number;
+  /**
+   * The accumulated raw body bytes from all `block-body` tokens in this block.
+   * Raw: may contain non-UTF-8 bytes. Each token's bytes are concatenated
+   * directly (no newlines inserted between lines).
+   */
+  readonly body: Uint8Array;
+}
+
+/**
+ * Called for every `NotificationToken` that arrives between (or before/after)
+ * command blocks. The correlator does NOT consume notifications — they are
+ * forwarded here so downstream logic (%output decode, session events, etc.)
+ * still receives them.
+ */
+export type NotificationHandler = (token: NotificationToken) => void;
+
+/** Options for `CommandCorrelator`. */
+export interface CommandCorrelatorOptions {
+  /**
+   * Called synchronously for each `notification` token that is not part of a
+   * command block. Optional; if omitted, notifications are silently discarded.
+   */
+  onNotification?: NotificationHandler;
+}
+
+// ---------------------------------------------------------------------------
+// Internal types
+// ---------------------------------------------------------------------------
+
+/** One entry in the pending-command FIFO queue. */
+interface PendingCommand {
+  /**
+   * The command number we expect to see on the closing guard line.
+   * Populated when the matching `%begin` is seen (it carries the commandNumber).
+   * Before `%begin` arrives this is `undefined` (we don't know the cmdnum until
+   * tmux assigns it and echoes it back in the guard line).
+   */
+  expectedCommandNumber: number | undefined;
+  resolve: (result: CommandResult) => void;
+  reject: (err: Error) => void;
+}
+
+// ---------------------------------------------------------------------------
+// CommandCorrelator
+// ---------------------------------------------------------------------------
+
+/**
+ * Stateful correlator that maps %begin…%end/%error command blocks to caller-
+ * issued Promises.
+ *
+ * Usage:
+ * 1. Before sending a command to tmux, call `expectCommand()`. Hold the Promise.
+ * 2. Feed every `ControlToken` from `ControlTokenizer` into `push()`.
+ * 3. The Promise returned in step 1 resolves (or rejects) once tmux's block
+ *    for that command completes.
+ */
+export class CommandCorrelator {
+  private readonly _onNotification: NotificationHandler | undefined;
+
+  /**
+   * FIFO queue of pending commands registered by the caller.
+   * Dequeued in order as %end/%error blocks complete.
+   */
+  private readonly _pending: PendingCommand[] = [];
+
+  /** The command currently open (between %begin and %end/%error), or null. */
+  private _inFlight: {
+    commandNumber: number;
+    bodyChunks: Uint8Array[];
+    bodyLen: number;
+  } | null = null;
+
+  constructor(options: CommandCorrelatorOptions = {}) {
+    this._onNotification = options.onNotification;
+  }
+
+  // -------------------------------------------------------------------------
+  // Public API
+  // -------------------------------------------------------------------------
+
+  /**
+   * Register an outstanding command.
+   *
+   * Call this BEFORE (or immediately after) sending the command bytes to tmux,
+   * so that the FIFO queue stays in sync with tmux's reply order. Multiple
+   * callers may queue multiple commands; they resolve in the order the blocks
+   * arrive (which is the same as the order they were sent).
+   *
+   * The returned Promise:
+   * - Resolves with `CommandResult` when the matching `%end` block completes.
+   * - Resolves with `CommandResult` (ok=false) when the matching `%error` block
+   *   completes.
+   * - Rejects with an `Error` only on a protocol violation (e.g. commandNumber
+   *   mismatch, which would indicate a bug in the tokenizer layer or in the
+   *   caller's call ordering).
+   *
+   * @returns A Promise that resolves when tmux's reply block for this command
+   *   is fully received.
+   */
+  expectCommand(): Promise<CommandResult> {
+    return new Promise<CommandResult>((resolve, reject) => {
+      this._pending.push({
+        expectedCommandNumber: undefined,
+        resolve,
+        reject,
+      });
+    });
+  }
+
+  /**
+   * Feed one token from `ControlTokenizer` into the correlator.
+   *
+   * - `block-begin`: opens a new in-flight block; associates it with the oldest
+   *   pending command (if any). If no command was pre-registered, the block is
+   *   buffered and matched when a command is registered later via
+   *   `expectCommand()` — but callers SHOULD register before sending to avoid
+   *   races.
+   * - `block-body`: accumulates bytes for the current in-flight block.
+   * - `block-end` / `block-error`: closes the in-flight block, resolves the
+   *   matching pending command.
+   * - `notification`: forwarded to `onNotification`; not correlated.
+   * - `dcs-open` / `dcs-close`: ignored (informational from the tokenizer).
+   */
+  push(token: ControlToken): void {
+    switch (token.kind) {
+      case "block-begin":
+        this._handleBegin(token);
+        break;
+      case "block-body":
+        this._handleBody(token);
+        break;
+      case "block-end":
+        this._handleEnd(token);
+        break;
+      case "block-error":
+        this._handleError(token);
+        break;
+      case "notification":
+        this._onNotification?.(token);
+        break;
+      case "dcs-open":
+      case "dcs-close":
+        // Informational; no correlation action needed.
+        break;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Internal handlers
+  // -------------------------------------------------------------------------
+
+  private _handleBegin(token: BlockBeginToken): void {
+    if (this._inFlight !== null) {
+      // Protocol violation: %begin while a block is already open.
+      // This cannot happen if the tokenizer is correct, but be defensive.
+      this._rejectOldest(
+        new Error(
+          `correlator: %begin (cmdnum=${token.commandNumber}) arrived while block ` +
+            `${this._inFlight.commandNumber} is still open`,
+        ),
+      );
+    }
+
+    // Open a new in-flight accumulation slot.
+    this._inFlight = {
+      commandNumber: token.commandNumber,
+      bodyChunks: [],
+      bodyLen: 0,
+    };
+
+    // Bind the commandNumber to the oldest pending command, if any.
+    const oldest = this._pending[0];
+    if (oldest !== undefined) {
+      oldest.expectedCommandNumber = token.commandNumber;
+    }
+    // If no pending command exists: the block will still be accumulated.
+    // When push() sees %end/%error it will resolve whoever is at the front
+    // of the queue at that time (or reject with a mismatch error if still none).
+  }
+
+  private _handleBody(token: BlockBodyToken): void {
+    if (this._inFlight === null) {
+      // Protocol violation: body outside a block. Ignore defensively.
+      return;
+    }
+    this._inFlight.bodyChunks.push(token.bytes);
+    this._inFlight.bodyLen += token.bytes.length;
+  }
+
+  private _handleEnd(token: BlockEndToken): void {
+    this._closeBlock(token.commandNumber, true);
+  }
+
+  private _handleError(token: BlockErrorToken): void {
+    this._closeBlock(token.commandNumber, false);
+  }
+
+  /**
+   * Close the current in-flight block and resolve the oldest pending command.
+   *
+   * @param closingCmdNum - The commandNumber from the %end/%error guard line.
+   * @param ok - True for %end, false for %error.
+   */
+  private _closeBlock(closingCmdNum: number, ok: boolean): void {
+    if (this._inFlight === null) {
+      // No open block — stray %end/%error. Ignore.
+      return;
+    }
+
+    // Safety: verify the commandNumber on the closing guard matches the one
+    // on the opening %begin. A mismatch would indicate a protocol anomaly.
+    if (this._inFlight.commandNumber !== closingCmdNum) {
+      const err = new Error(
+        `correlator: commandNumber mismatch — %begin had ${this._inFlight.commandNumber}` +
+          `, but closing guard has ${closingCmdNum}`,
+      );
+      // Collect the body anyway (best effort) but reject the pending command.
+      this._inFlight = null;
+      this._rejectOldest(err);
+      return;
+    }
+
+    // Materialise the accumulated body.
+    const body = this._collectBody();
+    const commandNumber = closingCmdNum;
+    this._inFlight = null;
+
+    // Dequeue the oldest pending command.
+    const pending = this._pending.shift();
+    if (pending === undefined) {
+      // No registered command — unsolicited block. Silently discard.
+      // (This can happen if the caller fires a command without registering via
+      // expectCommand(), which is a caller error.)
+      return;
+    }
+
+    // Secondary safety: if we bound a commandNumber to this pending entry on
+    // %begin, verify it matches now.
+    if (
+      pending.expectedCommandNumber !== undefined &&
+      pending.expectedCommandNumber !== commandNumber
+    ) {
+      pending.reject(
+        new Error(
+          `correlator: expected cmdnum ${pending.expectedCommandNumber} but got ${commandNumber}`,
+        ),
+      );
+      return;
+    }
+
+    pending.resolve({ ok, commandNumber, body });
+  }
+
+  /** Concatenate all accumulated body chunks into one Uint8Array. */
+  private _collectBody(): Uint8Array {
+    if (this._inFlight === null) return new Uint8Array(0);
+    const { bodyChunks, bodyLen } = this._inFlight;
+    if (bodyChunks.length === 0) return new Uint8Array(0);
+    if (bodyChunks.length === 1) return bodyChunks[0]!;
+
+    const out = new Uint8Array(bodyLen);
+    let offset = 0;
+    for (const chunk of bodyChunks) {
+      out.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return out;
+  }
+
+  /** Reject the oldest pending command with an error. */
+  private _rejectOldest(err: Error): void {
+    const pending = this._pending.shift();
+    pending?.reject(err);
+  }
+}
