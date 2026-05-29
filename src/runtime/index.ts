@@ -34,3 +34,7 @@ export {
   DEFAULT_LOW_WATER_BYTES,
 } from "./flow-control.js";
 export type { FlowController, FlowControllerOptions } from "./flow-control.js";
+
+// tc-93a: full daemon assembly — wires host+pipeline+demux+server+inputPath+flowController
+export { createDaemon } from "./daemon.js";
+export type { Daemon, DaemonOptions } from "./daemon.js";
