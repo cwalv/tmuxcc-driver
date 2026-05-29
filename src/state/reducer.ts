@@ -745,13 +745,19 @@ function handleLayoutChange(model: SessionModel, rawLine: Uint8Array): SessionMo
     return model;
   }
 
-  // Reconcile pane set: add any pane from the layout that is missing in the model.
+  // Reconcile pane set: add any pane from the layout that is missing in the
+  // model, AND refresh the geometry of panes that already exist. %layout-change
+  // carries the authoritative per-pane cols/rows, so a resize (refresh-client
+  // -C → tmux reflow → %layout-change) round-trips all the way to
+  // model.panes.get(id).cols/rows — which in turn lets diffModel emit a
+  // pane.resized delta on the wire.
   const leaves = collectLayoutLeaves(parsedLayout.root);
   const win = model.windows.get(wid)!;
 
   for (const leaf of leaves) {
     const pid = mintPaneId(leaf.tmuxId);
-    if (!model.panes.has(pid)) {
+    const existing = model.panes.get(pid);
+    if (existing === undefined) {
       const pane: Pane = {
         paneId: pid,
         windowId: wid,
@@ -762,6 +768,8 @@ function handleLayoutChange(model: SessionModel, rawLine: Uint8Array): SessionMo
         scrollbackHandle: undefined,
       };
       model = addPane(model, pane);
+    } else if (existing.cols !== leaf.cols || existing.rows !== leaf.rows) {
+      model = updatePane(model, pid, { cols: leaf.cols, rows: leaf.rows });
     }
   }
 

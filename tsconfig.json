@@ -13,6 +13,8 @@
   //   flow-load.test.ts  — tc-55t flow-control under load (imports e2e-smoke.test.ts)
   "exclude": [
     "src/runtime/e2e-smoke.test.ts",
-    "src/runtime/flow-load.test.ts"
+    "src/runtime/flow-load.test.ts",
+    "src/runtime/resize-roundtrip.test.ts",
+    "src/runtime/resilience.test.ts"
   ]
 }
