@@ -10,3 +10,7 @@ export type {
   RuntimePipelineOptions,
   ModelChangeHandler,
 } from "./pipeline.js";
+
+// tc-fbz: output demux — fan %output bytes to per-client data-plane transports
+export { createOutputDemux } from "./output-demux.js";
+export type { OutputDemux, OutputDemuxOptions } from "./output-demux.js";
