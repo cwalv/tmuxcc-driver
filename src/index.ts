@@ -8,14 +8,6 @@
 /** Placeholder export — replaced as domain modules land in later epics. */
 export const CLIENT_PLACEHOLDER = true;
 
-/**
- * Stub type that will eventually describe a connected client session.
- * Declared here so dependents can import the type before the real impl lands.
- */
-export interface ClientSession {
-  readonly id: string;
-}
-
 // ---------------------------------------------------------------------------
 // Connection + handshake (tc-ahh — E5 serial head)
 // ---------------------------------------------------------------------------
@@ -28,3 +20,19 @@ export type {
   DataFrameHandler,
   StateChangeHandler,
 } from "./connection.js";
+
+// ---------------------------------------------------------------------------
+// Model mirror (tc-eots) — client-side snapshot + delta apply, seq-gap detect
+// ---------------------------------------------------------------------------
+
+export { Mirror, createMirror, applySnapshot, applyDelta } from "./mirror.js";
+export type {
+  ClientPane,
+  ClientWindow,
+  ClientSession,
+  ClientFocus,
+  ClientModel,
+  SeqGapInfo,
+  ModelChangeHandler,
+  ResyncNeededHandler,
+} from "./mirror.js";

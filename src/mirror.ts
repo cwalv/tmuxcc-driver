@@ -1,0 +1,692 @@
+/**
+ * Client-side model mirror — tc-eots
+ *
+ * Maintains a client-side mirror of the daemon's session model by consuming
+ * a SnapshotMessage (full-state baseline) followed by incremental delta
+ * messages from the DaemonConnection.onControl stream.
+ *
+ * # Architecture
+ *
+ * Two layers:
+ *   1. Pure core: `applySnapshot` / `applyDelta` operate on `ClientModel`
+ *      (plain data structures, no side effects). Fully testable in isolation.
+ *
+ *   2. `Mirror` class: thin stateful wrapper that holds the current model,
+ *      manages seq-gap detection, fires change/resync callbacks, and provides
+ *      `getModel()` for renderers. `Mirror.connectTo(connection)` wires a
+ *      DaemonConnection to the mirror automatically.
+ *
+ * # Client model shape
+ *
+ * The `ClientModel` is intentionally simpler than the daemon's `SessionModel`:
+ *   - No scrollback handles (daemon-internal).
+ *   - No invariant-checking overhead.
+ *   - Flat maps keyed by the same branded id types the wire uses.
+ *   - `ClientPane` includes `mode` (rendered by tc-7v9 as visual indicator).
+ *   - `ClientWindow` includes `layout` (WindowLayout — the full geometry tree).
+ *   - `ClientSession` includes `active` flag mirrored from snapshot/deltas.
+ *   - A `focus` triple (`paneId | null`, `windowId | null`, `sessionId | null`).
+ *
+ * # Seq-gap detection policy
+ *
+ * The snapshot's `seq` is the baseline. Each delta MUST have `seq === lastSeq + 1`.
+ * When a gap is detected:
+ *   - The delta is NOT applied (the mirror stays at its last known-good state).
+ *   - All registered `onResyncNeeded` handlers are called with the gap info.
+ *   - The caller (e.g. a reconnect loop) should request a fresh snapshot and
+ *     call `applySnapshot` again; the mirror resets cleanly.
+ *
+ * In-order deltas never trigger the resync signal.
+ *
+ * # Renderer seam (tc-7v9)
+ *
+ * `mirror.getModel()` — returns the current `ClientModel` snapshot (immutable
+ * reference; mirror replaces it atomically on each apply).
+ *
+ * `mirror.onModelChange(handler)` — fires after every successful `applySnapshot`
+ * or `applyDelta`, passing the new model. Handlers are appended (not replaced).
+ * Returns an unsubscribe function.
+ *
+ * `mirror.onResyncNeeded(handler)` — fires when a seq gap is detected. Handlers
+ * receive a `SeqGapInfo` describing the gap. Returns an unsubscribe function.
+ *
+ * # NO DOM, NO vscode, NO host API, NO Pseudoterminal
+ */
+
+import type {
+  SnapshotMessage,
+  DaemonMessage,
+  PaneId,
+  WindowId,
+  SessionId,
+  WindowLayout,
+  PaneMode,
+} from "@tmuxcc/daemon";
+import type { DaemonConnection } from "./connection.js";
+
+// ---------------------------------------------------------------------------
+// Client model types
+// ---------------------------------------------------------------------------
+
+/**
+ * A pane as tracked by the client mirror.
+ *
+ * Projection from the wire: paneId, windowId, sessionId, cols, rows are direct
+ * from SnapshotPane / delta messages. `mode` is tracked from pane.mode-changed
+ * deltas (defaults to "normal" at snapshot time since SnapshotPane has no mode).
+ */
+export interface ClientPane {
+  readonly paneId: PaneId;
+  readonly windowId: WindowId;
+  readonly sessionId: SessionId;
+  readonly cols: number;
+  readonly rows: number;
+  /** Current pane mode. Defaults to "normal" after a snapshot. */
+  readonly mode: PaneMode;
+}
+
+/**
+ * A window as tracked by the client mirror.
+ *
+ * `active` is true when this window is the active window in its session
+ * (driven by snapshot active flags and focus.changed / session.changed deltas).
+ * `layout` is the current WindowLayout tree for this window (may be the
+ * zero-placeholder if no layout.updated has arrived yet — matches projection.ts
+ * semantics for window.added).
+ */
+export interface ClientWindow {
+  readonly windowId: WindowId;
+  readonly sessionId: SessionId;
+  readonly name: string;
+  readonly active: boolean;
+  readonly layout: WindowLayout;
+}
+
+/**
+ * A session as tracked by the client mirror.
+ *
+ * `active` is true for the session that is currently focused.
+ */
+export interface ClientSession {
+  readonly sessionId: SessionId;
+  readonly name: string;
+  readonly active: boolean;
+}
+
+/**
+ * Global focus triple. All three are null when no pane is focused.
+ */
+export interface ClientFocus {
+  readonly paneId: PaneId | null;
+  readonly windowId: WindowId | null;
+  readonly sessionId: SessionId | null;
+}
+
+/**
+ * The client-side model — a flat, normalized view of the daemon's session state.
+ *
+ * Maps are keyed by the same branded id types the wire uses. This model is
+ * replaced atomically by `applySnapshot` / `applyDelta`; renderers should call
+ * `getModel()` after each change notification to get the latest reference.
+ *
+ * Rendering hint: join `sessions` → `windows` (by sessionId) → `panes`
+ * (by windowId) to build a tree, or read individual entities by id directly.
+ */
+export interface ClientModel {
+  /** All sessions, keyed by sessionId. */
+  readonly sessions: ReadonlyMap<SessionId, ClientSession>;
+  /** All windows across all sessions, keyed by windowId. */
+  readonly windows: ReadonlyMap<WindowId, ClientWindow>;
+  /** All panes across all windows, keyed by paneId. */
+  readonly panes: ReadonlyMap<PaneId, ClientPane>;
+  /** Global focus triple. */
+  readonly focus: ClientFocus;
+}
+
+// ---------------------------------------------------------------------------
+// Seq-gap types
+// ---------------------------------------------------------------------------
+
+/**
+ * Information about a detected sequence gap.
+ *
+ * Passed to `onResyncNeeded` handlers when a delta arrives out of order or
+ * with a skipped seq number.
+ *
+ * `expected` — the seq the mirror was expecting (lastAppliedSeq + 1).
+ * `received` — the seq carried by the out-of-order delta.
+ */
+export interface SeqGapInfo {
+  readonly expected: number;
+  readonly received: number;
+}
+
+// ---------------------------------------------------------------------------
+// Empty model constructor
+// ---------------------------------------------------------------------------
+
+/** Return an empty ClientModel (no sessions, windows, panes; null focus). */
+function emptyClientModel(): ClientModel {
+  return {
+    sessions: new Map(),
+    windows: new Map(),
+    panes: new Map(),
+    focus: { paneId: null, windowId: null, sessionId: null },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Pure core: applySnapshot
+// ---------------------------------------------------------------------------
+
+/**
+ * Initialize a `ClientModel` from a full `SnapshotMessage`.
+ *
+ * Replaces ALL state — any previously applied deltas are discarded. Call this
+ * when connecting (first snapshot) or re-syncing after a seq gap.
+ *
+ * Returns both the new model and the snapshot's seq (for seq tracking).
+ */
+export function applySnapshot(snapshot: SnapshotMessage): {
+  model: ClientModel;
+  seq: number;
+} {
+  const sessions = new Map<SessionId, ClientSession>();
+  for (const s of snapshot.sessions) {
+    sessions.set(s.sessionId, {
+      sessionId: s.sessionId,
+      name: s.name,
+      active: s.active,
+    });
+  }
+
+  const windows = new Map<WindowId, ClientWindow>();
+  for (const w of snapshot.windows) {
+    windows.set(w.windowId, {
+      windowId: w.windowId,
+      sessionId: w.sessionId,
+      name: w.name,
+      active: w.active,
+      layout: w.layout,
+    });
+  }
+
+  const panes = new Map<PaneId, ClientPane>();
+  for (const p of snapshot.panes) {
+    panes.set(p.paneId, {
+      paneId: p.paneId,
+      windowId: p.windowId,
+      sessionId: p.sessionId,
+      cols: p.cols,
+      rows: p.rows,
+      mode: "normal", // SnapshotPane has no mode field; default per spec
+    });
+  }
+
+  const model: ClientModel = {
+    sessions,
+    windows,
+    panes,
+    focus: {
+      paneId: snapshot.focus.paneId,
+      windowId: snapshot.focus.windowId,
+      sessionId: snapshot.focus.sessionId,
+    },
+  };
+
+  return { model, seq: snapshot.seq };
+}
+
+// ---------------------------------------------------------------------------
+// Pure core: applyDelta
+// ---------------------------------------------------------------------------
+
+/**
+ * Apply one delta message to an existing `ClientModel`.
+ *
+ * Exhaustively handles every delta type via TypeScript `never` exhaustiveness
+ * check. Messages not relevant to model state (command.response, error,
+ * daemon.capabilities, snapshot) are returned as-is (no model change).
+ *
+ * Returns the updated model (or the same model reference if no change is
+ * needed for this message type).
+ *
+ * Mirror semantics follow the daemon's `applyDeltas` reference implementation
+ * in `projection.test.ts`, so client and daemon agree on round-trip consistency.
+ */
+export function applyDelta(model: ClientModel, msg: DaemonMessage): ClientModel {
+  switch (msg.type) {
+    // ── Pane lifecycle ───────────────────────────────────────────────────────
+
+    case "pane.opened": {
+      const panes = new Map(model.panes);
+      panes.set(msg.paneId, {
+        paneId: msg.paneId,
+        windowId: msg.windowId,
+        sessionId: msg.sessionId,
+        cols: msg.cols,
+        rows: msg.rows,
+        mode: "normal",
+      });
+      return { ...model, panes };
+    }
+
+    case "pane.closed": {
+      if (!model.panes.has(msg.paneId)) return model;
+      const panes = new Map(model.panes);
+      panes.delete(msg.paneId);
+      return { ...model, panes };
+    }
+
+    case "pane.resized": {
+      const pane = model.panes.get(msg.paneId);
+      if (!pane) return model;
+      const panes = new Map(model.panes);
+      panes.set(msg.paneId, { ...pane, cols: msg.cols, rows: msg.rows });
+      return { ...model, panes };
+    }
+
+    case "pane.mode-changed": {
+      const pane = model.panes.get(msg.paneId);
+      if (!pane) return model;
+      const panes = new Map(model.panes);
+      panes.set(msg.paneId, { ...pane, mode: msg.mode });
+      return { ...model, panes };
+    }
+
+    // ── Window lifecycle ─────────────────────────────────────────────────────
+
+    case "window.added": {
+      const windows = new Map(model.windows);
+      // If this window is active, clear other windows' active flags in the same
+      // session (mirrors projection.test.ts applyDeltas semantics).
+      if (msg.active) {
+        for (const [wid, win] of windows) {
+          if (win.sessionId === msg.sessionId && win.active) {
+            windows.set(wid, { ...win, active: false });
+          }
+        }
+      }
+      windows.set(msg.windowId, {
+        windowId: msg.windowId,
+        sessionId: msg.sessionId,
+        name: msg.name,
+        active: msg.active,
+        // Zero-layout placeholder — mirrors projection.ts window.added behavior.
+        // A subsequent layout.updated will replace it.
+        layout: {
+          cols: 0,
+          rows: 0,
+          root: {
+            kind: "pane",
+            paneId: "" as PaneId,
+            rect: { x: 0, y: 0, cols: 0, rows: 0 },
+          },
+        },
+      });
+      return { ...model, windows };
+    }
+
+    case "window.closed": {
+      if (!model.windows.has(msg.windowId)) return model;
+      const windows = new Map(model.windows);
+      windows.delete(msg.windowId);
+      return { ...model, windows };
+    }
+
+    case "window.renamed": {
+      const win = model.windows.get(msg.windowId);
+      if (!win) return model;
+      const windows = new Map(model.windows);
+      windows.set(msg.windowId, { ...win, name: msg.newName });
+      return { ...model, windows };
+    }
+
+    // ── Layout ───────────────────────────────────────────────────────────────
+
+    case "layout.updated": {
+      const win = model.windows.get(msg.windowId);
+      if (!win) return model;
+      const windows = new Map(model.windows);
+      windows.set(msg.windowId, { ...win, layout: msg.layout });
+      return { ...model, windows };
+    }
+
+    // ── Focus ────────────────────────────────────────────────────────────────
+
+    case "focus.changed": {
+      // Update the focus triple.
+      const focus: ClientFocus = {
+        paneId: msg.paneId,
+        windowId: msg.windowId,
+        sessionId: msg.sessionId,
+      };
+      // Also update active flags on sessions and windows to match the new focus
+      // (mirrors projection.test.ts applyDeltas semantics).
+      const sessions = new Map(model.sessions);
+      for (const [sid, sess] of sessions) {
+        const shouldBeActive = sid === msg.sessionId;
+        if (sess.active !== shouldBeActive) {
+          sessions.set(sid, { ...sess, active: shouldBeActive });
+        }
+      }
+      const windows = new Map(model.windows);
+      for (const [wid, win] of windows) {
+        const shouldBeActive = wid === msg.windowId;
+        if (win.active !== shouldBeActive) {
+          windows.set(wid, { ...win, active: shouldBeActive });
+        }
+      }
+      return { ...model, sessions, windows, focus };
+    }
+
+    // ── Session lifecycle ────────────────────────────────────────────────────
+
+    case "session.added": {
+      const sessions = new Map(model.sessions);
+      // Clear other sessions' active flag if the new session is immediately active.
+      if (msg.active) {
+        for (const [sid, sess] of sessions) {
+          if (sess.active) {
+            sessions.set(sid, { ...sess, active: false });
+          }
+        }
+      }
+      sessions.set(msg.sessionId, {
+        sessionId: msg.sessionId,
+        name: msg.name,
+        active: msg.active,
+      });
+      return { ...model, sessions };
+    }
+
+    case "session.closed": {
+      if (!model.sessions.has(msg.sessionId)) return model;
+      const sessions = new Map(model.sessions);
+      sessions.delete(msg.sessionId);
+      return { ...model, sessions };
+    }
+
+    case "session.changed": {
+      // Update active flag on all sessions to reflect the new active session.
+      const sessions = new Map(model.sessions);
+      for (const [sid, sess] of sessions) {
+        const shouldBeActive = sid === msg.newActiveSessionId;
+        if (sess.active !== shouldBeActive) {
+          sessions.set(sid, { ...sess, active: shouldBeActive });
+        }
+      }
+      return { ...model, sessions };
+    }
+
+    case "session.renamed": {
+      const sess = model.sessions.get(msg.sessionId);
+      if (!sess) return model;
+      const sessions = new Map(model.sessions);
+      sessions.set(msg.sessionId, { ...sess, name: msg.newName });
+      return { ...model, sessions };
+    }
+
+    // ── Non-model messages (pass through unchanged) ──────────────────────────
+
+    case "snapshot":
+      // Full snapshot — call applySnapshot() instead.
+      return model;
+
+    case "daemon.capabilities":
+    case "command.response":
+    case "error":
+      // Not state-bearing for the mirror.
+      return model;
+
+    // ── Exhaustiveness check ─────────────────────────────────────────────────
+    default: {
+      // TypeScript will error here if a new DaemonMessage variant is added but
+      // not handled above.
+      const _exhaustive: never = msg;
+      return _exhaustive;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Mirror — stateful wrapper
+// ---------------------------------------------------------------------------
+
+/** Handler for model-change notifications from the mirror. */
+export type ModelChangeHandler = (model: ClientModel) => void;
+
+/** Handler for seq-gap / resync-needed notifications from the mirror. */
+export type ResyncNeededHandler = (gap: SeqGapInfo) => void;
+
+/**
+ * Stateful client-side mirror of the daemon session model.
+ *
+ * Usage (pure manual drive):
+ * ```ts
+ * const mirror = new Mirror();
+ * mirror.onModelChange((m) => render(m));
+ * mirror.onResyncNeeded(({ expected, received }) => {
+ *   // request a fresh snapshot from the daemon
+ * });
+ * // On connection established — snapshot arrives first:
+ * connection.onControl((msg) => {
+ *   if (msg.type === "snapshot") {
+ *     mirror.receiveSnapshot(msg);
+ *   } else {
+ *     mirror.receiveDelta(msg);
+ *   }
+ * });
+ * ```
+ *
+ * Or use `Mirror.connectTo(connection)` for automatic wiring.
+ */
+export class Mirror {
+  // ── State ─────────────────────────────────────────────────────────────────
+
+  #model: ClientModel = emptyClientModel();
+  #lastSeq: number | null = null; // null = no snapshot received yet
+  #initialized = false;
+
+  // ── Handlers ──────────────────────────────────────────────────────────────
+
+  readonly #changeHandlers: ModelChangeHandler[] = [];
+  readonly #resyncHandlers: ResyncNeededHandler[] = [];
+
+  // ── Public model access ───────────────────────────────────────────────────
+
+  /**
+   * Get the current client model.
+   *
+   * Returns an immutable reference; the mirror replaces the reference atomically
+   * on each `receiveSnapshot` / `receiveDelta`. Callers should not cache this
+   * reference across change notifications — always call `getModel()` again
+   * inside an `onModelChange` handler to get the latest state.
+   *
+   * tc-7v9 (render hook bead) reads from this getter.
+   */
+  getModel(): ClientModel {
+    return this.#model;
+  }
+
+  /**
+   * True after the first `receiveSnapshot` has been called.
+   * Renderers may gate their first render on this flag.
+   */
+  get initialized(): boolean {
+    return this.#initialized;
+  }
+
+  // ── Change notifications ──────────────────────────────────────────────────
+
+  /**
+   * Register a handler that fires after every successful model update
+   * (snapshot or delta).
+   *
+   * Handlers are APPENDED (multiple registrations are all called in order).
+   * Returns an unsubscribe function; call it to deregister the handler.
+   *
+   * tc-7v9 (render hook bead) registers here to drive render updates.
+   */
+  onModelChange(handler: ModelChangeHandler): () => void {
+    this.#changeHandlers.push(handler);
+    return () => {
+      const idx = this.#changeHandlers.indexOf(handler);
+      if (idx !== -1) this.#changeHandlers.splice(idx, 1);
+    };
+  }
+
+  /**
+   * Register a handler that fires when a seq gap is detected.
+   *
+   * A seq gap means a delta arrived with a non-consecutive seq (skipped or
+   * out-of-order). The mirror does NOT apply the offending delta. The caller
+   * should request a fresh snapshot from the daemon and call `receiveSnapshot`
+   * again.
+   *
+   * Handlers are APPENDED. Returns an unsubscribe function.
+   */
+  onResyncNeeded(handler: ResyncNeededHandler): () => void {
+    this.#resyncHandlers.push(handler);
+    return () => {
+      const idx = this.#resyncHandlers.indexOf(handler);
+      if (idx !== -1) this.#resyncHandlers.splice(idx, 1);
+    };
+  }
+
+  // ── Receive methods ───────────────────────────────────────────────────────
+
+  /**
+   * Initialize (or re-initialize) the mirror from a full snapshot.
+   *
+   * Resets all state including the seq counter. Safe to call multiple times
+   * (e.g. after a resync). Fires `onModelChange` handlers.
+   */
+  receiveSnapshot(snapshot: SnapshotMessage): void {
+    const { model, seq } = applySnapshot(snapshot);
+    this.#model = model;
+    this.#lastSeq = seq;
+    this.#initialized = true;
+    this.#emitChange(model);
+  }
+
+  /**
+   * Apply one delta message to the mirror.
+   *
+   * If no snapshot has been received yet, the delta is silently ignored (the
+   * mirror is not yet initialized and has no baseline to apply against).
+   *
+   * If the delta's `seq` is not `lastSeq + 1`, a seq gap is detected:
+   *   - The delta is NOT applied.
+   *   - All `onResyncNeeded` handlers are called with the gap info.
+   *   - The mirror stays at the last known-good state.
+   *
+   * If the message type is not a delta (snapshot, daemon.capabilities,
+   * command.response, error), it is silently ignored.
+   *
+   * Fires `onModelChange` handlers on successful apply.
+   */
+  receiveDelta(msg: DaemonMessage): void {
+    // Not yet initialized — ignore.
+    if (!this.#initialized || this.#lastSeq === null) return;
+
+    // Snapshot messages should go to receiveSnapshot, not here.
+    if (msg.type === "snapshot") return;
+
+    // Non-state-bearing messages — skip seq check and silently ignore.
+    if (
+      msg.type === "daemon.capabilities" ||
+      msg.type === "command.response" ||
+      msg.type === "error"
+    ) {
+      return;
+    }
+
+    // Seq-gap detection.
+    const expected = this.#lastSeq + 1;
+    if (msg.seq !== expected) {
+      this.#emitResync({ expected, received: msg.seq });
+      return;
+    }
+
+    const newModel = applyDelta(this.#model, msg);
+    this.#model = newModel;
+    this.#lastSeq = msg.seq;
+    this.#emitChange(newModel);
+  }
+
+  // ── Connection wiring ─────────────────────────────────────────────────────
+
+  /**
+   * Wire this mirror to a `DaemonConnection`.
+   *
+   * Registers a single `onControl` handler that routes:
+   *   - `snapshot` messages → `receiveSnapshot()`
+   *   - all other messages → `receiveDelta()`
+   *
+   * Returns an unsubscribe function that deregisters the handler (setting
+   * the connection's control handler to null is not possible with the current
+   * DaemonConnection API, so the unsubscribe replaces it with a no-op).
+   *
+   * NOTE: `DaemonConnection.onControl` is a single-slot handler (replace
+   * semantics, not append). If another consumer also calls `onControl`, it
+   * will replace this mirror's handler. In that case, route messages manually
+   * via `receiveSnapshot` / `receiveDelta` instead.
+   *
+   * Call AFTER `await connection.connect()` so buffered messages are delivered.
+   */
+  connectTo(connection: DaemonConnection): () => void {
+    const handler = (msg: DaemonMessage): void => {
+      if (msg.type === "snapshot") {
+        this.receiveSnapshot(msg);
+      } else {
+        this.receiveDelta(msg);
+      }
+    };
+    connection.onControl(handler);
+    // Return a no-op unsubscribe (DaemonConnection.onControl is replace-only;
+    // to truly unsubscribe you'd have to install a new handler).
+    return () => {
+      // Replace with a no-op to stop routing to this mirror.
+      connection.onControl(() => {
+        /* no-op */
+      });
+    };
+  }
+
+  // ── Internal ──────────────────────────────────────────────────────────────
+
+  #emitChange(model: ClientModel): void {
+    for (const handler of this.#changeHandlers) {
+      handler(model);
+    }
+  }
+
+  #emitResync(gap: SeqGapInfo): void {
+    for (const handler of this.#resyncHandlers) {
+      handler(gap);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Factory helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Create a `Mirror` already wired to a `DaemonConnection`.
+ *
+ * Convenience wrapper around `new Mirror()` + `mirror.connectTo(connection)`.
+ * Call after `await connection.connect()`.
+ *
+ * ```ts
+ * const session = await connection.connect();
+ * const mirror = createMirror(connection);
+ * mirror.onModelChange((m) => render(m));
+ * ```
+ */
+export function createMirror(connection: DaemonConnection): Mirror {
+  const mirror = new Mirror();
+  mirror.connectTo(connection);
+  return mirror;
+}
