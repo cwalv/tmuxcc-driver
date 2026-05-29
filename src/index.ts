@@ -47,3 +47,10 @@ export {
 // Projection functions for client round-trip tests:
 export { projectSnapshot, diffModel } from "./state/projection.js";
 export type { ProjectSnapshotOpts } from "./state/projection.js";
+
+// Runtime — createDaemon and supporting types (tc-93a).
+// Re-exported from src/index so consumers can import from "@tmuxcc/daemon"
+// without reaching into internal sub-paths.
+export { createDaemon } from "./runtime/daemon.js";
+export type { Daemon, DaemonOptions } from "./runtime/daemon.js";
+export type { TmuxHostOptions } from "./runtime/tmux-host.js";
