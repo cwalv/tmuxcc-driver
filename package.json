@@ -17,6 +17,9 @@
     "test": "node --import tsx --test \"src/**/*.test.ts\"",
     "format": "prettier --write src"
   },
+  "dependencies": {
+    "@tmuxcc/daemon": "*"
+  },
   "devDependencies": {
     "@types/node": "^22.19.19",
     "tsx": "^4.19.2",
