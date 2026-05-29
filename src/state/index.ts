@@ -58,3 +58,7 @@ export {
   // Parser→model bridge
   parsedLayoutToWindowLayout,
 } from "./model.js";
+
+// tc-fx2: per-pane scrollback ring buffer
+export type { PaneBufferStore } from "./scrollback.js";
+export { createPaneBufferStore, DEFAULT_CAP_BYTES } from "./scrollback.js";
