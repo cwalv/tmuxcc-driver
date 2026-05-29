@@ -86,3 +86,7 @@ export type {
   ControlMessage,
 } from "./control.js";
 export { isControlMessage, isDaemonMessage, isClientMessage } from "./control.js";
+
+// Data-plane binary frame format (tc-2mq)
+export { FRAME_MAGIC, encodeFrame, decodeFrame, FrameDecoder } from "./framing.js";
+export type { DataFrame } from "./framing.js";

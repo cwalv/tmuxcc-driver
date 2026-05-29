@@ -553,11 +553,117 @@ The daemon applies the resize to tmux and responds with a `pane.resized` delta.
 
 ---
 
-## TODO: Data plane (bead tc-2mq)
+## Data plane (`src/wire/framing.ts`) — bead tc-2mq
 
-The data plane carries raw pane byte streams using length-prefixed framing. It imports `PaneId` from `src/wire/ids.ts` to tag frames. The framing format, frame header layout, and stream multiplexing are defined by bead **tc-2mq**.
+The data plane carries raw terminal output bytes for panes. It is binary (not JSON or base64) because a busy terminal can push megabytes per second; JSON encoding would add per-byte string-escape overhead and base64 would inflate every payload by 33%. The control plane handles structured messages that are low-volume and benefit from readability; the data plane does not.
 
-> **Stub**: document data-plane frame format here once tc-2mq is complete.
+### Why binary?
+
+At hot-path volumes (a busy terminal, fast-scrolling output, cat of a large file) the difference between raw binary and JSON/base64 framing is material:
+- **JSON**: each `0xFF` byte becomes the 6-character escape `ÿ`; a 1 MB payload becomes ~6 MB on the wire, plus parsing cost.
+- **base64**: every 3 raw bytes become 4 ASCII characters — 33% inflation, plus a base64 decode step.
+- **Binary**: payload bytes are written as-is. The only overhead is the fixed 11-byte header plus the (typically 2–4 byte) paneId.
+
+### Frame byte layout
+
+Every data-plane frame is a single contiguous byte sequence:
+
+```
+Offset  Size   Type          Field     Description
+------  -----  ------------  --------  ------------------------------------------
+     0      1  u8            MAGIC     0xCC — magic byte for framing verification
+     1      4  u32 big-endian SEQ      Per-pane monotonic sequence number
+     5      4  u32 big-endian PAYLEN   Payload byte length
+     9      2  u16 big-endian IDLEN    paneId UTF-8 byte length
+    11  IDLEN  UTF-8 bytes   PANEID    paneId string encoded as UTF-8
+11+IDLEN PAYLEN raw bytes   PAYLOAD   Raw terminal output bytes (any byte value)
+```
+
+Total frame size: `11 + IDLEN + PAYLEN` bytes.
+
+#### Field rationale
+
+| Field   | Size         | Rationale |
+|---------|--------------|-----------|
+| MAGIC   | 1 byte       | `0xCC` (mnemonic: "control-client"). Allows detection of framing errors / stream corruption. Not a valid UTF-8 start byte for common paneId strings, reducing false positives. |
+| SEQ     | 4 bytes u32  | 4 billion frames per pane before wrap. At 1 MB/s of 4 KB frames, ~48 years before rollover. Wrap at `0xFFFFFFFF` is explicitly allowed; clients detect a gap of UINT32_MAX or a seq going back to 0. |
+| PAYLEN  | 4 bytes u32  | Supports frames up to ~4 GB. In practice bounded by the daemon's chunk size. |
+| IDLEN   | 2 bytes u16  | Supports paneId UTF-8 strings up to 65535 bytes. Current ids ("p0", "s0-p3") are short; 2 bytes keeps the header compact without wasting 4. |
+| PANEID  | IDLEN bytes  | PaneId encoded as UTF-8. Variable-length because PaneId is a branded string of arbitrary length (see design choice below). |
+| PAYLOAD | PAYLEN bytes | Raw terminal output bytes. Opaque. May contain 0x00, 0xFF, or any byte sequence that is not valid UTF-8. NEVER base64 or escaped. |
+
+#### PaneId encoding design choice
+
+PaneId is a branded string (see `ids.ts`). Two options were considered for the binary header:
+
+- **(a) Length-prefixed UTF-8 field** — encode the string directly with a 2-byte length prefix. Simple, no extra state, readable in a hex dump.
+- **(b) Numeric alias** — define a numeric handle (e.g. u32) per pane, maintain a state table mapping alias ↔ PaneId. Smaller per-frame overhead for long ids; requires alias assignment/lookup.
+
+**Choice: option (a)** — length-prefixed UTF-8. Current pane ids are 2–6 bytes ("p0"…"s0-p3"), so the overhead difference is negligible. Option (b) would add a state table the data plane does not otherwise need. If ids grow substantially longer in the future, option (b) is the natural upgrade path.
+
+### Sequence numbers
+
+`SEQ` is a per-pane monotonically-increasing `uint32`, **starting at 0**. The **daemon** owns the counter for each pane and increments it with every frame emitted for that pane.
+
+Clients use the sequence number to:
+- **Detect frame drops**: a gap in `seq` for the same `paneId` means one or more frames were lost.
+- **Restore ordering**: if a transport delivers frames out-of-order (unlikely on a local socket, possible on a routed transport), clients can buffer and sort by seq.
+
+`encodeFrame` accepts `seq` as a parameter; the daemon is responsible for maintaining a per-pane counter.
+
+### API (`src/wire/framing.ts`)
+
+```typescript
+// Magic byte constant
+export const FRAME_MAGIC = 0xCC;
+
+// Decoded frame shape
+export interface DataFrame {
+  paneId:  PaneId;
+  seq:     number;    // uint32
+  payload: Uint8Array; // raw bytes; any byte value
+}
+
+// Encode a frame into a single Uint8Array
+export function encodeFrame(
+  paneId:  PaneId,
+  seq:     number,      // uint32, per-pane counter (caller owns increment)
+  payload: Uint8Array,
+): Uint8Array;
+
+// Decode a complete frame from a byte buffer (single-frame, not streaming)
+export function decodeFrame(buf: Uint8Array): DataFrame;
+
+// Stateful streaming decoder — handles chunk boundaries
+export class FrameDecoder {
+  push(chunk: Uint8Array): DataFrame[]; // returns all complete frames decoded
+}
+```
+
+`encodeFrame` throws `RangeError` if the paneId UTF-8 encoding exceeds 65535 bytes.
+`decodeFrame` and `FrameDecoder.push` throw `RangeError` on a bad magic byte or truncated buffer.
+
+### Streaming decoder
+
+TCP and pipe reads do not respect frame boundaries. A single `read()` call may return a partial header, exactly one frame, or multiple frames concatenated. `FrameDecoder` maintains an internal byte buffer and yields complete frames only once their full `PAYLEN` bytes have arrived. Partial frames are held across `push()` calls. Example:
+
+```typescript
+const dec = new FrameDecoder();
+socket.on("data", (chunk: Uint8Array) => {
+  const frames = dec.push(chunk);
+  for (const frame of frames) {
+    applyPaneOutput(frame.paneId, frame.seq, frame.payload);
+  }
+});
+```
+
+### File layout
+
+```
+src/wire/
+  framing.ts       — encodeFrame, decodeFrame, FrameDecoder, DataFrame, FRAME_MAGIC
+  framing.test.ts  — round-trip, non-UTF-8 bytes, streaming, error cases
+```
 
 ---
 
