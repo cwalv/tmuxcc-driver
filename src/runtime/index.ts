@@ -18,3 +18,11 @@ export type {
 // tc-fbz: output demux — fan %output bytes to per-client data-plane transports
 export { createOutputDemux } from "./output-demux.js";
 export type { OutputDemux, OutputDemuxOptions } from "./output-demux.js";
+
+// tc-kvk: client→tmux input & resize path (send-keys -H / refresh-client)
+export { createInputPath, defaultPaneIdToTmux, defaultWindowIdToTmux } from "./input-path.js";
+export type { InputPath, InputPathOptions } from "./input-path.js";
+
+// tc-dv3: serve control-plane — per-client handshake + snapshot + delta stream
+export { createControlServer } from "./serve.js";
+export type { ControlServer, ControlServerOptions, ServedClient, SeqStamp } from "./serve.js";
