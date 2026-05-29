@@ -32,3 +32,12 @@ export type {
   DcsOpenToken,
   DcsCloseToken,
 } from "./tokenizer.js";
+
+// tc-8yz: %output octal byte codec
+export {
+  decodeOutputPayload,
+  encodeOutputPayload,
+  parseOutputNotification,
+} from "./output-codec.js";
+
+export type { OutputNotification } from "./output-codec.js";
