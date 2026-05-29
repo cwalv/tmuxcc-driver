@@ -25,4 +25,4 @@ export type { InputPath, InputPathOptions } from "./input-path.js";
 
 // tc-dv3: serve control-plane — per-client handshake + snapshot + delta stream
 export { createControlServer } from "./serve.js";
-export type { ControlServer, ControlServerOptions, ServedClient, SeqStamp } from "./serve.js";
+export type { ControlServer, ControlServerOptions } from "./serve.js";
