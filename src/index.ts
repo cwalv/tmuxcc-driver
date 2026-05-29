@@ -36,3 +36,21 @@ export type {
   ModelChangeHandler,
   ResyncNeededHandler,
 } from "./mirror.js";
+
+// ---------------------------------------------------------------------------
+// Pane byte-stream consumer (tc-ekd) — per-pane ordered delivery
+// ---------------------------------------------------------------------------
+
+export * from "./pane-stream.js";
+
+// ---------------------------------------------------------------------------
+// Input/resize API (tc-6jf) — client→daemon wire messages
+// ---------------------------------------------------------------------------
+
+export * from "./input.js";
+
+// ---------------------------------------------------------------------------
+// Render-hook interface (tc-y8d) — the renderer seam (E6 implements)
+// ---------------------------------------------------------------------------
+
+export * from "./render-hook.js";
