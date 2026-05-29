@@ -62,3 +62,20 @@ export {
 // tc-fx2: per-pane scrollback ring buffer
 export type { PaneBufferStore } from "./scrollback.js";
 export { createPaneBufferStore, DEFAULT_CAP_BYTES } from "./scrollback.js";
+
+// tc-835: attach-time bootstrap → live-delta handoff
+export {
+  BOOTSTRAP_WINDOWS_FORMAT,
+  BOOTSTRAP_PANES_FORMAT,
+  bootstrapCommands,
+  parseWindowsReply,
+  parsePanesReply,
+  buildInitialModel,
+  BootstrapCoordinator,
+} from "./bootstrap.js";
+export type {
+  WindowsReplyRow,
+  PanesReplyRow,
+  BootstrapCoordinatorOptions,
+  BootstrapPhase,
+} from "./bootstrap.js";
