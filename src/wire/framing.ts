@@ -37,8 +37,10 @@
  *   - SEQ (4 bytes, uint32): 4 billion frames per pane before wrap; at 1 MB/s
  *     of 4 KB frames that is ~48 years. Wrapping at 0xFFFFFFFF is allowed;
  *     clients detect it as a gap of exactly UINT32_MAX or a rollover.
- *   - PAYLEN (4 bytes, uint32): supports frames up to ~4 GB. In practice frames
- *     are bounded by the daemon's chunk size, but the field leaves room.
+ *   - PAYLEN (4 bytes, uint32): supports frames up to ~4 GB in the field.
+ *     The decoder enforces a MAX_FRAME cap (8 MiB); frames with PAYLEN above
+ *     that cap are rejected with a RangeError before any buffering or
+ *     allocation — the caller must tear down the connection.
  *   - IDLEN (2 bytes, uint16): supports paneId strings up to 65535 UTF-8 bytes.
  *     Current ids are short ("p0", "s0-p3") so this is over-provisioned; 2
  *     bytes keeps the header word-aligned without a full 4-byte field.
@@ -96,6 +98,24 @@ const OFF_PANEID = 11; // variable (IDLEN bytes)
 
 /** Minimum number of bytes needed to read MAGIC + SEQ + PAYLEN + IDLEN. */
 const MIN_HEADER_BYTES = 11;
+
+/**
+ * Maximum permitted payload length in bytes (8 MiB).
+ *
+ * The PAYLEN field is a u32, which can theoretically reach ~4 GiB. Without a
+ * cap, a sender that writes a frame header with a large PAYLEN but never
+ * delivers the payload body causes FrameDecoder to pin up to PAYLEN bytes of
+ * buffered chunks indefinitely. The cap is enforced on the decode path so that
+ * untrusted transports (network sockets) cannot trigger unbounded allocation.
+ *
+ * 8 MiB is chosen as well above any legitimate single frame: the daemon's
+ * practical chunk size is ~4 KiB of terminal output, and the flow-control
+ * high-water mark is 256 KiB. 8 MiB leaves a 32× headroom buffer for large
+ * burst payloads while bounding the worst-case allocation to a reasonable
+ * amount. If legitimate frames ever exceed this limit, raise the constant and
+ * document the reason.
+ */
+export const MAX_FRAME = 8_388_608; // 8 MiB (8 * 1024 * 1024)
 
 // ---------------------------------------------------------------------------
 // Decoded frame
@@ -239,6 +259,13 @@ export class FrameDecoder {
       const payLen = view.getUint32(OFF_PAYLEN, false);
       const idLen = view.getUint16(OFF_IDLEN, false);
 
+      // Reject oversized frames before buffering grows beyond the cap.
+      if (payLen > MAX_FRAME) {
+        throw new RangeError(
+          `data-plane framing error: PAYLEN ${payLen} exceeds MAX_FRAME cap of ${MAX_FRAME} bytes — possible garbage or hostile frame`,
+        );
+      }
+
       const totalFrameLen = MIN_HEADER_BYTES + idLen + payLen;
 
       if (this._bufferedLen < totalFrameLen) {
@@ -370,6 +397,13 @@ export function decodeFrame(buf: Uint8Array): DataFrame {
   const seq = view.getUint32(OFF_SEQ, false);
   const payLen = view.getUint32(OFF_PAYLEN, false);
   const idLen = view.getUint16(OFF_IDLEN, false);
+
+  // Reject oversized frames before allocating.
+  if (payLen > MAX_FRAME) {
+    throw new RangeError(
+      `data-plane framing error: PAYLEN ${payLen} exceeds MAX_FRAME cap of ${MAX_FRAME} bytes — possible garbage or hostile frame`,
+    );
+  }
 
   const expectedLen = MIN_HEADER_BYTES + idLen + payLen;
   if (buf.length < expectedLen) {

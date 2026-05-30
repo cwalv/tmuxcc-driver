@@ -587,7 +587,7 @@ Total frame size: `11 + IDLEN + PAYLEN` bytes.
 |---------|--------------|-----------|
 | MAGIC   | 1 byte       | `0xCC` (mnemonic: "control-client"). Allows detection of framing errors / stream corruption. Not a valid UTF-8 start byte for common paneId strings, reducing false positives. |
 | SEQ     | 4 bytes u32  | 4 billion frames per pane before wrap. At 1 MB/s of 4 KB frames, ~48 years before rollover. Wrap at `0xFFFFFFFF` is explicitly allowed; clients detect a gap of UINT32_MAX or a seq going back to 0. |
-| PAYLEN  | 4 bytes u32  | Supports frames up to ~4 GB. In practice bounded by the daemon's chunk size. |
+| PAYLEN  | 4 bytes u32  | Supports frames up to ~4 GB in the field, but the decoder enforces a `MAX_FRAME` cap of 8 MiB. Frames with `PAYLEN > MAX_FRAME` are rejected with a `RangeError` before any buffering or allocation; the connection must be torn down. |
 | IDLEN   | 2 bytes u16  | Supports paneId UTF-8 strings up to 65535 bytes. Current ids ("p0", "s0-p3") are short; 2 bytes keeps the header compact without wasting 4. |
 | PANEID  | IDLEN bytes  | PaneId encoded as UTF-8. Variable-length because PaneId is a branded string of arbitrary length (see design choice below). |
 | PAYLOAD | PAYLEN bytes | Raw terminal output bytes. Opaque. May contain 0x00, 0xFF, or any byte sequence that is not valid UTF-8. NEVER base64 or escaped. |
