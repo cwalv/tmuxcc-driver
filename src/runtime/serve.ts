@@ -52,12 +52,17 @@
  * data-plane pump (tc-fbz) should use its own `transport.onClose` handler or
  * share the same one (calling `removeClient` is idempotent).
  *
- * # Command requests (client → daemon)
+ * # Inbound messages (client → daemon)
  *
- * The control plane is bidirectional: clients send `command.request` and
- * `input`/`resize.request` messages back to the daemon.  This serve layer does
- * NOT process those inbound messages — it is strictly the OUTBOUND (server-push)
- * half.  Wiring inbound handling is tc-93a's (and tc-kvk's) responsibility.
+ * The control plane is bidirectional.  Most client→daemon messages (`command.request`,
+ * `input`, `resize.request`) are routed by tc-93a / tc-kvk.  The one exception
+ * handled HERE is `resync.request` (tc-7ml.4), because only the serve layer holds
+ * the per-connection seq counter and can re-send the snapshot correctly.
+ *
+ * When `resync.request` arrives this module:
+ *   1. Sends `projectSnapshot(pipeline.getModel(), { seq: state.nextSeq })`.
+ *   2. Increments `state.nextSeq` — seq monotonically continues (no reset).
+ *   3. Subsequent model-change deltas pick up from the next seq value.
  *
  * @module runtime/serve
  */
@@ -72,6 +77,7 @@ import {
   WIRE_PROTOCOL_VERSION,
   type Capabilities,
   type DaemonMessage,
+  type ControlMessage,
   type ErrorMessage,
 } from "../wire/control.js";
 import { projectSnapshot } from "../state/projection.js";
@@ -279,6 +285,23 @@ class ControlServerImpl implements ControlServer {
       this._cleanupClient(transport);
     });
 
+    // Inbound control handler: handle resync.request from the client.
+    // This is the only client→daemon message the serve layer processes; all
+    // other inbound messages (command.request, input, resize.request) are
+    // routed by the integration layer (tc-93a / tc-kvk).
+    //
+    // NOTE: transport.onControl is single-slot (replace semantics). Installing
+    // it here means the integration layer MUST NOT also install onControl on
+    // the same transport after addClient returns — or it must proxy resync.request
+    // to this server. For now the integration code is in-process and aware of
+    // this constraint.
+    transport.onControl((msg: ControlMessage) => {
+      if (msg.type === "resync.request") {
+        this._handleResyncRequest(transport);
+      }
+      // All other inbound messages: silently pass through (handled by tc-93a).
+    });
+
     // Defer the snapshot by one microtask so the client's post-handshake
     // onControl handler (installed synchronously in DaemonConnection.connect()
     // after runClientHandshake resolves) is registered before the snapshot
@@ -321,6 +344,22 @@ class ControlServerImpl implements ControlServer {
   // ---------------------------------------------------------------------------
   // Internal helpers
   // ---------------------------------------------------------------------------
+
+  /**
+   * Handle a resync.request from a client.
+   *
+   * Re-sends the full snapshot at the next per-connection seq without resetting
+   * the counter.  Subsequent deltas continue from there.  Only this one client
+   * is affected; the pipeline and other clients are untouched.
+   */
+  private _handleResyncRequest(transport: Transport): void {
+    const state = this._clients.get(transport);
+    if (!state) return; // client may have been removed already (race with close)
+
+    const snapshot = projectSnapshot(this._pipeline.getModel(), { seq: state.nextSeq });
+    state.nextSeq++;
+    transport.sendControl(snapshot);
+  }
 
   private _cleanupClient(transport: Transport): void {
     const state = this._clients.get(transport);
