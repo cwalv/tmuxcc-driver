@@ -23,8 +23,7 @@
  * These are structurally different.  The adapter (mirrorToModelSource) maps:
  *   - ClientPane → PaneInfo: paneId, windowId, sessionId, cols, rows are direct;
  *     `active` is derived from mirror.getModel().focus.paneId === pane.paneId.
- *   - ClientWindow → WindowInfo: windowId, sessionId, name, active are direct;
- *     `layout` is dropped (WindowInfo has no layout field).
+ *   - ClientWindow → WindowInfo: windowId, sessionId, name, active, layout are all direct.
  *   - ClientFocus → FocusInfo: direct (same shape).
  *
  * ## ModelSource.onModelChange signature mismatch
@@ -119,7 +118,7 @@ function mirrorToModelSource(mirror: Mirror): ModelSource {
       }
 
       // Map ClientWindow → WindowInfo.
-      // WindowInfo has no layout field; drop it.
+      // WindowInfo.layout carries the full split-tree geometry from the mirror.
       const windows = new Map<WindowId, WindowInfo>();
       for (const [id, w] of m.windows) {
         windows.set(id, {
@@ -127,6 +126,7 @@ function mirrorToModelSource(mirror: Mirror): ModelSource {
           sessionId: w.sessionId,
           name: w.name,
           active: w.active,
+          layout: w.layout,
         });
       }
 

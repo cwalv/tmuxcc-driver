@@ -98,7 +98,7 @@ export interface FocusInfo {
 }
 
 /**
- * Snapshot of a window's identity at the time of an event.
+ * Snapshot of a window's identity and geometry at the time of an event.
  */
 export interface WindowInfo {
   readonly windowId: WindowId;
@@ -106,6 +106,16 @@ export interface WindowInfo {
   readonly name: string;
   /** True if this window is the active window in its session. */
   readonly active: boolean;
+  /**
+   * Current split-tree geometry for this window.
+   *
+   * Set from the mirror's ClientWindow.layout on every model update.  During
+   * initial snapshot replay the driver calls onLayoutChanged for every window
+   * whose layout root is non-trivial (i.e. not the zero-placeholder emitted by
+   * window.added deltas).  Thereafter onLayoutChanged fires on every model
+   * tick where this field differs from the previous tick.
+   */
+  readonly layout: WindowLayout;
 }
 
 // ---------------------------------------------------------------------------
@@ -536,19 +546,26 @@ export function createRenderHookDriver(
       function applyModelDiff(next: ClientModel): void {
         const prev = prevModel;
 
-        // Windows: added / removed / renamed
+        // Windows: added / removed / renamed / layout changed
         for (const [wid, win] of next.windows) {
           const prevWin = prev.windows.get(wid);
           if (prevWin === undefined) {
             hook.onWindowAdded(win);
-          } else if (prevWin.name !== win.name) {
-            hook.onWindowRenamed(wid, win.name);
+            // Fire onLayoutChanged for the initial layout of a newly-added window.
+            hook.onLayoutChanged(wid, win.layout);
+          } else {
+            if (prevWin.name !== win.name) {
+              hook.onWindowRenamed(wid, win.name);
+            }
+            // Layout: fire onLayoutChanged when the layout reference changes.
+            // WindowInfo.layout is projected from ClientWindow.layout (which is
+            // replaced atomically by the mirror on every layout.updated delta).
+            // Reference inequality is the correct and cheap change signal here
+            // because the mirror always creates a new object on update.
+            if (prevWin.layout !== win.layout) {
+              hook.onLayoutChanged(wid, win.layout);
+            }
           }
-          // Layout: compare WindowLayout from PaneInfo — if layout changed for
-          // this window, fire onLayoutChanged.  The driver does not store layout
-          // separately; tc-eots may expose it on the model.  For now the driver
-          // relies on the model including layout via the windows map.
-          // (The TL may enrich WindowInfo with layout at integration.)
         }
         for (const [wid] of prev.windows) {
           if (!next.windows.has(wid)) {
@@ -590,6 +607,9 @@ export function createRenderHookDriver(
       // Windows first (panes are children of windows).
       for (const win of initial.windows.values()) {
         hook.onWindowAdded(win);
+        // Fire onLayoutChanged for every window in the initial snapshot so
+        // renderers receive geometry before any pane events arrive.
+        hook.onLayoutChanged(win.windowId, win.layout);
       }
 
       // Panes + byte subscriptions.

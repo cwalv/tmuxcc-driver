@@ -36,15 +36,15 @@
  * onModelChange, which drives the driver's diff loop (onWindowAdded,
  * onPaneOpened, onFocusChanged). Tests assert on the combined call log.
  *
- * # Why there is no onLayoutChanged assertion
+ * # onLayoutChanged — tc-7ml.3
  *
- * The render-hook driver (createRenderHookDriver) does NOT call
- * hook.onLayoutChanged in its current implementation — neither during initial
- * snapshot replay nor during model diffs.  The driver maps windows to
- * WindowInfo (which has no layout field) and the diff loop only checks for
- * name changes.  This is a known gap documented in render-hook.ts
- * ("The TL may enrich WindowInfo with layout at integration").  The tests
- * assert the actual driver behaviour; they do NOT paper over the gap.
+ * WindowInfo now carries a `layout` field (tc-7ml.3 fix).  The render-hook
+ * driver fires onLayoutChanged:
+ *   - During initial snapshot replay: once per window after onWindowAdded.
+ *   - During model diffs: when a window's layout reference changes (i.e. after
+ *     a layout.updated delta propagates through the mirror).
+ * Scenario 6 exercises this end-to-end: snapshot with a known split layout,
+ * then a layout.updated delta; asserts onLayoutChanged fires with geometry.
  *
  * Reuses E1's round-trip harness: createInMemoryTransportPair +
  * runDaemonHandshake from @tmuxcc/daemon.
@@ -609,6 +609,91 @@ describe("e2e — scenario 5: input/resize round-trip", () => {
     assert.ok(inputMsg.seq > 0, "input seq must be positive");
     assert.ok(resizeMsg.seq > 0, "resize seq must be positive");
     assert.ok(inputMsg.seq < resizeMsg.seq, "input must be sent before resize");
+
+    client.stop();
+    daemonTransport.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scenario 6 — onLayoutChanged delivers geometry (tc-7ml.3)
+// ---------------------------------------------------------------------------
+
+describe("e2e — scenario 6: onLayoutChanged delivers split-tree geometry", () => {
+  it("snapshot with a split layout fires onLayoutChanged with non-empty geometry; layout.updated delta fires it again", async () => {
+    const { daemon: daemonTransport, client: clientTransport } =
+      createInMemoryTransportPair();
+
+    const echo = new EchoRenderHook();
+    const client = createClient(clientTransport, echo);
+
+    // Build a model with a known split layout on W0.
+    const model = buildBaseModel(); // W0 carries SAMPLE_LAYOUT (hsplit, 2 panes)
+    const snapshot: SnapshotMessage = projectSnapshot(model, { seq: 2 });
+
+    await connectAndSnapshot(daemonTransport, client, snapshot);
+
+    // ── Part 1: snapshot replay fires onLayoutChanged with the split layout ──
+    const layoutCalls = echo.calls.filter(
+      (c): c is Extract<typeof c, { type: "layoutChanged" }> => c.type === "layoutChanged",
+    );
+    assert.ok(layoutCalls.length > 0, "onLayoutChanged must fire at least once from snapshot");
+
+    // Find the call for W0.
+    const w0LayoutCall = layoutCalls.find((c) => c.windowId === W0);
+    assert.ok(w0LayoutCall !== undefined, "onLayoutChanged must fire for W0");
+
+    // Layout must carry the split geometry from SAMPLE_LAYOUT.
+    const deliveredLayout = w0LayoutCall.layout;
+    assert.equal(deliveredLayout.cols, SAMPLE_LAYOUT.cols, "layout.cols must match SAMPLE_LAYOUT");
+    assert.equal(deliveredLayout.rows, SAMPLE_LAYOUT.rows, "layout.rows must match SAMPLE_LAYOUT");
+    assert.equal(deliveredLayout.root.kind, "hsplit", "root must be hsplit (non-trivial split)");
+    if (deliveredLayout.root.kind === "hsplit") {
+      assert.equal(deliveredLayout.root.children.length, 2, "hsplit must have 2 children");
+      const left = deliveredLayout.root.children[0];
+      const right = deliveredLayout.root.children[1];
+      assert.ok(left !== undefined && left.kind === "pane", "left child is a pane");
+      assert.ok(right !== undefined && right.kind === "pane", "right child is a pane");
+      if (left.kind === "pane") assert.equal(left.paneId, P0, "left pane is P0");
+      if (right.kind === "pane") assert.equal(right.paneId, P1, "right pane is P1");
+    }
+
+    // ── Part 2: layout.updated delta fires onLayoutChanged again ────────────
+    const updatedLayout: WindowLayout = {
+      cols: 200,
+      rows: 50,
+      root: {
+        kind: "vsplit",
+        rect: { x: 0, y: 0, cols: 200, rows: 50 },
+        children: [
+          { kind: "pane", paneId: P0, rect: { x: 0, y: 0, cols: 200, rows: 25 } },
+          { kind: "pane", paneId: P1, rect: { x: 0, y: 25, cols: 200, rows: 25 } },
+        ],
+      },
+    };
+
+    const layoutUpdatedDelta: DaemonMessage = {
+      type: "layout.updated",
+      seq: 3,
+      windowId: W0,
+      sessionId: S0,
+      layout: updatedLayout,
+    };
+
+    echo.clear(); // reset — focus only on the delta-driven call
+    daemonTransport.sendControl(layoutUpdatedDelta);
+
+    const deltaLayoutCalls = echo.calls.filter(
+      (c): c is Extract<typeof c, { type: "layoutChanged" }> => c.type === "layoutChanged",
+    );
+    assert.equal(deltaLayoutCalls.length, 1, "exactly one onLayoutChanged after layout.updated");
+    const deltaCall = deltaLayoutCalls[0];
+    assert.ok(deltaCall !== undefined);
+    assert.equal(deltaCall.windowId, W0);
+    assert.equal(deltaCall.layout.root.kind, "vsplit", "updated root must be vsplit");
+    if (deltaCall.layout.root.kind === "vsplit") {
+      assert.equal(deltaCall.layout.root.children.length, 2);
+    }
 
     client.stop();
     daemonTransport.close();

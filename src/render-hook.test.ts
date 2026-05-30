@@ -67,8 +67,9 @@ function makeWindowInfo(
   sessionId: SessionId,
   name = "main",
   active = false,
+  layout?: WindowLayout,
 ): WindowInfo {
-  return { windowId, sessionId, name, active };
+  return { windowId, sessionId, name, active, layout: layout ?? makeLayout() };
 }
 
 // ---------------------------------------------------------------------------
@@ -321,13 +322,14 @@ describe("EchoRenderHook", () => {
 // ---------------------------------------------------------------------------
 
 describe("createRenderHookDriver — snapshot replay", () => {
-  it("fires onWindowAdded, onPaneOpened, onFocusChanged, onConnected in order for initial model", () => {
+  it("fires onWindowAdded, onLayoutChanged, onPaneOpened, onFocusChanged, onConnected in order for initial model", () => {
     const w0 = wid("w0");
     const p0 = pid("p0");
     const s0 = sid("s0");
 
+    const layout = makeLayout(80, 24);
     const pane = makePaneInfo(p0, w0, s0, 80, 24, true);
-    const win = makeWindowInfo(w0, s0, "main", true);
+    const win = makeWindowInfo(w0, s0, "main", true, layout);
     const focus: FocusInfo = { paneId: p0, windowId: w0, sessionId: s0 };
 
     const model: ClientModel = {
@@ -344,24 +346,30 @@ describe("createRenderHookDriver — snapshot replay", () => {
     const driver = createRenderHookDriver(echo, modelSource, byteSource, inputSink);
     const session = driver.start();
 
-    // Expected order: windowAdded, paneOpened, focusChanged, connected
-    assert.ok(echo.calls.length >= 4);
+    // Expected order: windowAdded, layoutChanged, paneOpened, focusChanged, connected
+    assert.ok(echo.calls.length >= 5);
     assert.equal(echo.calls[0]?.type, "windowAdded");
-    assert.equal(echo.calls[1]?.type, "paneOpened");
-    assert.equal(echo.calls[2]?.type, "focusChanged");
-    assert.equal(echo.calls[3]?.type, "connected");
+    assert.equal(echo.calls[1]?.type, "layoutChanged");
+    assert.equal(echo.calls[2]?.type, "paneOpened");
+    assert.equal(echo.calls[3]?.type, "focusChanged");
+    assert.equal(echo.calls[4]?.type, "connected");
 
     const wo = echo.calls[0];
     assert.ok(wo !== undefined && wo.type === "windowAdded");
     assert.equal(wo.window.windowId, w0);
 
-    const po = echo.calls[1];
+    const lc = echo.calls[1];
+    assert.ok(lc !== undefined && lc.type === "layoutChanged");
+    assert.equal(lc.windowId, w0);
+    assert.deepEqual(lc.layout, layout);
+
+    const po = echo.calls[2];
     assert.ok(po !== undefined && po.type === "paneOpened");
     assert.equal(po.pane.paneId, p0);
     assert.equal(po.pane.cols, 80);
     assert.equal(po.pane.rows, 24);
 
-    const fc = echo.calls[2];
+    const fc = echo.calls[3];
     assert.ok(fc !== undefined && fc.type === "focusChanged");
     assert.equal(fc.focus.paneId, p0);
 
