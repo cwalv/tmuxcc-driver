@@ -546,6 +546,10 @@ Client sends text or key input destined for a pane.
 
 **Note**: this is NOT tmux `send-keys` syntax. The daemon writes the bytes directly to the pane's pty. The client is responsible for encoding.
 
+**Known limitation — input-plane UTF-8 narrowing**: `InputMessage.data` is typed `string`, which means only valid UTF-8 sequences can be expressed in the contract. This creates an asymmetry with the **output plane**, where `%output` payloads are forwarded as byte-exact `Uint8Array` values (arbitrary bytes; round-trip-safe for non-UTF-8). On the input side, special keys (e.g. cursor-up as `"\x1b[A"`) are pre-encoded as escape sequences by the client, which is idiomatic for keyboard input; however, **arbitrary non-UTF-8 input bytes cannot be expressed** through this message as currently typed, even though the daemon south side ultimately calls `send-keys -H` (hex-encoded, byte-clean).
+
+This narrowing is intentional and acceptable for alpha: the primary use case is keyboard input from a VS Code terminal renderer, where all keys are naturally UTF-8-encodable escape sequences. A paste or binary-input path requiring true byte-level fidelity would need a new wire variant — e.g. a sibling `InputBytesMessage` carrying a `Uint8Array` payload — which would be a breaking schema change (new discriminant) and a protocol-version bump. This is left as a future-extension point if such a path is ever needed.
+
 #### `resize.request` — `ResizeRequestMessage`
 
 Client requests that a pane be resized (e.g. when the host viewport changes). Distinct from `resize-pane` command: this is viewport-driven (the renderer window resized), not user-initiated.
