@@ -33,7 +33,7 @@ import {
   WIRE_PROTOCOL_VERSION,
 } from "../wire/index.js";
 import type { Transport, ControlMessage, DaemonMessage, SnapshotMessage, ControlHandler, CloseHandler } from "../wire/index.js";
-import type { RuntimePipeline, ModelChangeHandler } from "./pipeline.js";
+import type { RuntimePipeline, ModelChangeHandler, NotificationHandler } from "./pipeline.js";
 import {
   emptyModel,
   paneId,
@@ -72,6 +72,10 @@ function createFakePipeline(initialModel?: SessionModel): FakePipeline {
     onModelChange(handler: ModelChangeHandler) {
       handlers.add(handler);
       return () => { handlers.delete(handler); };
+    },
+    onNotification(_handler: NotificationHandler) {
+      // FakePipeline does not emit notifications — no-op for serve.test.ts.
+      return () => {};
     },
     get buffers(): never {
       throw new Error("FakePipeline has no buffers");

@@ -55,6 +55,7 @@
 import { ControlTokenizer } from "../parser/tokenizer.js";
 import type { ControlToken } from "../parser/tokenizer.js";
 import { parseNotification } from "../parser/notifications.js";
+import type { NotificationEvent } from "../parser/notifications.js";
 import type { NotificationToken } from "../parser/tokenizer.js";
 import { CommandCorrelator } from "../parser/correlator.js";
 import { BootstrapCoordinator } from "../state/bootstrap.js";
@@ -73,6 +74,19 @@ import type { TmuxHost } from "./tmux-host.js";
  * Returning an unsubscribe function from `onModelChange` allows cleanup.
  */
 export type ModelChangeHandler = (model: SessionModel, prev: SessionModel) => void;
+
+/**
+ * Called for every notification token emitted by the pipeline, regardless of
+ * whether the notification causes a model change.  This is the seam for
+ * components (e.g. FlowController) that must act on %pause / %continue /
+ * %extended-output without going through the model.
+ *
+ * Fired synchronously, inside the same event-loop tick as the notification
+ * arrival.  Only called while the pipeline is live (after start() resolves).
+ *
+ * Returns an unsubscribe function.
+ */
+export type NotificationHandler = (event: NotificationEvent) => void;
 
 /** Options for `createRuntimePipeline`. */
 export interface RuntimePipelineOptions {
@@ -145,6 +159,19 @@ export interface RuntimePipeline {
   onModelChange(handler: ModelChangeHandler): () => void;
 
   /**
+   * Register a callback for every notification event, fired synchronously
+   * before the model-change signal (and even for no-op notifications like
+   * %pause / %continue that do not change the model).
+   *
+   * Only called while the pipeline is live (after start() resolves).
+   * Returns an unsubscribe function.
+   *
+   * Use this for components (e.g. FlowController) that need to react to
+   * %pause / %continue / %extended-output without going through the model.
+   */
+  onNotification(handler: NotificationHandler): () => void;
+
+  /**
    * The PaneBufferStore used by this pipeline for %output/%extended-output bytes.
    * tc-fbz reads from this store to frame pane byte content for the wire.
    */
@@ -162,6 +189,7 @@ class RuntimePipelineImpl implements RuntimePipeline {
   private readonly _correlator: CommandCorrelator;
   private _coordinator: BootstrapCoordinator | null = null;
   private readonly _modelChangeHandlers = new Set<ModelChangeHandler>();
+  private readonly _notificationHandlers = new Set<NotificationHandler>();
   private _unsubData: (() => void) | null = null;
   private _started = false;
   private _stopped = false;
@@ -252,6 +280,13 @@ class RuntimePipelineImpl implements RuntimePipeline {
     };
   }
 
+  onNotification(handler: NotificationHandler): () => void {
+    this._notificationHandlers.add(handler);
+    return () => {
+      this._notificationHandlers.delete(handler);
+    };
+  }
+
   // -------------------------------------------------------------------------
   // Internal: notification routing
   // -------------------------------------------------------------------------
@@ -277,7 +312,20 @@ class RuntimePipelineImpl implements RuntimePipeline {
     coordinator.onNotification(event);
     const next = coordinator.getModel();
 
-    // Only emit if something changed and we're in live mode.
+    // Fire notification subscribers while live — even for no-op notifications
+    // like %pause / %continue that don't change the model.  Subscribers such as
+    // FlowController need to react to these without going through the model.
+    if (coordinator.isLive() && this._notificationHandlers.size > 0) {
+      for (const handler of this._notificationHandlers) {
+        try {
+          handler(event);
+        } catch (e) {
+          console.warn("[pipeline] notification handler threw:", e);
+        }
+      }
+    }
+
+    // Only emit model-change if something changed and we're in live mode.
     // During bootstrap the coordinator buffers events without updating the
     // model, so prev === next (both are emptyModel()) — no signal needed.
     // After bootstrap transitions to live (replays buffer), the first real

@@ -51,6 +51,7 @@ import type { InputPath, InputPathOptions } from "./input-path.js";
 import { createFlowController } from "./flow-control.js";
 import type { FlowController, FlowControllerOptions } from "./flow-control.js";
 import type { Transport } from "../wire/transport.js";
+import { paneId as mintPaneId } from "../wire/ids.js";
 import type { PaneId } from "../wire/ids.js";
 import type { PaneBufferStore } from "../state/reducer.js";
 
@@ -179,6 +180,23 @@ export function createDaemon(opts: DaemonOptions = {}): Daemon {
   // 7. Input path.
   const inputPath = createInputPath(host, opts.input);
 
+  // 8. Route %pause / %continue notifications from the pipeline to the
+  //    FlowController.  These are no-ops at the model level (reducer returns
+  //    the same model reference), so they don't appear in onModelChange.
+  //    We subscribe via pipeline.onNotification which fires for every event
+  //    regardless of model changes.
+  //
+  //    %extended-output byte accounting is already handled by accountingStore
+  //    (which calls fc.onPaneBytes on every append).  fc.onExtendedOutput
+  //    simply delegates to onPaneBytes, so we don't double-count here.
+  pipeline.onNotification((event) => {
+    if (event.kind === "pause") {
+      fc.onPauseNotification(mintPaneId("p" + event.paneId));
+    } else if (event.kind === "continue") {
+      fc.onContinueNotification(mintPaneId("p" + event.paneId));
+    }
+  });
+
   // ---------------------------------------------------------------------------
   // Daemon handle
   // ---------------------------------------------------------------------------
@@ -200,8 +218,28 @@ export function createDaemon(opts: DaemonOptions = {}): Daemon {
       // 1. Run control-plane handshake + send snapshot + subscribe deltas.
       const session = await server.addClient(transport);
 
-      // 2. Wire data plane: attach demux fan-out to this transport.
-      const detach = demux.attachTransport(transport);
+      // 2. Wire data plane: attach a wrapped transport to the demux so that
+      //    each sendData call also notifies the flow controller that bytes have
+      //    been drained from the backpressure counter for that pane.
+      //
+      //    Without this call fc.bufferedBytes grows monotonically and a pane
+      //    that crosses the high-water mark is paused and NEVER resumed — the
+      //    resume path (fc.noteDrained → below low-water → _resume) never fires
+      //    because nothing decrements the counter.
+      //
+      //    We wrap only sendData; all other Transport methods are forwarded
+      //    unchanged so the demux sees a fully-conforming Transport.
+      const drainingTransport: Transport = {
+        ...transport,
+        sendData(pid: PaneId, bytes: Uint8Array): void | Promise<void> {
+          const result = transport.sendData(pid, bytes);
+          if (bytes.length > 0) {
+            fc.noteDrained(pid, bytes.length);
+          }
+          return result;
+        },
+      };
+      const detach = demux.attachTransport(drainingTransport);
 
       // 3. Wire input path: forward client control messages to tmux.
       transport.onControl((msg) => {
