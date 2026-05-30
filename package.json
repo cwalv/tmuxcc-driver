@@ -16,6 +16,9 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test \"src/**/*.test.ts\"",
+    "lint:boundaries": "depcruise src/ --config .dependency-cruiser.cjs --output-type err",
+    "lint:boundaries:verify": "bash scripts/verify-boundary-lint.sh",
+    "ci": "npm run build && npm run typecheck && npm run test && npm run lint:boundaries",
     "format": "prettier --write src"
   },
   "dependencies": {
@@ -23,6 +26,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.19.19",
+    "dependency-cruiser": "^17.4.3",
     "tsx": "^4.19.2",
     "typescript": "^5.8.3"
   }
