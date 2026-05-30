@@ -23,7 +23,7 @@ import type {
   ClientCapabilitiesMessage,
   CommandRequestMessage,
 } from "../wire/index.js";
-import { paneId, windowId, sessionId } from "../wire/index.js";
+import { paneId, windowId, sessionId, WIRE_PROTOCOL_VERSION } from "../wire/index.js";
 
 // ---------------------------------------------------------------------------
 // FakeHost — captures write() calls for assertion
@@ -479,7 +479,7 @@ describe("createInputPath — client.capabilities", () => {
       type: "client.capabilities",
       seq: nextSeq(),
       capabilities: {
-        protocolVersion: 1,
+        protocolVersion: WIRE_PROTOCOL_VERSION,
         features: ["input-forwarding"],
       },
     };

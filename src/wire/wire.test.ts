@@ -211,7 +211,7 @@ describe("DaemonCapabilitiesMessage", () => {
         features: ["pane-lifecycle", "layout-updates", "focus-events", "input-forwarding"],
       },
     };
-    assert.strictEqual(msg.capabilities.protocolVersion, 1);
+    assert.strictEqual(msg.capabilities.protocolVersion, WIRE_PROTOCOL_VERSION);
     assert.ok(msg.capabilities.features.includes("pane-lifecycle"));
   });
 });
@@ -326,7 +326,7 @@ describe("isDaemonMessage / isClientMessage", () => {
   });
 
   it("identifies client→daemon messages", () => {
-    const clientTypes = ["input", "resize.request", "client.capabilities"] as const;
+    const clientTypes = ["input", "resize.request", "client.capabilities", "resync.request"] as const;
 
     for (const t of clientTypes) {
       const msg = { type: t, seq: 1 } as ControlMessage;

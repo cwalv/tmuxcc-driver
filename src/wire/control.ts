@@ -32,7 +32,7 @@
  * ---------------------------------------------------------------------------
  *
  * The protocol version is a single monotonically-increasing integer:
- *   WIRE_PROTOCOL_VERSION = 1
+ *   WIRE_PROTOCOL_VERSION = 2
  *
  * It appears in the handshake-adjacent CapabilitiesMessage (both sides
  * advertise their supported version). Increment this constant for any
@@ -41,6 +41,11 @@
  *
  * The version is NOT repeated in every message envelope to keep messages
  * compact. Version negotiation happens once at handshake time (tc-auj).
+ *
+ * v1 → v2 (tc-7ml.4): Added ResyncRequestMessage (type: "resync.request")
+ * to ClientMessage. The new variant is a breaking change because a v1 daemon
+ * would receive an unknown message type; both sides must be updated in lockstep
+ * per the exact-version-match policy.
  */
 
 import type { PaneId, WindowId, SessionId } from "./ids.js";
@@ -55,7 +60,7 @@ import type { WindowLayout } from "./layout.js";
  * Increment on any breaking schema change. Non-breaking additions do not
  * require a bump. Version negotiation flow is defined by bead tc-auj.
  */
-export const WIRE_PROTOCOL_VERSION = 1 as const;
+export const WIRE_PROTOCOL_VERSION = 2 as const;
 
 // ---------------------------------------------------------------------------
 // Capabilities (data shape only — handshake flow is tc-auj's job)
@@ -638,6 +643,34 @@ export interface ClientCapabilitiesMessage extends MessageBase {
   readonly capabilities: Capabilities;
 }
 
+/**
+ * Client requests that the daemon re-send a full snapshot for this connection.
+ * direction: client→daemon
+ *
+ * Sent when the mirror detects a seq gap (a delta was dropped in transit) and
+ * needs to re-establish a consistent baseline. No payload is required — the
+ * connection identity is implicit in the transport.
+ *
+ * Daemon response: re-sends a SnapshotMessage at the next per-connection seq.
+ * The daemon does NOT reset its seq counter; subsequent deltas continue from
+ * the seq that follows the re-sent snapshot.
+ *
+ * Client policy (tc-7ml.4):
+ *   1. On gap detect: set an in-flight `resyncRequested` flag; send this
+ *      message once.
+ *   2. On snapshot arrival: clear the flag (resync complete).
+ *   3. While the flag is set: ignore further gap signals (dedup).
+ *   4. If a gap is still present AFTER the snapshot delivers (persistent gap):
+ *      escalate to `transport.close()` — the reconnect path handles the rest.
+ *
+ * Added in protocol v2 (tc-7ml.4). A v1 daemon receiving this message will
+ * treat it as an unknown type; both sides must be v2 for resync to work.
+ * The exact-version handshake enforces this.
+ */
+export interface ResyncRequestMessage extends MessageBase {
+  readonly type: "resync.request";
+}
+
 // ---------------------------------------------------------------------------
 // Union types — the top-level discriminated unions
 // ---------------------------------------------------------------------------
@@ -693,7 +726,8 @@ export type ClientMessage =
   | InputMessage
   | ResizeRequestMessage
   | ClientCapabilitiesMessage
-  | CommandRequestMessage;
+  | CommandRequestMessage
+  | ResyncRequestMessage;
 
 /**
  * Any control-plane message (either direction).
@@ -761,6 +795,7 @@ export function isClientMessage(msg: ControlMessage): msg is ClientMessage {
     t === "input" ||
     t === "resize.request" ||
     t === "client.capabilities" ||
-    t === "command.request"
+    t === "command.request" ||
+    t === "resync.request"
   );
 }

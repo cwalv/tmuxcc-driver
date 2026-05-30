@@ -80,6 +80,8 @@ export type {
   SelectPaneCommand,
   ResizePaneCommand,
   CommandRequestMessage,
+  // Client → Daemon (resync)
+  ResyncRequestMessage,
   // Client union
   ClientMessage,
   // Either direction

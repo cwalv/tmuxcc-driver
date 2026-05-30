@@ -41,12 +41,19 @@ Handshake flow (capability negotiation sequence) is defined by bead **tc-666** (
 
 ## Versioning
 
-**`WIRE_PROTOCOL_VERSION = 1`** (monotonically-increasing integer)
+**`WIRE_PROTOCOL_VERSION = 2`** (monotonically-increasing integer)
 
 - The version is exchanged once at connection time via the capabilities handshake (see `DaemonCapabilitiesMessage` / `ClientCapabilitiesMessage`).
 - It is NOT repeated in every message envelope — version negotiation happens once.
 - **Increment rule**: bump only for breaking schema changes (field removal, type change, discriminant rename). Additive changes (new optional fields, new message `type` values) are non-breaking and do not require a bump.
-- **Negotiation**: if daemon and client advertise different versions, the handshake flow (tc-666) determines fallback or rejection. The data shapes here are version-1 only.
+- **Negotiation**: if daemon and client advertise different versions, the handshake flow (tc-666) determines fallback or rejection. The data shapes here are version-2 only.
+
+### Version history
+
+| Version | Change |
+|---------|--------|
+| `1`     | Initial wire schema: control plane (snapshot, deltas, commands, errors, input, resize.request). |
+| `2`     | Added `resync.request` (client→daemon) — see below. Bumped because a v1 daemon would receive an unknown message type; the exact-version handshake enforces lockstep upgrades (tc-7ml.4). |
 
 ---
 
@@ -509,7 +516,7 @@ After `"protocol.version-mismatch"` or `"session.unavailable"`, the client shoul
 | Type            | Members                                                                                                    |
 |-----------------|------------------------------------------------------------------------------------------------------------|
 | `DaemonMessage` | `DaemonCapabilitiesMessage \| SnapshotMessage \| PaneOpenedMessage \| PaneClosedMessage \| PaneResizedMessage \| PaneModeChangedMessage \| WindowAddedMessage \| WindowClosedMessage \| WindowRenamedMessage \| LayoutUpdatedMessage \| FocusChangedMessage \| SessionAddedMessage \| SessionClosedMessage \| SessionChangedMessage \| SessionRenamedMessage \| CommandResponseMessage \| ErrorMessage` |
-| `ClientMessage` | `InputMessage \| ResizeRequestMessage \| ClientCapabilitiesMessage \| CommandRequestMessage`              |
+| `ClientMessage` | `InputMessage \| ResizeRequestMessage \| ClientCapabilitiesMessage \| CommandRequestMessage \| ResyncRequestMessage` |
 | `ControlMessage`| `DaemonMessage \| ClientMessage`                                                                           |
 
 ---
@@ -550,6 +557,24 @@ Client requests that a pane be resized (e.g. when the host viewport changes). Di
 | `rows`   | `number` | Requested height.       |
 
 The daemon applies the resize to tmux and responds with a `pane.resized` delta.
+
+#### `resync.request` — `ResyncRequestMessage` *(v2+)*
+
+Client requests that the daemon re-send a full snapshot for this connection.
+
+No payload fields beyond the standard `type` and `seq`.
+
+**When sent:** the client mirror detects a seq gap (a delta was dropped in transit). The client cannot safely continue applying deltas against a model that may be missing updates.
+
+**Daemon response:** re-sends a `SnapshotMessage` at the **next per-connection seq** (no seq reset). Subsequent deltas continue from the seq that follows the re-sent snapshot. Only this connection is affected; other connected clients are unaffected.
+
+**Client send/retry/dedup policy:**
+1. On seq gap detect: set an in-flight `resyncRequested` flag; send `resync.request` exactly once.
+2. On snapshot arrival: clear the flag (resync complete; subsequent deltas apply normally).
+3. While the flag is set: ignore further gap signals (dedup — only one resync in flight at a time).
+4. If a gap is still detected **after** the snapshot delivers (persistent gap — the resync itself failed or was lost): escalate to `transport.close()`. The reconnect path will re-handshake and receive a fresh snapshot.
+
+**Protocol note:** `resync.request` was added in **protocol v2**. A v1 daemon will not understand this message. The exact-version handshake (`WIRE_PROTOCOL_VERSION` must match on both sides) prevents a v2 client from connecting to a v1 daemon, so mismatched resync handling cannot silently occur.
 
 ---
 
