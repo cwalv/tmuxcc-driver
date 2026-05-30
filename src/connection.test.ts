@@ -478,24 +478,18 @@ describe("DaemonConnection — message buffering", () => {
     };
     daemonTransport.sendControl(msg);
 
-    // Now install the handler — the message should already be buffered.
+    // Now install the handler — the buffered message is drained immediately on
+    // handler install (tc-7ml.4: drain-on-register so Mirror.connectTo() after
+    // await connect() receives buffered snapshots reliably).
     const received: DaemonMessage[] = [];
     conn.onControl((m) => received.push(m));
 
-    // The buffer is drained when connect() resolves; messages that arrived
-    // after connect() but before the handler was installed are in the buffer.
-    // However, with the in-memory transport, messages are delivered synchronously
-    // during sendControl, so the pending buffer holds them.
-    // We need to trigger a drain — registering the handler doesn't auto-drain.
-    // This is expected: callers should install handlers before connect() or
-    // call connect() and immediately install handlers to catch all messages.
-    // The current implementation drains at connect()-time, so only messages
-    // that arrived during the handshake settlement microtask are buffered.
-    // Messages sent AFTER connect() resolves go to the handler directly if it
-    // is registered, or to the buffer if not.
-    // At this point the buffer holds msg — we confirm it's accessible once
-    // the handler is registered by sending one more message.
+    // msg was buffered while no handler was registered; it is delivered
+    // synchronously when the handler is installed via onControl().
+    assert.equal(received.length, 1);
+    assert.deepEqual(received[0], msg);
 
+    // Messages sent AFTER the handler is registered arrive directly.
     const msg2: DaemonMessage = {
       type: "pane.opened",
       seq: 3,
@@ -508,14 +502,8 @@ describe("DaemonConnection — message buffering", () => {
     };
     daemonTransport.sendControl(msg2);
 
-    // msg2 goes directly to the handler since it's now installed.
-    assert.equal(received.length, 1);
-    assert.deepEqual(received[0], msg2);
-
-    // To receive msg (which is in the pending buffer), install handler before
-    // sending — this test confirms the direct-delivery path.
-    // The buffer drain on connect() would have delivered msg if handler was
-    // registered at connect() time.
+    assert.equal(received.length, 2);
+    assert.deepEqual(received[1], msg2);
   });
 
   it("handler registered BEFORE connect() receives all messages without buffering", async () => {

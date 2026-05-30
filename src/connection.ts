@@ -310,7 +310,12 @@ export class DaemonConnection {
    *
    * Replaces any previously registered handler (mirrors transport.onControl
    * convention).  Messages buffered before this handler is installed are
-   * delivered when connect() resolves (drained synchronously).
+   * delivered synchronously (drained immediately on handler install).
+   *
+   * NOTE: buffered messages are drained both in connect() (if a handler is
+   * already registered) AND here (if the handler is installed after connect()
+   * returns).  Calling connectTo() after await connect() is safe — buffered
+   * snapshots will be delivered on the connectTo() call.
    *
    * Receives: snapshot, pane/window/session/layout deltas, command responses,
    * unsolicited errors.  Does NOT receive the handshake capabilities messages.
@@ -319,6 +324,11 @@ export class DaemonConnection {
    */
   onControl(handler: DaemonMessageHandler): void {
     this.#controlHandler = handler;
+    // Drain any messages buffered while no handler was registered.  This
+    // covers the common pattern of calling mirror.connectTo(conn) after
+    // await conn.connect() — the snapshot may have arrived during the
+    // microtask yield in addClient() and been buffered.
+    this.#drainBuffers();
   }
 
   /**

@@ -56,6 +56,8 @@
 import type {
   SnapshotMessage,
   DaemonMessage,
+  ClientMessage,
+  ResyncRequestMessage,
   PaneId,
   WindowId,
   SessionId,
@@ -488,6 +490,31 @@ export class Mirror {
   #lastSeq: number | null = null; // null = no snapshot received yet
   #initialized = false;
 
+  // ── Resync-request state (tc-7ml.4) ───────────────────────────────────────
+  //
+  // When a seq gap is detected the mirror sends `resync.request` to the daemon
+  // and sets #resyncRequested = true.  On snapshot arrival the flag is cleared.
+  //
+  // While the flag is set, further gap signals are suppressed (dedup: only one
+  // resync in flight at a time).
+  //
+  // After the snapshot clears the flag, #resyncDelivered is set to true.  If
+  // ANOTHER gap is then detected (persistent gap — the resync did not help),
+  // the mirror escalates by calling transport.close() via #closeFn.
+  //
+  // #clientSeq is the outbound sequence counter for resync.request messages
+  // (and any other client→daemon messages the mirror may send in the future).
+  // It is independent of the inbound #lastSeq counter.
+  #resyncRequested = false;
+  #resyncDelivered = false; // true after the first resync snapshot was received
+  #clientSeq = 0;           // incremented before each send
+
+  // Send function and close function — injected by connectTo().
+  // The send function accepts a ResyncRequestMessage specifically; the type
+  // is narrowed to make the intent clear (the mirror only sends one message type).
+  #sendFn: ((msg: ResyncRequestMessage) => void) | null = null;
+  #closeFn: (() => void) | null = null;
+
   // ── Handlers ──────────────────────────────────────────────────────────────
 
   readonly #changeHandlers: ModelChangeHandler[] = [];
@@ -561,12 +588,23 @@ export class Mirror {
    *
    * Resets all state including the seq counter. Safe to call multiple times
    * (e.g. after a resync). Fires `onModelChange` handlers.
+   *
+   * If a `resync.request` was in flight when this snapshot arrives, the
+   * in-flight flag is cleared (resync succeeded). A subsequent persistent gap
+   * will escalate to transport close.
    */
   receiveSnapshot(snapshot: SnapshotMessage): void {
     const { model, seq } = applySnapshot(snapshot);
     this.#model = model;
     this.#lastSeq = seq;
     this.#initialized = true;
+
+    // If we had an in-flight resync request, mark it as delivered.
+    if (this.#resyncRequested) {
+      this.#resyncRequested = false;
+      this.#resyncDelivered = true;
+    }
+
     this.#emitChange(model);
   }
 
@@ -605,7 +643,30 @@ export class Mirror {
     // Seq-gap detection.
     const expected = this.#lastSeq + 1;
     if (msg.seq !== expected) {
+      // Always fire the legacy onResyncNeeded handlers (backward-compat).
       this.#emitResync({ expected, received: msg.seq });
+
+      if (this.#resyncRequested) {
+        // A resync.request is already in flight — deduplicate; ignore this gap.
+        return;
+      }
+
+      if (this.#resyncDelivered) {
+        // We already received a resync snapshot but STILL get a gap — persistent
+        // gap.  Escalate: close the transport so the reconnect path takes over.
+        this.#closeFn?.();
+        return;
+      }
+
+      // First gap: send resync.request and set the in-flight flag.
+      this.#resyncRequested = true;
+      if (this.#sendFn !== null) {
+        const msg: ResyncRequestMessage = {
+          type: "resync.request",
+          seq: ++this.#clientSeq,
+        };
+        this.#sendFn(msg);
+      }
       return;
     }
 
@@ -624,6 +685,9 @@ export class Mirror {
    *   - `snapshot` messages → `receiveSnapshot()`
    *   - all other messages → `receiveDelta()`
    *
+   * Also injects the connection's `send` and `close` functions so that the
+   * mirror can autonomously send `resync.request` on gap detect (tc-7ml.4).
+   *
    * Returns an unsubscribe function that deregisters the handler (setting
    * the connection's control handler to null is not possible with the current
    * DaemonConnection API, so the unsubscribe replaces it with a no-op).
@@ -636,6 +700,16 @@ export class Mirror {
    * Call AFTER `await connection.connect()` so buffered messages are delivered.
    */
   connectTo(connection: DaemonConnection): () => void {
+    // Inject the send/close capabilities for autonomous resync-request (tc-7ml.4).
+    this.#sendFn = (msg: ResyncRequestMessage) => {
+      // DaemonConnection.send() accepts ClientMessage; ResyncRequestMessage
+      // is a member of ClientMessage, so this cast is safe.
+      connection.send(msg as ClientMessage);
+    };
+    this.#closeFn = () => {
+      connection.close();
+    };
+
     const handler = (msg: DaemonMessage): void => {
       if (msg.type === "snapshot") {
         this.receiveSnapshot(msg);
@@ -651,6 +725,10 @@ export class Mirror {
       connection.onControl(() => {
         /* no-op */
       });
+      // Clear the injected send/close so the mirror doesn't call into a
+      // disconnected connection after unsubscribe.
+      this.#sendFn = null;
+      this.#closeFn = null;
     };
   }
 
