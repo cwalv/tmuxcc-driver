@@ -212,6 +212,22 @@ export function createDaemon(opts: DaemonOptions = {}): Daemon {
     async start(): Promise<void> {
       await host.start();
       await pipeline.start();
+
+      // Subscribe to host.onExit so that when tmux dies unexpectedly the
+      // daemon tears down its pipeline and notifies all connected clients.
+      host.onExit(() => {
+        // Stop the pipeline (mirrors stop() but without waiting for host exit
+        // since we're already in the exit handler).
+        pipeline.stop();
+
+        // Push session.unavailable to every connected client so they know the
+        // session is gone and should treat the connection as dead.
+        server.broadcastError({
+          type: "error",
+          code: "session.unavailable",
+          message: "The tmux session has exited unexpectedly.",
+        });
+      });
     },
 
     async addClient(transport: Transport) {

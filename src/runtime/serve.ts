@@ -72,6 +72,7 @@ import {
   WIRE_PROTOCOL_VERSION,
   type Capabilities,
   type DaemonMessage,
+  type ErrorMessage,
 } from "../wire/control.js";
 import { projectSnapshot } from "../state/projection.js";
 import { diffModel } from "../state/projection.js";
@@ -160,6 +161,17 @@ export interface ControlServer {
    * Useful for monitoring and tests.
    */
   clientCount(): number;
+
+  /**
+   * Push an unsolicited `ErrorMessage` to ALL currently connected clients.
+   *
+   * Used by the daemon to notify clients of unrecoverable conditions such as
+   * `session.unavailable` (tmux process exited unexpectedly).  Each copy
+   * stamped with the correct per-connection `seq` before delivery.
+   *
+   * Clients that are removed concurrently are silently skipped.
+   */
+  broadcastError(error: Omit<ErrorMessage, "seq">): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -291,6 +303,19 @@ class ControlServerImpl implements ControlServer {
 
   clientCount(): number {
     return this._clients.size;
+  }
+
+  broadcastError(error: Omit<ErrorMessage, "seq">): void {
+    for (const [transport, state] of this._clients) {
+      const stamped: DaemonMessage = { ...error, seq: state.nextSeq } as DaemonMessage;
+      state.nextSeq++;
+      try {
+        transport.sendControl(stamped);
+      } catch {
+        // Transport may already be closed — clean it up and continue.
+        this._cleanupClient(transport);
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------

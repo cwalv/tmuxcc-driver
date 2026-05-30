@@ -572,5 +572,83 @@ describe(
         }
       },
     );
+
+    // -----------------------------------------------------------------------
+    // R5. kill-server → connected clients receive session.unavailable
+    //
+    // This is the daemon-level RESPONSE test (tc-7ml.2):
+    //   1. Start daemon + first client via setupE2E.
+    //   2. Connect a second client via daemon.addClient (full onClose wiring).
+    //   3. Wire the second client's onControl to capture messages.
+    //   4. Kill the tmux server.
+    //   5. Assert the second client receives an error with code "session.unavailable".
+    //
+    // Uses daemon.addClient so the data-plane detach + server.removeClient path
+    // is fully wired (same as production code).  The second client's transport
+    // is kept alive so that the broadcastError delivery is observable.
+    // -----------------------------------------------------------------------
+
+    it(
+      "R5: kill-server → connected client receives session.unavailable error",
+      { timeout: 30_000 },
+      async () => {
+        const sock = sockName("unavail");
+        after(() => killServer(sock));
+
+        const session = await setupE2E("unavail");
+
+        try {
+          const { daemon } = session;
+
+          // Connect a second client so we have an independent transport to observe.
+          // Use daemon.addClient for the full production wiring.
+          const { daemon: dt2, client: ct2 } = createInMemoryTransportPair();
+          const addP = daemon.addClient(dt2);
+          await runClientHandshake(ct2, CLIENT_CAPS);
+          await addP;
+
+          // Capture control messages arriving on the second client AFTER the
+          // handshake.  Install the handler AFTER runClientHandshake so we don't
+          // clobber the handler that runClientHandshake's settle() installs.
+          const received: Array<{ type: string; code?: string }> = [];
+          ct2.onControl((msg) => {
+            const m = msg as { type: string; code?: string };
+            received.push({ type: m.type, code: m.code });
+          });
+
+          // Kill the tmux server — triggers host.onExit inside the daemon.
+          try {
+            execFileSync("tmux", ["-L", session.socketName, "kill-server"], { timeout: 5000 });
+          } catch { /* already gone */ }
+
+          // Wait for the daemon host to detect the exit.
+          await waitFor(
+            () => daemon.host.exited ? true : undefined,
+            15_000,
+            "daemon host must detect tmux exit within 15 s",
+          );
+
+          // Give the event loop a few ticks to deliver the broadcastError to ct2.
+          await waitFor(
+            () => received.some((m) => m.type === "error" && m.code === "session.unavailable") ? true : undefined,
+            5_000,
+            "client must receive session.unavailable error after kill-server",
+          );
+
+          const errMsg = received.find((m) => m.type === "error" && m.code === "session.unavailable");
+          assert.ok(
+            errMsg !== undefined,
+            `client must receive a session.unavailable error; got: ${JSON.stringify(received)}`,
+          );
+          assert.equal(
+            errMsg.code,
+            "session.unavailable",
+            `error code must be "session.unavailable"; got "${errMsg.code}"`,
+          );
+        } finally {
+          await session.teardown();
+        }
+      },
+    );
   },
 );
