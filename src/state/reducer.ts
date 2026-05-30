@@ -50,6 +50,14 @@
  * then calls `parseLayout(layoutString)` → `parsedLayoutToWindowLayout(...)` to
  * produce a `WindowLayout`, and sets it on the window via `updateWindow`.
  *
+ * Early-layout race (skip-and-wait policy):
+ *   If the window named by `%layout-change` is not yet in the model, the
+ *   notification is DROPPED (model returned unchanged). The %window-add event
+ *   carries authoritative session identity, cols, rows, and active-pane info;
+ *   synthesizing a session id ("s0") to park the window would corrupt the model
+ *   until a later session event corrects it. The layout will be applied correctly
+ *   by a subsequent %layout-change (or E4 bootstrap reconciliation).
+ *
  * Pane reconciliation on layout-change (policy):
  *   CONSERVATIVE ADD: any pane leaf in the new layout that is not already in the
  *   model is added to the window (cols/rows from the layout cell, mode "normal",
@@ -286,53 +294,6 @@ function ensureSession(
     activeWindowId: null,
   };
   return addSession(model, session);
-}
-
-// ---------------------------------------------------------------------------
-// Ensure-window helper
-//
-// window-add events may arrive before a session-changed for that session.
-// Creates a minimal Window if needed, first ensuring the session exists.
-// ---------------------------------------------------------------------------
-
-function ensureWindow(
-  model: SessionModel,
-  tmuxWindowId: number,
-  tmuxSessionId: number | null,
-  name: string,
-): SessionModel {
-  const wid = mintWindowId(tmuxWindowId);
-  if (model.windows.has(wid)) return model;
-
-  // Determine which session to attach to: use provided tmuxSessionId if given,
-  // otherwise find the first existing session, or create a synthetic one.
-  let sid: SessionId;
-  if (tmuxSessionId !== null) {
-    sid = mintSessionId(tmuxSessionId);
-    if (!model.sessions.has(sid)) {
-      model = ensureSession(model, tmuxSessionId, "");
-    }
-  } else {
-    const firstSession = model.sessions.keys().next().value as SessionId | undefined;
-    if (firstSession === undefined) {
-      // No sessions at all — create a synthetic one (will be named by a later event)
-      const syntheticSessId = 0;
-      sid = mintSessionId(syntheticSessId);
-      model = ensureSession(model, syntheticSessId, "");
-    } else {
-      sid = firstSession;
-    }
-  }
-
-  const win: Window = {
-    windowId: wid,
-    sessionId: sid,
-    name,
-    paneIds: [],
-    activePaneId: null,
-    layout: null,
-  };
-  return addWindow(model, win);
 }
 
 // ---------------------------------------------------------------------------
@@ -710,9 +671,10 @@ export function reduce(
  *      not yet in the model (conservative add policy).
  *   5. Set the window's layout to the new `WindowLayout`.
  *
- * Returns the input model unchanged if the line is malformed or the window
- * does not exist (the caller may not have seen window-add yet; the layout will
- * arrive again after bootstrap reconciliation).
+ * Returns the input model unchanged if the line is malformed, if the window
+ * is not yet in the model (skip-and-wait: a %layout-change before %window-add
+ * must not synthesize a session id — the layout will be applied once the window
+ * is properly registered), or if the layout string cannot be parsed.
  */
 function handleLayoutChange(model: SessionModel, rawLine: Uint8Array): SessionModel {
   const fields = parseLayoutChangeLine(rawLine);
@@ -721,10 +683,20 @@ function handleLayoutChange(model: SessionModel, rawLine: Uint8Array): SessionMo
   const { windowId: tmuxWinId, layoutString } = fields;
   const wid = mintWindowId(tmuxWinId);
 
-  // If the window is not in the model yet, create it under a synthetic session.
-  // This handles the race where layout-change arrives before window-add.
+  // If the window is not in the model yet, skip-and-wait.
+  //
+  // A %layout-change that names a window the model has not seen yet is an
+  // early-layout race: the %window-add (which carries authoritative session
+  // identity, cols, rows, and active-pane info) has not arrived yet. Creating
+  // a synthetic session here ("s0") would mis-parent the window and corrupt
+  // the model until a later session event corrects it.
+  //
+  // The correct response is to drop this layout notification. The layout will
+  // be re-applied correctly once %window-add registers the window under its
+  // real session, and any subsequent %layout-change (or the bootstrap
+  // reconciliation in E4) will carry the authoritative geometry.
   if (!model.windows.has(wid)) {
-    model = ensureWindow(model, tmuxWinId, null, "");
+    return model;
   }
 
   // Parse the layout string.

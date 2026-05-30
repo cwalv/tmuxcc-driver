@@ -678,6 +678,79 @@ describe("reducer: layout-change (via unknown keyword)", () => {
     assert.deepEqual(checkInvariants(after, { checkLayoutConsistency: true }), []);
   });
 
+  it("%layout-change before %window-add: skip-and-wait — no synthetic s0 created", () => {
+    // Regression test for the early-layout race (tc-7qz.3):
+    // A %layout-change that names a window not yet in the model must NOT mint a
+    // synthetic session ("s0"). The model must remain empty. Once %window-add
+    // arrives for the real session, the final state must be correct with no s0.
+
+    const { ctx } = makeCtx();
+
+    // Step 1: apply %layout-change on an empty model (no sessions, no windows).
+    // Before the fix this would synthesize session "s0" and mis-parent the window.
+    let model = emptyModel();
+    const layoutStr = "0000,80x24,0,0,1";
+    const earlyLayout: NotificationEvent = {
+      kind: "unknown",
+      keyword: "layout-change",
+      rawLine: asBytes(`%layout-change @1 ${layoutStr}\n`),
+    };
+    model = reduce(model, earlyLayout, ctx);
+
+    // The model must remain empty — no synthetic sessions, windows, or panes.
+    assert.equal(model.sessions.size, 0, "no synthetic session minted by early layout-change");
+    assert.equal(model.windows.size, 0, "no synthetic window minted by early layout-change");
+    assert.equal(model.panes.size, 0, "no panes minted by early layout-change");
+    // Specifically, "s0" must NOT exist.
+    assert.ok(!model.sessions.has(sessionId("s0")), 'synthetic session "s0" must not exist');
+
+    assert.deepEqual(checkInvariants(model), [], "invariants hold after early layout-change no-op");
+
+    // Step 2: %session-changed arrives — creates the real session s3.
+    model = reduce(model, {
+      kind: "session-changed",
+      sessionId: 3,
+      name: "main",
+    }, ctx);
+    assert.ok(model.sessions.has(sessionId("s3")), "real session s3 exists");
+
+    // Step 3: %window-add for window 1 arrives — window is parented to real session s3.
+    model = reduce(model, {
+      kind: "window-add",
+      windowId: 1,
+      unlinked: false,
+    }, ctx);
+    assert.ok(model.windows.has(windowId("w1")), "window w1 registered");
+    assert.equal(
+      model.windows.get(windowId("w1"))!.sessionId,
+      sessionId("s3"),
+      "window w1 is parented to real session s3, not synthetic s0",
+    );
+
+    // Step 4: %layout-change arrives again (now the window exists).
+    model = reduce(model, earlyLayout, ctx);
+    assert.ok(model.windows.get(windowId("w1"))!.layout !== null, "layout applied after window-add");
+    assert.ok(model.panes.has(paneId("p1")), "pane p1 added from post-add layout-change");
+
+    // Confirm s0 never appeared anywhere across the whole sequence.
+    assert.ok(!model.sessions.has(sessionId("s0")), 'synthetic "s0" never created throughout sequence');
+
+    assert.deepEqual(checkInvariants(model, { checkLayoutConsistency: true }), [], "final invariants hold");
+  });
+
+  it("%layout-change before %window-add: model object identity preserved (strict no-op)", () => {
+    // Verify that the early-layout no-op returns exactly the same model reference.
+    const model = emptyModel();
+    const { ctx } = makeCtx();
+    const event: NotificationEvent = {
+      kind: "unknown",
+      keyword: "layout-change",
+      rawLine: asBytes("%layout-change @42 0000,80x24,0,0,5\n"),
+    };
+    const after = reduce(model, event, ctx);
+    assert.strictEqual(after, model, "early layout-change on empty model returns same object (no allocation)");
+  });
+
   it("%layout-change: malformed raw line → no-op", () => {
     const model = baseModel();
     const { ctx } = makeCtx();
