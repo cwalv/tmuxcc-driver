@@ -158,6 +158,18 @@ export interface ClientModel {
    * notification (%window-close) does not carry one. See PaneClosedMessage.
    */
   readonly exitCodes: ReadonlyMap<PaneId, number>;
+  /**
+   * Number of daemon-protocol clients connected at the time the most recent
+   * snapshot was received.
+   *
+   * tc-1elae (Phase 2 — §11.4): populated from `SnapshotMessage.attachedClientCount`.
+   * Absent (undefined) when the snapshot did not carry this field (older daemon
+   * or pre-connection state). The status bar falls back to 1 when absent.
+   *
+   * This is a STATIC value captured at snapshot time — it does NOT update
+   * when clients attach or detach. Live updates land in Phase 4 (tc-44wu0).
+   */
+  readonly attachedClientCount: number | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -190,6 +202,7 @@ function emptyClientModel(): ClientModel {
     panes: new Map(),
     focus: { paneId: null, windowId: null, sessionId: null },
     exitCodes: new Map(),
+    attachedClientCount: undefined,
   };
 }
 
@@ -253,6 +266,9 @@ export function applySnapshot(snapshot: SnapshotMessage): {
     // Snapshot resets all state including exit codes — panes that exited before
     // this snapshot are gone and their exit codes are no longer relevant.
     exitCodes: new Map(),
+    // tc-1elae (§11.4): propagate the attached-client count from the snapshot
+    // so TmuxccSessionHandle can surface it in the status-bar tooltip.
+    attachedClientCount: snapshot.attachedClientCount,
   };
 
   return { model, seq: snapshot.seq };
