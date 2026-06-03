@@ -312,7 +312,16 @@ class ControlServerImpl implements ControlServer {
     // Guard: the client may have been removed during the microtask gap (e.g.
     // transport closed between handshake settle and here).
     if (this._clients.has(transport)) {
-      const snapshot = projectSnapshot(this._pipeline.getModel(), { seq: state.nextSeq });
+      // tc-1elae: include the client count at snapshot time so the VS Code
+      // status bar can render "Attached clients: K" (§11.4). The count is
+      // captured HERE (after the microtask yield, just before sending) so it
+      // reflects the state at the moment this client receives its snapshot.
+      // Note: this client has already been added to _clients above, so the
+      // count includes the current connection.
+      const snapshot = projectSnapshot(this._pipeline.getModel(), {
+        seq: state.nextSeq,
+        attachedClientCount: this._clients.size,
+      });
       state.nextSeq++;
       transport.sendControl(snapshot);
     }
@@ -356,7 +365,12 @@ class ControlServerImpl implements ControlServer {
     const state = this._clients.get(transport);
     if (!state) return; // client may have been removed already (race with close)
 
-    const snapshot = projectSnapshot(this._pipeline.getModel(), { seq: state.nextSeq });
+    // tc-1elae: include the current client count in the re-sent snapshot so
+    // that the status bar tooltip stays accurate after a resync.
+    const snapshot = projectSnapshot(this._pipeline.getModel(), {
+      seq: state.nextSeq,
+      attachedClientCount: this._clients.size,
+    });
     state.nextSeq++;
     transport.sendControl(snapshot);
   }

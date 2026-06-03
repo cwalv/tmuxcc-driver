@@ -300,6 +300,19 @@ export interface SnapshotMessage extends MessageBase {
     readonly windowId: WindowId | null;
     readonly sessionId: SessionId | null;
   };
+  /**
+   * Number of daemon-protocol clients currently connected to the server at
+   * the moment the snapshot was built.
+   *
+   * tc-1elae (Phase 2 — §11.4 tooltip): used by the VS Code status bar to
+   * render "Attached clients: K". The value is static at snapshot time — it
+   * reflects the count when the snapshot was sent, NOT a live-updating counter.
+   * Live updates land in Phase 4 (tc-44wu0).
+   *
+   * Additive optional field — older clients that do not read this field are
+   * unaffected (non-breaking per the versioning policy above).
+   */
+  readonly attachedClientCount?: number;
 }
 
 // ---------------------------------------------------------------------------

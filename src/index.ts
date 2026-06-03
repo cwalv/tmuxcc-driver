@@ -54,3 +54,13 @@ export type { ProjectSnapshotOpts } from "./state/projection.js";
 export { createDaemon } from "./runtime/daemon.js";
 export type { Daemon, DaemonOptions } from "./runtime/daemon.js";
 export type { TmuxHostOptions } from "./runtime/tmux-host.js";
+
+// Control server — re-exported so Layer A tests in @tmuxcc/client can
+// instantiate ControlServer without reaching into internal sub-paths.
+// tc-1elae (§11.4): tests verify attachedClientCount stamping.
+export { createControlServer } from "./runtime/serve.js";
+export type {
+  ControlServer,
+  ControlServerOptions,
+} from "./runtime/serve.js";
+export type { RuntimePipeline } from "./runtime/pipeline.js";

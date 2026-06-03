@@ -89,9 +89,15 @@ import type {
  * `seq`: the sequence number to stamp on the snapshot message. The E4 daemon
  * runtime owns the per-connection counter and passes it here. Defaults to 1
  * (safe for tests; callers must supply the correct value in production).
+ *
+ * `attachedClientCount`: the number of daemon-protocol clients connected at
+ * snapshot time (tc-1elae, §11.4 tooltip). The serve layer (tc-dv3) passes
+ * `server.clientCount()` here. Omit to leave the field absent (backwards-
+ * compatible; older clients simply do not read it).
  */
 export interface ProjectSnapshotOpts {
   readonly seq?: number;
+  readonly attachedClientCount?: number;
 }
 
 /**
@@ -110,6 +116,7 @@ export function projectSnapshot(
   opts: ProjectSnapshotOpts = {},
 ): SnapshotMessage {
   const seq = opts.seq ?? 1;
+  const attachedClientCount = opts.attachedClientCount;
 
   const sessions: SnapshotSession[] = [];
   for (const sess of model.sessions.values()) {
@@ -154,7 +161,7 @@ export function projectSnapshot(
     });
   }
 
-  return {
+  const msg: SnapshotMessage = {
     type: "snapshot",
     seq,
     sessions,
@@ -166,6 +173,12 @@ export function projectSnapshot(
       sessionId: model.focus.sessionId,
     },
   };
+  // tc-1elae: include attachedClientCount when provided (omit to keep the
+  // field absent for backwards compatibility with older consumers).
+  if (attachedClientCount !== undefined) {
+    return { ...msg, attachedClientCount };
+  }
+  return msg;
 }
 
 /**
