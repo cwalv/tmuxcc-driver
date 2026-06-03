@@ -79,6 +79,7 @@ export type {
   RenameWindowCommand,
   SelectPaneCommand,
   ResizePaneCommand,
+  KillSessionCommand,
   CommandRequestMessage,
   // Client → Daemon (resync)
   ResyncRequestMessage,

@@ -473,6 +473,22 @@ export interface ResizePaneCommand {
 }
 
 /**
+ * Kill the tmux session entirely.
+ *
+ * Used when `tmuxcc.killSessionOnLastWindowClose: true` (ux-design.md §13)
+ * and the last window of the session is closed. The daemon emits
+ * session.closed on success; no further interaction is possible after this.
+ *
+ * Additive addition — non-breaking per the versioning policy
+ * (new optional command kind; existing implementations silently drop unknown
+ * command kinds per the forward-compatible `default` branch in input-path.ts).
+ */
+export interface KillSessionCommand {
+  readonly kind: "kill-session";
+  readonly sessionId: SessionId;
+}
+
+/**
  * Discriminated union of all model-level commands a client may issue.
  * Narrow with `cmd.kind` to get the specific shape.
  *
@@ -487,7 +503,8 @@ export type WireCommand =
   | ClosePaneCommand
   | RenameWindowCommand
   | SelectPaneCommand
-  | ResizePaneCommand;
+  | ResizePaneCommand
+  | KillSessionCommand;
 
 /**
  * Client issues a model-level command to the daemon.
