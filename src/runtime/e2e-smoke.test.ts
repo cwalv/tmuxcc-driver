@@ -46,7 +46,13 @@
 
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
+
+// tc-blk — process-level safety net: register every spawned tmux socket so a
+// thrown / timed-out test still has its server killed.
+// flushAllTracked is imported for the E6 regression test that simulates a
+// thrown test body and verifies the safety net reaps the orphan.
+import { trackSocket, killTmuxServer, flushAllTracked } from "./test-tmux-cleanup.js";
 
 // ---------------------------------------------------------------------------
 // Daemon internals (within daemon/src, no rootDir issue)
@@ -119,13 +125,12 @@ function sockName(label: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// killServer — idempotent kill of a tmux server by socket name
+// killServer — idempotent kill of a tmux server by socket name.
+// Delegates to the shared cleanup helper (which also forgets the socket).
 // ---------------------------------------------------------------------------
 
 function killServer(sock: string): void {
-  try {
-    execFileSync("tmux", ["-L", sock, "kill-server"], { timeout: 5000 });
-  } catch { /* already dead */ }
+  killTmuxServer(sock);
 }
 
 // ---------------------------------------------------------------------------
@@ -322,6 +327,9 @@ export async function setupE2E(
   opts: { cols?: number; rows?: number; sessionName?: string } = {},
 ): Promise<E2ESession> {
   const sock = sockName(label);
+  // tc-blk — register BEFORE we spawn so a throw between here and teardown
+  // still has its socket reaped by the process-exit / top-level after() net.
+  trackSocket(sock);
   const sessionName = opts.sessionName ?? `e2e-${label}`;
 
   // 1. Create and start the daemon (spawns real tmux -CC via PTY bridge).
@@ -660,6 +668,65 @@ describe(
 
         const check = spawnSync("tmux", ["-L", sock, "list-sessions"], { timeout: 3000 });
         assert.ok(check.status !== 0, "tmux server must not be running after teardown()");
+      },
+    );
+
+    // -----------------------------------------------------------------------
+    // E6 — tc-blk regression: throw mid-body leaves no orphan tmux server.
+    //
+    // Stands up setupE2E (which spawns a real tmux -CC server), then
+    // SIMULATES a thrown test body by not calling session.teardown() and
+    // not directly killing the server. We then invoke the same code path
+    // the process-exit / top-level after() hook will run — flushAllTracked
+    // — and assert tmux is gone.
+    //
+    // This is the acceptance criterion from the bead: "a test that throws
+    // mid-body still leaves no orphaned server".
+    //
+    // We can't actually let the test throw (it would fail the suite). The
+    // observable property is: the cleanup happens via the registered safety
+    // net, NOT via any per-test teardown. flushAllTracked is exactly what
+    // the process-exit/SIGINT handlers and the top-level after() invoke.
+    // -----------------------------------------------------------------------
+
+    it(
+      "E6 (tc-blk): tmux server spawned by setupE2E is reaped by safety net even when per-test teardown is skipped",
+      { timeout: 20_000 },
+      async () => {
+        const session = await setupE2E("throw-regression");
+
+        // SIMULATE a thrown test body: do NOT call session.teardown(),
+        // do NOT call killServer(session.socketName). The only cleanup
+        // path is the shared safety net.
+
+        // Sanity: the server must be alive before we trigger cleanup
+        // (otherwise the test is vacuous).
+        const aliveCheck = spawnSync(
+          "tmux", ["-L", session.socketName, "list-sessions"], { timeout: 3000 },
+        );
+        assert.equal(
+          aliveCheck.status, 0,
+          "E6: tmux server must be alive immediately after setupE2E (sanity)",
+        );
+
+        // Now invoke the safety net's flush — same code that runs from
+        // process.on('exit') and the top-level after() hook.
+        flushAllTracked();
+
+        // After flush, the server must be gone — this is the bead's
+        // "throws mid-body still leaves no orphaned server" criterion.
+        const deadCheck = spawnSync(
+          "tmux", ["-L", session.socketName, "list-sessions"], { timeout: 3000 },
+        );
+        assert.notEqual(
+          deadCheck.status, 0,
+          `E6 (tc-blk): tmux server on ${session.socketName} must be reaped by the safety net`,
+        );
+
+        // Also tear down the daemon's bridge process so we don't leave a
+        // stranded host child (it will exit on its own when tmux dies, but
+        // we wait briefly to be a polite test citizen).
+        session.daemon.kill();
       },
     );
   },

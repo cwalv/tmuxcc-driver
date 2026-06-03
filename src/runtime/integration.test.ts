@@ -44,9 +44,12 @@
 
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
-import { spawn as spawnProc, execFileSync, spawnSync, type ChildProcess } from "node:child_process";
+import { spawn as spawnProc, spawnSync, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
+
+// tc-blk — process-level safety net for real-tmux test sockets.
+import { trackSocket, killTmuxServer } from "./test-tmux-cleanup.js";
 
 // ---------------------------------------------------------------------------
 // Runtime modules under test
@@ -1214,10 +1217,15 @@ describe("tc-93a: createDaemon assembly — fake-tmux smoke", () => {
     // Since createDaemon() always creates its own TmuxHost via createTmuxHost(),
     // we test the assembly here by calling createDaemon() and verifying the
     // shape of the returned Daemon object.
+    // tc-blk — track the assembly-test socket too, even though we never start
+    // the daemon (kill is called below). The trackSocket call is cheap and
+    // covers the case where createDaemon evolves to do eager work later.
+    const asmSock = `tmuxcc-test-daemon-asm-${Date.now()}`;
+    trackSocket(asmSock);
     const daemon = createDaemon({
       host: {
         // Use a nonexistent socket so we don't conflict; we kill immediately.
-        socketName: `tmuxcc-test-daemon-asm-${Date.now()}`,
+        socketName: asmSock,
         sessionName: "asmtest",
       },
     });
@@ -1275,13 +1283,15 @@ const tmuxAvailable = (() => {
 const REAL_RUN_ID = `${Date.now()}-${process.pid}`;
 
 function realSockName(label: string): string {
-  return `tmuxcc-int-${REAL_RUN_ID}-${label}`;
+  const sock = `tmuxcc-int-${REAL_RUN_ID}-${label}`;
+  // tc-blk — track BEFORE the daemon is created so a thrown test still gets
+  // its server reaped via the process-exit / top-level after() net.
+  trackSocket(sock);
+  return sock;
 }
 
 function killRealServer(sock: string): void {
-  try {
-    execFileSync("tmux", ["-L", sock, "kill-server"], { timeout: 4000 });
-  } catch { /* already dead */ }
+  killTmuxServer(sock);
 }
 
 /** Poll a Buffer accumulator until predicate returns true or timeout. */

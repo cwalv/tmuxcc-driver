@@ -46,7 +46,7 @@
 
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync, execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 
 // ---------------------------------------------------------------------------
 // Reuse tc-2ph's harness
@@ -81,11 +81,14 @@ const tmuxAvailable = (() => {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Kill a tmux server by socket name — idempotent. */
+/** Kill a tmux server by socket name — idempotent. Delegates to the shared
+ *  tc-blk cleanup helper. setupE2E already tracks its socket for the
+ *  process-exit safety net; this wrapper is kept for the explicit per-test
+ *  after() belt-and-suspenders calls below. */
+import { killTmuxServer } from "./test-tmux-cleanup.js";
+
 function killServer(sock: string): void {
-  try {
-    execFileSync("tmux", ["-L", sock, "kill-server"], { timeout: 5000 });
-  } catch { /* already dead */ }
+  killTmuxServer(sock);
 }
 
 /**

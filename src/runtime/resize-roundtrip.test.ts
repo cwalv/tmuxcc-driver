@@ -108,13 +108,16 @@ const tmuxAvailable = (() => {
 })();
 
 // ---------------------------------------------------------------------------
-// killServer — idempotent kill of a tmux server by socket name
+// killServer — idempotent kill of a tmux server by socket name.
+// Delegates to the shared cleanup helper (tc-blk). setupE2E() already tracks
+// its own sockets; this helper is only kept for the explicit per-test after()
+// belt-and-suspenders calls below.
 // ---------------------------------------------------------------------------
 
+import { killTmuxServer } from "./test-tmux-cleanup.js";
+
 function killServer(sock: string): void {
-  try {
-    execFileSync("tmux", ["-L", sock, "kill-server"], { timeout: 5000 });
-  } catch { /* already dead */ }
+  killTmuxServer(sock);
 }
 
 // ---------------------------------------------------------------------------

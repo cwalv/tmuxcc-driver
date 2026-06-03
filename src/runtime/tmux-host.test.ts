@@ -20,11 +20,13 @@
 
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
-import { spawn as spawnProc, execFileSync, spawnSync, type ChildProcess } from "node:child_process";
+import { spawn as spawnProc, spawnSync, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
 
 import { createTmuxHost } from "./tmux-host.js";
+// tc-blk — process-level safety net for real-tmux test sockets.
+import { trackSocket, killTmuxServer } from "./test-tmux-cleanup.js";
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -303,13 +305,15 @@ const tmuxAvailable = (() => {
 const RUN_ID = `${Date.now()}-${process.pid}`;
 
 function sockName(label: string) {
-  return `tmuxcc-test-${RUN_ID}-${label}`;
+  const sock = `tmuxcc-test-${RUN_ID}-${label}`;
+  // tc-blk — track every real-tmux socket so a thrown / timed-out test still
+  // has its server reaped via the process-exit / top-level after() net.
+  trackSocket(sock);
+  return sock;
 }
 
 function killServer(sock: string) {
-  try {
-    execFileSync("tmux", ["-L", sock, "kill-server"], { timeout: 3000 });
-  } catch { /* already dead */ }
+  killTmuxServer(sock);
 }
 
 /** Wait for predicate over collected chunks to become true, or reject after ms. */

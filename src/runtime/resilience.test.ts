@@ -38,6 +38,9 @@ import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 
+// tc-blk — process-level safety net for real-tmux test sockets.
+import { trackSocket, killTmuxServer } from "./test-tmux-cleanup.js";
+
 // ---------------------------------------------------------------------------
 // Daemon internals
 // ---------------------------------------------------------------------------
@@ -77,13 +80,16 @@ const tmuxAvailable = (() => {
 const RUN_ID = `${Date.now()}-${process.pid}`;
 
 function sockName(label: string): string {
-  return `tmuxcc-res-${RUN_ID}-${label}`;
+  const sock = `tmuxcc-res-${RUN_ID}-${label}`;
+  // tc-blk — track BEFORE setupE2E so a thrown test still has its server reaped
+  // by the process-exit / top-level after() net. setupE2E also tracks its own
+  // socket; trackSocket is idempotent (Set semantics).
+  trackSocket(sock);
+  return sock;
 }
 
 function killServer(sock: string): void {
-  try {
-    execFileSync("tmux", ["-L", sock, "kill-server"], { timeout: 5000 });
-  } catch { /* already dead */ }
+  killTmuxServer(sock);
 }
 
 function waitFor<T>(
