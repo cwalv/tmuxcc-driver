@@ -496,10 +496,14 @@ export interface ResizePaneCommand {
  * Additive addition — non-breaking per the versioning policy
  * (new optional command kind; existing implementations silently drop unknown
  * command kinds per the forward-compatible `default` branch in input-path.ts).
+ *
+ * tc-91o: uses sessionName (string) rather than sessionId (SessionId) so the
+ * daemon can pass the name directly to `kill-session -t =<name>` without a
+ * fragile numeric-id mapping (tmux session numbers can be reshuffled).
  */
 export interface KillSessionCommand {
   readonly kind: "kill-session";
-  readonly sessionId: SessionId;
+  readonly sessionName: string;
 }
 
 /**

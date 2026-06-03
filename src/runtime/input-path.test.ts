@@ -519,6 +519,48 @@ describe("createInputPath — custom paneIdToTmux option", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Suite: kill-session command (tc-91o)
+// ---------------------------------------------------------------------------
+
+describe("createInputPath — kill-session command", () => {
+  it("kill-session → kill-session -t =<sessionName>", () => {
+    const host = makeFakeHost();
+    const path = createInputPath(host);
+
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "ks1",
+      command: {
+        kind: "kill-session",
+        sessionName: "myworkspace",
+      },
+    };
+    path.handleClientMessage(msg);
+
+    assert.equal(host.lastWrite, "kill-session -t =myworkspace\n");
+  });
+
+  it("kill-session with name containing hyphens passes through correctly", () => {
+    const host = makeFakeHost();
+    const path = createInputPath(host);
+
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "ks2",
+      command: {
+        kind: "kill-session",
+        sessionName: "my-project-dev",
+      },
+    };
+    path.handleClientMessage(msg);
+
+    assert.equal(host.lastWrite, "kill-session -t =my-project-dev\n");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Suite: mixed messages in sequence
 // ---------------------------------------------------------------------------
 

@@ -60,7 +60,7 @@
 
 import type { TmuxHost } from "./tmux-host.js";
 import type { ClientMessage } from "../wire/index.js";
-import type { PaneId, WindowId, SessionId } from "../wire/index.js";
+import type { PaneId, WindowId } from "../wire/index.js";
 import {
   sendKeysHex,
   refreshClientSize,
@@ -106,20 +106,6 @@ function defaultWindowIdToTmux(id: WindowId): number {
 // Public types
 // ---------------------------------------------------------------------------
 
-/**
- * Default SessionId→tmux-name inversion.
- *
- * Strips the leading "s" prefix to recover the raw session name used at
- * startup.  If the id does not start with "s" the raw string is used as-is
- * (forward-compatible for non-prefixed session ids).
- *
- * Convention source: src/state/reducer.ts `mintSessionId("s" + name)`.
- */
-function defaultSessionIdToTmux(id: SessionId): string {
-  const s = id as string;
-  return s.startsWith("s") ? s.slice(1) : s;
-}
-
 /** Options for createInputPath. */
 export interface InputPathOptions {
   /**
@@ -138,14 +124,6 @@ export interface InputPathOptions {
    * The default strips the "w" prefix and parses the trailing decimal integer.
    */
   windowIdToTmux?: (id: WindowId) => number;
-
-  /**
-   * Override the default SessionId→tmux-name mapping.
-   *
-   * The default strips the leading "s" prefix to recover the raw session name.
-   * Supply an override when the daemon maintains an explicit SessionId→name map.
-   */
-  sessionIdToTmux?: (id: SessionId) => string;
 }
 
 /** The input path handle returned by createInputPath. */
@@ -187,7 +165,6 @@ export function createInputPath(
 ): InputPath {
   const toTmuxPane = opts.paneIdToTmux ?? defaultPaneIdToTmux;
   const toTmuxWindow = opts.windowIdToTmux ?? defaultWindowIdToTmux;
-  const toTmuxSession = opts.sessionIdToTmux ?? defaultSessionIdToTmux;
 
   /** Write a tmux command line (appends \n). */
   function sendCommand(cmd: string): void {
@@ -322,13 +299,17 @@ export function createInputPath(
           }
 
           case "kill-session": {
-            // kill-session -t <name>
+            // kill-session -t =<sessionName>
             // Terminates the tmux session and all its windows/panes.
             // Used when tmuxcc.killSessionOnLastWindowClose=true (ux-design.md §13).
             // The daemon will receive a session exit notification from tmux;
             // callers should expect the connection to close shortly after.
-            const sessionName = toTmuxSession(command.sessionId);
-            sendCommand(`kill-session -t ${sessionName}`);
+            //
+            // tc-91o: the wire command now carries sessionName directly, so no
+            // id-mapping is required.  The "=" prefix is the tmux exact-match
+            // target selector, which avoids ambiguity when session names share a
+            // prefix.
+            sendCommand(`kill-session -t =${command.sessionName}`);
             break;
           }
 
@@ -365,4 +346,4 @@ export function createInputPath(
 // Exports — id-mapping helpers exposed for tests and potential registry wiring
 // ---------------------------------------------------------------------------
 
-export { defaultPaneIdToTmux, defaultWindowIdToTmux, defaultSessionIdToTmux };
+export { defaultPaneIdToTmux, defaultWindowIdToTmux };
