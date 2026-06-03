@@ -60,8 +60,8 @@ export * from "./render-hook.js";
 // full command type union (OpenWindowCommand, SplitPaneCommand, etc.).
 
 // ---------------------------------------------------------------------------
-// createClient (tc-emo) — top-level integration: wires all E5 modules together
+// connectClient (tc-cox.1) — top-level integration: wires all E5 modules together
 // ---------------------------------------------------------------------------
 
-export { createClient } from "./client.js";
-export type { CreateClientOptions, ClientHandle } from "./client.js";
+export { connectClient } from "./client.js";
+export type { ConnectClientOptions, ClientHandle } from "./client.js";

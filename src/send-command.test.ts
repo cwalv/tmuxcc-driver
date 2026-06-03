@@ -32,7 +32,7 @@ import type {
 
 import { createInputApi } from "./input.js";
 import type { InputSender } from "./input.js";
-import { createClient } from "./client.js";
+import { connectClient } from "./client.js";
 import { NoOpRenderHook } from "./render-hook.js";
 
 // ---------------------------------------------------------------------------
@@ -124,21 +124,20 @@ describe("ClientHandle.controller.sendCommand — via in-memory transport", () =
       features: ["pane-lifecycle"],
     });
 
-    // Build the client.
-    const client = createClient(clientTransport, NoOpRenderHook);
-
     // Connect client (runs handshake).
-    const connectPromise = client.connect();
+    const handle = await connectClient(clientTransport);
 
     await daemonHandshakePromise;
-    await connectPromise;
+
+    // Attach no-op hook (required to complete the setup).
+    handle.mirror.attach(NoOpRenderHook);
 
     // After handshake, install a control handler on the daemon side.
     daemonTransport.onControl((msg) => {
       receivedByDaemon.push(msg as ClientMessage);
     });
 
-    // Daemon sends an empty snapshot so the client driver can start.
+    // Daemon sends an empty snapshot so the mirror catches up.
     function sendSnapshotAndStart(): void {
       const snapshot: SnapshotMessage = {
         type: "snapshot",
@@ -164,11 +163,10 @@ describe("ClientHandle.controller.sendCommand — via in-memory transport", () =
       features: ["pane-lifecycle"],
     });
 
-    const client = createClient(clientTransport, NoOpRenderHook);
-    const connectP = client.connect();
+    const handle = await connectClient(clientTransport);
+    handle.mirror.attach(NoOpRenderHook);
 
     await daemonHandshakeP;
-    await connectP;
 
     // Install control handler on daemon side AFTER handshake.
     daemonTransport.onControl((msg) => {
@@ -177,7 +175,7 @@ describe("ClientHandle.controller.sendCommand — via in-memory transport", () =
 
     // Issue the command via the controller.
     const cmd: WireCommand = { kind: "open-window", sessionId: sessionId("s0") };
-    client.controller.sendCommand(cmd);
+    handle.controller.sendCommand(cmd);
 
     // The in-memory transport delivers synchronously.
     assert.equal(receivedByDaemon.length, 1, "daemon should receive exactly one message");
@@ -187,7 +185,7 @@ describe("ClientHandle.controller.sendCommand — via in-memory transport", () =
     assert.ok(typeof received.correlationId === "string", "correlationId should be a string");
     assert.ok(received.correlationId.length > 0, "correlationId should be non-empty");
 
-    client.stop();
+    handle.disconnect();
   });
 
   it("controller.sendCommand(split-pane) → daemon receives correct CommandRequestMessage", async () => {
@@ -198,10 +196,9 @@ describe("ClientHandle.controller.sendCommand — via in-memory transport", () =
       protocolVersion: WIRE_PROTOCOL_VERSION,
       features: ["pane-lifecycle"],
     });
-    const client = createClient(clientTransport, NoOpRenderHook);
-    const connectP = client.connect();
+    const handle = await connectClient(clientTransport);
+    handle.mirror.attach(NoOpRenderHook);
     await daemonHandshakeP;
-    await connectP;
 
     daemonTransport.onControl((msg) => {
       receivedByDaemon.push(msg as ClientMessage);
@@ -212,13 +209,13 @@ describe("ClientHandle.controller.sendCommand — via in-memory transport", () =
       paneId: paneId("p0"),
       direction: "vertical",
     };
-    client.controller.sendCommand(cmd);
+    handle.controller.sendCommand(cmd);
 
     assert.equal(receivedByDaemon.length, 1);
     const received = receivedByDaemon[0]! as CommandRequestMessage;
     assert.equal(received.type, "command.request");
     assert.deepEqual(received.command, cmd);
 
-    client.stop();
+    handle.disconnect();
   });
 });

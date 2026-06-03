@@ -1,151 +1,34 @@
 /**
- * createClient — top-level integration wiring for the headless client.
+ * connectClient — top-level integration wiring for the headless client.
  *
  * Assembles the five E5 modules (connection, mirror, pane-stream, input,
- * render-hook driver) into one coherent client object and adapts the concrete
- * module APIs to the abstract ModelSource / ByteSource / InputSink seams that
- * createRenderHookDriver expects.
- *
- * # Adapter notes (mismatch bridging)
- *
- * ## ModelSource.getModel() shape mismatch
- *
- * render-hook.ts defines a LOCAL ClientModel with:
- *   panes: ReadonlyMap<PaneId, PaneInfo>          (PaneInfo has `active` not `mode`)
- *   windows: ReadonlyMap<WindowId, WindowInfo>    (WindowInfo has no `layout`)
- *   focus: FocusInfo
- *
- * mirror.ts defines its own ClientModel with:
- *   panes: ReadonlyMap<PaneId, ClientPane>        (ClientPane has `mode` not `active`)
- *   windows: ReadonlyMap<WindowId, ClientWindow>  (ClientWindow has `layout`)
- *   focus: ClientFocus
- *
- * These are structurally different.  The adapter (mirrorToModelSource) maps:
- *   - ClientPane → PaneInfo: paneId, windowId, sessionId, cols, rows are direct;
- *     `active` is derived from mirror.getModel().focus.paneId === pane.paneId.
- *   - ClientWindow → WindowInfo: windowId, sessionId, name, active, layout are all direct.
- *   - ClientFocus → FocusInfo: direct (same shape).
- *
- * ## ModelSource.onModelChange signature mismatch
- *
- * render-hook.ts:  onModelChange(callback: () => void): () => void
- * mirror.ts:       onModelChange(handler: (model: ClientModel) => void): () => void
- *
- * The mirror's handler receives the new model as an argument; the driver's
- * callback takes no arguments.  The adapter wraps the driver's zero-arg callback
- * in a one-arg lambda that ignores the model parameter — structurally compatible.
- *
- * ## ByteSource / InputSink
- *
- * PaneStreamConsumer.onPaneOutput(paneId, handler) → () => void matches
- * ByteSource.onPaneOutput exactly — no adapter needed, pass through directly.
- *
- * InputApi (sendInput, resizePane) matches InputSink exactly — pass through.
- *
- * # E6 usage
+ * render-hook driver) into one coherent client handle:
  *
  * ```ts
- * const { daemon, client: transport } = createInMemoryTransportPair();
- * // or: const transport = createPipeTransport(socketPath);
+ * const handle = await connectClient(transport);
+ * // handle = { controller, mirror, session, disconnect }
+ * // All four fields are real and usable. No placeholder, no late assignment.
  *
- * const hook: RenderHook = myVsCodeRenderer;
- * const client = createClient(transport, hook);
- * const session = await client.connect();    // runs handshake
- * // hook.onConnected() fires, hook.onPaneOpened() etc. fire with initial state
- *
- * client.controller.sendInput(paneId("p0"), "ls\r");
- * client.controller.resizePane(paneId("p0"), 220, 50);
- *
- * client.stop();   // detaches render-hook driver, closes connection
+ * const hook = new VsCodeRenderHook(factory, logger, handle.controller);
+ * handle.mirror.attach(hook);
+ * // attach walks the current mirror state (sessions, windows, panes) firing
+ * // onWindowAdded / onPaneOpened / onFocusChanged for each existing entity,
+ * // then subscribes to deltas. No separate 'snapshot replay' special case.
  * ```
  *
  * # NO DOM, NO vscode, NO host API, NO Pseudoterminal
  */
 
-import type { Transport, NegotiatedSession, PaneId, WindowId } from "@tmuxcc/daemon";
+import type { Transport, NegotiatedSession, PaneId, WireCommand } from "@tmuxcc/daemon";
 import { DaemonConnection } from "./connection.js";
 import { Mirror } from "./mirror.js";
-import type { ClientPane, ClientWindow, ClientFocus } from "./mirror.js";
 import { PaneStreamConsumer, connectPaneStream } from "./pane-stream.js";
 import { createInputApi } from "./input.js";
 import type { InputApiOptions } from "./input.js";
-import {
-  createRenderHookDriver,
-} from "./render-hook.js";
 import type {
-  RenderHook,
   ClientController,
-  ModelSource,
   ByteSource,
-  InputSink,
-  ClientModel as RenderClientModel,
-  PaneInfo,
-  WindowInfo,
-  FocusInfo,
 } from "./render-hook.js";
-
-// ---------------------------------------------------------------------------
-// Adapter: Mirror → ModelSource
-// ---------------------------------------------------------------------------
-
-/**
- * Adapt a Mirror instance to the ModelSource interface expected by
- * createRenderHookDriver.
- *
- * Bridges two mismatches:
- *   1. Model shape: Mirror's ClientModel uses ClientPane/ClientWindow;
- *      the driver's ClientModel uses PaneInfo/WindowInfo (different field sets).
- *   2. onModelChange callback arity: Mirror passes (model) to the handler;
- *      the driver expects () => void.  We wrap and ignore the arg.
- */
-function mirrorToModelSource(mirror: Mirror): ModelSource {
-  return {
-    getModel(): RenderClientModel {
-      const m = mirror.getModel();
-      // Map ClientPane → PaneInfo.
-      // PaneInfo.active = (pane is the focused pane in the current focus triple).
-      const focusPaneId = m.focus.paneId;
-      const panes = new Map<PaneId, PaneInfo>();
-      for (const [id, p] of m.panes) {
-        panes.set(id, {
-          paneId: p.paneId,
-          windowId: p.windowId,
-          sessionId: p.sessionId,
-          cols: p.cols,
-          rows: p.rows,
-          active: p.paneId === focusPaneId,
-        });
-      }
-
-      // Map ClientWindow → WindowInfo.
-      // WindowInfo.layout carries the full split-tree geometry from the mirror.
-      const windows = new Map<WindowId, WindowInfo>();
-      for (const [id, w] of m.windows) {
-        windows.set(id, {
-          windowId: w.windowId,
-          sessionId: w.sessionId,
-          name: w.name,
-          active: w.active,
-          layout: w.layout,
-        });
-      }
-
-      const focus: FocusInfo = {
-        paneId: m.focus.paneId,
-        windowId: m.focus.windowId,
-        sessionId: m.focus.sessionId,
-      };
-
-      return { panes, windows, focus };
-    },
-
-    onModelChange(callback: () => void): () => void {
-      // Mirror's onModelChange passes the new model to the handler, but the
-      // driver only needs a zero-arg notification.  Wrap and ignore the arg.
-      return mirror.onModelChange((_model) => callback());
-    },
-  };
-}
 
 // ---------------------------------------------------------------------------
 // Adapter: PaneStreamConsumer → ByteSource
@@ -167,13 +50,13 @@ function consumerToByteSource(consumer: PaneStreamConsumer): ByteSource {
 }
 
 // ---------------------------------------------------------------------------
-// createClient options
+// connectClient options
 // ---------------------------------------------------------------------------
 
 /**
- * Options for createClient.
+ * Options for connectClient.
  */
-export interface CreateClientOptions {
+export interface ConnectClientOptions {
   /**
    * Input API options (coalesce resize, etc.).
    * @see InputApiOptions
@@ -182,64 +65,79 @@ export interface CreateClientOptions {
 }
 
 // ---------------------------------------------------------------------------
-// Client handle
+// ClientHandle — the fully-built handle returned by connectClient
 // ---------------------------------------------------------------------------
 
 /**
- * The handle returned by createClient.
+ * The fully-built handle returned by connectClient.
+ *
+ * All four fields are real and usable immediately — no placeholder, no late
+ * assignment.  After `await connectClient(transport)` resolves:
+ *   - `controller.sendInput` / `resizePane` / `sendCommand` are wired to the
+ *     daemon.
+ *   - `mirror` is initialized from the daemon's snapshot.
+ *   - `session` contains the negotiated protocol version + features.
+ *   - `disconnect()` tears down byte subscriptions, detaches the hook, and
+ *     closes the transport.
+ *
+ * Hook attachment is separate and idempotent:
+ * ```ts
+ * const hook = new MyHook(handle.controller);
+ * handle.mirror.attach(hook);
+ * ```
  */
 export interface ClientHandle {
   /**
-   * Run the wire handshake with the daemon, initialise the mirror, subscribe
-   * to byte streams, and start the render-hook driver.
-   *
-   * After this resolves:
-   *   - The render hook has received onWindowAdded / onPaneOpened /
-   *     onLayoutChanged / onFocusChanged for every entity in the snapshot,
-   *     followed by onConnected().
-   *   - controller.sendInput / resizePane are ready.
-   *
-   * Rejects with HandshakeError on protocol mismatch or transport failure.
-   */
-  connect(): Promise<NegotiatedSession>;
-
-  /**
    * The controller the renderer uses to send input and resize requests.
-   * Available only after connect() resolves.
+   * Available immediately — no connect() step required.
    */
   readonly controller: ClientController;
 
   /**
-   * Detach the render-hook driver, close the connection, and tear down all
+   * The mirror — initialized from the daemon snapshot.
+   * Call `mirror.attach(hook)` to catch up and subscribe.
+   */
+  readonly mirror: Mirror;
+
+  /**
+   * The negotiated session (protocolVersion, features).
+   */
+  readonly session: NegotiatedSession;
+
+  /**
+   * Detach the render hook (if any), close the connection, and tear down all
    * subscriptions.  Safe to call more than once.
    */
-  stop(): void;
+  disconnect(): void;
 }
 
 // ---------------------------------------------------------------------------
-// createClient
+// connectClient
 // ---------------------------------------------------------------------------
 
 /**
- * Assemble the full headless client from a transport and a render hook.
+ * Connect to a daemon via the given transport and return a fully-built handle.
  *
  * Builds:
  *   - DaemonConnection  (over `transport`)
  *   - Mirror            (wired to connection.onControl via connectTo)
  *   - PaneStreamConsumer (wired to connection.onData via connectPaneStream)
  *   - InputApi          (wired to connection.send)
- *   - createRenderHookDriver (adapted Mirror, Consumer, InputApi → abstract seams)
+ *   - ClientController  (delegates to InputApi)
  *
- * @param transport - Injected wire transport.  Caller owns creation; createClient
- *                    owns lifecycle after this point (stop() closes it).
- * @param hook      - Renderer implementation of RenderHook.
+ * Runs the wire handshake and waits for the daemon snapshot before resolving.
+ * After this promise resolves, `handle.mirror` is initialized and
+ * `handle.controller` is usable.
+ *
+ * @param transport - Injected wire transport.  Caller owns creation; the
+ *                    returned handle owns lifecycle after this point
+ *                    (disconnect() closes it).
  * @param opts      - Optional tuning (InputApiOptions, etc.).
  */
-export function createClient(
+export async function connectClient(
   transport: Transport,
-  hook: RenderHook,
-  opts: CreateClientOptions = {},
-): ClientHandle {
+  opts: ConnectClientOptions = {},
+): Promise<ClientHandle> {
   // ── Construct modules ────────────────────────────────────────────────────────
 
   const connection = new DaemonConnection(transport);
@@ -247,79 +145,48 @@ export function createClient(
   const paneConsumer = new PaneStreamConsumer();
   const inputApi = createInputApi(connection, opts.input);
 
-  // Build the render-hook driver (does not start yet).
-  const driver = createRenderHookDriver(
-    hook,
-    mirrorToModelSource(mirror),
-    consumerToByteSource(paneConsumer),
-    inputApi as InputSink,
-  );
+  // ── Run the wire handshake ──────────────────────────────────────────────────
 
-  // Mutable controller slot — filled when connect() starts the driver.
-  let _controller: ClientController = {
-    sendInput(_paneId: PaneId, _data: string): void {
-      throw new Error("createClient: call connect() before using the controller");
+  const session = await connection.connect();
+
+  // ── Wire modules to the live connection ────────────────────────────────────
+
+  // Wire mirror to the connection's control stream.
+  // Must be called AFTER connect() so buffered messages are delivered.
+  mirror.connectTo(connection);
+
+  // Wire the pane-stream consumer to the connection's data stream.
+  connectPaneStream(connection, paneConsumer);
+
+  // Pre-wire the byte source into the mirror so mirror.attach(hook) works.
+  mirror.wireDataSources(consumerToByteSource(paneConsumer));
+
+  // ── Build the controller ────────────────────────────────────────────────────
+
+  const controller: ClientController = {
+    sendInput(paneId: PaneId, data: string): void {
+      inputApi.sendInput(paneId, data);
     },
-    resizePane(_paneId: PaneId, _cols: number, _rows: number): void {
-      throw new Error("createClient: call connect() before using the controller");
+    resizePane(paneId: PaneId, cols: number, rows: number): void {
+      inputApi.resizePane(paneId, cols, rows);
     },
-    sendCommand(_cmd): void {
-      throw new Error("createClient: call connect() before using the controller");
+    sendCommand(cmd: WireCommand): void {
+      inputApi.sendCommand(cmd);
     },
   };
 
-  let _stop: (() => void) | null = null;
-  let _stopped = false;
+  // ── disconnect() ────────────────────────────────────────────────────────────
 
-  // ── connect() ───────────────────────────────────────────────────────────────
+  let _disconnected = false;
 
-  async function connect(): Promise<NegotiatedSession> {
-    // Run the wire handshake.
-    const session = await connection.connect();
-
-    // Wire mirror to the connection's control stream.
-    // Must be called AFTER connect() so buffered messages are delivered.
-    mirror.connectTo(connection);
-
-    // Wire the pane-stream consumer to the connection's data stream.
-    connectPaneStream(connection, paneConsumer);
-
-    // Start the render-hook driver (fires initial onWindowAdded / onPaneOpened /
-    // onFocusChanged / onConnected from the snapshot already in the mirror).
-    const session_ = driver.start();
-    _controller = session_.controller;
-    _stop = () => {
-      session_.stop();
-      connection.close();
-    };
-
-    return session;
+  function disconnect(): void {
+    if (_disconnected) return;
+    _disconnected = true;
+    mirror.detachHook();
+    connection.close();
   }
 
-  // ── stop() ──────────────────────────────────────────────────────────────────
+  // ── Return fully-built handle ───────────────────────────────────────────────
 
-  function stop(): void {
-    if (_stopped) return;
-    _stopped = true;
-    if (_stop !== null) {
-      _stop();
-    } else {
-      // connect() was never called — just close the transport.
-      connection.close();
-    }
-  }
-
-  // ── Public handle ────────────────────────────────────────────────────────────
-
-  // Use a Proxy-like accessor for controller so callers can destructure it
-  // before connect() and still get the live reference after connect().
-  const handle: ClientHandle = {
-    connect,
-    get controller(): ClientController {
-      return _controller;
-    },
-    stop,
-  };
-
-  return handle;
+  return { controller, mirror, session, disconnect };
 }

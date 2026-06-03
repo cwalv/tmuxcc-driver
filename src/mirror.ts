@@ -65,6 +65,7 @@ import type {
   PaneMode,
 } from "@tmuxcc/daemon";
 import type { DaemonConnection } from "./connection.js";
+import type { RenderHook, ByteSource } from "./render-hook.js";
 
 // ---------------------------------------------------------------------------
 // Client model types
@@ -515,6 +516,19 @@ export class Mirror {
   #sendFn: ((msg: ResyncRequestMessage) => void) | null = null;
   #closeFn: (() => void) | null = null;
 
+  // ── attach() state ────────────────────────────────────────────────────────
+  //
+  // Pre-wired by wireDataSources() before attach() may be called.  These are
+  // set once during connectClient() setup and never changed afterwards.
+
+  #byteSource: ByteSource | null = null;
+
+  // Whether attach() has already been called (idempotent guard).
+  #attached = false;
+
+  // Unsubscribe functions gathered by attach() for teardown.
+  readonly #attachUnsubs: Array<() => void> = [];
+
   // ── Handlers ──────────────────────────────────────────────────────────────
 
   readonly #changeHandlers: ModelChangeHandler[] = [];
@@ -730,6 +744,231 @@ export class Mirror {
       this.#sendFn = null;
       this.#closeFn = null;
     };
+  }
+
+  // ── attach() API ─────────────────────────────────────────────────────────
+
+  /**
+   * Pre-wire the byte source so that `attach()` can subscribe per-pane byte
+   * output.  Called once by `connectClient()` before the handle is returned.
+   *
+   * Must be called before `attach()`.
+   */
+  wireDataSources(byteSource: ByteSource): void {
+    this.#byteSource = byteSource;
+  }
+
+  /**
+   * Catch up a RenderHook from the current mirror state, then subscribe to
+   * all future model deltas and byte output.
+   *
+   * Fires in order:
+   *   1. onWindowAdded + onLayoutChanged for every known window.
+   *   2. onPaneOpened for every known pane; subscribes byte output for each.
+   *   3. onFocusChanged with current focus.
+   *   4. onConnected.
+   *
+   * Subsequent model changes (pane/window/layout/focus) are delivered via the
+   * model-diff path (same as before).
+   *
+   * Idempotent: a second call with any hook is a no-op (does NOT fire a second
+   * snapshot replay).  The caller must not rely on attach() being callable
+   * twice — construct a new Mirror for a new connection instead.
+   *
+   * @throws Error if wireDataSources() has not been called first.
+   */
+  attach(hook: RenderHook): void {
+    if (this.#attached) return;
+    this.#attached = true;
+
+    if (this.#byteSource === null) {
+      throw new Error("Mirror.attach(): call wireDataSources() before attach()");
+    }
+    const byteSource: ByteSource = this.#byteSource;
+
+    // Track previously-seen model to diff against.
+    let prevModel: {
+      panes: ReadonlyMap<PaneId, { cols: number; rows: number }>;
+      windows: ReadonlyMap<WindowId, { name: string; layout: WindowLayout }>;
+      focus: { paneId: PaneId | null; windowId: WindowId | null; sessionId: SessionId | null };
+    } = {
+      panes: new Map(),
+      windows: new Map(),
+      focus: { paneId: null, windowId: null, sessionId: null },
+    };
+
+    // Byte-source unsubscribe functions keyed by PaneId string.
+    const byteUnsubs = new Map<string, () => void>();
+
+    let detached = false;
+
+    function subscribeBytes(paneId: PaneId): void {
+      if (byteUnsubs.has(paneId)) return;
+      const unsub = byteSource.onPaneOutput(paneId, (bytes) => {
+        if (!detached) hook.onPaneOutput(paneId, bytes);
+      });
+      byteUnsubs.set(paneId, unsub);
+    }
+
+    function unsubscribeBytes(paneId: PaneId): void {
+      const unsub = byteUnsubs.get(paneId);
+      if (unsub !== undefined) {
+        unsub();
+        byteUnsubs.delete(paneId);
+      }
+    }
+
+    // Model diff — called on each model change after attach().
+    function applyModelDiff(curr: ClientModel): void {
+      const prev = prevModel;
+
+      // Windows: added / removed / renamed / layout changed
+      for (const [wid, win] of curr.windows) {
+        const prevWin = prev.windows.get(wid);
+        if (prevWin === undefined) {
+          hook.onWindowAdded({
+            windowId: win.windowId,
+            sessionId: win.sessionId,
+            name: win.name,
+            active: win.active,
+            layout: win.layout,
+          });
+          hook.onLayoutChanged(wid, win.layout);
+        } else {
+          if (prevWin.name !== win.name) {
+            hook.onWindowRenamed(wid, win.name);
+          }
+          if (prevWin.layout !== win.layout) {
+            hook.onLayoutChanged(wid, win.layout);
+          }
+        }
+      }
+      for (const [wid] of prev.windows) {
+        if (!curr.windows.has(wid)) {
+          hook.onWindowClosed(wid);
+        }
+      }
+
+      // Panes: added / removed / resized
+      for (const [pid, pane] of curr.panes) {
+        const prevPane = prev.panes.get(pid);
+        if (prevPane === undefined) {
+          hook.onPaneOpened({
+            paneId: pane.paneId,
+            windowId: pane.windowId,
+            sessionId: pane.sessionId,
+            cols: pane.cols,
+            rows: pane.rows,
+            active: pane.paneId === curr.focus.paneId,
+          });
+          subscribeBytes(pid);
+        } else if (prevPane.cols !== pane.cols || prevPane.rows !== pane.rows) {
+          hook.onPaneResized(pid, pane.cols, pane.rows);
+        }
+      }
+      for (const [pid] of prev.panes) {
+        if (!curr.panes.has(pid)) {
+          hook.onPaneClosed(pid);
+          unsubscribeBytes(pid);
+        }
+      }
+
+      // Focus
+      const pf = prev.focus;
+      const nf = curr.focus;
+      if (pf.paneId !== nf.paneId || pf.windowId !== nf.windowId || pf.sessionId !== nf.sessionId) {
+        hook.onFocusChanged(nf);
+      }
+
+      // Update prevModel to reflect current state.
+      const newPanes = new Map<PaneId, { cols: number; rows: number }>();
+      for (const [pid, p] of curr.panes) {
+        newPanes.set(pid, { cols: p.cols, rows: p.rows });
+      }
+      const newWindows = new Map<WindowId, { name: string; layout: WindowLayout }>();
+      for (const [wid, w] of curr.windows) {
+        newWindows.set(wid, { name: w.name, layout: w.layout });
+      }
+      prevModel = { panes: newPanes, windows: newWindows, focus: nf };
+    }
+
+    // ── Initial catch-up from current mirror state ──────────────────────────
+
+    const initial = this.#model;
+
+    // Windows first (panes are children of windows).
+    for (const win of initial.windows.values()) {
+      hook.onWindowAdded({
+        windowId: win.windowId,
+        sessionId: win.sessionId,
+        name: win.name,
+        active: win.active,
+        layout: win.layout,
+      });
+      hook.onLayoutChanged(win.windowId, win.layout);
+    }
+
+    // Panes + byte subscriptions.
+    for (const [pid, pane] of initial.panes) {
+      hook.onPaneOpened({
+        paneId: pane.paneId,
+        windowId: pane.windowId,
+        sessionId: pane.sessionId,
+        cols: pane.cols,
+        rows: pane.rows,
+        active: pane.paneId === initial.focus.paneId,
+      });
+      subscribeBytes(pid);
+    }
+
+    // Focus.
+    hook.onFocusChanged(initial.focus);
+
+    // Signal connected.
+    hook.onConnected();
+
+    // Seed prevModel from initial state.
+    const seedPanes = new Map<PaneId, { cols: number; rows: number }>();
+    for (const [pid, p] of initial.panes) {
+      seedPanes.set(pid, { cols: p.cols, rows: p.rows });
+    }
+    const seedWindows = new Map<WindowId, { name: string; layout: WindowLayout }>();
+    for (const [wid, w] of initial.windows) {
+      seedWindows.set(wid, { name: w.name, layout: w.layout });
+    }
+    prevModel = { panes: seedPanes, windows: seedWindows, focus: initial.focus };
+
+    // ── Subscribe to future model changes ────────────────────────────────────
+
+    const unsubModel = this.onModelChange((newModel) => {
+      if (detached) return;
+      applyModelDiff(newModel);
+    });
+    this.#attachUnsubs.push(unsubModel);
+
+    // Store byteUnsubs teardown in attachUnsubs.
+    this.#attachUnsubs.push(() => {
+      detached = true;
+      for (const unsub of byteUnsubs.values()) {
+        unsub();
+      }
+      byteUnsubs.clear();
+      hook.onDisconnected("mirror detached");
+    });
+  }
+
+  /**
+   * Detach the render hook attached via `attach()`.
+   *
+   * Fires `hook.onDisconnected("mirror detached")`, unsubscribes all byte
+   * sources, and removes the model-change listener.  Safe to call before
+   * `attach()` (no-op).
+   */
+  detachHook(): void {
+    for (const unsub of this.#attachUnsubs) {
+      unsub();
+    }
+    this.#attachUnsubs.length = 0;
   }
 
   // ── Internal ──────────────────────────────────────────────────────────────

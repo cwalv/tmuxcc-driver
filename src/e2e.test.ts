@@ -84,7 +84,8 @@ import type {
 import { EchoRenderHook } from "./render-hook.js";
 import { Mirror } from "./mirror.js";
 import type { SeqGapInfo } from "./mirror.js";
-import { createClient } from "./client.js";
+import { connectClient } from "./client.js";
+import type { ClientHandle } from "./client.js";
 
 // ---------------------------------------------------------------------------
 // Shared fixtures
@@ -165,31 +166,38 @@ function stampSeqs(deltas: DaemonMessage[], startSeq: number): DaemonMessage[] {
 }
 
 /**
- * Run the handshake on both sides, connect the client, then send the snapshot.
+ * Run the handshake on both sides, connect the client, attach the hook,
+ * then send the snapshot.
  *
  * We send the snapshot AFTER both sides have completed their handshake and
- * client.connect() has returned.  This avoids the microtask-ordering race where
- * the daemon's .then() runs before the client's post-handshake routing is
- * installed.
+ * connectClient() has returned, then attach the hook.  This means attach()
+ * fires onConnected with the empty model first, and the snapshot arrives as
+ * a model-change event (same ordering as the old driver.start() flow).
  */
 async function connectAndSnapshot(
   daemonTransport: import("@tmuxcc/daemon").Transport,
-  clientHandle: ReturnType<typeof createClient>,
+  clientTransport: import("@tmuxcc/daemon").Transport,
+  hook: EchoRenderHook,
   snapshot: SnapshotMessage,
-): Promise<import("@tmuxcc/daemon").NegotiatedSession> {
+): Promise<{ handle: ClientHandle; session: import("@tmuxcc/daemon").NegotiatedSession }> {
   // Start handshake on both sides concurrently (daemon doesn't need to await).
   const daemonHandshake = runDaemonHandshake(daemonTransport, DAEMON_CAPS);
 
   // Await the client — this completes both sides of the handshake.
-  const session = await clientHandle.connect();
+  const handle = await connectClient(clientTransport);
 
   // Ensure daemon promise has resolved (it must have by now; just drain).
   await daemonHandshake;
 
+  // Attach the hook before sending the snapshot, so the ordering matches
+  // the old driver.start() behavior: onConnected fires with empty model,
+  // then snapshot arrives as a model-change event.
+  handle.mirror.attach(hook);
+
   // Send the snapshot NOW — client post-handshake routing is installed.
   daemonTransport.sendControl(snapshot);
 
-  return session;
+  return { handle, session: handle.session };
 }
 
 // ---------------------------------------------------------------------------
@@ -202,13 +210,12 @@ describe("e2e — scenario 1: handshake + snapshot", () => {
       createInMemoryTransportPair();
 
     const echo = new EchoRenderHook();
-    const client = createClient(clientTransport, echo);
 
     // Build a model and project a snapshot.
     const model = buildBaseModel();
     const snapshot: SnapshotMessage = projectSnapshot(model, { seq: 2 });
 
-    const clientSession = await connectAndSnapshot(daemonTransport, client, snapshot);
+    const { handle, session: clientSession } = await connectAndSnapshot(daemonTransport, clientTransport, echo, snapshot);
 
     // Verify negotiated session.
     assert.equal(clientSession.protocolVersion, WIRE_PROTOCOL_VERSION);
@@ -274,7 +281,7 @@ describe("e2e — scenario 1: handshake + snapshot", () => {
     const firstPaneOpenedIdx = types.indexOf("paneOpened");
     assert.ok(windowAddedIdx < firstPaneOpenedIdx, "windowAdded must come before paneOpened");
 
-    client.stop();
+    handle.disconnect();
     daemonTransport.close();
   });
 });
@@ -289,13 +296,12 @@ describe("e2e — scenario 2: deltas", () => {
       createInMemoryTransportPair();
 
     const echo = new EchoRenderHook();
-    const client = createClient(clientTransport, echo);
 
     // Base model + snapshot.
     const baseModel = buildBaseModel();
     const snapshot: SnapshotMessage = projectSnapshot(baseModel, { seq: 2 });
 
-    await connectAndSnapshot(daemonTransport, client, snapshot);
+    const { handle } = await connectAndSnapshot(daemonTransport, clientTransport, echo, snapshot);
     echo.clear(); // clear initial snapshot calls; focus only on delta calls
 
     // Build updated model:
@@ -371,7 +377,7 @@ describe("e2e — scenario 2: deltas", () => {
     const closeIdx = echo.calls.indexOf(closedCall);
     assert.ok(resizeIdx < closeIdx, "paneResized must come before paneClosed");
 
-    client.stop();
+    handle.disconnect();
     daemonTransport.close();
   });
 });
@@ -386,12 +392,11 @@ describe("e2e — scenario 3: %output byte streams", () => {
       createInMemoryTransportPair();
 
     const echo = new EchoRenderHook();
-    const client = createClient(clientTransport, echo);
 
     const model = buildBaseModel();
     const snapshot: SnapshotMessage = projectSnapshot(model, { seq: 2 });
 
-    await connectAndSnapshot(daemonTransport, client, snapshot);
+    const { handle } = await connectAndSnapshot(daemonTransport, clientTransport, echo, snapshot);
 
     // Payloads — including non-UTF-8 bytes.
     const p0Chunk1 = new TextEncoder().encode("hello ");
@@ -437,7 +442,7 @@ describe("e2e — scenario 3: %output byte streams", () => {
     const p1FirstIdx = allOutputCalls.indexOf(p1a);
     assert.ok(p0LastIdx < p1FirstIdx, "P0 outputs must arrive before P1");
 
-    client.stop();
+    handle.disconnect();
     daemonTransport.close();
   });
 });
@@ -460,12 +465,10 @@ describe("e2e — scenario 4: resync — seq gap detection and recovery", () => 
       resyncGaps.push(gap);
     });
 
-    const client = createClient(clientTransport, echo);
-
     const model = buildBaseModel();
     const snapshot: SnapshotMessage = projectSnapshot(model, { seq: 2 });
 
-    await connectAndSnapshot(daemonTransport, client, snapshot);
+    const { handle } = await connectAndSnapshot(daemonTransport, clientTransport, echo, snapshot);
 
     // Build a delta with a GAP: snapshot seq=2, next expected=3, but we send seq=5.
     const gapDelta: DaemonMessage = {
@@ -529,7 +532,7 @@ describe("e2e — scenario 4: resync — seq gap detection and recovery", () => 
     assert.equal(lastResize.cols, 200);
     assert.equal(lastResize.rows, 60);
 
-    client.stop();
+    handle.disconnect();
     daemonTransport.close();
   });
 });
@@ -544,10 +547,6 @@ describe("e2e — scenario 5: input/resize round-trip", () => {
       createInMemoryTransportPair();
 
     const echo = new EchoRenderHook();
-    // Disable resize coalescing so the resize is sent immediately (no microtask wait).
-    const client = createClient(clientTransport, echo, {
-      input: { coalesceResizes: false },
-    });
 
     const model = buildBaseModel();
     const snapshot: SnapshotMessage = projectSnapshot(model, { seq: 2 });
@@ -558,11 +557,14 @@ describe("e2e — scenario 5: input/resize round-trip", () => {
     // Start handshake concurrently.
     const daemonHandshake = runDaemonHandshake(daemonTransport, DAEMON_CAPS);
 
-    // Connect the client.
-    await client.connect();
+    // Connect the client (coalesceResizes: false so resize is sent immediately).
+    const handle = await connectClient(clientTransport, { input: { coalesceResizes: false } });
 
-    // After client.connect(), daemon side must also have resolved.
+    // After connectClient(), daemon side must also have resolved.
     await daemonHandshake;
+
+    // Attach hook before sending snapshot.
+    handle.mirror.attach(echo);
 
     // Install daemon-side handler NOW (handshake no-op has settled).
     daemonTransport.onControl((msg) => {
@@ -573,10 +575,10 @@ describe("e2e — scenario 5: input/resize round-trip", () => {
     daemonTransport.sendControl(snapshot);
 
     // Send input via controller.
-    client.controller.sendInput(P0, "ls -la\r");
+    handle.controller.sendInput(P0, "ls -la\r");
 
     // Send resize via controller (coalescing disabled → immediate send).
-    client.controller.resizePane(P0, 220, 50);
+    handle.controller.resizePane(P0, 220, 50);
 
     // The in-memory transport delivers synchronously.
 
@@ -610,7 +612,7 @@ describe("e2e — scenario 5: input/resize round-trip", () => {
     assert.ok(resizeMsg.seq > 0, "resize seq must be positive");
     assert.ok(inputMsg.seq < resizeMsg.seq, "input must be sent before resize");
 
-    client.stop();
+    handle.disconnect();
     daemonTransport.close();
   });
 });
@@ -625,13 +627,12 @@ describe("e2e — scenario 6: onLayoutChanged delivers split-tree geometry", () 
       createInMemoryTransportPair();
 
     const echo = new EchoRenderHook();
-    const client = createClient(clientTransport, echo);
 
     // Build a model with a known split layout on W0.
     const model = buildBaseModel(); // W0 carries SAMPLE_LAYOUT (hsplit, 2 panes)
     const snapshot: SnapshotMessage = projectSnapshot(model, { seq: 2 });
 
-    await connectAndSnapshot(daemonTransport, client, snapshot);
+    const { handle } = await connectAndSnapshot(daemonTransport, clientTransport, echo, snapshot);
 
     // ── Part 1: snapshot replay fires onLayoutChanged with the split layout ──
     const layoutCalls = echo.calls.filter(
@@ -695,7 +696,7 @@ describe("e2e — scenario 6: onLayoutChanged delivers split-tree geometry", () 
       assert.equal(deltaCall.layout.root.children.length, 2);
     }
 
-    client.stop();
+    handle.disconnect();
     daemonTransport.close();
   });
 });
