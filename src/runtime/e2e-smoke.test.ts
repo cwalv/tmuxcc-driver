@@ -3,7 +3,7 @@
  *
  * Drives REAL tmux 3.4 through the whole stack:
  *   tmux -CC (via PTY bridge) → createDaemon → transport pair → client modules
- *   (Mirror + PaneStreamConsumer + RenderHookDriver) → EchoRenderHook callbacks
+ *   (Mirror + PaneStreamConsumer + Mirror.attach) → EchoRenderHook callbacks
  *
  * Acceptance scenarios (run against real tmux):
  *   E1. Connect: onWindowAdded + onPaneOpened + onConnected + onFocusChanged fire.
@@ -23,9 +23,18 @@
  *
  * Solution: mirror the proven pattern from integration.test.ts (Suite 3 R1/R2)
  * and daemon-transport.test.ts — run both handshakes concurrently, then
- * wire up the client modules (Mirror, PaneStreamConsumer, RenderHookDriver)
- * manually AFTER the handshake resolves.  This gives us EchoRenderHook
- * callbacks without the timing race.
+ * wire up the client modules (Mirror, PaneStreamConsumer) manually AFTER the
+ * handshake resolves, then call mirror.wireDataSources(byteSource) +
+ * mirror.attach(hook).  This gives us EchoRenderHook callbacks without the
+ * timing race.
+ *
+ * # tc-cox.5 migration note
+ *
+ * This harness previously used createRenderHookDriver (render-hook.ts) which
+ * has been deleted per the pre-alpha-redesign rule.  The wiring now uses
+ * Mirror.wireDataSources() + Mirror.attach(), which is the same path used by
+ * the production connectClient() in client.ts.  The E2ESession.teardown()
+ * calls mirror.detachHook() instead of renderSession.stop().
  *
  * # "VS Code terminals" layer
  *
@@ -80,10 +89,7 @@ import { PaneStreamConsumer } from "../../../tmuxcc-client/src/pane-stream.js";
 // @ts-ignore — outside rootDir; resolved by tsx at runtime
 import { createInputApi } from "../../../tmuxcc-client/src/input.js";
 // @ts-ignore — outside rootDir; resolved by tsx at runtime
-import {
-  EchoRenderHook,
-  createRenderHookDriver,
-} from "../../../tmuxcc-client/src/render-hook.js";
+import { EchoRenderHook } from "../../../tmuxcc-client/src/render-hook.js";
 // @ts-ignore — outside rootDir; resolved by tsx at runtime
 import type { RenderHookCall, PaneInfo, ClientController } from "../../../tmuxcc-client/src/render-hook.js";
 
@@ -203,59 +209,6 @@ function accumulatedOutput(
   );
 }
 
-// ---------------------------------------------------------------------------
-// buildMirrorModelSource — adapt Mirror to the ModelSource shape
-// ---------------------------------------------------------------------------
-
-// eslint-disable-next-line @typescript-eslint/explicit-function-return-type
-function buildMirrorModelSource(mirror: InstanceType<typeof Mirror>) {
-  return {
-    getModel() {
-      const m = mirror.getModel();
-      // Map ClientPane → PaneInfo (active = is focused pane)
-      const focusPaneId = m.focus.paneId;
-      const panes = new Map<PaneId, PaneInfo>();
-      for (const [id, p] of m.panes) {
-        panes.set(id, {
-          paneId: p.paneId,
-          windowId: p.windowId,
-          sessionId: p.sessionId,
-          cols: p.cols,
-          rows: p.rows,
-          active: p.paneId === focusPaneId,
-        });
-      }
-      const windows = new Map();
-      for (const [id, w] of m.windows) {
-        windows.set(id, {
-          windowId: w.windowId,
-          sessionId: w.sessionId,
-          name: w.name,
-          active: w.active,
-        });
-      }
-      const focus = { paneId: m.focus.paneId, windowId: m.focus.windowId, sessionId: m.focus.sessionId };
-      return { panes, windows, focus };
-    },
-    onModelChange(callback: () => void): () => void {
-      return mirror.onModelChange((_model: unknown) => callback());
-    },
-  };
-}
-
-// ---------------------------------------------------------------------------
-// buildByteSource — adapt PaneStreamConsumer to the ByteSource shape
-// ---------------------------------------------------------------------------
-
-// eslint-disable-next-line @typescript-eslint/explicit-function-return-type
-function buildByteSource(consumer: InstanceType<typeof PaneStreamConsumer>) {
-  return {
-    onPaneOutput(paneId: PaneId, callback: (bytes: Uint8Array) => void): () => void {
-      return consumer.onPaneOutput(paneId, callback);
-    },
-  };
-}
-
 // ===========================================================================
 // setupE2E — REUSABLE HARNESS
 //
@@ -308,7 +261,7 @@ export interface E2ESession {
   readonly clientTransport: ReturnType<typeof createInMemoryTransportPair>["client"];
   /** Poll until pane output contains needle. Throws on timeout. */
   waitForOutput(paneId: PaneId, needle: string, timeoutMs: number): Promise<void>;
-  /** Graceful teardown: stop render driver → kill daemon → kill tmux server. */
+  /** Graceful teardown: detach mirror hook → kill daemon → kill tmux server. */
   teardown(): Promise<void>;
 }
 
@@ -362,7 +315,7 @@ export async function setupE2E(
     daemon.inputPath.handleClientMessage(msg as ClientMessage);
   });
 
-  // 6. Build client-side modules: Mirror + PaneStreamConsumer + RenderHookDriver.
+  // 6. Build client-side modules: Mirror + PaneStreamConsumer.
   //
   //    The snapshot was sent synchronously by server.addClient() inside addPromise.
   //    At this point we need the snapshot in the mirror.  We get it via
@@ -405,23 +358,36 @@ export async function setupE2E(
   };
   const inputApi = createInputApi(connShim, {});
 
-  // 9. Build render-hook driver + EchoRenderHook.
+  // 9. Wire byte source into mirror + attach the EchoRenderHook.
+  //
+  //    tc-cox.5: replaced createRenderHookDriver with Mirror.wireDataSources() +
+  //    Mirror.attach() — the same path used by connectClient() in client.ts.
+  //    PaneStreamConsumer is structurally compatible with ByteSource; we adapt
+  //    it inline (same pattern as consumerToByteSource in client.ts).
   const hook: InstanceType<typeof EchoRenderHook> = new EchoRenderHook();
-  const modelSource = buildMirrorModelSource(mirror);
-  const byteSource = buildByteSource(paneConsumer);
-  const driver = createRenderHookDriver(hook, modelSource, byteSource, inputApi);
-  const renderSession = driver.start();
-  const controller: ClientController = renderSession.controller;
+  mirror.wireDataSources({
+    onPaneOutput(paneId: PaneId, callback: (bytes: Uint8Array) => void): () => void {
+      return paneConsumer.onPaneOutput(paneId, callback);
+    },
+  });
+  mirror.attach(hook);
+
+  // Build a ClientController that delegates to the InputApi.
+  const controller: ClientController = {
+    sendInput(paneId: PaneId, data: string): void { inputApi.sendInput(paneId, data); },
+    resizePane(paneId: PaneId, cols: number, rows: number): void { inputApi.resizePane(paneId, cols, rows); },
+    sendCommand(cmd: import("../wire/index.js").WireCommand): void { inputApi.sendCommand(cmd); },
+  };
 
   // 10. Validate: we must have at least 1 pane from the snapshot.
   const calls: RenderHookCall[] = hook.calls as RenderHookCall[];
   const firstPaneOpened = calls.find((c: RenderHookCall) => c.type === "paneOpened");
   if (firstPaneOpened === undefined || firstPaneOpened.type !== "paneOpened") {
-    renderSession.stop();
+    mirror.detachHook();
     detach();
     daemon.kill();
     killServer(sock);
-    throw new Error("setupE2E: no onPaneOpened after driver.start() — snapshot may be empty");
+    throw new Error("setupE2E: no onPaneOpened after mirror.attach() — snapshot may be empty");
   }
   const firstPaneId: PaneId = (firstPaneOpened as { type: "paneOpened"; pane: PaneInfo }).pane.paneId as PaneId;
 
@@ -431,7 +397,7 @@ export async function setupE2E(
   async function teardown(): Promise<void> {
     if (tornDown) return;
     tornDown = true;
-    try { renderSession.stop(); } catch { /**/ }
+    try { mirror.detachHook(); } catch { /**/ }
     try { detach(); } catch { /**/ }
     try { daemon.kill(); } catch { /**/ }
     await new Promise<void>((r) => {
