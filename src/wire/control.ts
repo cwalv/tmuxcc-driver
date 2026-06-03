@@ -147,12 +147,26 @@ export interface PaneOpenedMessage extends MessageBase {
 /**
  * A pane has been closed (exited or killed).
  * direction: daemon→client
+ *
+ * `exitCode` is the process exit code if the daemon captured it. It is
+ * optional because the current tmux notification layer (%window-close) does
+ * not carry the per-pane exit status — tmux only notifies that the window
+ * closed, not the individual pane's exit code. When absent, renderers should
+ * display a generic "[process exited]" message rather than "[process exited —
+ * code N]". This field is additive/optional and does not require a protocol
+ * version bump (non-breaking per the versioning policy above).
  */
 export interface PaneClosedMessage extends MessageBase {
   readonly type: "pane.closed";
   readonly paneId: PaneId;
   readonly windowId: WindowId;
   readonly sessionId: SessionId;
+  /**
+   * Exit code of the pane's process, if known.
+   * Absent when the daemon could not determine the exit code (most common case:
+   * tmux's %window-close notification does not include a per-pane exit status).
+   */
+  readonly exitCode?: number;
 }
 
 /**
