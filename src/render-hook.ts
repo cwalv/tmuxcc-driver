@@ -165,9 +165,14 @@ export interface RenderHook {
    * Called when a pane.closed event arrives.  After this, no further
    * onPaneOutput / onPaneResized callbacks will fire for this paneId.
    *
-   * Renderers should destroy pane-local state here.
+   * `exitCode` is the process exit code if the daemon captured it.  It is
+   * absent when the underlying tmux notification did not carry exit status
+   * (the most common case — see PaneClosedMessage in @tmuxcc/daemon).
+   *
+   * Renderers should show an exit message and mark the terminal as exited here.
+   * The tab MUST NOT auto-close; that is a user-driven action.
    */
-  onPaneClosed(paneId: PaneId): void;
+  onPaneClosed(paneId: PaneId, exitCode?: number): void;
 
   /**
    * A pane's dimensions changed.
@@ -365,7 +370,7 @@ export interface ByteSource {
  */
 export const NoOpRenderHook: RenderHook = {
   onPaneOpened(_pane: PaneInfo): void {},
-  onPaneClosed(_paneId: PaneId): void {},
+  onPaneClosed(_paneId: PaneId, _exitCode?: number): void {},
   onPaneResized(_paneId: PaneId, _cols: number, _rows: number): void {},
   onPaneModeChanged(_paneId: PaneId, _mode: PaneMode): void {},
   onPaneOutput(_paneId: PaneId, _bytes: Uint8Array): void {},
@@ -391,7 +396,7 @@ export const NoOpRenderHook: RenderHook = {
  */
 export type RenderHookCall =
   | { type: "paneOpened"; pane: PaneInfo }
-  | { type: "paneClosed"; paneId: PaneId }
+  | { type: "paneClosed"; paneId: PaneId; exitCode?: number }
   | { type: "paneResized"; paneId: PaneId; cols: number; rows: number }
   | { type: "paneModeChanged"; paneId: PaneId; mode: PaneMode }
   | { type: "paneOutput"; paneId: PaneId; bytes: Uint8Array }
@@ -427,8 +432,12 @@ export class EchoRenderHook implements RenderHook {
     this.calls.push({ type: "paneOpened", pane });
   }
 
-  onPaneClosed(paneId: PaneId): void {
-    this.calls.push({ type: "paneClosed", paneId });
+  onPaneClosed(paneId: PaneId, exitCode?: number): void {
+    if (exitCode !== undefined) {
+      this.calls.push({ type: "paneClosed", paneId, exitCode });
+    } else {
+      this.calls.push({ type: "paneClosed", paneId });
+    }
   }
 
   onPaneResized(paneId: PaneId, cols: number, rows: number): void {

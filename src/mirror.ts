@@ -144,6 +144,20 @@ export interface ClientModel {
   readonly panes: ReadonlyMap<PaneId, ClientPane>;
   /** Global focus triple. */
   readonly focus: ClientFocus;
+  /**
+   * Exit codes for panes that have closed, keyed by paneId.
+   *
+   * Populated when a `pane.closed` delta arrives carrying an `exitCode`.
+   * The entry persists in this map after the pane is removed from `panes` so
+   * that the mirror's diff path can pass the code to `onPaneClosed`.
+   * Entries are removed when the next snapshot arrives (full reset) or when
+   * the mirror is detached.
+   *
+   * Absent from `panes` (pane is closed) does NOT guarantee an entry here —
+   * most pane-closed events have no exit code because the underlying tmux
+   * notification (%window-close) does not carry one. See PaneClosedMessage.
+   */
+  readonly exitCodes: ReadonlyMap<PaneId, number>;
 }
 
 // ---------------------------------------------------------------------------
@@ -175,6 +189,7 @@ function emptyClientModel(): ClientModel {
     windows: new Map(),
     panes: new Map(),
     focus: { paneId: null, windowId: null, sessionId: null },
+    exitCodes: new Map(),
   };
 }
 
@@ -235,6 +250,9 @@ export function applySnapshot(snapshot: SnapshotMessage): {
       windowId: snapshot.focus.windowId,
       sessionId: snapshot.focus.sessionId,
     },
+    // Snapshot resets all state including exit codes — panes that exited before
+    // this snapshot are gone and their exit codes are no longer relevant.
+    exitCodes: new Map(),
   };
 
   return { model, seq: snapshot.seq };
@@ -278,6 +296,12 @@ export function applyDelta(model: ClientModel, msg: DaemonMessage): ClientModel 
       if (!model.panes.has(msg.paneId)) return model;
       const panes = new Map(model.panes);
       panes.delete(msg.paneId);
+      // Record the exit code if the daemon provided one.
+      if (msg.exitCode !== undefined) {
+        const exitCodes = new Map(model.exitCodes);
+        exitCodes.set(msg.paneId, msg.exitCode);
+        return { ...model, panes, exitCodes };
+      }
       return { ...model, panes };
     }
 
@@ -791,10 +815,12 @@ export class Mirror {
       panes: ReadonlyMap<PaneId, { cols: number; rows: number }>;
       windows: ReadonlyMap<WindowId, { name: string; layout: WindowLayout }>;
       focus: { paneId: PaneId | null; windowId: WindowId | null; sessionId: SessionId | null };
+      exitCodes: ReadonlyMap<PaneId, number>;
     } = {
       panes: new Map(),
       windows: new Map(),
       focus: { paneId: null, windowId: null, sessionId: null },
+      exitCodes: new Map(),
     };
 
     // Byte-source unsubscribe functions keyed by PaneId string.
@@ -868,7 +894,9 @@ export class Mirror {
       }
       for (const [pid] of prev.panes) {
         if (!curr.panes.has(pid)) {
-          hook.onPaneClosed(pid);
+          // Pass the exit code if the daemon provided one (carried in exitCodes).
+          const exitCode = curr.exitCodes.get(pid);
+          hook.onPaneClosed(pid, exitCode);
           unsubscribeBytes(pid);
         }
       }
@@ -889,7 +917,7 @@ export class Mirror {
       for (const [wid, w] of curr.windows) {
         newWindows.set(wid, { name: w.name, layout: w.layout });
       }
-      prevModel = { panes: newPanes, windows: newWindows, focus: nf };
+      prevModel = { panes: newPanes, windows: newWindows, focus: nf, exitCodes: curr.exitCodes };
     }
 
     // ── Initial catch-up from current mirror state ──────────────────────────
@@ -936,7 +964,7 @@ export class Mirror {
     for (const [wid, w] of initial.windows) {
       seedWindows.set(wid, { name: w.name, layout: w.layout });
     }
-    prevModel = { panes: seedPanes, windows: seedWindows, focus: initial.focus };
+    prevModel = { panes: seedPanes, windows: seedWindows, focus: initial.focus, exitCodes: initial.exitCodes };
 
     // ── Subscribe to future model changes ────────────────────────────────────
 
