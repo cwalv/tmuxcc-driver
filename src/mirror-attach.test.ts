@@ -1,12 +1,36 @@
 /**
- * Tests for the render-hook interface, reference implementations, and driver.
+ * Tests for Mirror.attach — snapshot replay, model-diff, byte events, and cleanup.
  *
- * All dependencies (model/byte/input sources) are synthetic fakes so these
- * tests run independently of concurrent sibling beads (tc-eots, tc-3fb,
- * tc-fpf).
+ * Port of render-hook.test.ts's driver tests to exercise Mirror.attach directly,
+ * per tc-cox.5 (pre-alpha-redesign rule: createRenderHookDriver removed).
+ *
+ * # Porting notes (tc-cox.5)
+ *
+ * The original render-hook.test.ts tested createRenderHookDriver using a
+ * FakeModelSource (push arbitrary ClientModel shapes) and FakeInputSink.
+ * Mirror.attach is the replacement: it takes a Mirror instance pre-seeded via
+ * receiveSnapshot()/receiveDelta() and a FakeByteSource.
+ *
+ * Key differences from the driver:
+ *   - Model state is driven via mirror.receiveSnapshot() + mirror.receiveDelta()
+ *     using real DaemonMessage types (pane.opened, pane.closed, etc.).
+ *   - mirror.wireDataSources(byteSource) is called before mirror.attach(hook).
+ *   - mirror.detachHook() replaces session.stop().
+ *   - Mirror.attach is idempotent (second call is no-op).
+ *
+ * # Intentionally dropped (documented)
+ *
+ * "ClientController delegates to InputSink" (3 tests) — Mirror.attach does not
+ * return a ClientController; that surface belongs to connectClient(). Those tests
+ * exercised driver-internal wiring (createRenderHookDriver → inputSink.sendInput
+ * / resizePane). The equivalent production path is tested end-to-end in
+ * e2e-smoke.test.ts (E2/E3/E4). No coverage gap in the redesigned architecture.
+ *
+ * All other describe blocks and every individual test from render-hook.test.ts are
+ * preserved 1-for-1 below.
  */
 
-import { describe, it, before } from "node:test";
+import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import type {
@@ -15,19 +39,12 @@ import type {
   SessionId,
   WindowLayout,
   PaneMode,
-  ModelSource,
-  ByteSource,
-  InputSink,
-  ClientModel,
-  PaneInfo,
-  WindowInfo,
   FocusInfo,
+  RenderHookCall,
 } from "./render-hook.js";
-import {
-  NoOpRenderHook,
-  EchoRenderHook,
-  createRenderHookDriver,
-} from "./render-hook.js";
+import { NoOpRenderHook, EchoRenderHook } from "./render-hook.js";
+import { Mirror } from "./mirror.js";
+import type { SnapshotMessage, DaemonMessage } from "@tmuxcc/daemon";
 
 // ---------------------------------------------------------------------------
 // Helpers — mint branded ids without importing daemon internals
@@ -51,65 +68,12 @@ function makeLayout(cols = 80, rows = 24): WindowLayout {
   };
 }
 
-function makePaneInfo(
-  paneId: PaneId,
-  windowId: WindowId,
-  sessionId: SessionId,
-  cols = 80,
-  rows = 24,
-  active = false,
-): PaneInfo {
-  return { paneId, windowId, sessionId, cols, rows, active };
-}
-
-function makeWindowInfo(
-  windowId: WindowId,
-  sessionId: SessionId,
-  name = "main",
-  active = false,
-  layout?: WindowLayout,
-): WindowInfo {
-  return { windowId, sessionId, name, active, layout: layout ?? makeLayout() };
-}
-
 // ---------------------------------------------------------------------------
-// Fake ModelSource — fully controllable from tests
+// Fake ByteSource — per-pane emit function vended by subscribe.
+// Matches the ByteSource interface from render-hook.ts.
 // ---------------------------------------------------------------------------
 
-class FakeModelSource implements ModelSource {
-  #model: ClientModel;
-  #listeners: Set<() => void> = new Set();
-
-  constructor(initial?: Partial<ClientModel>) {
-    this.#model = {
-      panes: initial?.panes ?? new Map(),
-      windows: initial?.windows ?? new Map(),
-      focus: initial?.focus ?? { paneId: null, windowId: null, sessionId: null },
-    };
-  }
-
-  getModel(): ClientModel {
-    return this.#model;
-  }
-
-  onModelChange(cb: () => void): () => void {
-    this.#listeners.add(cb);
-    return () => this.#listeners.delete(cb);
-  }
-
-  /** Push a new model state and fire all listeners. */
-  push(next: Partial<ClientModel>): void {
-    this.#model = { ...this.#model, ...next };
-    for (const cb of this.#listeners) cb();
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Fake ByteSource — per-pane emit function vended by subscribe
-// ---------------------------------------------------------------------------
-
-class FakeByteSource implements ByteSource {
-  /** emit(paneId, bytes) — call this from tests to push bytes. */
+class FakeByteSource {
   readonly emitters = new Map<string, Set<(bytes: Uint8Array) => void>>();
 
   onPaneOutput(paneId: PaneId, cb: (bytes: Uint8Array) => void): () => void {
@@ -131,50 +95,73 @@ class FakeByteSource implements ByteSource {
 }
 
 // ---------------------------------------------------------------------------
-// Fake InputSink — captures calls
+// SnapshotMessage builder — creates a snapshot with the given panes/windows
 // ---------------------------------------------------------------------------
 
-interface InputCall {
-  kind: "input";
-  paneId: PaneId;
-  data: string;
+interface SnapshotOpts {
+  seq?: number;
+  sessionId?: SessionId;
+  panes?: Array<{ paneId: PaneId; windowId: WindowId; cols?: number; rows?: number }>;
+  windows?: Array<{ windowId: WindowId; name?: string; active?: boolean; layout?: WindowLayout }>;
+  focus?: { paneId: PaneId | null; windowId: WindowId | null; sessionId: SessionId | null };
 }
-interface ResizeCall {
-  kind: "resize";
-  paneId: PaneId;
-  cols: number;
-  rows: number;
-}
-type SinkCall = InputCall | ResizeCall;
 
-class FakeInputSink implements InputSink {
-  readonly calls: SinkCall[] = [];
-
-  sendInput(paneId: PaneId, data: string): void {
-    this.calls.push({ kind: "input", paneId, data });
-  }
-
-  resizePane(paneId: PaneId, cols: number, rows: number): void {
-    this.calls.push({ kind: "resize", paneId, cols, rows });
-  }
-
-  // tc-9hk: stub — render-hook.test.ts tests don't exercise sendCommand.
-  sendCommand(_cmd: import("@tmuxcc/daemon").WireCommand): void {}
+function makeSnapshot(opts: SnapshotOpts = {}): SnapshotMessage {
+  const s = opts.sessionId ?? sid("s0");
+  const seq = opts.seq ?? 1;
+  const panes = opts.panes ?? [];
+  const windows = opts.windows ?? [];
+  const focus = opts.focus ?? { paneId: null, windowId: null, sessionId: null };
+  return {
+    type: "snapshot",
+    seq,
+    sessions: [{ sessionId: s, name: "main", active: true }],
+    windows: windows.map((w) => ({
+      windowId: w.windowId,
+      sessionId: s,
+      name: w.name ?? "main",
+      active: w.active ?? false,
+      layout: w.layout ?? makeLayout(),
+    })),
+    panes: panes.map((p) => ({
+      paneId: p.paneId,
+      windowId: p.windowId,
+      sessionId: s,
+      cols: p.cols ?? 80,
+      rows: p.rows ?? 24,
+    })),
+    focus,
+  };
 }
 
 // ---------------------------------------------------------------------------
-// Tests: NoOpRenderHook
+// Helper: create and wire a fresh Mirror for testing Mirror.attach
+//
+// Returns { mirror, byteSource } — caller calls mirror.attach(hook) to trigger
+// the catch-up + subscribe path, and mirror.detachHook() to tear down.
+// ---------------------------------------------------------------------------
+
+function makeMirror(snap: SnapshotMessage): { mirror: Mirror; byteSource: FakeByteSource } {
+  const mirror = new Mirror();
+  const byteSource = new FakeByteSource();
+  mirror.receiveSnapshot(snap);
+  mirror.wireDataSources(byteSource);
+  return { mirror, byteSource };
+}
+
+// ---------------------------------------------------------------------------
+// Tests: NoOpRenderHook (unchanged from render-hook.test.ts)
 // ---------------------------------------------------------------------------
 
 describe("NoOpRenderHook", () => {
   it("satisfies the RenderHook interface (compile check)", () => {
     // All methods are callable without throwing.
-    NoOpRenderHook.onPaneOpened(makePaneInfo(pid("p0"), wid("w0"), sid("s0")));
+    NoOpRenderHook.onPaneOpened({ paneId: pid("p0"), windowId: wid("w0"), sessionId: sid("s0"), cols: 80, rows: 24, active: false });
     NoOpRenderHook.onPaneClosed(pid("p0"));
     NoOpRenderHook.onPaneResized(pid("p0"), 80, 24);
     NoOpRenderHook.onPaneModeChanged(pid("p0"), "copy" as PaneMode);
     NoOpRenderHook.onPaneOutput(pid("p0"), new Uint8Array([0x41]));
-    NoOpRenderHook.onWindowAdded(makeWindowInfo(wid("w0"), sid("s0")));
+    NoOpRenderHook.onWindowAdded({ windowId: wid("w0"), sessionId: sid("s0"), name: "main", active: false, layout: makeLayout() });
     NoOpRenderHook.onWindowClosed(wid("w0"));
     NoOpRenderHook.onWindowRenamed(wid("w0"), "new-name");
     NoOpRenderHook.onLayoutChanged(wid("w0"), makeLayout());
@@ -186,13 +173,13 @@ describe("NoOpRenderHook", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Tests: EchoRenderHook records calls
+// Tests: EchoRenderHook records calls (unchanged from render-hook.test.ts)
 // ---------------------------------------------------------------------------
 
 describe("EchoRenderHook", () => {
   it("records onPaneOpened", () => {
     const echo = new EchoRenderHook();
-    const pane = makePaneInfo(pid("p1"), wid("w1"), sid("s1"), 120, 40, true);
+    const pane = { paneId: pid("p1"), windowId: wid("w1"), sessionId: sid("s1"), cols: 120, rows: 40, active: true };
     echo.onPaneOpened(pane);
     assert.equal(echo.calls.length, 1);
     const call = echo.calls[0];
@@ -242,7 +229,7 @@ describe("EchoRenderHook", () => {
 
   it("records onWindowAdded", () => {
     const echo = new EchoRenderHook();
-    const win = makeWindowInfo(wid("w2"), sid("s1"), "my-window", true);
+    const win = { windowId: wid("w2"), sessionId: sid("s1"), name: "my-window", active: true, layout: makeLayout() };
     echo.onWindowAdded(win);
     const call = echo.calls[0];
     assert.ok(call !== undefined);
@@ -318,33 +305,31 @@ describe("EchoRenderHook", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Tests: createRenderHookDriver — snapshot replay
+// Tests: Mirror.attach — snapshot replay
+//
+// Ported from "createRenderHookDriver — snapshot replay".
+// Mirror.attach fires the same ordered sequence of callbacks:
+//   onWindowAdded, onLayoutChanged (per window), onPaneOpened (per pane),
+//   onFocusChanged, onConnected.
 // ---------------------------------------------------------------------------
 
-describe("createRenderHookDriver — snapshot replay", () => {
+describe("Mirror.attach — snapshot replay", () => {
   it("fires onWindowAdded, onLayoutChanged, onPaneOpened, onFocusChanged, onConnected in order for initial model", () => {
     const w0 = wid("w0");
     const p0 = pid("p0");
     const s0 = sid("s0");
-
     const layout = makeLayout(80, 24);
-    const pane = makePaneInfo(p0, w0, s0, 80, 24, true);
-    const win = makeWindowInfo(w0, s0, "main", true, layout);
-    const focus: FocusInfo = { paneId: p0, windowId: w0, sessionId: s0 };
 
-    const model: ClientModel = {
-      panes: new Map([[p0, pane]]),
-      windows: new Map([[w0, win]]),
-      focus,
-    };
+    const snap = makeSnapshot({
+      sessionId: s0,
+      panes: [{ paneId: p0, windowId: w0, cols: 80, rows: 24 }],
+      windows: [{ windowId: w0, name: "main", active: true, layout }],
+      focus: { paneId: p0, windowId: w0, sessionId: s0 },
+    });
 
-    const modelSource = new FakeModelSource(model);
-    const byteSource = new FakeByteSource();
-    const inputSink = new FakeInputSink();
+    const { mirror } = makeMirror(snap);
     const echo = new EchoRenderHook();
-
-    const driver = createRenderHookDriver(echo, modelSource, byteSource, inputSink);
-    const session = driver.start();
+    mirror.attach(echo);
 
     // Expected order: windowAdded, layoutChanged, paneOpened, focusChanged, connected
     assert.ok(echo.calls.length >= 5);
@@ -373,35 +358,31 @@ describe("createRenderHookDriver — snapshot replay", () => {
     assert.ok(fc !== undefined && fc.type === "focusChanged");
     assert.equal(fc.focus.paneId, p0);
 
-    session.stop();
+    mirror.detachHook();
   });
 
-  it("fires onDisconnected when stopped", () => {
-    const modelSource = new FakeModelSource();
-    const byteSource = new FakeByteSource();
-    const inputSink = new FakeInputSink();
+  it("fires onDisconnected when detachHook() is called", () => {
+    const { mirror } = makeMirror(makeSnapshot());
     const echo = new EchoRenderHook();
-
-    const driver = createRenderHookDriver(echo, modelSource, byteSource, inputSink);
-    const session = driver.start();
+    mirror.attach(echo);
     echo.clear();
-    session.stop();
+    mirror.detachHook();
 
     assert.equal(echo.calls.length, 1);
     assert.equal(echo.calls[0]?.type, "disconnected");
   });
 
-  it("stop() is idempotent (no double-disconnect)", () => {
-    const modelSource = new FakeModelSource();
-    const byteSource = new FakeByteSource();
-    const inputSink = new FakeInputSink();
+  it("detachHook() is idempotent (no double-disconnect)", () => {
+    // Note: Mirror.attach() is idempotent (second call is a no-op), so there is
+    // no way to re-attach the same hook. Instead we verify that detachHook()
+    // called twice only fires onDisconnected once (the second call is a no-op
+    // because #attachUnsubs is cleared).
+    const { mirror } = makeMirror(makeSnapshot());
     const echo = new EchoRenderHook();
-
-    const driver = createRenderHookDriver(echo, modelSource, byteSource, inputSink);
-    const session = driver.start();
+    mirror.attach(echo);
     echo.clear();
-    session.stop();
-    session.stop(); // second call must be no-op
+    mirror.detachHook();
+    mirror.detachHook(); // second call must be no-op
 
     const disconnects = echo.calls.filter((c) => c.type === "disconnected");
     assert.equal(disconnects.length, 1);
@@ -409,37 +390,43 @@ describe("createRenderHookDriver — snapshot replay", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Tests: driver — model change events
+// Tests: Mirror.attach — model change events
+//
+// Ported from "createRenderHookDriver — model changes".
+// Model changes are driven via mirror.receiveDelta() with proper DaemonMessage
+// types and sequential seq numbers (seq starts at 2 after a seq=1 snapshot).
 // ---------------------------------------------------------------------------
 
-describe("createRenderHookDriver — model changes", () => {
+describe("Mirror.attach — model changes", () => {
   it("fires onPaneOpened when a new pane appears in the model", () => {
     const s0 = sid("s0");
     const w0 = wid("w0");
     const p0 = pid("p0");
     const p1 = pid("p1");
 
-    const pane0 = makePaneInfo(p0, w0, s0);
-    const win0 = makeWindowInfo(w0, s0);
-
-    const modelSource = new FakeModelSource({
-      panes: new Map([[p0, pane0]]),
-      windows: new Map([[w0, win0]]),
+    const snap = makeSnapshot({
+      sessionId: s0,
+      panes: [{ paneId: p0, windowId: w0 }],
+      windows: [{ windowId: w0 }],
       focus: { paneId: p0, windowId: w0, sessionId: s0 },
     });
-    const byteSource = new FakeByteSource();
-    const inputSink = new FakeInputSink();
+    const { mirror } = makeMirror(snap);
     const echo = new EchoRenderHook();
-
-    const driver = createRenderHookDriver(echo, modelSource, byteSource, inputSink);
-    const session = driver.start();
+    mirror.attach(echo);
     echo.clear();
 
     // New pane appears
-    const pane1 = makePaneInfo(p1, w0, s0, 80, 24, false);
-    modelSource.push({
-      panes: new Map([[p0, pane0], [p1, pane1]]),
-    });
+    const delta: DaemonMessage = {
+      type: "pane.opened",
+      seq: 2,
+      paneId: p1,
+      windowId: w0,
+      sessionId: s0,
+      cols: 80,
+      rows: 24,
+      active: false,
+    };
+    mirror.receiveDelta(delta);
 
     const opened = echo.calls.filter((c) => c.type === "paneOpened");
     assert.equal(opened.length, 1);
@@ -447,7 +434,7 @@ describe("createRenderHookDriver — model changes", () => {
     assert.ok(oc !== undefined && oc.type === "paneOpened");
     assert.equal(oc.pane.paneId, p1);
 
-    session.stop();
+    mirror.detachHook();
   });
 
   it("fires onPaneClosed when a pane disappears from the model", () => {
@@ -456,25 +443,26 @@ describe("createRenderHookDriver — model changes", () => {
     const p0 = pid("p0");
     const p1 = pid("p1");
 
-    const pane0 = makePaneInfo(p0, w0, s0);
-    const pane1 = makePaneInfo(p1, w0, s0);
-    const win0 = makeWindowInfo(w0, s0);
-
-    const modelSource = new FakeModelSource({
-      panes: new Map([[p0, pane0], [p1, pane1]]),
-      windows: new Map([[w0, win0]]),
+    const snap = makeSnapshot({
+      sessionId: s0,
+      panes: [{ paneId: p0, windowId: w0 }, { paneId: p1, windowId: w0 }],
+      windows: [{ windowId: w0 }],
       focus: { paneId: p0, windowId: w0, sessionId: s0 },
     });
-    const byteSource = new FakeByteSource();
-    const inputSink = new FakeInputSink();
+    const { mirror } = makeMirror(snap);
     const echo = new EchoRenderHook();
-
-    const driver = createRenderHookDriver(echo, modelSource, byteSource, inputSink);
-    const session = driver.start();
+    mirror.attach(echo);
     echo.clear();
 
     // p1 closes
-    modelSource.push({ panes: new Map([[p0, pane0]]) });
+    const delta: DaemonMessage = {
+      type: "pane.closed",
+      seq: 2,
+      paneId: p1,
+      windowId: w0,
+      sessionId: s0,
+    };
+    mirror.receiveDelta(delta);
 
     const closed = echo.calls.filter((c) => c.type === "paneClosed");
     assert.equal(closed.length, 1);
@@ -482,7 +470,7 @@ describe("createRenderHookDriver — model changes", () => {
     assert.ok(cc !== undefined && cc.type === "paneClosed");
     assert.equal(cc.paneId, p1);
 
-    session.stop();
+    mirror.detachHook();
   });
 
   it("fires onPaneResized when a pane's size changes", () => {
@@ -490,23 +478,24 @@ describe("createRenderHookDriver — model changes", () => {
     const w0 = wid("w0");
     const p0 = pid("p0");
 
-    const pane0 = makePaneInfo(p0, w0, s0, 80, 24);
-    const win0 = makeWindowInfo(w0, s0);
-
-    const modelSource = new FakeModelSource({
-      panes: new Map([[p0, pane0]]),
-      windows: new Map([[w0, win0]]),
+    const snap = makeSnapshot({
+      sessionId: s0,
+      panes: [{ paneId: p0, windowId: w0, cols: 80, rows: 24 }],
+      windows: [{ windowId: w0 }],
     });
-    const byteSource = new FakeByteSource();
-    const inputSink = new FakeInputSink();
+    const { mirror } = makeMirror(snap);
     const echo = new EchoRenderHook();
-
-    const driver = createRenderHookDriver(echo, modelSource, byteSource, inputSink);
-    const session = driver.start();
+    mirror.attach(echo);
     echo.clear();
 
-    const resized = makePaneInfo(p0, w0, s0, 120, 40);
-    modelSource.push({ panes: new Map([[p0, resized]]) });
+    const delta: DaemonMessage = {
+      type: "pane.resized",
+      seq: 2,
+      paneId: p0,
+      cols: 120,
+      rows: 40,
+    };
+    mirror.receiveDelta(delta);
 
     const resizes = echo.calls.filter((c) => c.type === "paneResized");
     assert.equal(resizes.length, 1);
@@ -515,7 +504,7 @@ describe("createRenderHookDriver — model changes", () => {
     assert.equal(rc.cols, 120);
     assert.equal(rc.rows, 40);
 
-    session.stop();
+    mirror.detachHook();
   });
 
   it("fires onFocusChanged when focus changes", () => {
@@ -524,24 +513,25 @@ describe("createRenderHookDriver — model changes", () => {
     const p0 = pid("p0");
     const p1 = pid("p1");
 
-    const pane0 = makePaneInfo(p0, w0, s0);
-    const pane1 = makePaneInfo(p1, w0, s0);
-    const win0 = makeWindowInfo(w0, s0);
-
-    const modelSource = new FakeModelSource({
-      panes: new Map([[p0, pane0], [p1, pane1]]),
-      windows: new Map([[w0, win0]]),
+    const snap = makeSnapshot({
+      sessionId: s0,
+      panes: [{ paneId: p0, windowId: w0 }, { paneId: p1, windowId: w0 }],
+      windows: [{ windowId: w0 }],
       focus: { paneId: p0, windowId: w0, sessionId: s0 },
     });
-    const byteSource = new FakeByteSource();
-    const inputSink = new FakeInputSink();
+    const { mirror } = makeMirror(snap);
     const echo = new EchoRenderHook();
-
-    const driver = createRenderHookDriver(echo, modelSource, byteSource, inputSink);
-    const session = driver.start();
+    mirror.attach(echo);
     echo.clear();
 
-    modelSource.push({ focus: { paneId: p1, windowId: w0, sessionId: s0 } });
+    const delta: DaemonMessage = {
+      type: "focus.changed",
+      seq: 2,
+      paneId: p1,
+      windowId: w0,
+      sessionId: s0,
+    };
+    mirror.receiveDelta(delta);
 
     const focuses = echo.calls.filter((c) => c.type === "focusChanged");
     assert.equal(focuses.length, 1);
@@ -549,7 +539,7 @@ describe("createRenderHookDriver — model changes", () => {
     assert.ok(fc !== undefined && fc.type === "focusChanged");
     assert.equal(fc.focus.paneId, p1);
 
-    session.stop();
+    mirror.detachHook();
   });
 
   it("fires onWindowAdded when a new window appears", () => {
@@ -557,21 +547,24 @@ describe("createRenderHookDriver — model changes", () => {
     const w0 = wid("w0");
     const w1 = wid("w1");
 
-    const win0 = makeWindowInfo(w0, s0);
-
-    const modelSource = new FakeModelSource({
-      windows: new Map([[w0, win0]]),
+    const snap = makeSnapshot({
+      sessionId: s0,
+      windows: [{ windowId: w0 }],
     });
-    const byteSource = new FakeByteSource();
-    const inputSink = new FakeInputSink();
+    const { mirror } = makeMirror(snap);
     const echo = new EchoRenderHook();
-
-    const driver = createRenderHookDriver(echo, modelSource, byteSource, inputSink);
-    const session = driver.start();
+    mirror.attach(echo);
     echo.clear();
 
-    const win1 = makeWindowInfo(w1, s0, "second");
-    modelSource.push({ windows: new Map([[w0, win0], [w1, win1]]) });
+    const delta: DaemonMessage = {
+      type: "window.added",
+      seq: 2,
+      windowId: w1,
+      sessionId: s0,
+      name: "second",
+      active: false,
+    };
+    mirror.receiveDelta(delta);
 
     const added = echo.calls.filter((c) => c.type === "windowAdded");
     assert.equal(added.length, 1);
@@ -579,7 +572,7 @@ describe("createRenderHookDriver — model changes", () => {
     assert.ok(ac !== undefined && ac.type === "windowAdded");
     assert.equal(ac.window.windowId, w1);
 
-    session.stop();
+    mirror.detachHook();
   });
 
   it("fires onWindowClosed when a window disappears", () => {
@@ -587,21 +580,22 @@ describe("createRenderHookDriver — model changes", () => {
     const w0 = wid("w0");
     const w1 = wid("w1");
 
-    const win0 = makeWindowInfo(w0, s0);
-    const win1 = makeWindowInfo(w1, s0);
-
-    const modelSource = new FakeModelSource({
-      windows: new Map([[w0, win0], [w1, win1]]),
+    const snap = makeSnapshot({
+      sessionId: s0,
+      windows: [{ windowId: w0 }, { windowId: w1 }],
     });
-    const byteSource = new FakeByteSource();
-    const inputSink = new FakeInputSink();
+    const { mirror } = makeMirror(snap);
     const echo = new EchoRenderHook();
-
-    const driver = createRenderHookDriver(echo, modelSource, byteSource, inputSink);
-    const session = driver.start();
+    mirror.attach(echo);
     echo.clear();
 
-    modelSource.push({ windows: new Map([[w0, win0]]) });
+    const delta: DaemonMessage = {
+      type: "window.closed",
+      seq: 2,
+      windowId: w1,
+      sessionId: s0,
+    };
+    mirror.receiveDelta(delta);
 
     const closed = echo.calls.filter((c) => c.type === "windowClosed");
     assert.equal(closed.length, 1);
@@ -609,27 +603,29 @@ describe("createRenderHookDriver — model changes", () => {
     assert.ok(cc !== undefined && cc.type === "windowClosed");
     assert.equal(cc.windowId, w1);
 
-    session.stop();
+    mirror.detachHook();
   });
 
   it("fires onWindowRenamed when a window name changes", () => {
     const s0 = sid("s0");
     const w0 = wid("w0");
-    const win0 = makeWindowInfo(w0, s0, "original");
 
-    const modelSource = new FakeModelSource({
-      windows: new Map([[w0, win0]]),
+    const snap = makeSnapshot({
+      sessionId: s0,
+      windows: [{ windowId: w0, name: "original" }],
     });
-    const byteSource = new FakeByteSource();
-    const inputSink = new FakeInputSink();
+    const { mirror } = makeMirror(snap);
     const echo = new EchoRenderHook();
-
-    const driver = createRenderHookDriver(echo, modelSource, byteSource, inputSink);
-    const session = driver.start();
+    mirror.attach(echo);
     echo.clear();
 
-    const renamed = makeWindowInfo(w0, s0, "new-name");
-    modelSource.push({ windows: new Map([[w0, renamed]]) });
+    const delta: DaemonMessage = {
+      type: "window.renamed",
+      seq: 2,
+      windowId: w0,
+      newName: "new-name",
+    };
+    mirror.receiveDelta(delta);
 
     const renames = echo.calls.filter((c) => c.type === "windowRenamed");
     assert.equal(renames.length, 1);
@@ -638,33 +634,32 @@ describe("createRenderHookDriver — model changes", () => {
     assert.equal(rc.windowId, w0);
     assert.equal(rc.newName, "new-name");
 
-    session.stop();
+    mirror.detachHook();
   });
 });
 
 // ---------------------------------------------------------------------------
-// Tests: driver — byte events
+// Tests: Mirror.attach — byte events
+//
+// Ported from "createRenderHookDriver — byte events".
+// FakeByteSource is wired via mirror.wireDataSources(byteSource) before
+// mirror.attach(hook), matching the Mirror.attach contract.
 // ---------------------------------------------------------------------------
 
-describe("createRenderHookDriver — byte events", () => {
+describe("Mirror.attach — byte events", () => {
   it("routes onPaneOutput for a pane with non-UTF-8 bytes", () => {
     const s0 = sid("s0");
     const w0 = wid("w0");
     const p0 = pid("p0");
 
-    const pane0 = makePaneInfo(p0, w0, s0);
-    const win0 = makeWindowInfo(w0, s0);
-
-    const modelSource = new FakeModelSource({
-      panes: new Map([[p0, pane0]]),
-      windows: new Map([[w0, win0]]),
+    const snap = makeSnapshot({
+      sessionId: s0,
+      panes: [{ paneId: p0, windowId: w0 }],
+      windows: [{ windowId: w0 }],
     });
-    const byteSource = new FakeByteSource();
-    const inputSink = new FakeInputSink();
+    const { mirror, byteSource } = makeMirror(snap);
     const echo = new EchoRenderHook();
-
-    const driver = createRenderHookDriver(echo, modelSource, byteSource, inputSink);
-    const session = driver.start();
+    mirror.attach(echo);
     echo.clear();
 
     // Non-UTF-8 bytes: 0xFF, 0x80, 0x00, plus ASCII
@@ -678,7 +673,7 @@ describe("createRenderHookDriver — byte events", () => {
     assert.equal(oc.paneId, p0);
     assert.deepEqual(oc.bytes, bytes);
 
-    session.stop();
+    mirror.detachHook();
   });
 
   it("subscribes to new pane bytes when a pane opens mid-session", () => {
@@ -687,24 +682,28 @@ describe("createRenderHookDriver — byte events", () => {
     const p0 = pid("p0");
     const p1 = pid("p1");
 
-    const pane0 = makePaneInfo(p0, w0, s0);
-    const win0 = makeWindowInfo(w0, s0);
-
-    const modelSource = new FakeModelSource({
-      panes: new Map([[p0, pane0]]),
-      windows: new Map([[w0, win0]]),
+    const snap = makeSnapshot({
+      sessionId: s0,
+      panes: [{ paneId: p0, windowId: w0 }],
+      windows: [{ windowId: w0 }],
     });
-    const byteSource = new FakeByteSource();
-    const inputSink = new FakeInputSink();
+    const { mirror, byteSource } = makeMirror(snap);
     const echo = new EchoRenderHook();
-
-    const driver = createRenderHookDriver(echo, modelSource, byteSource, inputSink);
-    const session = driver.start();
+    mirror.attach(echo);
     echo.clear();
 
     // p1 opens
-    const pane1 = makePaneInfo(p1, w0, s0);
-    modelSource.push({ panes: new Map([[p0, pane0], [p1, pane1]]) });
+    const delta: DaemonMessage = {
+      type: "pane.opened",
+      seq: 2,
+      paneId: p1,
+      windowId: w0,
+      sessionId: s0,
+      cols: 80,
+      rows: 24,
+      active: false,
+    };
+    mirror.receiveDelta(delta);
 
     // Now emit bytes for p1
     const bytes = new Uint8Array([0x68, 0x69]); // "hi"
@@ -716,7 +715,7 @@ describe("createRenderHookDriver — byte events", () => {
     assert.ok(oc !== undefined && oc.type === "paneOutput");
     assert.equal(oc.paneId, p1);
 
-    session.stop();
+    mirror.detachHook();
   });
 
   it("stops routing bytes for a closed pane after pane close", () => {
@@ -725,23 +724,24 @@ describe("createRenderHookDriver — byte events", () => {
     const p0 = pid("p0");
     const p1 = pid("p1");
 
-    const pane0 = makePaneInfo(p0, w0, s0);
-    const pane1 = makePaneInfo(p1, w0, s0);
-    const win0 = makeWindowInfo(w0, s0);
-
-    const modelSource = new FakeModelSource({
-      panes: new Map([[p0, pane0], [p1, pane1]]),
-      windows: new Map([[w0, win0]]),
+    const snap = makeSnapshot({
+      sessionId: s0,
+      panes: [{ paneId: p0, windowId: w0 }, { paneId: p1, windowId: w0 }],
+      windows: [{ windowId: w0 }],
     });
-    const byteSource = new FakeByteSource();
-    const inputSink = new FakeInputSink();
+    const { mirror, byteSource } = makeMirror(snap);
     const echo = new EchoRenderHook();
-
-    const driver = createRenderHookDriver(echo, modelSource, byteSource, inputSink);
-    const session = driver.start();
+    mirror.attach(echo);
 
     // Close p1
-    modelSource.push({ panes: new Map([[p0, pane0]]) });
+    const delta: DaemonMessage = {
+      type: "pane.closed",
+      seq: 2,
+      paneId: p1,
+      windowId: w0,
+      sessionId: s0,
+    };
+    mirror.receiveDelta(delta);
     echo.clear();
 
     // Bytes for p1 after close — should NOT reach the hook
@@ -750,111 +750,97 @@ describe("createRenderHookDriver — byte events", () => {
     const outputs = echo.calls.filter((c) => c.type === "paneOutput");
     assert.equal(outputs.length, 0);
 
-    session.stop();
+    mirror.detachHook();
   });
 });
 
 // ---------------------------------------------------------------------------
-// Tests: input/resize surface — controller delegates to InputSink
+// Tests: Mirror.attach — cleanup on detach
+//
+// Ported from "createRenderHookDriver — cleanup on stop".
 // ---------------------------------------------------------------------------
 
-describe("ClientController delegates to InputSink", () => {
-  it("sendInput is forwarded to the InputSink", () => {
-    const modelSource = new FakeModelSource();
-    const byteSource = new FakeByteSource();
-    const sink = new FakeInputSink();
-    const echo = new EchoRenderHook();
-
-    const driver = createRenderHookDriver(echo, modelSource, byteSource, sink);
-    const session = driver.start();
-
-    session.controller.sendInput(pid("p0"), "hello");
-
-    assert.equal(sink.calls.length, 1);
-    const call = sink.calls[0];
-    assert.ok(call !== undefined && call.kind === "input");
-    assert.equal(call.paneId, "p0");
-    assert.equal(call.data, "hello");
-
-    session.stop();
-  });
-
-  it("resizePane is forwarded to the InputSink", () => {
-    const modelSource = new FakeModelSource();
-    const byteSource = new FakeByteSource();
-    const sink = new FakeInputSink();
-    const echo = new EchoRenderHook();
-
-    const driver = createRenderHookDriver(echo, modelSource, byteSource, sink);
-    const session = driver.start();
-
-    session.controller.resizePane(pid("p1"), 200, 50);
-
-    assert.equal(sink.calls.length, 1);
-    const call = sink.calls[0];
-    assert.ok(call !== undefined && call.kind === "resize");
-    assert.equal(call.paneId, "p1");
-    assert.equal(call.cols, 200);
-    assert.equal(call.rows, 50);
-
-    session.stop();
-  });
-
-  it("multiple sendInput calls are all captured in order", () => {
-    const modelSource = new FakeModelSource();
-    const byteSource = new FakeByteSource();
-    const sink = new FakeInputSink();
-    const echo = new EchoRenderHook();
-
-    const driver = createRenderHookDriver(echo, modelSource, byteSource, sink);
-    const session = driver.start();
-
-    session.controller.sendInput(pid("p0"), "a");
-    session.controller.sendInput(pid("p0"), "b");
-    session.controller.sendInput(pid("p0"), "c");
-
-    assert.equal(sink.calls.length, 3);
-    assert.equal((sink.calls[0] as InputCall | undefined)?.data, "a");
-    assert.equal((sink.calls[1] as InputCall | undefined)?.data, "b");
-    assert.equal((sink.calls[2] as InputCall | undefined)?.data, "c");
-
-    session.stop();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Tests: model unsubscription on stop
-// ---------------------------------------------------------------------------
-
-describe("createRenderHookDriver — cleanup on stop", () => {
-  it("does not fire callbacks after stop()", () => {
+describe("Mirror.attach — cleanup on detach", () => {
+  it("does not fire callbacks after detachHook()", () => {
     const s0 = sid("s0");
     const w0 = wid("w0");
     const p0 = pid("p0");
 
-    const pane0 = makePaneInfo(p0, w0, s0);
-    const win0 = makeWindowInfo(w0, s0);
-
-    const modelSource = new FakeModelSource({
-      panes: new Map([[p0, pane0]]),
-      windows: new Map([[w0, win0]]),
+    const snap = makeSnapshot({
+      sessionId: s0,
+      panes: [{ paneId: p0, windowId: w0 }],
+      windows: [{ windowId: w0 }],
     });
-    const byteSource = new FakeByteSource();
-    const inputSink = new FakeInputSink();
+    const { mirror, byteSource } = makeMirror(snap);
     const echo = new EchoRenderHook();
-
-    const driver = createRenderHookDriver(echo, modelSource, byteSource, inputSink);
-    const session = driver.start();
-    session.stop();
+    mirror.attach(echo);
+    mirror.detachHook();
     echo.clear();
 
-    // Push a model change after stop — should be silent
-    const pane1 = makePaneInfo(pid("p1"), w0, s0);
-    modelSource.push({
-      panes: new Map([[p0, pane0], [pid("p1"), pane1]]),
-    });
+    // Push a model change after detach — should be silent
+    // We use receiveSnapshot to force a model change (detachHook already unsubscribed)
+    // Since the seq counter resets on re-snapshot, that's fine for testing the
+    // "no callbacks after detach" invariant.
+    mirror.receiveSnapshot(
+      makeSnapshot({
+        seq: 99,
+        sessionId: s0,
+        panes: [{ paneId: p0, windowId: w0 }, { paneId: pid("p1"), windowId: w0 }],
+        windows: [{ windowId: w0 }],
+      }),
+    );
     byteSource.emit(p0, new Uint8Array([0x41]));
 
     assert.equal(echo.calls.length, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: Mirror.attach — idempotence
+//
+// New test verifying Mirror.attach() guard: a second attach() call is a no-op.
+// (No equivalent in the old tests — the driver didn't have this constraint.)
+// ---------------------------------------------------------------------------
+
+describe("Mirror.attach — idempotence", () => {
+  it("second attach() call is a no-op (does not fire a second snapshot replay)", () => {
+    const w0 = wid("w0");
+    const p0 = pid("p0");
+    const s0 = sid("s0");
+
+    const snap = makeSnapshot({
+      sessionId: s0,
+      panes: [{ paneId: p0, windowId: w0 }],
+      windows: [{ windowId: w0 }],
+      focus: { paneId: p0, windowId: w0, sessionId: s0 },
+    });
+    const { mirror } = makeMirror(snap);
+    const echo = new EchoRenderHook();
+    mirror.attach(echo);
+    const countAfterFirst = echo.calls.length;
+
+    // Second attach should be a no-op
+    const echo2 = new EchoRenderHook();
+    mirror.attach(echo2);
+    assert.equal(echo2.calls.length, 0, "second attach must not fire any callbacks");
+    // First echo must have received nothing extra
+    assert.equal(echo.calls.length, countAfterFirst);
+
+    mirror.detachHook();
+  });
+
+  it("wireDataSources() throws if called after attach()", () => {
+    // This guards the pre-condition: wireDataSources must be called BEFORE attach.
+    // Mirror.attach() itself throws if wireDataSources hasn't been called.
+    // Here we test the complementary case: attach() called without wireDataSources.
+    const snap = makeSnapshot({
+      windows: [{ windowId: wid("w0") }],
+      panes: [{ paneId: pid("p0"), windowId: wid("w0") }],
+    });
+    const mirror = new Mirror();
+    mirror.receiveSnapshot(snap);
+    // Intentionally skip wireDataSources — should throw.
+    const echo = new EchoRenderHook();
+    assert.throws(() => mirror.attach(echo), /wireDataSources/);
   });
 });

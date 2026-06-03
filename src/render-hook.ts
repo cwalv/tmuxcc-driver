@@ -17,13 +17,11 @@
  *
  * Usage (from the renderer side):
  * ```ts
+ * const handle = await connectClient(transport);
  * const hook: RenderHook = myRendererImpl;
- * const controller: ClientController = { sendInput, resizePane };
- * const driver = createRenderHookDriver(hook, modelSource, byteSource, inputSink);
- * const stop = driver.start();   // begins observing; calls hook immediately with
- *                                // current panes / layout / focus
+ * handle.mirror.attach(hook);  // catches up from current mirror state + subscribes
  * // ... later:
- * stop();                        // detach from model + byte sources
+ * handle.mirror.detachHook();  // detach from all sources
  * ```
  *
  * # HEADLESS INVARIANT
@@ -36,24 +34,6 @@
  *
  * E6 (tmuxcc-vscode) IMPLEMENTS RenderHook using VS Code APIs.  That code
  * lives in tmuxcc-vscode, not here.
- *
- * # Concurrent sibling integration (tc-eots / tc-3fb / tc-fpf)
- *
- * This file defines ABSTRACT local interfaces for the driver's dependencies so
- * it can be compiled and tested independently of concurrent sibling beads:
- *
- *   ModelSource  ← tc-eots (mirror.ts): getModel() + onModelChange()
- *   ByteSource   ← tc-3fb (pane-stream.ts): onPaneOutput()
- *   InputSink    ← tc-fpf (input.ts): sendInput() + resizePane()
- *
- * Integration wiring (TL action at sync time):
- *   modelSource → the ClientMirror exported by tc-eots' mirror.ts
- *   byteSource  → the PaneStream / consumer exported by tc-3fb' pane-stream.ts
- *   inputSink   → the InputApi exported by tc-fpf's input.ts
- *
- * The driver uses only these abstract shapes, so no import change is needed in
- * render-hook.ts; the TL wires the concrete instances at call-site (wherever
- * createRenderHookDriver is called from the top-level client entry point).
  */
 
 import type { PaneId, WindowId, SessionId, WindowLayout, PaneMode, WireCommand } from "@tmuxcc/daemon";
@@ -306,12 +286,10 @@ export interface RenderHook {
  * The handle the renderer uses to send input and resize requests toward the
  * daemon.  The renderer CALLS these methods; the client IMPLEMENTS them.
  *
- * Handed to the renderer alongside the driver (e.g. returned from
- * createRenderHookDriver alongside a stop function, or bundled in a
- * RenderSession object).
+ * Obtained from `connectClient(transport).controller`.
  *
- * Integration wiring: at call-site the concrete implementation delegates to
- * tc-fpf's InputApi (sendInput / resizePane methods).
+ * Integration wiring: the concrete implementation (built in client.ts) delegates
+ * to tc-fpf's InputApi (sendInput / resizePane methods).
  */
 export interface ClientController {
   /**
@@ -357,69 +335,15 @@ export interface ClientController {
 }
 
 // ---------------------------------------------------------------------------
-// Abstract source/sink interfaces — driver dependencies
+// ByteSource — abstract byte source used by Mirror.attach and client.ts
 // ---------------------------------------------------------------------------
-//
-// These are LOCAL minimal interfaces that the driver is parameterised over.
-// They exist so the driver compiles + tests independently of the concurrent
-// sibling beads (tc-eots / tc-3fb / tc-fpf).
-//
-// TL integration wiring at sync time:
-//   ModelSource  → ClientMirror from tc-eots (mirror.ts)
-//     getModel() → mirror.getModel()
-//     onModelChange(cb) → mirror.onModelChange(cb); returns unsubscribe fn
-//
-//   ByteSource   → PaneStream from tc-3fb (pane-stream.ts)
-//     onPaneOutput(paneId, cb) → stream.onPaneOutput(paneId, cb); returns unsubscribe
-//
-//   InputSink    → InputApi from tc-fpf (input.ts)
-//     sendInput(paneId, data) → inputApi.sendInput(paneId, data)
-//     resizePane(paneId, cols, rows) → inputApi.resizePane(paneId, cols, rows)
-
-/**
- * The current client model: a flat snapshot of all sessions, windows, panes,
- * and focus state.  The driver reads this on every model-change tick to diff
- * the previous state and derive lifecycle events for the renderer.
- *
- * Integration: this is a projection of what tc-eots' ClientMirror exposes.
- * The mirror's getModel() should return a value compatible with ClientModel.
- */
-export interface ClientModel {
-  /** All panes known to the client, keyed by PaneId string. */
-  readonly panes: ReadonlyMap<PaneId, PaneInfo>;
-  /** All windows known to the client, keyed by WindowId string. */
-  readonly windows: ReadonlyMap<WindowId, WindowInfo>;
-  /** Current focus state. */
-  readonly focus: FocusInfo;
-}
-
-/**
- * Abstract model source — provided by tc-eots' mirror at integration time.
- *
- * @remarks
- * The driver calls getModel() synchronously on each model-change tick to
- * obtain the latest state.  onModelChange registers a listener that fires
- * whenever the mirror applies a snapshot or delta; the returned function
- * removes the listener.
- */
-export interface ModelSource {
-  /** Returns the current model state (snapshot of all panes/windows/focus). */
-  getModel(): ClientModel;
-  /**
-   * Register a callback to be invoked whenever the model changes.
-   * Returns an unsubscribe function; call it to stop receiving notifications.
-   */
-  onModelChange(callback: () => void): () => void;
-}
 
 /**
  * Abstract byte source — provided by tc-3fb's pane-stream at integration time.
  *
- * @remarks
- * The driver calls onPaneOutput for EVERY pane that exists at driver start,
- * and re-subscribes when new panes open.  The returned function unsubscribes.
- * If the sibling supports global subscription (all panes through one callback),
- * the TL should adapt the interface at the call-site.
+ * Implemented by PaneStreamConsumer (pane-stream.ts) and adapted via
+ * consumerToByteSource() in client.ts.  Exposed here so mirror.ts and
+ * client.ts can share the interface without a circular import.
  */
 export interface ByteSource {
   /**
@@ -427,242 +351,6 @@ export interface ByteSource {
    * Returns an unsubscribe function.
    */
   onPaneOutput(paneId: PaneId, callback: (bytes: Uint8Array) => void): () => void;
-}
-
-/**
- * Abstract input sink — provided by tc-fpf's InputApi at integration time.
- *
- * @remarks
- * The driver builds a ClientController whose methods delegate to this sink.
- * At integration, swap the local fake (used in tests) for the real InputApi.
- */
-export interface InputSink {
-  /** Forward text/key input to a pane. */
-  sendInput(paneId: PaneId, data: string): void;
-  /** Forward a resize notification for a pane. */
-  resizePane(paneId: PaneId, cols: number, rows: number): void;
-  /**
-   * Send a model-level command to the daemon (e.g. open-window, split-pane).
-   * tc-9hk: wired to DaemonConnection.send() via a command.request wrapper.
-   */
-  sendCommand(cmd: WireCommand): void;
-}
-
-// ---------------------------------------------------------------------------
-// RenderSession — the combined handle returned to a renderer
-// ---------------------------------------------------------------------------
-
-/**
- * The complete handle vended to a renderer by createRenderHookDriver.
- *
- * `controller` — for renderer→client input/resize.
- * `stop`       — call to detach from all model/byte sources and stop
- *                receiving callbacks.  Idempotent.
- */
-export interface RenderSession {
-  readonly controller: ClientController;
-  /** Stop observing model + byte sources.  Safe to call more than once. */
-  stop(): void;
-}
-
-// ---------------------------------------------------------------------------
-// createRenderHookDriver — the driver implementation
-// ---------------------------------------------------------------------------
-
-/**
- * Create a render-hook driver that translates model changes and byte events
- * into RenderHook callbacks.
- *
- * The driver:
- *   1. On start(), reads the current model via modelSource.getModel() and
- *      calls onWindowAdded / onPaneOpened / onLayoutChanged for every entity
- *      in the snapshot, then onFocusChanged, then onConnected.
- *   2. Subscribes to modelSource.onModelChange and diffs prev/next model on
- *      each tick to derive onPaneOpened / onPaneClosed / onPaneResized /
- *      onWindowAdded / onWindowClosed / onWindowRenamed / onLayoutChanged /
- *      onFocusChanged callbacks.
- *   3. Subscribes to byteSource.onPaneOutput for each known pane (and adds
- *      new subscriptions when onPaneOpened fires) and calls hook.onPaneOutput.
- *   4. Builds a ClientController that delegates to inputSink.
- *
- * Model diff strategy (step 2):
- *   - Panes added   (in next but not prev) → onPaneOpened
- *   - Panes removed (in prev but not next) → onPaneClosed
- *   - Panes resized (same id, different cols/rows) → onPaneResized
- *   - Windows added / removed / renamed — same pattern
- *   - Layout: the driver compares the layout from the model's windows; if the
- *     layout field changed for a window, onLayoutChanged fires.  (The sibling
- *     tc-eots may expose richer layout info; the TL can specialise this at
- *     integration if needed.)
- *   - Focus changed → onFocusChanged (compare prev.focus vs next.focus)
- *
- * @param hook        - Renderer implementation of RenderHook.
- * @param modelSource - Abstract model source (see ModelSource).
- * @param byteSource  - Abstract byte source (see ByteSource).
- * @param inputSink   - Abstract input sink (see InputSink).
- * @returns           RenderSession with controller + stop().
- */
-export function createRenderHookDriver(
-  hook: RenderHook,
-  modelSource: ModelSource,
-  byteSource: ByteSource,
-  inputSink: InputSink,
-): { start(): RenderSession } {
-  return {
-    start(): RenderSession {
-      // Track previously-seen model to diff against.
-      let prevModel: ClientModel = {
-        panes: new Map(),
-        windows: new Map(),
-        focus: { paneId: null, windowId: null, sessionId: null },
-      };
-
-      // Byte-source unsubscribe functions keyed by PaneId string.
-      const byteUnsubs = new Map<string, () => void>();
-
-      // Whether the driver has been stopped.
-      let stopped = false;
-
-      // ── Byte subscription helper ─────────────────────────────────────────
-
-      function subscribeBytes(paneId: PaneId): void {
-        if (byteUnsubs.has(paneId)) return; // already subscribed
-        const unsub = byteSource.onPaneOutput(paneId, (bytes) => {
-          if (!stopped) hook.onPaneOutput(paneId, bytes);
-        });
-        byteUnsubs.set(paneId, unsub);
-      }
-
-      function unsubscribeBytes(paneId: PaneId): void {
-        const unsub = byteUnsubs.get(paneId);
-        if (unsub !== undefined) {
-          unsub();
-          byteUnsubs.delete(paneId);
-        }
-      }
-
-      // ── Model diff ───────────────────────────────────────────────────────
-
-      function applyModelDiff(next: ClientModel): void {
-        const prev = prevModel;
-
-        // Windows: added / removed / renamed / layout changed
-        for (const [wid, win] of next.windows) {
-          const prevWin = prev.windows.get(wid);
-          if (prevWin === undefined) {
-            hook.onWindowAdded(win);
-            // Fire onLayoutChanged for the initial layout of a newly-added window.
-            hook.onLayoutChanged(wid, win.layout);
-          } else {
-            if (prevWin.name !== win.name) {
-              hook.onWindowRenamed(wid, win.name);
-            }
-            // Layout: fire onLayoutChanged when the layout reference changes.
-            // WindowInfo.layout is projected from ClientWindow.layout (which is
-            // replaced atomically by the mirror on every layout.updated delta).
-            // Reference inequality is the correct and cheap change signal here
-            // because the mirror always creates a new object on update.
-            if (prevWin.layout !== win.layout) {
-              hook.onLayoutChanged(wid, win.layout);
-            }
-          }
-        }
-        for (const [wid] of prev.windows) {
-          if (!next.windows.has(wid)) {
-            hook.onWindowClosed(wid);
-          }
-        }
-
-        // Panes: added / removed / resized
-        for (const [pid, pane] of next.panes) {
-          const prevPane = prev.panes.get(pid);
-          if (prevPane === undefined) {
-            hook.onPaneOpened(pane);
-            subscribeBytes(pid);
-          } else if (prevPane.cols !== pane.cols || prevPane.rows !== pane.rows) {
-            hook.onPaneResized(pid, pane.cols, pane.rows);
-          }
-        }
-        for (const [pid] of prev.panes) {
-          if (!next.panes.has(pid)) {
-            hook.onPaneClosed(pid);
-            unsubscribeBytes(pid);
-          }
-        }
-
-        // Focus
-        const pf = prev.focus;
-        const nf = next.focus;
-        if (pf.paneId !== nf.paneId || pf.windowId !== nf.windowId || pf.sessionId !== nf.sessionId) {
-          hook.onFocusChanged(nf);
-        }
-
-        prevModel = next;
-      }
-
-      // ── Initial snapshot replay ──────────────────────────────────────────
-
-      const initial = modelSource.getModel();
-
-      // Windows first (panes are children of windows).
-      for (const win of initial.windows.values()) {
-        hook.onWindowAdded(win);
-        // Fire onLayoutChanged for every window in the initial snapshot so
-        // renderers receive geometry before any pane events arrive.
-        hook.onLayoutChanged(win.windowId, win.layout);
-      }
-
-      // Panes + byte subscriptions.
-      for (const [pid, pane] of initial.panes) {
-        hook.onPaneOpened(pane);
-        subscribeBytes(pid);
-      }
-
-      // Focus.
-      hook.onFocusChanged(initial.focus);
-
-      // Signal connected.
-      hook.onConnected();
-
-      prevModel = initial;
-
-      // ── Subscribe to model changes ───────────────────────────────────────
-
-      const unsubModel = modelSource.onModelChange(() => {
-        if (stopped) return;
-        applyModelDiff(modelSource.getModel());
-      });
-
-      // ── Controller ───────────────────────────────────────────────────────
-
-      const controller: ClientController = {
-        sendInput(paneId: PaneId, data: string): void {
-          inputSink.sendInput(paneId, data);
-        },
-        resizePane(paneId: PaneId, cols: number, rows: number): void {
-          inputSink.resizePane(paneId, cols, rows);
-        },
-        sendCommand(cmd: WireCommand): void {
-          inputSink.sendCommand(cmd);
-        },
-      };
-
-      // ── Stop ─────────────────────────────────────────────────────────────
-
-      function stop(): void {
-        if (stopped) return;
-        stopped = true;
-        unsubModel();
-        for (const unsub of byteUnsubs.values()) {
-          unsub();
-        }
-        byteUnsubs.clear();
-        hook.onDisconnected("driver stopped");
-      }
-
-      return { controller, stop };
-    },
-  };
 }
 
 // ---------------------------------------------------------------------------
