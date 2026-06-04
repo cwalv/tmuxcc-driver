@@ -1220,7 +1220,8 @@ describe("tc-93a: createDaemon assembly — fake-tmux smoke", () => {
     // tc-blk — track the assembly-test socket too, even though we never start
     // the daemon (kill is called below). The trackSocket call is cheap and
     // covers the case where createDaemon evolves to do eager work later.
-    const asmSock = `tmuxcc-test-daemon-asm-${Date.now()}`;
+    // tc-bpn — shape: tmuxcc-test-<pid>-<suffix> required by test-tmux-cleanup.
+    const asmSock = `tmuxcc-test-${process.pid}-daemon-asm-${Date.now()}`;
     trackSocket(asmSock);
     const daemon = createDaemon({
       host: {
@@ -1280,10 +1281,11 @@ const tmuxAvailable = (() => {
   }
 })();
 
-const REAL_RUN_ID = `${Date.now()}-${process.pid}`;
+const REAL_RUN_SUFFIX = `${Date.now()}`;
 
 function realSockName(label: string): string {
-  const sock = `tmuxcc-int-${REAL_RUN_ID}-${label}`;
+  // tc-bpn — shape: tmuxcc-test-<pid>-<suffix> required by test-tmux-cleanup.
+  const sock = `tmuxcc-test-${process.pid}-int-${REAL_RUN_SUFFIX}-${label}`;
   // tc-blk — track BEFORE the daemon is created so a thrown test still gets
   // its server reaped via the process-exit / top-level after() net.
   trackSocket(sock);

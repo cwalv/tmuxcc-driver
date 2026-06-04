@@ -263,7 +263,7 @@ describe("TmuxHost — hermetic (fake-tmux)", () => {
 describe("TmuxHost — error paths", () => {
   it("onError fires when python binary is not found", async () => {
     const host = createTmuxHost({
-      socketName: `tmuxcc-test-err-${Date.now()}`,
+      socketName: `tmuxcc-test-${process.pid}-err-${Date.now()}`,
       sessionName: "tc-kyp-err",
       pythonPath: "/nonexistent/python3-xyz-404",
     });
@@ -289,7 +289,7 @@ describe("TmuxHost — error paths", () => {
 
   it("write() throws before start()", () => {
     const host = createTmuxHost({
-      socketName: `tmuxcc-test-write-${Date.now()}`,
+      socketName: `tmuxcc-test-${process.pid}-write-${Date.now()}`,
       sessionName: "tc-kyp-write-pre",
     });
     assert.throws(() => host.write("hello\n"), /before start/i);
@@ -309,10 +309,11 @@ const tmuxAvailable = (() => {
   }
 })();
 
-const RUN_ID = `${Date.now()}-${process.pid}`;
+const RUN_SUFFIX = `${Date.now()}`;
 
 function sockName(label: string) {
-  const sock = `tmuxcc-test-${RUN_ID}-${label}`;
+  // tc-bpn — shape: tmuxcc-test-<pid>-<suffix> required by test-tmux-cleanup.
+  const sock = `tmuxcc-test-${process.pid}-host-${RUN_SUFFIX}-${label}`;
   // tc-blk — track every real-tmux socket so a thrown / timed-out test still
   // has its server reaped via the process-exit / top-level after() net.
   trackSocket(sock);

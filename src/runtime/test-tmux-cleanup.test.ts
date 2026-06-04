@@ -53,11 +53,12 @@ const tmuxAvailable = (() => {
   }
 })();
 
-// Unique per-run prefix so concurrent test runs (if any) don't collide.
-const SELFTEST_RUN_ID = `${Date.now()}-${process.pid}`;
+// Unique per-run suffix so concurrent test runs (if any) don't collide.
+// Shape: tmuxcc-test-<pid>-<suffix> as required by the new SOCKET_REGEX.
+const SELFTEST_RUN_SUFFIX = `${Date.now()}`;
 
 function selftestSock(label: string): string {
-  return `tmuxcc-selftest-${SELFTEST_RUN_ID}-${label}`;
+  return `tmuxcc-test-${process.pid}-selftest-${SELFTEST_RUN_SUFFIX}-${label}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -67,21 +68,34 @@ describe("tc-blk: test-tmux-cleanup safety net", () => {
   // S1. trackSocket prefix guard
   // -------------------------------------------------------------------------
 
-  it("S1: trackSocket throws on names outside the `tmuxcc-` prefix", () => {
+  it("S1: trackSocket throws on names outside the `tmuxcc-test-<pid>-` convention", () => {
+    // Any name that doesn't match /^tmuxcc-test-\d+-/ must be rejected.
     assert.throws(
       () => trackSocket("gc-chost.session"),
-      /must start with "tmuxcc-"/,
+      /must match.*tmuxcc-test/,
       "must refuse user-owned socket names",
     );
     assert.throws(
       () => trackSocket("default"),
-      /must start with "tmuxcc-"/,
+      /must match.*tmuxcc-test/,
       "must refuse the literal default tmux socket name",
     );
     assert.throws(
       () => trackSocket(""),
-      /must start with "tmuxcc-"/,
+      /must match.*tmuxcc-test/,
       "must refuse the empty socket name",
+    );
+    // Names that start with `tmuxcc-` but don't include pid segment also rejected.
+    assert.throws(
+      () => trackSocket("tmuxcc-foo"),
+      /must match.*tmuxcc-test/,
+      "must refuse tmuxcc- names without pid segment",
+    );
+    // Names with `tmuxcc-test-` prefix but non-numeric pid segment are rejected.
+    assert.throws(
+      () => trackSocket("tmuxcc-test-foo"),
+      /must match.*tmuxcc-test/,
+      "must refuse tmuxcc-test- names with non-numeric pid segment",
     );
   });
 

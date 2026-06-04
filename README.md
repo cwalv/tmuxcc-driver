@@ -19,3 +19,24 @@ own neutral repo (`.proto` + bindings) only when a second-language server
 
 Part of the `tmuxcc` repoweave project. Design:
 `foundations/docs/tmuxcc/repo-decomposition.md`.
+
+## Test socket convention (tc-bpn)
+
+Every test-owned tmux socket MUST use the shape:
+
+```
+tmuxcc-test-<pid>-<suffix>
+```
+
+where `<pid>` is `process.pid` of the test-runner process that mints it (e.g.
+`tmuxcc-test-${process.pid}-e2e-${Date.now()}-smoke`).
+
+**Why:** `src/runtime/test-tmux-cleanup.ts` runs a boot sweep on first use that
+reaps any `tmuxcc-test-*` sockets whose owner PID is no longer alive. The PID
+segment lets the sweep distinguish orphans from sockets in active use by a
+concurrent test agent. Names not matching `/^tmuxcc-test-\d+-/` are rejected
+by `trackSocket()` at runtime.
+
+Production socket names (`tmuxcc-vscode-<pid>-<ts>`, bare `tmuxcc`, user's
+`-L default`) are all outside the `tmuxcc-test-` prefix and are never touched
+by the sweep.

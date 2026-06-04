@@ -77,10 +77,11 @@ const tmuxAvailable = (() => {
 // Utilities
 // ---------------------------------------------------------------------------
 
-const RUN_ID = `${Date.now()}-${process.pid}`;
+const RUN_SUFFIX = `${Date.now()}`;
 
 function sockName(label: string): string {
-  const sock = `tmuxcc-res-${RUN_ID}-${label}`;
+  // tc-bpn — shape: tmuxcc-test-<pid>-<suffix> required by test-tmux-cleanup.
+  const sock = `tmuxcc-test-${process.pid}-res-${RUN_SUFFIX}-${label}`;
   // tc-blk — track BEFORE setupE2E so a thrown test still has its server reaped
   // by the process-exit / top-level after() net. setupE2E also tracks its own
   // socket; trackSocket is idempotent (Set semantics).

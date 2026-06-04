@@ -124,10 +124,11 @@ const CLIENT_CAPS = {
 // Socket-name factory — unique per run + per label
 // ---------------------------------------------------------------------------
 
-const RUN_ID = `${Date.now()}-${process.pid}`;
+const RUN_SUFFIX = `${Date.now()}`;
 
 function sockName(label: string): string {
-  return `tmuxcc-e2e-${RUN_ID}-${label}`;
+  // tc-bpn — shape: tmuxcc-test-<pid>-<suffix> required by test-tmux-cleanup.
+  return `tmuxcc-test-${process.pid}-e2e-${RUN_SUFFIX}-${label}`;
 }
 
 // ---------------------------------------------------------------------------
