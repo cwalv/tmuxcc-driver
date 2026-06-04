@@ -240,21 +240,61 @@ export function createInputPath(
         const { command } = msg;
         switch (command.kind) {
           case "open-window": {
-            // new-window with optional name.
-            const cmd = newWindow(
-              command.name !== undefined ? { name: command.name } : undefined,
-            );
+            // new-window with optional name, cwd, and shellCommand.
+            // tc-cr4dz: cwd and shellCommand are additive optional fields set
+            // by the cold-start profile applicator after substitution.
+            const hasOpts =
+              command.name !== undefined ||
+              command.cwd !== undefined ||
+              command.shellCommand !== undefined;
+            const openOpts = hasOpts
+              ? {
+                  ...(command.name !== undefined ? { name: command.name } : {}),
+                  ...(command.cwd !== undefined ? { startDirectory: command.cwd } : {}),
+                  ...(command.shellCommand !== undefined ? { shellCommand: command.shellCommand } : {}),
+                }
+              : undefined;
+            const cmd = newWindow(openOpts);
             sendCommand(cmd);
             break;
           }
 
           case "split-pane": {
-            const tmuxPaneNum = toTmuxPane(command.paneId);
-            if (!validPaneId(tmuxPaneNum, command.paneId as string)) return;
-
             // direction: "horizontal" = left/right (-h); "vertical" = top/bottom (-v)
-            const cmd = splitWindow(tmuxPaneNum, command.direction);
-            sendCommand(cmd);
+            // tc-cr4dz: cwd and shellCommand are additive optional fields set
+            // by the cold-start profile applicator after substitution.
+            //
+            // paneId is optional (tc-cr4dz): when absent, split the current
+            // pane (tmux implicit target — used when the new window's first
+            // pane ID is not yet known).
+            if (command.paneId !== undefined) {
+              const tmuxPaneNum = toTmuxPane(command.paneId);
+              if (!validPaneId(tmuxPaneNum, command.paneId as string)) return;
+              const hasSplitOpts =
+                command.cwd !== undefined || command.shellCommand !== undefined;
+              const splitOpts = hasSplitOpts
+                ? {
+                    ...(command.cwd !== undefined ? { startDirectory: command.cwd } : {}),
+                    ...(command.shellCommand !== undefined ? { shellCommand: command.shellCommand } : {}),
+                  }
+                : undefined;
+              const cmd = splitWindow(tmuxPaneNum, command.direction, splitOpts);
+              sendCommand(cmd);
+            } else {
+              // paneId absent → split current pane (no -t flag).
+              // Build the command manually since splitWindow() requires a paneId.
+              const flag = command.direction === "horizontal" ? "-h" : "-v";
+              const parts: string[] = [`split-window ${flag}`];
+              if (command.cwd !== undefined) {
+                // Single-quote the cwd for safety (same as commands.ts quoteArg).
+                const quotedCwd = "'" + command.cwd.replace(/'/g, "'\\''") + "'";
+                parts.push(`-c ${quotedCwd}`);
+              }
+              if (command.shellCommand !== undefined) {
+                parts.push(command.shellCommand);
+              }
+              sendCommand(parts.join(" "));
+            }
             break;
           }
 

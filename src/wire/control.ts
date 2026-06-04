@@ -449,6 +449,19 @@ export interface OpenWindowCommand {
   readonly sessionId: SessionId;
   /** Optional name for the new window. If omitted the daemon picks one. */
   readonly name?: string;
+  /**
+   * Working directory for the first pane of the new window (`-c <dir>`).
+   * Additive optional field — non-breaking per the versioning policy.
+   * tc-cr4dz: set by the cold-start profile applicator after substitution.
+   */
+  readonly cwd?: string;
+  /**
+   * Shell command to run in the first pane of the new window.
+   * Passed as a trailing argument to `new-window`.
+   * Additive optional field — non-breaking per the versioning policy.
+   * tc-cr4dz: set by the cold-start profile applicator after substitution.
+   */
+  readonly shellCommand?: string;
 }
 
 /**
@@ -457,9 +470,30 @@ export interface OpenWindowCommand {
  */
 export interface SplitPaneCommand {
   readonly kind: "split-pane";
-  readonly paneId: PaneId;
+  /**
+   * The pane to split.  When absent, the daemon splits the current pane
+   * (tmux's implicit target).  This is used by the cold-start profile
+   * applicator (tc-cr4dz) when splitting a pane in a newly-created window
+   * where the new window's first pane ID is not yet known.
+   *
+   * Additive optional field — non-breaking per the versioning policy.
+   */
+  readonly paneId?: PaneId;
   /** "horizontal" = side-by-side; "vertical" = stacked top-to-bottom. */
   readonly direction: "horizontal" | "vertical";
+  /**
+   * Working directory for the new pane (`-c <dir>`).
+   * Additive optional field — non-breaking per the versioning policy.
+   * tc-cr4dz: set by the cold-start profile applicator after substitution.
+   */
+  readonly cwd?: string;
+  /**
+   * Shell command to run in the new pane.
+   * Passed as a trailing argument to `split-window`.
+   * Additive optional field — non-breaking per the versioning policy.
+   * tc-cr4dz: set by the cold-start profile applicator after substitution.
+   */
+  readonly shellCommand?: string;
 }
 
 /**
