@@ -261,40 +261,24 @@ export function createInputPath(
 
           case "split-pane": {
             // direction: "horizontal" = left/right (-h); "vertical" = top/bottom (-v)
-            // tc-cr4dz: cwd and shellCommand are additive optional fields set
-            // by the cold-start profile applicator after substitution.
-            //
-            // paneId is optional (tc-cr4dz): when absent, split the current
-            // pane (tmux implicit target — used when the new window's first
-            // pane ID is not yet known).
+            // tc-cr4dz: cwd and shellCommand are additive; paneId is optional
+            // (when absent, splitWindow emits no -t flag so tmux targets the
+            // current pane — used when the new window's first pane ID is not
+            // yet known).
+            let tmuxPaneNum: number | undefined;
             if (command.paneId !== undefined) {
-              const tmuxPaneNum = toTmuxPane(command.paneId);
+              tmuxPaneNum = toTmuxPane(command.paneId);
               if (!validPaneId(tmuxPaneNum, command.paneId as string)) return;
-              const hasSplitOpts =
-                command.cwd !== undefined || command.shellCommand !== undefined;
-              const splitOpts = hasSplitOpts
-                ? {
-                    ...(command.cwd !== undefined ? { startDirectory: command.cwd } : {}),
-                    ...(command.shellCommand !== undefined ? { shellCommand: command.shellCommand } : {}),
-                  }
-                : undefined;
-              const cmd = splitWindow(tmuxPaneNum, command.direction, splitOpts);
-              sendCommand(cmd);
-            } else {
-              // paneId absent → split current pane (no -t flag).
-              // Build the command manually since splitWindow() requires a paneId.
-              const flag = command.direction === "horizontal" ? "-h" : "-v";
-              const parts: string[] = [`split-window ${flag}`];
-              if (command.cwd !== undefined) {
-                // Single-quote the cwd for safety (same as commands.ts quoteArg).
-                const quotedCwd = "'" + command.cwd.replace(/'/g, "'\\''") + "'";
-                parts.push(`-c ${quotedCwd}`);
-              }
-              if (command.shellCommand !== undefined) {
-                parts.push(command.shellCommand);
-              }
-              sendCommand(parts.join(" "));
             }
+            const hasSplitOpts =
+              command.cwd !== undefined || command.shellCommand !== undefined;
+            const splitOpts = hasSplitOpts
+              ? {
+                  ...(command.cwd !== undefined ? { startDirectory: command.cwd } : {}),
+                  ...(command.shellCommand !== undefined ? { shellCommand: command.shellCommand } : {}),
+                }
+              : undefined;
+            sendCommand(splitWindow(tmuxPaneNum, command.direction, splitOpts));
             break;
           }
 

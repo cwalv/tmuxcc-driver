@@ -390,4 +390,23 @@ describe("splitWindow", () => {
       "split-window -v -t %2 htop",
     );
   });
+
+  it("omits -t when paneId is undefined (tc-cr4dz current-pane targeting)", () => {
+    assert.equal(splitWindow(undefined, "horizontal"), "split-window -h");
+    assert.equal(splitWindow(undefined, "vertical"), "split-window -v");
+  });
+
+  it("quotes shellCommand with spaces even when paneId is undefined", () => {
+    assert.equal(
+      splitWindow(undefined, "horizontal", { shellCommand: "npm test --watch" }),
+      "split-window -h 'npm test --watch'",
+    );
+  });
+
+  it("quotes startDirectory even when paneId is undefined", () => {
+    assert.equal(
+      splitWindow(undefined, "vertical", { startDirectory: "/path with spaces" }),
+      "split-window -v -c '/path with spaces'",
+    );
+  });
 });

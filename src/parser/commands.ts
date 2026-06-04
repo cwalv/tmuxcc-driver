@@ -360,20 +360,25 @@ export interface SplitWindowOptions {
  * This matches the tmux cmd-split-window.c usage string:
  *   `[-bdefhIklPvZ] ... [-t target-pane]`
  *
- * @param paneId       Numeric ID of the pane to split.
+ * @param paneId       Numeric ID of the pane to split, or `undefined` to
+ *                     split the current pane (tmux's implicit target —
+ *                     used by tc-cr4dz when the new window's first pane ID
+ *                     is not yet known).
  * @param orientation  `"horizontal"` → `-h` (left/right);
  *                     `"vertical"`   → `-v` (top/bottom).
  * @param opts         Optional split options.
  * @returns            e.g. `split-window -h -t %3`
  *                     or   `split-window -v -t %3 -p 30`
+ *                     or   `split-window -h` (paneId undefined)
  */
 export function splitWindow(
-  paneId: number,
+  paneId: number | undefined,
   orientation: SplitOrientation,
   opts?: SplitWindowOptions,
 ): string {
   const flag = orientation === "horizontal" ? "-h" : "-v";
-  const parts: string[] = [`split-window ${flag} -t %${paneId}`];
+  const head = paneId !== undefined ? `split-window ${flag} -t %${paneId}` : `split-window ${flag}`;
+  const parts: string[] = [head];
   if (opts?.percent !== undefined) {
     parts.push(`-p ${opts.percent}`);
   }
