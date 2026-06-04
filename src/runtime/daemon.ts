@@ -61,8 +61,14 @@ import type { PaneBufferStore } from "../state/reducer.js";
 
 /** Options for createDaemon. Each sub-group maps to the respective component. */
 export interface DaemonOptions {
-  /** Options forwarded to createTmuxHost (socketName, sessionName, cols/rows, …). */
-  host?: TmuxHostOptions;
+  /**
+   * Options forwarded to createTmuxHost (socketName, sessionName, cols/rows, …).
+   *
+   * Required — socketName and sessionName inside must be provided explicitly.
+   * There is no default socket; omitting it risks attaching to the user's
+   * interactive tmux server.
+   */
+  host: TmuxHostOptions;
   /** Options forwarded to createControlServer (capabilities override). */
   server?: ControlServerOptions;
   /** Options forwarded to createInputPath (id-mapping overrides). */
@@ -137,7 +143,7 @@ export interface Daemon {
  *
  * @param opts - Optional per-component options.
  */
-export function createDaemon(opts: DaemonOptions = {}): Daemon {
+export function createDaemon(opts: DaemonOptions): Daemon {
   // 1. Host
   const host = createTmuxHost(opts.host);
 

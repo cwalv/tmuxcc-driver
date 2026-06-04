@@ -262,7 +262,11 @@ describe("TmuxHost — hermetic (fake-tmux)", () => {
 
 describe("TmuxHost — error paths", () => {
   it("onError fires when python binary is not found", async () => {
-    const host = createTmuxHost({ pythonPath: "/nonexistent/python3-xyz-404" });
+    const host = createTmuxHost({
+      socketName: `tmuxcc-test-err-${Date.now()}`,
+      sessionName: "tc-kyp-err",
+      pythonPath: "/nonexistent/python3-xyz-404",
+    });
 
     let errFired = false;
     host.onError(() => { errFired = true; });
@@ -284,7 +288,10 @@ describe("TmuxHost — error paths", () => {
   });
 
   it("write() throws before start()", () => {
-    const host = createTmuxHost({});
+    const host = createTmuxHost({
+      socketName: `tmuxcc-test-write-${Date.now()}`,
+      sessionName: "tc-kyp-write-pre",
+    });
     assert.throws(() => host.write("hello\n"), /before start/i);
   });
 });

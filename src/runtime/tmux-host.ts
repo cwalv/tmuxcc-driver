@@ -18,12 +18,13 @@
  *
  * # Spawn invocation defaults
  *
- * By default:
- *   - Socket: `-L tmuxcc-<socketName>` (a private named socket, isolates from
- *     the user's existing tmux server; default socket name is "default").
+ * Spawn invocation:
+ *   - Socket: `-L <socketName>` (required; callers MUST supply a hermetic,
+ *     workspace-unique name — there is no default to prevent accidental
+ *     attachment to the user's interactive tmux server at `-L default`).
  *   - Session: starts a new session (`new-session`) named by `sessionName`
- *     (default: "tmuxcc"); does NOT detach (`-d`) so the control client IS
- *     the session client.
+ *     (required); does NOT detach (`-d`) so the control client IS the session
+ *     client.
  *   - Attach mode: if `attach: true`, runs `attach-session -t <sessionName>`
  *     instead (requires a server already running on the named socket).
  *
@@ -49,16 +50,20 @@ export interface TmuxHostOptions {
   /**
    * Private tmux socket name. tmux will be launched with `-L <socketName>`,
    * isolating it from the user's existing tmux servers.
-   * Default: "default"
+   *
+   * Required — no default. Callers MUST supply a hermetic, workspace-unique
+   * socket name (e.g. via `tmuxccSocketName(workspaceId)`). There is no
+   * fallback; omitting this field is a compile error.
    */
-  socketName?: string;
+  socketName: string;
 
   /**
    * tmux session name. Used as `-s <sessionName>` for new-session or
    * `-t <sessionName>` for attach.
-   * Default: "tmuxcc"
+   *
+   * Required — no default. Callers MUST supply an explicit session name.
    */
-  sessionName?: string;
+  sessionName: string;
 
   /**
    * If true, attach to an existing session instead of creating a new one.
@@ -219,10 +224,10 @@ class TmuxHostImpl implements TmuxHost {
   private readonly _errorHandlers = new Set<ErrorHandler>();
   private readonly _stderrHandlers = new Set<DataHandler>();
 
-  constructor(opts: TmuxHostOptions = {}) {
+  constructor(opts: TmuxHostOptions) {
     this.opts = {
-      socketName: opts.socketName ?? "default",
-      sessionName: opts.sessionName ?? "tmuxcc",
+      socketName: opts.socketName,
+      sessionName: opts.sessionName,
       attach: opts.attach ?? false,
       cwd: opts.cwd ?? process.cwd(),
       env: opts.env ?? {},
@@ -510,7 +515,7 @@ class TmuxHostImpl implements TmuxHost {
  * await host.stop();
  * ```
  */
-export function createTmuxHost(opts?: TmuxHostOptions): TmuxHost {
+export function createTmuxHost(opts: TmuxHostOptions): TmuxHost {
   return new TmuxHostImpl(opts);
 }
 
