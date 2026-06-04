@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # verify-boundary-lint.sh — confirm the client-no-daemon-runtime rule CATCHES violations.
 #
-# This script is run via `npm run lint:boundaries:verify` (make lint-boundaries-verify).
+# This script is run via `npm run lint:boundaries:verify`.
 # It is NOT part of normal CI — it's a one-time verification helper for after
 # lint config changes, confirming the rule is active and not silently passing.
 #
