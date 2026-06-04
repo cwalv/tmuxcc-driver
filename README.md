@@ -1,42 +1,59 @@
 # tmuxcc-daemon
 
-Owns the single `tmux -CC` (control mode) connection and serves a
-language-neutral wire to clients.
+Per-session bridge between `tmux -CC` (control mode) and the language-neutral
+daemon wire. One daemon process is bound to exactly one tmux session for its
+lifetime; lifecycle and discovery are owned by a sibling **session broker**
+(see `SCHEMA.md` for the broker spec).
 
 **Modules (single-consumer, kept internal — not separate repos):**
 - `-CC` parser: control-mode stream → typed events; command serializer.
   Emits **raw bytes** for `%output` (octal-unescaped; never assumes UTF-8).
-- state reducer: events → sessions / windows / panes + layout-string parser.
-  The daemon owns canonical session state.
+- state reducer: events → windows / panes + layout-string parser. The daemon
+  owns canonical model state for its bound session.
 - I/O / demux: per-pane streams out; input remuxed as `send-keys -H`.
 
-**Wire (a spec, not a repo):** the daemon↔client contract lives here as
-`SCHEMA.md` + exported TS types, because the daemon owns the model and the
-wire is a projection of it. The contract speaks panes / bytes / deltas /
-input / resize — **never** `%output`, never `Pseudoterminal`. Graduates to its
-own neutral repo (`.proto` + bindings) only when a second-language server
-(Go/Rust) actually exists.
+**Wires (a spec, not a repo):** `SCHEMA.md` defines two wires — the
+per-session **daemon wire** owned by this process, and the per-socket
+**broker wire** owned by the broker. Both wires speak panes / bytes /
+deltas / input / resize / session-metadata — **never** `%output`, never
+`Pseudoterminal`. Wires graduate to a neutral repo (`.proto` + bindings)
+only when a second-language server actually exists.
 
-Part of the `tmuxcc` repoweave project. Design:
-`foundations/docs/tmuxcc/repo-decomposition.md`.
+Part of the `tmuxcc` repoweave project.
 
-## Test socket convention (tc-bpn)
-
-Every test-owned tmux socket MUST use the shape:
+## Architecture position
 
 ```
-tmuxcc-test-<pid>-<suffix>
+[ tmux server (one socket) ]
+       ↕
+[ session broker ]   ← discovery + lifecycle; this daemon's parent
+       ↓ spawns
+[ this daemon ]      ← attached to ONE tmux session via -CC attach -t <name>
+       ↕ daemon wire
+[ client ]
 ```
 
-where `<pid>` is `process.pid` of the test-runner process that mints it (e.g.
-`tmuxcc-test-${process.pid}-e2e-${Date.now()}-smoke`).
+Daemons are spawned by the broker on `session.claim`. A daemon never
+discovers sessions on its own and never creates or destroys them. If its
+bound session goes away (`%session-changed` to another session,
+`session.died` from tmux, or `kill-session`), the daemon emits a
+`session.died` error and closes its connections; the broker reaps it.
 
-**Why:** `src/runtime/test-tmux-cleanup.ts` runs a boot sweep on first use that
-reaps any `tmuxcc-test-*` sockets whose owner PID is no longer alive. The PID
-segment lets the sweep distinguish orphans from sockets in active use by a
-concurrent test agent. Names not matching `/^tmuxcc-test-\d+-/` are rejected
-by `trackSocket()` at runtime.
+## Socket conventions
 
-Production socket names (`tmuxcc-vscode-<pid>-<ts>`, bare `tmuxcc`, user's
-`-L default`) are all outside the `tmuxcc-test-` prefix and are never touched
-by the sweep.
+Each daemon listens on its own unix socket. The broker mints the socket
+path when it spawns the daemon and hands it to the client via
+`session.claim` / `session.create`. Daemon socket paths are an
+implementation detail of the broker; clients treat them as opaque
+endpoint strings.
+
+Under the v3 trust model (see `SCHEMA.md` — "Trust and security model"),
+broker and daemon sockets live in `$XDG_RUNTIME_DIR/tmuxcc/` (falling
+back to `/tmp/tmuxcc-<uid>/`), with the directory at mode 0700 and the
+socket files at mode 0600. There is no cryptographic authentication;
+any local process the kernel grants socket access is trusted.
+
+The **tmux** socket (where `tmux -CC attach` connects) is owned by the
+broker. Test brokers use `tmuxcc-test-<id>` socket names; production
+brokers use `tmuxcc`. Socket naming is a single broker constructor
+argument with no env-var threading.
