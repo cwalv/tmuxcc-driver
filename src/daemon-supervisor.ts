@@ -1,0 +1,287 @@
+/**
+ * Daemon supervisor — manages per-session daemon child processes.
+ *
+ * # Responsibility
+ *
+ * The supervisor owns the lifecycle of per-session daemon processes:
+ *   - Spawning a daemon for a session (if one is not already running)
+ *   - Waiting for the daemon to signal readiness
+ *   - Reaping daemons on session removal or unexpected exit
+ *   - Per-name atomicity: concurrent claim requests for the same session name
+ *     are serialized so only one daemon process is ever spawned
+ *
+ * # Daemon entry point
+ *
+ * The supervisor spawns Node.js running the daemon entry script
+ * `src/daemon-entry.js` (compiled from daemon-entry.ts in this package).
+ * The entry script accepts `--socket-name`, `--session-name`, and
+ * `--socket-path` arguments and writes "READY\n" to stdout once the daemon
+ * is listening.
+ *
+ * # Data-plane endpoint convention
+ *
+ * Per SCHEMA.md: "SCHEMA.md mandates multiplexing control + data plane on the
+ * same per-daemon socket via the 0xCC magic byte (already implemented in
+ * tmuxcc-daemon's framing.ts). The endpoint string IS the multiplexed socket."
+ *
+ * The endpoint returned by the supervisor IS the unix socket path on which the
+ * daemon listens for both control-plane (JSON) and data-plane (0xCC) traffic.
+ * Clients do not need a separate data socket.
+ *
+ * @module daemon-supervisor
+ */
+
+import { spawn, type ChildProcess } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { join, dirname } from "node:path";
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+/** A running daemon entry. */
+interface DaemonEntry {
+  /** The unix socket path the daemon is listening on. */
+  socketPath: string;
+  /** Stable broker-assigned session id. */
+  sessionId: string;
+  /** The daemon child process. */
+  proc: ChildProcess;
+  /** Promise that resolves once the daemon is ready. */
+  ready: Promise<string>;
+}
+
+/** Called when a daemon exits unexpectedly while clients may be connected. */
+export type DaemonCrashHandler = (sessionId: string) => void;
+
+// ---------------------------------------------------------------------------
+// Path to the daemon entry script
+// ---------------------------------------------------------------------------
+
+const __dir = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Path to the compiled daemon-entry script.
+ * In dist/ layout the entry is dist/daemon-entry.js relative to this file.
+ */
+function daemonEntryScript(): string {
+  // When running from dist/ (compiled), daemon-entry.js is a sibling.
+  // When running from src/ via tsx, daemon-entry.ts is a sibling.
+  const ext = import.meta.url.endsWith(".ts") ? ".ts" : ".js";
+  return join(__dir, `daemon-entry${ext}`);
+}
+
+// ---------------------------------------------------------------------------
+// DaemonSupervisor
+// ---------------------------------------------------------------------------
+
+export interface DaemonSupervisor {
+  /**
+   * Ensure a daemon is running for the given session and return its socket path.
+   *
+   * If a daemon for `sessionId` is already running, returns its socket path
+   * immediately. If not, spawns one and waits for it to signal readiness.
+   *
+   * Per-name atomicity: concurrent calls for the same `sessionId` share the
+   * same in-flight spawn promise — only one daemon process is ever spawned.
+   */
+  ensureDaemon(
+    sessionId: string,
+    sessionName: string,
+    socketName: string,
+    daemonSocketPath: string,
+  ): Promise<string>;
+
+  /**
+   * Kill the daemon for a session (if running). Called on session removal.
+   */
+  reapDaemon(sessionId: string): void;
+
+  /**
+   * Kill all running daemons. Called on broker shutdown.
+   */
+  reapAll(): void;
+
+  /**
+   * Register a handler called when a daemon exits unexpectedly.
+   */
+  onCrash(handler: DaemonCrashHandler): void;
+}
+
+// ---------------------------------------------------------------------------
+// Implementation
+// ---------------------------------------------------------------------------
+
+class DaemonSupervisorImpl implements DaemonSupervisor {
+  /**
+   * Map from sessionId to running daemon entry (or in-progress spawn promise).
+   * The value is the entry OR a Promise for the in-flight spawn, allowing
+   * per-name serialization.
+   */
+  private _daemons = new Map<string, DaemonEntry | Promise<DaemonEntry>>();
+  private _crashHandler: DaemonCrashHandler | null = null;
+
+  onCrash(handler: DaemonCrashHandler): void {
+    this._crashHandler = handler;
+  }
+
+  async ensureDaemon(
+    sessionId: string,
+    sessionName: string,
+    socketName: string,
+    daemonSockPath: string,
+  ): Promise<string> {
+    // Fast path: daemon already running
+    const existing = this._daemons.get(sessionId);
+    if (existing !== undefined) {
+      if (existing instanceof Promise) {
+        // In-flight spawn — wait for it
+        const entry = await existing;
+        return entry.socketPath;
+      }
+      return existing.socketPath;
+    }
+
+    // Slow path: spawn a new daemon
+    const spawnPromise = this._spawnDaemon(
+      sessionId,
+      sessionName,
+      socketName,
+      daemonSockPath,
+    );
+
+    // Register the promise immediately so concurrent callers share it
+    this._daemons.set(sessionId, spawnPromise);
+
+    let entry: DaemonEntry;
+    try {
+      entry = await spawnPromise;
+    } catch (err) {
+      // Spawn failed — remove the stale promise
+      this._daemons.delete(sessionId);
+      throw err;
+    }
+
+    // Replace promise with resolved entry
+    this._daemons.set(sessionId, entry);
+    return entry.socketPath;
+  }
+
+  reapDaemon(sessionId: string): void {
+    const entry = this._daemons.get(sessionId);
+    if (!entry) return;
+
+    this._daemons.delete(sessionId);
+
+    if (entry instanceof Promise) {
+      // In-flight spawn — kill after it resolves
+      void entry.then((e) => this._killEntry(e)).catch(() => {});
+    } else {
+      this._killEntry(entry);
+    }
+  }
+
+  reapAll(): void {
+    for (const sessionId of this._daemons.keys()) {
+      this.reapDaemon(sessionId);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Private helpers
+  // ---------------------------------------------------------------------------
+
+  private async _spawnDaemon(
+    sessionId: string,
+    sessionName: string,
+    socketName: string,
+    daemonSockPath: string,
+  ): Promise<DaemonEntry> {
+    const script = daemonEntryScript();
+
+    const proc = spawn(
+      process.execPath, // node
+      [
+        "--import", "tsx", // for TypeScript source; compiled dist won't need this
+        script,
+        "--socket-name", socketName,
+        "--session-name", sessionName,
+        "--socket-path", daemonSockPath,
+      ],
+      {
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: false,
+        env: { ...process.env },
+      },
+    );
+
+    // Wait for "READY\n" on stdout with a 30-second timeout
+    const readyPromise = new Promise<void>((resolve, reject) => {
+      let buf = "";
+      const timeout = setTimeout(() => {
+        reject(new Error(`Daemon for session '${sessionName}' did not signal READY within 30s`));
+      }, 30_000);
+
+      proc.stdout?.on("data", (chunk: Buffer) => {
+        buf += chunk.toString("utf8");
+        if (buf.includes("READY\n")) {
+          clearTimeout(timeout);
+          resolve();
+        }
+      });
+
+      proc.once("exit", (code) => {
+        clearTimeout(timeout);
+        reject(new Error(`Daemon for session '${sessionName}' exited before READY (code=${code})`));
+      });
+
+      proc.once("error", (err) => {
+        clearTimeout(timeout);
+        reject(err);
+      });
+    });
+
+    await readyPromise;
+
+    // Unref the child process so it doesn't keep the Node.js event loop alive.
+    // The process continues running; we can still kill/track it, but the parent
+    // won't be prevented from exiting due to this handle.
+    proc.unref();
+
+    // Wire up crash detection AFTER readiness so "exited before READY" is a
+    // spawn error, not a crash.
+    proc.once("exit", () => {
+      const current = this._daemons.get(sessionId);
+      // Only fire crash if this entry is still registered (not intentionally reaped)
+      if (current !== undefined && !(current instanceof Promise)) {
+        this._daemons.delete(sessionId);
+        this._crashHandler?.(sessionId);
+      }
+    });
+
+    const entry: DaemonEntry = {
+      sessionId,
+      socketPath: daemonSockPath,
+      proc,
+      ready: Promise.resolve(daemonSockPath),
+    };
+
+    return entry;
+  }
+
+  private _killEntry(entry: DaemonEntry): void {
+    try {
+      entry.proc.kill("SIGTERM");
+    } catch {
+      // already dead
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Factory
+// ---------------------------------------------------------------------------
+
+export function createDaemonSupervisor(): DaemonSupervisor {
+  return new DaemonSupervisorImpl();
+}

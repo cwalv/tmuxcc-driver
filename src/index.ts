@@ -1,0 +1,27 @@
+/**
+ * @tmuxcc/broker — public API.
+ *
+ * Primary entry point: `createBroker({ socketName, runtimeDir? })`.
+ * Returns a BrokerHandle with `start()`, `shutdown()`, `endpoint()`.
+ *
+ * The broker is a per-tmux-socket discovery and lifecycle service:
+ *   - Maintains the list of sessions on a tmux socket
+ *   - Spawns per-session daemon processes on demand
+ *   - Hands clients daemon socket paths via the broker wire
+ *
+ * See SCHEMA.md "Broker wire" for the full wire protocol spec.
+ *
+ * Assumption on lifecycle supervision:
+ * The broker does not manage its own auto-spawn or OS-level supervision.
+ * Per SCHEMA.md "Broker lifecycle", process supervision is out of scope for v3.
+ * A launcher binary (Stage 3+) is needed for production autospawn.
+ */
+
+export { createBroker } from "./broker.js";
+export type { BrokerHandle, BrokerOptions } from "./broker.js";
+
+// Socket transport utilities (useful for clients / tests)
+export { createSocketTransport, connectSocketTransport, createSocketServer } from "./socket-transport.js";
+
+// Runtime directory helpers (useful for clients that need to compute socket paths)
+export { brokerSocketPath, daemonSocketPath } from "./runtime-dir.js";
