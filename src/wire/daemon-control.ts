@@ -31,8 +31,7 @@
  * VERSIONING
  * ---------------------------------------------------------------------------
  *
- * See envelope.ts for WIRE_PROTOCOL_VERSION. This module re-exports it for
- * backward-compatibility of callers that import directly from daemon-control.ts.
+ * See envelope.ts for WIRE_PROTOCOL_VERSION.
  *
  * v1 → v2 (tc-7ml.4): Added ResyncRequestMessage (type: "resync.request")
  * to ClientMessage. The new variant is a breaking change because a v1 daemon
@@ -43,11 +42,6 @@
 import type { PaneId, WindowId, SessionId } from "./ids.js";
 import type { WindowLayout } from "./layout.js";
 import type { MessageBase, Capabilities } from "./envelope.js";
-
-// Re-export envelope primitives so callers importing from daemon-control.ts
-// (e.g. handshake.ts) continue to work without changes to their imports.
-export { WIRE_PROTOCOL_VERSION } from "./envelope.js";
-export type { Capabilities, WireFeature } from "./envelope.js";
 
 // ---------------------------------------------------------------------------
 // Daemon → Client messages (server push)
