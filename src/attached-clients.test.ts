@@ -413,10 +413,296 @@ describe("tc-1elae: end-to-end via connectClient", () => {
     const countB = clientB.mirror.getModel().attachedClientCount;
     assert.equal(countB, 2, "client B (second) must see attachedClientCount=2 (A still connected)");
 
-    // Send a snapshot to client A to catch up with the post-snapshot model.
-    dA.sendControl(projectSnapshot(model, { seq: 2, attachedClientCount: 2 }));
+    clientA.disconnect();
+    clientB.disconnect();
+    dA.close();
+    dB.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// tc-44wu0 — Live attach/detach updates via client-count.changed
+// ---------------------------------------------------------------------------
+
+/**
+ * Layer A tests: live attached-client count updates (tc-44wu0, §11.4 Phase 4).
+ *
+ * Verifies that:
+ *   (1) When a second client connects, the first client receives a
+ *       `client-count.changed` delta and its `attachedClientCount` updates to 2.
+ *   (2) When the second client disconnects, the first client receives a
+ *       `client-count.changed` delta and its `attachedClientCount` drops to 1.
+ *   (3) The newly-connected client itself receives a `client-count.changed`
+ *       message after its initial snapshot, reflecting the new total.
+ *   (4) applyDelta: `client-count.changed` correctly updates ClientModel.attachedClientCount.
+ *
+ * Test harness: createControlServer + createInMemoryTransportPair (in-process,
+ * no real tmux, no vscode).
+ */
+
+import { applyDelta } from "./mirror.js";
+
+// Helper: build a minimal pipeline for ControlServer.
+function buildLivePipeline() {
+  const model = buildBaseModel();
+  let current = model;
+  const handlers = new Set<(n: typeof model, p: typeof model) => void>();
+  return {
+    pipeline: {
+      getModel: () => current,
+      isLive: () => true,
+      async start() {},
+      stop() {},
+      onModelChange(h: (n: typeof model, p: typeof model) => void) {
+        handlers.add(h);
+        return () => { handlers.delete(h); };
+      },
+      onNotification() { return () => {}; },
+      get buffers(): never { throw new Error("no buffers"); },
+    },
+    setModel: (m: typeof model) => { current = m; },
+  };
+}
+
+describe("tc-44wu0: applyDelta handles client-count.changed", () => {
+  it("updates attachedClientCount in ClientModel", () => {
+    const model = buildBaseModel();
+    const snap: import("@tmuxcc/daemon").SnapshotMessage = projectSnapshot(model, {
+      seq: 1,
+      attachedClientCount: 1,
+    });
+    const { model: clientModel } = applySnapshot(snap);
+
+    // Simulate a client-count.changed delta arriving (a second client connected).
+    const delta: import("@tmuxcc/daemon").DaemonMessage = {
+      type: "client-count.changed",
+      seq: 2,
+      count: 2,
+    };
+    const updated = applyDelta(clientModel, delta);
+
+    assert.equal(
+      updated.attachedClientCount,
+      2,
+      "applyDelta(client-count.changed) must update attachedClientCount",
+    );
+  });
+
+  it("decrements attachedClientCount when a client detaches", () => {
+    const model = buildBaseModel();
+    const snap: import("@tmuxcc/daemon").SnapshotMessage = projectSnapshot(model, {
+      seq: 1,
+      attachedClientCount: 3,
+    });
+    const { model: clientModel } = applySnapshot(snap);
+
+    const delta: import("@tmuxcc/daemon").DaemonMessage = {
+      type: "client-count.changed",
+      seq: 2,
+      count: 2,
+    };
+    const updated = applyDelta(clientModel, delta);
+    assert.equal(updated.attachedClientCount, 2);
+  });
+
+  it("does not affect other model fields", () => {
+    const model = buildBaseModel();
+    const snap: import("@tmuxcc/daemon").SnapshotMessage = projectSnapshot(model, {
+      seq: 1,
+      attachedClientCount: 1,
+    });
+    const { model: clientModel } = applySnapshot(snap);
+
+    const delta: import("@tmuxcc/daemon").DaemonMessage = {
+      type: "client-count.changed",
+      seq: 2,
+      count: 5,
+    };
+    const updated = applyDelta(clientModel, delta);
+
+    // Other fields unchanged.
+    assert.equal(updated.windows.size, clientModel.windows.size);
+    assert.equal(updated.panes.size, clientModel.panes.size);
+    assert.deepEqual(updated.focus, clientModel.focus);
+    assert.strictEqual(updated.session, clientModel.session);
+  });
+});
+
+describe("tc-44wu0: ControlServer broadcasts client-count.changed on attach", () => {
+  it("existing client receives client-count.changed when a new client connects", async () => {
+    const { pipeline } = buildLivePipeline();
+    const server = createControlServer(pipeline);
+
+    // Track all control messages received by client A (after snapshot).
+    const receivedByA: import("@tmuxcc/daemon").ControlMessage[] = [];
+
+    // Connect client A.
+    const { daemon: dA, client: cA } = createInMemoryTransportPair();
+    await Promise.all([
+      server.addClient(dA),
+      runClientHandshake(cA, CLIENT_CAPS),
+    ]);
+
+    // Snapshot for A is already received (seq=1). Now spy on subsequent messages.
+    const origSend = dA.sendControl.bind(dA);
+    dA.sendControl = function (msg: import("@tmuxcc/daemon").ControlMessage) {
+      receivedByA.push(msg);
+      return origSend(msg);
+    };
+
+    // Connect client B — this should trigger a client-count.changed broadcast.
+    const { daemon: dB, client: cB } = createInMemoryTransportPair();
+    await Promise.all([
+      server.addClient(dB),
+      runClientHandshake(cB, CLIENT_CAPS),
+    ]);
+
+    // Client A must have received at least one client-count.changed message.
+    const countMsgs = receivedByA.filter(
+      (m) => m.type === "client-count.changed",
+    );
+    assert.ok(
+      countMsgs.length >= 1,
+      "client A must receive at least one client-count.changed after client B connects",
+    );
+
+    // The last one (or only one) should have count=2.
+    const last = countMsgs[countMsgs.length - 1] as import("@tmuxcc/daemon").ClientCountChangedMessage;
+    assert.equal(
+      last.count,
+      2,
+      "client-count.changed must carry count=2 after second client connects",
+    );
+
+    dA.close();
+    dB.close();
+  });
+
+  it("remaining client sees count decrease after a client disconnects", async () => {
+    const { pipeline } = buildLivePipeline();
+    const server = createControlServer(pipeline);
+
+    // Connect client A.
+    const { daemon: dA, client: cA } = createInMemoryTransportPair();
+    await Promise.all([
+      server.addClient(dA),
+      runClientHandshake(cA, CLIENT_CAPS),
+    ]);
+
+    // Connect client B.
+    const { daemon: dB, client: cB } = createInMemoryTransportPair();
+    await Promise.all([
+      server.addClient(dB),
+      runClientHandshake(cB, CLIENT_CAPS),
+    ]);
+
+    // Now spy on messages to client A.
+    const receivedByA: import("@tmuxcc/daemon").ControlMessage[] = [];
+    const origSend = dA.sendControl.bind(dA);
+    dA.sendControl = function (msg: import("@tmuxcc/daemon").ControlMessage) {
+      receivedByA.push(msg);
+      return origSend(msg);
+    };
+
+    // Disconnect client B.
+    dB.close();
+
+    // Client A must receive a client-count.changed with count=1.
+    // The close is synchronous in the in-memory transport, so receivedByA
+    // should already be populated.
+    const countMsgs = receivedByA.filter(
+      (m) => m.type === "client-count.changed",
+    );
+    assert.ok(
+      countMsgs.length >= 1,
+      "client A must receive a client-count.changed after client B disconnects",
+    );
+
+    const last = countMsgs[countMsgs.length - 1] as import("@tmuxcc/daemon").ClientCountChangedMessage;
+    assert.equal(
+      last.count,
+      1,
+      "client-count.changed must carry count=1 after client B disconnects",
+    );
+
+    dA.close();
+  });
+});
+
+describe("tc-44wu0: end-to-end live count updates via connectClient + Mirror", () => {
+  it("client A's mirror.getModel().attachedClientCount updates live when B connects then disconnects", async () => {
+    const { pipeline } = buildLivePipeline();
+    const server = createControlServer(pipeline);
+
+    // Connect client A via full connectClient path.
+    const { daemon: dA, client: cA } = createInMemoryTransportPair();
+    const [, clientA] = await Promise.all([
+      server.addClient(dA),
+      connectClient(cA),
+    ]);
+
+    // Initial state: only A connected.
+    assert.equal(
+      clientA.mirror.getModel().attachedClientCount,
+      1,
+      "client A must start with attachedClientCount=1",
+    );
+
+    // Connect client B — daemon broadcasts client-count.changed to A.
+    const { daemon: dB, client: cB } = createInMemoryTransportPair();
+    await Promise.all([
+      server.addClient(dB),
+      connectClient(cB),
+    ]);
+
+    // After B connects, A should see count=2.
+    assert.equal(
+      clientA.mirror.getModel().attachedClientCount,
+      2,
+      "client A must see attachedClientCount=2 after B connects",
+    );
+
+    // Disconnect B — daemon broadcasts client-count.changed to A.
+    dB.close();
+
+    // After B disconnects, A should see count=1.
+    assert.equal(
+      clientA.mirror.getModel().attachedClientCount,
+      1,
+      "client A must see attachedClientCount=1 after B disconnects",
+    );
 
     clientA.disconnect();
+    dA.close();
+  });
+
+  it("newly-connected client B receives updated count from client-count.changed", async () => {
+    const { pipeline } = buildLivePipeline();
+    const server = createControlServer(pipeline);
+
+    // Connect client A.
+    const { daemon: dA, client: cA } = createInMemoryTransportPair();
+    await Promise.all([
+      server.addClient(dA),
+      connectClient(cA),
+    ]);
+
+    // Connect client B.
+    const { daemon: dB, client: cB } = createInMemoryTransportPair();
+    const [, clientB] = await Promise.all([
+      server.addClient(dB),
+      connectClient(cB),
+    ]);
+
+    // Client B's snapshot carries count=2 and may receive an extra
+    // client-count.changed(2) after the snapshot. Either way the model
+    // should show count=2.
+    assert.equal(
+      clientB.mirror.getModel().attachedClientCount,
+      2,
+      "newly-connected client B must see attachedClientCount=2",
+    );
+
     clientB.disconnect();
     dA.close();
     dB.close();

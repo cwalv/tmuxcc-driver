@@ -164,15 +164,19 @@ export interface ClientModel {
    */
   readonly exitCodes: ReadonlyMap<PaneId, number>;
   /**
-   * Number of daemon-protocol clients connected at the time the most recent
-   * snapshot was received.
+   * Number of daemon-protocol clients currently connected to this session.
    *
-   * tc-1elae (Phase 2 — §11.4): populated from `SnapshotMessage.attachedClientCount`.
+   * tc-1elae (Phase 2 — §11.4): initially populated from
+   * `SnapshotMessage.attachedClientCount` (static baseline at connect time).
+   *
+   * tc-44wu0 (Phase 4): subsequently kept live by `client-count.changed`
+   * delta messages, which the daemon broadcasts whenever a client connects
+   * or disconnects. After tc-44wu0 lands this value reflects the real-time
+   * count, not merely the snapshot-time count.
+   *
    * Absent (undefined) when the snapshot did not carry this field (older daemon
-   * or pre-connection state). The status bar falls back to 1 when absent.
-   *
-   * This is a STATIC value captured at snapshot time — it does NOT update
-   * when clients attach or detach. Live updates land in Phase 4 (tc-44wu0).
+   * predating Phase 2) or before the first snapshot arrives. The status bar
+   * falls back to 1 when absent.
    */
   readonly attachedClientCount: number | undefined;
 }
@@ -417,6 +421,15 @@ export function applyDelta(model: ClientModel, msg: DaemonMessage): ClientModel 
     case "session.renamed": {
       // v3: DaemonSessionRenamedMessage has no sessionId — updates the bound session.
       return { ...model, session: { ...model.session, name: msg.newName } };
+    }
+
+    // ── Client-count delta (tc-44wu0) ────────────────────────────────────────
+
+    case "client-count.changed": {
+      // Live update from the daemon when a client attaches or detaches.
+      // Updates attachedClientCount so the status-bar tooltip reflects the
+      // current count without requiring a full resync.
+      return { ...model, attachedClientCount: msg.count };
     }
 
     // ── Non-model messages (pass through unchanged) ──────────────────────────
