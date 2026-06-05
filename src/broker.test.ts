@@ -365,12 +365,11 @@ describe("broker – integration (requires tmux)", { skip: !TMUX_AVAILABLE }, ()
     const snapshot2 = await Promise.race([snapshotPromise2, daemonTimeoutP]);
     clearDaemonTimeout();
 
-    // Daemon SnapshotMessage has `sessions: SnapshotSession[]` (normalized flat arrays)
+    // Daemon SnapshotMessage (wire v3, tc-j9c.2) has singular `session: SnapshotSession`
     assert.equal((snapshot2 as { type: string }).type, "snapshot");
-    const sessions2 = (snapshot2 as { sessions: Array<{ sessionId: string }> }).sessions;
-    assert.ok(Array.isArray(sessions2), "Daemon snapshot must have sessions array");
-    assert.ok(sessions2.length >= 1, "Daemon snapshot must have at least one session");
-    assert.ok(sessions2[0]?.sessionId, "Daemon snapshot session must have sessionId");
+    const sess2 = (snapshot2 as { session: { sessionId: string; name: string } }).session;
+    assert.ok(sess2, "Daemon snapshot must have a `session` field");
+    assert.ok(sess2.sessionId, "Daemon snapshot session must have sessionId");
 
     daemonTransport.close();
     mux.transport.close();
