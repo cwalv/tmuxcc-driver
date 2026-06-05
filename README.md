@@ -35,9 +35,9 @@ Part of the `tmuxcc` repoweave project.
 
 Daemons are spawned by the broker on `session.claim`. A daemon never
 discovers sessions on its own and never creates or destroys them. If its
-bound session goes away (`%session-changed` to another session,
-`session.died` from tmux, or `kill-session`), the daemon emits a
-`session.died` error and closes its connections; the broker reaps it.
+bound session goes away (`%session-changed` to another session or
+`kill-session`), the daemon emits an `ErrorMessage{code:"session.unavailable"}`
+and closes its connections; the broker reaps it.
 
 ## Socket conventions
 

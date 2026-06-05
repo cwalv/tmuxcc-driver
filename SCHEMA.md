@@ -1,8 +1,8 @@
 # tmuxcc Wire Protocols — Schema Reference
 
-**Status:** Design-phase rewrite (epic tc-j9c).
+**Status:** Implemented (wire v3).
 Single-session daemon protocol + per-socket broker protocol.
-See "Implementation decomposition" at the end for outstanding work.
+See `src/wire/` for canonical types; this document is the human-readable reference.
 
 ---
 
@@ -555,10 +555,11 @@ focused. The session is always the bound session; no `sessionId` field.
 
 #### `pane.closed` — `PaneClosedMessage`
 
-| Field      | Type       | Description           |
-|------------|------------|-----------------------|
-| `paneId`   | `PaneId`   | The closed pane.      |
-| `windowId` | `WindowId` | Former parent window. |
+| Field       | Type       | Description                                                                             |
+|-------------|------------|-----------------------------------------------------------------------------------------|
+| `paneId`    | `PaneId`   | The closed pane.                                                                        |
+| `windowId`  | `WindowId` | Former parent window.                                                                   |
+| `exitCode?` | `number`   | Exit code of the pane's process, if known. Absent when tmux did not report a per-pane exit status (the common case with `%window-close`). |
 
 #### `pane.resized` — `PaneResizedMessage`
 
@@ -653,14 +654,15 @@ direction: client→daemon
 
 All commands operate within the bound session. None carry `sessionId`.
 
-| `kind`            | Extra fields                                       | Description                                                  |
-|-------------------|----------------------------------------------------|--------------------------------------------------------------|
-| `"open-window"`   | `name?`                                            | Open a new window in the bound session.                      |
-| `"split-pane"`    | `paneId`, `direction: "horizontal" \| "vertical"`  | Split a pane.                                                |
-| `"close-pane"`    | `paneId`                                           | Kill a pane.                                                 |
-| `"rename-window"` | `windowId`, `name`                                 | Rename a window.                                             |
-| `"select-pane"`   | `paneId`                                           | Focus a pane.                                                |
-| `"resize-pane"`   | `paneId`, `cols`, `rows`                           | Resize a pane to explicit dimensions.                        |
+| `kind`             | Extra fields                                           | Description                                                   |
+|--------------------|--------------------------------------------------------|---------------------------------------------------------------|
+| `"open-window"`    | `name?`, `cwd?`, `shellCommand?`                       | Open a new window in the bound session.                       |
+| `"split-pane"`     | `paneId?`, `direction: "horizontal" \| "vertical"`, `cwd?`, `shellCommand?` | Split a pane. `paneId` optional — when absent the daemon splits the current pane. |
+| `"close-pane"`     | `paneId`                                               | Kill a pane.                                                  |
+| `"rename-window"`  | `windowId`, `name`                                     | Rename a window.                                              |
+| `"select-pane"`    | `paneId`                                               | Focus a pane.                                                 |
+| `"resize-pane"`    | `paneId`, `cols`, `rows`                               | Resize a pane to explicit dimensions.                         |
+| `"kill-session"`   | `sessionName: string`                                  | Kill the tmux session entirely. Daemon emits `ErrorMessage{code:"session.unavailable"}` and closes all client connections. Uses session name (not id) to avoid fragile numeric-id mapping. |
 
 #### `command.response` — `DaemonCommandResponseMessage`
 
@@ -758,14 +760,18 @@ across reconnects.
 ## Union types
 
 ```typescript
+// broker-control.ts
 type BrokerMessage =
   | BrokerCapabilitiesMessage
   | BrokerSnapshotMessage
   | BrokerSessionAddedMessage
   | BrokerSessionRemovedMessage
   | BrokerSessionRenamedMessage
-  | BrokerCommandResponseMessage
-  | ErrorMessage;                   // broker-wire codes
+  | BrokerCommandResponseMessage;
+// ErrorMessage (type: "error") is shared between broker and daemon wires.
+// It is defined in daemon-control.ts and re-used on the broker wire with
+// broker-wire error codes. It is not included in the BrokerMessage union
+// because the TypeScript type for ErrorMessage is identical on both wires.
 
 type DaemonMessage =
   | DaemonCapabilitiesMessage
@@ -886,55 +892,18 @@ SCHEMA.md            — This document
 
 ---
 
-## Implementation decomposition
+## Implementation status (epic tc-j9c)
 
-The schema above is the design target. Implementation work is broken
-into the following dependency-ordered stages. Each becomes one or more
-beads at decomposition time.
+All five implementation stages have shipped:
 
-**Stage 0 — Wire schema split (prerequisite for everything else).**
-Split today's `src/wire/control.ts` into `envelope.ts`, `daemon-control.ts`,
-and `broker-control.ts`. Extract handshake helpers in `handshake.ts` so
-broker and daemon wires can share them. Move shared type guards. No
-behavioral changes yet.
+| Stage | Work | Bead |
+|-------|------|------|
+| 0 | Wire schema split — `envelope.ts`, `daemon-control.ts`, `broker-control.ts`, `handshake.ts` | tc-j9c.1 |
+| 1 | Daemon wire → single-session; client mirror single-session migration | tc-j9c.2 |
+| 2 | `tmuxcc-broker` package — broker wire, supervisor, tmux south-side | tc-j9c.3 |
+| 3 | VS Code extension — broker-mediated activation flow | tc-j9c.4 |
+| 4 | Test harness — per-test broker isolation | tc-j9c.5 |
+| 5 | Docs pass — this reconciliation | tc-j9c.6 |
 
-**Stage 1 — Daemon wire single-session migration + tmuxcc-client mirror
-migration (paired).** These land together — the mirror's `RenderHook`
-signature changes when `sessionId` leaves the daemon wire.
-
-- Daemon: strip `sessionId` from every delta. Replace plural `sessions[]`
-  snapshot with singular `session`. Remove `session.added` /
-  `session.changed`. Add `session.unavailable` error code. Update
-  `tmuxcc-daemon/src/state/projection.ts`, reducer (narrow the
-  `%session-changed` handler per "Lifecycle and switch-client handling"),
-  control types, and tests.
-- Client mirror: `Mirror` becomes single-session. `RenderHook.onPaneOpened`
-  loses `sessionId`. The `attach()` walk no longer iterates sessions.
-
-**Stage 2 — Broker process and wire.** New `tmuxcc-broker` package (or
-sibling under daemon repo). Implements the broker wire above, shells
-out to `tmux list-sessions` / `new-session` / `kill-session` for state,
-supervises per-session daemon child processes, holds the thin
-`tmux -CC` connection for `%sessions-changed`. Decide before this
-stage: data-plane endpoint convention (currently spec'd as
-multiplexed on the daemon socket — confirm or revise during broker
-design).
-
-**Stage 3 — VS Code extension migration.** Activation flow becomes
-broker-mediated. Replace direct daemon spawn with `broker.claim(name)`.
-Remove `TMUXCC_SOCKET_OVERRIDE` / `TMUXCC_FORBID_DEFAULT_SOCKET` env-var
-threading (subsumed by broker construction).
-
-**Stage 4 — Test harness migration.** Per-test broker on a
-`tmuxcc-test-<id>` socket. Replace existing socket-naming + cleanup
-machinery with `broker.shutdown()`. Repurpose or remove the
-`tmuxcc-test-*` PID-encoded socket sweep (it becomes a broker
-implementation concern, not a daemon one).
-
-**Stage 5 — Docs pass.** Daemon, client, and vscode READMEs reflect
-final shape. Integration test READMEs reflect harness changes.
-Re-read `SCHEMA.md` against implementation reality and reconcile any
-drift discovered during implementation.
-
-Dependency graph: 0 blocks 1, 2; 1 blocks 3, 4; 2 blocks 3, 4; 3 and 4
-independent; 5 follows everything.
+The switch-client narrowing follow-up (runtime path narrowing for `%session-changed`)
+was delivered in bead tc-j9c.7.
