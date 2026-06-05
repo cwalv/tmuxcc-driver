@@ -274,7 +274,6 @@ describe("e2e — scenario 1: handshake + snapshot", () => {
     assert.ok(snapshotFocusCall?.type === "focusChanged", "focusChanged for P0 must fire");
     assert.equal(snapshotFocusCall.focus.paneId, P0);
     assert.equal(snapshotFocusCall.focus.windowId, W0);
-    assert.equal(snapshotFocusCall.focus.sessionId, S0);
 
     // windowAdded must appear before paneOpened (within the diff batch).
     const windowAddedIdx = types.indexOf("windowAdded");
@@ -677,7 +676,6 @@ describe("e2e — scenario 6: onLayoutChanged delivers split-tree geometry", () 
       type: "layout.updated",
       seq: 3,
       windowId: W0,
-      sessionId: S0,
       layout: updatedLayout,
     };
 
@@ -718,7 +716,6 @@ describe("mirror seq tracking — complementary unit assertions", () => {
     assert.ok(model.windows.has(W0), "W0 should be in the mirror");
     assert.equal(model.focus.paneId, P0);
     assert.equal(model.focus.windowId, W0);
-    assert.equal(model.focus.sessionId, S0);
   });
 
   it("mirror applies in-order deltas correctly", () => {

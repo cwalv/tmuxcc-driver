@@ -49,7 +49,6 @@ describe("InputApi.sendCommand — unit", () => {
     const api = createInputApi(sender);
     const cmd: WireCommand = {
       kind: "open-window",
-      sessionId: sessionId("s0"),
     };
     api.sendCommand(cmd);
 
@@ -73,7 +72,7 @@ describe("InputApi.sendCommand — unit", () => {
 
     const api = createInputApi(sender);
     api.sendInput(paneId("p0"), "hello");  // seq=1
-    api.sendCommand({ kind: "open-window", sessionId: sessionId("s0") });  // seq=2
+    api.sendCommand({ kind: "open-window" });  // seq=2
 
     assert.equal(messages.length, 2);
     assert.equal(messages[0]!.seq, 1, "sendInput should use seq=1");
@@ -142,10 +141,10 @@ describe("ClientHandle.controller.sendCommand — via in-memory transport", () =
       const snapshot: SnapshotMessage = {
         type: "snapshot",
         seq: 1,
-        sessions: [],
+        session: { sessionId: sessionId("s0"), name: "main" },
         windows: [],
         panes: [],
-        focus: { paneId: null, windowId: null, sessionId: null },
+        focus: { paneId: null, windowId: null },
       };
       daemonTransport.sendControl(snapshot);
     }
@@ -174,7 +173,7 @@ describe("ClientHandle.controller.sendCommand — via in-memory transport", () =
     });
 
     // Issue the command via the controller.
-    const cmd: WireCommand = { kind: "open-window", sessionId: sessionId("s0") };
+    const cmd: WireCommand = { kind: "open-window" };
     handle.controller.sendCommand(cmd);
 
     // The in-memory transport delivers synchronously.

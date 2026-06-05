@@ -103,22 +103,22 @@ interface SnapshotOpts {
   sessionId?: SessionId;
   panes?: Array<{ paneId: PaneId; windowId: WindowId; cols?: number; rows?: number }>;
   windows?: Array<{ windowId: WindowId; name?: string; active?: boolean; layout?: WindowLayout }>;
-  focus?: { paneId: PaneId | null; windowId: WindowId | null; sessionId: SessionId | null };
+  focus?: { paneId: PaneId | null; windowId: WindowId | null };
 }
 
+// v3: single-session snapshot builder
 function makeSnapshot(opts: SnapshotOpts = {}): SnapshotMessage {
   const s = opts.sessionId ?? sid("s0");
   const seq = opts.seq ?? 1;
   const panes = opts.panes ?? [];
   const windows = opts.windows ?? [];
-  const focus = opts.focus ?? { paneId: null, windowId: null, sessionId: null };
+  const focus = opts.focus ?? { paneId: null, windowId: null };
   return {
     type: "snapshot",
     seq,
-    sessions: [{ sessionId: s, name: "main", active: true }],
+    session: { sessionId: s, name: "main" },
     windows: windows.map((w) => ({
       windowId: w.windowId,
-      sessionId: s,
       name: w.name ?? "main",
       active: w.active ?? false,
       layout: w.layout ?? makeLayout(),
@@ -126,7 +126,6 @@ function makeSnapshot(opts: SnapshotOpts = {}): SnapshotMessage {
     panes: panes.map((p) => ({
       paneId: p.paneId,
       windowId: p.windowId,
-      sessionId: s,
       cols: p.cols ?? 80,
       rows: p.rows ?? 24,
     })),
@@ -156,16 +155,16 @@ function makeMirror(snap: SnapshotMessage): { mirror: Mirror; byteSource: FakeBy
 describe("NoOpRenderHook", () => {
   it("satisfies the RenderHook interface (compile check)", () => {
     // All methods are callable without throwing.
-    NoOpRenderHook.onPaneOpened({ paneId: pid("p0"), windowId: wid("w0"), sessionId: sid("s0"), cols: 80, rows: 24, active: false });
+    NoOpRenderHook.onPaneOpened({ paneId: pid("p0"), windowId: wid("w0"), cols: 80, rows: 24, active: false });
     NoOpRenderHook.onPaneClosed(pid("p0"));
     NoOpRenderHook.onPaneResized(pid("p0"), 80, 24);
     NoOpRenderHook.onPaneModeChanged(pid("p0"), "copy" as PaneMode);
     NoOpRenderHook.onPaneOutput(pid("p0"), new Uint8Array([0x41]));
-    NoOpRenderHook.onWindowAdded({ windowId: wid("w0"), sessionId: sid("s0"), name: "main", active: false, layout: makeLayout() });
+    NoOpRenderHook.onWindowAdded({ windowId: wid("w0"), name: "main", active: false, layout: makeLayout() });
     NoOpRenderHook.onWindowClosed(wid("w0"));
     NoOpRenderHook.onWindowRenamed(wid("w0"), "new-name");
     NoOpRenderHook.onLayoutChanged(wid("w0"), makeLayout());
-    NoOpRenderHook.onFocusChanged({ paneId: null, windowId: null, sessionId: null });
+    NoOpRenderHook.onFocusChanged({ paneId: null, windowId: null });
     NoOpRenderHook.onConnected();
     NoOpRenderHook.onDisconnected("test");
     // No assertion needed: reaching here without throw is the test.
@@ -179,7 +178,7 @@ describe("NoOpRenderHook", () => {
 describe("EchoRenderHook", () => {
   it("records onPaneOpened", () => {
     const echo = new EchoRenderHook();
-    const pane = { paneId: pid("p1"), windowId: wid("w1"), sessionId: sid("s1"), cols: 120, rows: 40, active: true };
+    const pane = { paneId: pid("p1"), windowId: wid("w1"), cols: 120, rows: 40, active: true };
     echo.onPaneOpened(pane);
     assert.equal(echo.calls.length, 1);
     const call = echo.calls[0];
@@ -272,7 +271,7 @@ describe("EchoRenderHook", () => {
 
   it("records onFocusChanged", () => {
     const echo = new EchoRenderHook();
-    const focus: FocusInfo = { paneId: pid("p0"), windowId: wid("w0"), sessionId: sid("s0") };
+    const focus: FocusInfo = { paneId: pid("p0"), windowId: wid("w0") };
     echo.onFocusChanged(focus);
     const call = echo.calls[0];
     assert.ok(call !== undefined);
@@ -321,10 +320,9 @@ describe("Mirror.attach — snapshot replay", () => {
     const layout = makeLayout(80, 24);
 
     const snap = makeSnapshot({
-      sessionId: s0,
       panes: [{ paneId: p0, windowId: w0, cols: 80, rows: 24 }],
       windows: [{ windowId: w0, name: "main", active: true, layout }],
-      focus: { paneId: p0, windowId: w0, sessionId: s0 },
+      focus: { paneId: p0, windowId: w0 },
     });
 
     const { mirror } = makeMirror(snap);
@@ -405,10 +403,9 @@ describe("Mirror.attach — model changes", () => {
     const p1 = pid("p1");
 
     const snap = makeSnapshot({
-      sessionId: s0,
       panes: [{ paneId: p0, windowId: w0 }],
       windows: [{ windowId: w0 }],
-      focus: { paneId: p0, windowId: w0, sessionId: s0 },
+      focus: { paneId: p0, windowId: w0 },
     });
     const { mirror } = makeMirror(snap);
     const echo = new EchoRenderHook();
@@ -421,7 +418,6 @@ describe("Mirror.attach — model changes", () => {
       seq: 2,
       paneId: p1,
       windowId: w0,
-      sessionId: s0,
       cols: 80,
       rows: 24,
       active: false,
@@ -444,10 +440,9 @@ describe("Mirror.attach — model changes", () => {
     const p1 = pid("p1");
 
     const snap = makeSnapshot({
-      sessionId: s0,
       panes: [{ paneId: p0, windowId: w0 }, { paneId: p1, windowId: w0 }],
       windows: [{ windowId: w0 }],
-      focus: { paneId: p0, windowId: w0, sessionId: s0 },
+      focus: { paneId: p0, windowId: w0 },
     });
     const { mirror } = makeMirror(snap);
     const echo = new EchoRenderHook();
@@ -460,7 +455,6 @@ describe("Mirror.attach — model changes", () => {
       seq: 2,
       paneId: p1,
       windowId: w0,
-      sessionId: s0,
     };
     mirror.receiveDelta(delta);
 
@@ -479,7 +473,6 @@ describe("Mirror.attach — model changes", () => {
     const p0 = pid("p0");
 
     const snap = makeSnapshot({
-      sessionId: s0,
       panes: [{ paneId: p0, windowId: w0, cols: 80, rows: 24 }],
       windows: [{ windowId: w0 }],
     });
@@ -514,10 +507,9 @@ describe("Mirror.attach — model changes", () => {
     const p1 = pid("p1");
 
     const snap = makeSnapshot({
-      sessionId: s0,
       panes: [{ paneId: p0, windowId: w0 }, { paneId: p1, windowId: w0 }],
       windows: [{ windowId: w0 }],
-      focus: { paneId: p0, windowId: w0, sessionId: s0 },
+      focus: { paneId: p0, windowId: w0 },
     });
     const { mirror } = makeMirror(snap);
     const echo = new EchoRenderHook();
@@ -529,7 +521,6 @@ describe("Mirror.attach — model changes", () => {
       seq: 2,
       paneId: p1,
       windowId: w0,
-      sessionId: s0,
     };
     mirror.receiveDelta(delta);
 
@@ -548,7 +539,6 @@ describe("Mirror.attach — model changes", () => {
     const w1 = wid("w1");
 
     const snap = makeSnapshot({
-      sessionId: s0,
       windows: [{ windowId: w0 }],
     });
     const { mirror } = makeMirror(snap);
@@ -560,7 +550,6 @@ describe("Mirror.attach — model changes", () => {
       type: "window.added",
       seq: 2,
       windowId: w1,
-      sessionId: s0,
       name: "second",
       active: false,
     };
@@ -581,7 +570,6 @@ describe("Mirror.attach — model changes", () => {
     const w1 = wid("w1");
 
     const snap = makeSnapshot({
-      sessionId: s0,
       windows: [{ windowId: w0 }, { windowId: w1 }],
     });
     const { mirror } = makeMirror(snap);
@@ -593,7 +581,6 @@ describe("Mirror.attach — model changes", () => {
       type: "window.closed",
       seq: 2,
       windowId: w1,
-      sessionId: s0,
     };
     mirror.receiveDelta(delta);
 
@@ -611,7 +598,6 @@ describe("Mirror.attach — model changes", () => {
     const w0 = wid("w0");
 
     const snap = makeSnapshot({
-      sessionId: s0,
       windows: [{ windowId: w0, name: "original" }],
     });
     const { mirror } = makeMirror(snap);
@@ -653,7 +639,6 @@ describe("Mirror.attach — byte events", () => {
     const p0 = pid("p0");
 
     const snap = makeSnapshot({
-      sessionId: s0,
       panes: [{ paneId: p0, windowId: w0 }],
       windows: [{ windowId: w0 }],
     });
@@ -683,7 +668,6 @@ describe("Mirror.attach — byte events", () => {
     const p1 = pid("p1");
 
     const snap = makeSnapshot({
-      sessionId: s0,
       panes: [{ paneId: p0, windowId: w0 }],
       windows: [{ windowId: w0 }],
     });
@@ -698,7 +682,6 @@ describe("Mirror.attach — byte events", () => {
       seq: 2,
       paneId: p1,
       windowId: w0,
-      sessionId: s0,
       cols: 80,
       rows: 24,
       active: false,
@@ -725,7 +708,6 @@ describe("Mirror.attach — byte events", () => {
     const p1 = pid("p1");
 
     const snap = makeSnapshot({
-      sessionId: s0,
       panes: [{ paneId: p0, windowId: w0 }, { paneId: p1, windowId: w0 }],
       windows: [{ windowId: w0 }],
     });
@@ -739,7 +721,6 @@ describe("Mirror.attach — byte events", () => {
       seq: 2,
       paneId: p1,
       windowId: w0,
-      sessionId: s0,
     };
     mirror.receiveDelta(delta);
     echo.clear();
@@ -767,7 +748,6 @@ describe("Mirror.attach — cleanup on detach", () => {
     const p0 = pid("p0");
 
     const snap = makeSnapshot({
-      sessionId: s0,
       panes: [{ paneId: p0, windowId: w0 }],
       windows: [{ windowId: w0 }],
     });
@@ -784,7 +764,6 @@ describe("Mirror.attach — cleanup on detach", () => {
     mirror.receiveSnapshot(
       makeSnapshot({
         seq: 99,
-        sessionId: s0,
         panes: [{ paneId: p0, windowId: w0 }, { paneId: pid("p1"), windowId: w0 }],
         windows: [{ windowId: w0 }],
       }),
@@ -809,10 +788,9 @@ describe("Mirror.attach — idempotence", () => {
     const s0 = sid("s0");
 
     const snap = makeSnapshot({
-      sessionId: s0,
       panes: [{ paneId: p0, windowId: w0 }],
       windows: [{ windowId: w0 }],
-      focus: { paneId: p0, windowId: w0, sessionId: s0 },
+      focus: { paneId: p0, windowId: w0 },
     });
     const { mirror } = makeMirror(snap);
     const echo = new EchoRenderHook();

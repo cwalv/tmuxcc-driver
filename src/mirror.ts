@@ -74,14 +74,16 @@ import type { RenderHook, ByteSource } from "./render-hook.js";
 /**
  * A pane as tracked by the client mirror.
  *
- * Projection from the wire: paneId, windowId, sessionId, cols, rows are direct
- * from SnapshotPane / delta messages. `mode` is tracked from pane.mode-changed
+ * Projection from the wire: paneId, windowId, cols, rows are direct from
+ * SnapshotPane / delta messages. `mode` is tracked from pane.mode-changed
  * deltas (defaults to "normal" at snapshot time since SnapshotPane has no mode).
+ *
+ * v3: sessionId is absent — the daemon wire is single-session and does not
+ * carry sessionId on pane messages.
  */
 export interface ClientPane {
   readonly paneId: PaneId;
   readonly windowId: WindowId;
-  readonly sessionId: SessionId;
   readonly cols: number;
   readonly rows: number;
   /** Current pane mode. Defaults to "normal" after a snapshot. */
@@ -92,14 +94,16 @@ export interface ClientPane {
  * A window as tracked by the client mirror.
  *
  * `active` is true when this window is the active window in its session
- * (driven by snapshot active flags and focus.changed / session.changed deltas).
+ * (driven by snapshot active flags and focus.changed deltas).
  * `layout` is the current WindowLayout tree for this window (may be the
  * zero-placeholder if no layout.updated has arrived yet — matches projection.ts
  * semantics for window.added).
+ *
+ * v3: sessionId is absent — the daemon wire is single-session and does not
+ * carry sessionId on window messages.
  */
 export interface ClientWindow {
   readonly windowId: WindowId;
-  readonly sessionId: SessionId;
   readonly name: string;
   readonly active: boolean;
   readonly layout: WindowLayout;
@@ -108,21 +112,22 @@ export interface ClientWindow {
 /**
  * A session as tracked by the client mirror.
  *
- * `active` is true for the session that is currently focused.
+ * v3: the daemon wire is single-session. `ClientModel.session` holds this
+ * scalar directly (not a map).
  */
 export interface ClientSession {
   readonly sessionId: SessionId;
   readonly name: string;
-  readonly active: boolean;
 }
 
 /**
- * Global focus triple. All three are null when no pane is focused.
+ * Global focus pair. Both are null when no pane is focused.
+ *
+ * v3: sessionId is absent from focus — the daemon wire is single-session.
  */
 export interface ClientFocus {
   readonly paneId: PaneId | null;
   readonly windowId: WindowId | null;
-  readonly sessionId: SessionId | null;
 }
 
 /**
@@ -132,17 +137,17 @@ export interface ClientFocus {
  * replaced atomically by `applySnapshot` / `applyDelta`; renderers should call
  * `getModel()` after each change notification to get the latest reference.
  *
- * Rendering hint: join `sessions` → `windows` (by sessionId) → `panes`
- * (by windowId) to build a tree, or read individual entities by id directly.
+ * v3: single-session. The bound session is a scalar `session` field, not a map.
+ * Rendering hint: iterate `windows` → `panes` (by windowId) to build a tree.
  */
 export interface ClientModel {
-  /** All sessions, keyed by sessionId. */
-  readonly sessions: ReadonlyMap<SessionId, ClientSession>;
-  /** All windows across all sessions, keyed by windowId. */
+  /** The bound session (single-session v3 wire). */
+  readonly session: ClientSession;
+  /** All windows, keyed by windowId. */
   readonly windows: ReadonlyMap<WindowId, ClientWindow>;
   /** All panes across all windows, keyed by paneId. */
   readonly panes: ReadonlyMap<PaneId, ClientPane>;
-  /** Global focus triple. */
+  /** Global focus pair. */
   readonly focus: ClientFocus;
   /**
    * Exit codes for panes that have closed, keyed by paneId.
@@ -194,13 +199,13 @@ export interface SeqGapInfo {
 // Empty model constructor
 // ---------------------------------------------------------------------------
 
-/** Return an empty ClientModel (no sessions, windows, panes; null focus). */
+/** Return an empty ClientModel (no windows, panes; null focus; placeholder session). */
 function emptyClientModel(): ClientModel {
   return {
-    sessions: new Map(),
+    session: { sessionId: "" as SessionId, name: "" },
     windows: new Map(),
     panes: new Map(),
-    focus: { paneId: null, windowId: null, sessionId: null },
+    focus: { paneId: null, windowId: null },
     exitCodes: new Map(),
     attachedClientCount: undefined,
   };
@@ -222,20 +227,16 @@ export function applySnapshot(snapshot: SnapshotMessage): {
   model: ClientModel;
   seq: number;
 } {
-  const sessions = new Map<SessionId, ClientSession>();
-  for (const s of snapshot.sessions) {
-    sessions.set(s.sessionId, {
-      sessionId: s.sessionId,
-      name: s.name,
-      active: s.active,
-    });
-  }
+  // v3: single session — scalar field, not an array.
+  const session: ClientSession = {
+    sessionId: snapshot.session.sessionId,
+    name: snapshot.session.name,
+  };
 
   const windows = new Map<WindowId, ClientWindow>();
   for (const w of snapshot.windows) {
     windows.set(w.windowId, {
       windowId: w.windowId,
-      sessionId: w.sessionId,
       name: w.name,
       active: w.active,
       layout: w.layout,
@@ -247,7 +248,6 @@ export function applySnapshot(snapshot: SnapshotMessage): {
     panes.set(p.paneId, {
       paneId: p.paneId,
       windowId: p.windowId,
-      sessionId: p.sessionId,
       cols: p.cols,
       rows: p.rows,
       mode: "normal", // SnapshotPane has no mode field; default per spec
@@ -255,13 +255,12 @@ export function applySnapshot(snapshot: SnapshotMessage): {
   }
 
   const model: ClientModel = {
-    sessions,
+    session,
     windows,
     panes,
     focus: {
       paneId: snapshot.focus.paneId,
       windowId: snapshot.focus.windowId,
-      sessionId: snapshot.focus.sessionId,
     },
     // Snapshot resets all state including exit codes — panes that exited before
     // this snapshot are gone and their exit codes are no longer relevant.
@@ -300,7 +299,6 @@ export function applyDelta(model: ClientModel, msg: DaemonMessage): ClientModel 
       panes.set(msg.paneId, {
         paneId: msg.paneId,
         windowId: msg.windowId,
-        sessionId: msg.sessionId,
         cols: msg.cols,
         rows: msg.rows,
         mode: "normal",
@@ -341,18 +339,17 @@ export function applyDelta(model: ClientModel, msg: DaemonMessage): ClientModel 
 
     case "window.added": {
       const windows = new Map(model.windows);
-      // If this window is active, clear other windows' active flags in the same
-      // session (mirrors projection.test.ts applyDeltas semantics).
+      // If this window is active, clear other windows' active flags
+      // (mirrors projection.test.ts applyDeltas semantics).
       if (msg.active) {
         for (const [wid, win] of windows) {
-          if (win.sessionId === msg.sessionId && win.active) {
+          if (win.active) {
             windows.set(wid, { ...win, active: false });
           }
         }
       }
       windows.set(msg.windowId, {
         windowId: msg.windowId,
-        sessionId: msg.sessionId,
         name: msg.name,
         active: msg.active,
         // Zero-layout placeholder — mirrors projection.ts window.added behavior.
@@ -398,21 +395,13 @@ export function applyDelta(model: ClientModel, msg: DaemonMessage): ClientModel 
     // ── Focus ────────────────────────────────────────────────────────────────
 
     case "focus.changed": {
-      // Update the focus triple.
+      // Update the focus pair (v3: no sessionId).
       const focus: ClientFocus = {
         paneId: msg.paneId,
         windowId: msg.windowId,
-        sessionId: msg.sessionId,
       };
-      // Also update active flags on sessions and windows to match the new focus
+      // Also update active flags on windows to match the new focus
       // (mirrors projection.test.ts applyDeltas semantics).
-      const sessions = new Map(model.sessions);
-      for (const [sid, sess] of sessions) {
-        const shouldBeActive = sid === msg.sessionId;
-        if (sess.active !== shouldBeActive) {
-          sessions.set(sid, { ...sess, active: shouldBeActive });
-        }
-      }
       const windows = new Map(model.windows);
       for (const [wid, win] of windows) {
         const shouldBeActive = wid === msg.windowId;
@@ -420,54 +409,14 @@ export function applyDelta(model: ClientModel, msg: DaemonMessage): ClientModel 
           windows.set(wid, { ...win, active: shouldBeActive });
         }
       }
-      return { ...model, sessions, windows, focus };
+      return { ...model, windows, focus };
     }
 
-    // ── Session lifecycle ────────────────────────────────────────────────────
-
-    case "session.added": {
-      const sessions = new Map(model.sessions);
-      // Clear other sessions' active flag if the new session is immediately active.
-      if (msg.active) {
-        for (const [sid, sess] of sessions) {
-          if (sess.active) {
-            sessions.set(sid, { ...sess, active: false });
-          }
-        }
-      }
-      sessions.set(msg.sessionId, {
-        sessionId: msg.sessionId,
-        name: msg.name,
-        active: msg.active,
-      });
-      return { ...model, sessions };
-    }
-
-    case "session.closed": {
-      if (!model.sessions.has(msg.sessionId)) return model;
-      const sessions = new Map(model.sessions);
-      sessions.delete(msg.sessionId);
-      return { ...model, sessions };
-    }
-
-    case "session.changed": {
-      // Update active flag on all sessions to reflect the new active session.
-      const sessions = new Map(model.sessions);
-      for (const [sid, sess] of sessions) {
-        const shouldBeActive = sid === msg.newActiveSessionId;
-        if (sess.active !== shouldBeActive) {
-          sessions.set(sid, { ...sess, active: shouldBeActive });
-        }
-      }
-      return { ...model, sessions };
-    }
+    // ── Session lifecycle (v3: only session.renamed on daemon wire) ───────────
 
     case "session.renamed": {
-      const sess = model.sessions.get(msg.sessionId);
-      if (!sess) return model;
-      const sessions = new Map(model.sessions);
-      sessions.set(msg.sessionId, { ...sess, name: msg.newName });
-      return { ...model, sessions };
+      // v3: DaemonSessionRenamedMessage has no sessionId — updates the bound session.
+      return { ...model, session: { ...model.session, name: msg.newName } };
     }
 
     // ── Non-model messages (pass through unchanged) ──────────────────────────
@@ -830,12 +779,12 @@ export class Mirror {
     let prevModel: {
       panes: ReadonlyMap<PaneId, { cols: number; rows: number }>;
       windows: ReadonlyMap<WindowId, { name: string; layout: WindowLayout }>;
-      focus: { paneId: PaneId | null; windowId: WindowId | null; sessionId: SessionId | null };
+      focus: { paneId: PaneId | null; windowId: WindowId | null };
       exitCodes: ReadonlyMap<PaneId, number>;
     } = {
       panes: new Map(),
       windows: new Map(),
-      focus: { paneId: null, windowId: null, sessionId: null },
+      focus: { paneId: null, windowId: null },
       exitCodes: new Map(),
     };
 
@@ -870,7 +819,6 @@ export class Mirror {
         if (prevWin === undefined) {
           hook.onWindowAdded({
             windowId: win.windowId,
-            sessionId: win.sessionId,
             name: win.name,
             active: win.active,
             layout: win.layout,
@@ -898,7 +846,6 @@ export class Mirror {
           hook.onPaneOpened({
             paneId: pane.paneId,
             windowId: pane.windowId,
-            sessionId: pane.sessionId,
             cols: pane.cols,
             rows: pane.rows,
             active: pane.paneId === curr.focus.paneId,
@@ -920,7 +867,7 @@ export class Mirror {
       // Focus
       const pf = prev.focus;
       const nf = curr.focus;
-      if (pf.paneId !== nf.paneId || pf.windowId !== nf.windowId || pf.sessionId !== nf.sessionId) {
+      if (pf.paneId !== nf.paneId || pf.windowId !== nf.windowId) {
         hook.onFocusChanged(nf);
       }
 
@@ -933,7 +880,12 @@ export class Mirror {
       for (const [wid, w] of curr.windows) {
         newWindows.set(wid, { name: w.name, layout: w.layout });
       }
-      prevModel = { panes: newPanes, windows: newWindows, focus: nf, exitCodes: curr.exitCodes };
+      prevModel = {
+        panes: newPanes,
+        windows: newWindows,
+        focus: { paneId: nf.paneId, windowId: nf.windowId },
+        exitCodes: curr.exitCodes,
+      };
     }
 
     // ── Initial catch-up from current mirror state ──────────────────────────
@@ -944,7 +896,6 @@ export class Mirror {
     for (const win of initial.windows.values()) {
       hook.onWindowAdded({
         windowId: win.windowId,
-        sessionId: win.sessionId,
         name: win.name,
         active: win.active,
         layout: win.layout,
@@ -957,7 +908,6 @@ export class Mirror {
       hook.onPaneOpened({
         paneId: pane.paneId,
         windowId: pane.windowId,
-        sessionId: pane.sessionId,
         cols: pane.cols,
         rows: pane.rows,
         active: pane.paneId === initial.focus.paneId,
@@ -980,7 +930,12 @@ export class Mirror {
     for (const [wid, w] of initial.windows) {
       seedWindows.set(wid, { name: w.name, layout: w.layout });
     }
-    prevModel = { panes: seedPanes, windows: seedWindows, focus: initial.focus, exitCodes: initial.exitCodes };
+    prevModel = {
+      panes: seedPanes,
+      windows: seedWindows,
+      focus: { paneId: initial.focus.paneId, windowId: initial.focus.windowId },
+      exitCodes: initial.exitCodes,
+    };
 
     // ── Subscribe to future model changes ────────────────────────────────────
 

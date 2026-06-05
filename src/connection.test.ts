@@ -286,7 +286,6 @@ describe("DaemonConnection — post-handshake control routing", () => {
       seq: 2,
       paneId: P0,
       windowId: "w0" as import("@tmuxcc/daemon").WindowId,
-      sessionId: "s0" as import("@tmuxcc/daemon").SessionId,
       cols: 80,
       rows: 24,
       active: true,
@@ -313,7 +312,6 @@ describe("DaemonConnection — post-handshake control routing", () => {
         seq: 2,
         paneId: P0,
         windowId: "w0" as import("@tmuxcc/daemon").WindowId,
-        sessionId: "s0" as import("@tmuxcc/daemon").SessionId,
         cols: 80,
         rows: 24,
         active: true,
@@ -323,7 +321,6 @@ describe("DaemonConnection — post-handshake control routing", () => {
         seq: 3,
         paneId: P0,
         windowId: "w0" as import("@tmuxcc/daemon").WindowId,
-        sessionId: "s0" as import("@tmuxcc/daemon").SessionId,
       },
     ];
 
@@ -474,7 +471,6 @@ describe("DaemonConnection — message buffering", () => {
       seq: 2,
       paneId: P0,
       windowId: "w0" as import("@tmuxcc/daemon").WindowId,
-      sessionId: "s0" as import("@tmuxcc/daemon").SessionId,
     };
     daemonTransport.sendControl(msg);
 
@@ -495,7 +491,6 @@ describe("DaemonConnection — message buffering", () => {
       seq: 3,
       paneId: P0,
       windowId: "w0" as import("@tmuxcc/daemon").WindowId,
-      sessionId: "s0" as import("@tmuxcc/daemon").SessionId,
       cols: 80,
       rows: 24,
       active: false,
@@ -522,7 +517,6 @@ describe("DaemonConnection — message buffering", () => {
       seq: 2,
       paneId: P0,
       windowId: "w0" as import("@tmuxcc/daemon").WindowId,
-      sessionId: "s0" as import("@tmuxcc/daemon").SessionId,
       cols: 80,
       rows: 24,
       active: true,

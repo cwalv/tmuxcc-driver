@@ -67,10 +67,7 @@ import type {
   WindowRenamedMessage,
   LayoutUpdatedMessage,
   FocusChangedMessage,
-  SessionAddedMessage,
-  SessionClosedMessage,
-  SessionChangedMessage,
-  SessionRenamedMessage,
+  DaemonSessionRenamedMessage,
   CommandResponseMessage,
   ErrorMessage,
   // All concrete message types — client→daemon
@@ -122,21 +119,20 @@ function buildDaemonMessages(): DaemonMessage[] {
   const snapshot: SnapshotMessage = {
     type: "snapshot",
     seq: 2,
-    sessions: [{ sessionId: S0, name: "main", active: true }],
+    session: { sessionId: S0, name: "main" },
     windows: [
       {
         windowId: W0,
-        sessionId: S0,
         name: "editor",
         active: true,
         layout: sampleLayout,
       },
     ],
     panes: [
-      { paneId: P0, windowId: W0, sessionId: S0, cols: 100, rows: 50 },
-      { paneId: P1, windowId: W0, sessionId: S0, cols: 100, rows: 50 },
+      { paneId: P0, windowId: W0, cols: 100, rows: 50 },
+      { paneId: P1, windowId: W0, cols: 100, rows: 50 },
     ],
-    focus: { paneId: P0, windowId: W0, sessionId: S0 },
+    focus: { paneId: P0, windowId: W0 },
   };
 
   const paneOpened: PaneOpenedMessage = {
@@ -144,7 +140,6 @@ function buildDaemonMessages(): DaemonMessage[] {
     seq: 3,
     paneId: P0,
     windowId: W0,
-    sessionId: S0,
     cols: 80,
     rows: 24,
     active: true,
@@ -155,7 +150,6 @@ function buildDaemonMessages(): DaemonMessage[] {
     seq: 4,
     paneId: P0,
     windowId: W0,
-    sessionId: S0,
   };
 
   const paneResized: PaneResizedMessage = {
@@ -177,7 +171,6 @@ function buildDaemonMessages(): DaemonMessage[] {
     type: "window.added",
     seq: 7,
     windowId: W0,
-    sessionId: S0,
     name: "editor",
     active: true,
   };
@@ -186,7 +179,6 @@ function buildDaemonMessages(): DaemonMessage[] {
     type: "window.closed",
     seq: 8,
     windowId: W0,
-    sessionId: S0,
   };
 
   const windowRenamed: WindowRenamedMessage = {
@@ -200,7 +192,6 @@ function buildDaemonMessages(): DaemonMessage[] {
     type: "layout.updated",
     seq: 10,
     windowId: W0,
-    sessionId: S0,
     layout: sampleLayout,
   };
 
@@ -209,7 +200,6 @@ function buildDaemonMessages(): DaemonMessage[] {
     seq: 11,
     paneId: P1,
     windowId: W0,
-    sessionId: S0,
   };
 
   const focusChangedNull: FocusChangedMessage = {
@@ -217,33 +207,11 @@ function buildDaemonMessages(): DaemonMessage[] {
     seq: 12,
     paneId: null,
     windowId: null,
-    sessionId: null,
   };
 
-  const sessionAdded: SessionAddedMessage = {
-    type: "session.added",
-    seq: 13,
-    sessionId: S0,
-    name: "main",
-    active: true,
-  };
-
-  const sessionClosed: SessionClosedMessage = {
-    type: "session.closed",
-    seq: 14,
-    sessionId: S0,
-  };
-
-  const sessionChanged: SessionChangedMessage = {
-    type: "session.changed",
-    seq: 15,
-    newActiveSessionId: S0,
-  };
-
-  const sessionRenamed: SessionRenamedMessage = {
+  const sessionRenamed: DaemonSessionRenamedMessage = {
     type: "session.renamed",
-    seq: 16,
-    sessionId: S0,
+    seq: 13,
     newName: "work",
   };
 
@@ -289,9 +257,6 @@ function buildDaemonMessages(): DaemonMessage[] {
     layoutUpdated,
     focusChanged,
     focusChangedNull,
-    sessionAdded,
-    sessionClosed,
-    sessionChanged,
     sessionRenamed,
     commandResponseOk,
     commandResponseErr,
@@ -330,7 +295,7 @@ function buildClientMessages(): ClientMessage[] {
     type: "command.request",
     seq: 4,
     correlationId: "req-a",
-    command: { kind: "open-window", sessionId: S0, name: "new-window" },
+    command: { kind: "open-window", name: "new-window" },
   };
 
   const cmdSplitPane: CommandRequestMessage = {
@@ -481,7 +446,6 @@ describe("wire round-trip — cross-package import from @tmuxcc/daemon", () => {
         seq: 1,
         paneId: P0,
         windowId: W0,
-        sessionId: S0,
         cols: 80,
         rows: 24,
         active: false,
@@ -557,7 +521,7 @@ describe("wire round-trip — cross-package import from @tmuxcc/daemon", () => {
 
       daemon.close();
       // This send should be silently dropped — transport is already closed.
-      daemon.sendControl({ type: "pane.closed", seq: 1, paneId: P0, windowId: W0, sessionId: S0 });
+      daemon.sendControl({ type: "pane.closed", seq: 1, paneId: P0, windowId: W0 });
 
       assert.equal(callCount, 0, "handler should not fire after transport close");
     });

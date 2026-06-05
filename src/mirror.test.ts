@@ -20,12 +20,9 @@ import {
   windowId,
   sessionId,
   emptyModel,
-  addSession,
   addWindow,
   addPane,
   removePane,
-  removeWindow,
-  removeSession,
   updatePane,
   updateWindow,
   updateSession,
@@ -78,26 +75,25 @@ const LAYOUT_2: WindowLayout = {
   },
 };
 
-/** A representative snapshot: S1 → W1 → [P1, P2], focus P1/W1/S1. */
-function makeSnapshot(seq = 1): SnapshotMessage {
+/** A representative snapshot: S1 → W1 → [P1, P2], focus P1/W1. (v3 single-session) */
+function makeSnapshot(seq = 2): SnapshotMessage {
   return {
     type: "snapshot",
     seq,
-    sessions: [{ sessionId: S1, name: "main", active: true }],
+    session: { sessionId: S1, name: "main" },
     windows: [
       {
         windowId: W1,
-        sessionId: S1,
         name: "editor",
         active: true,
         layout: LAYOUT_2,
       },
     ],
     panes: [
-      { paneId: P1, windowId: W1, sessionId: S1, cols: 40, rows: 24 },
-      { paneId: P2, windowId: W1, sessionId: S1, cols: 40, rows: 24 },
+      { paneId: P1, windowId: W1, cols: 40, rows: 24 },
+      { paneId: P2, windowId: W1, cols: 40, rows: 24 },
     ],
-    focus: { paneId: P1, windowId: W1, sessionId: S1 },
+    focus: { paneId: P1, windowId: W1 },
   };
 }
 
@@ -162,20 +158,19 @@ function baseModel(): SessionModel {
 // Helpers for normalizing ClientModel for comparison
 // ---------------------------------------------------------------------------
 
+// v3 single-session: session is a scalar, no sessionId on windows/panes
 function normalizeModel(model: ClientModel) {
   return {
-    sessions: [...model.sessions.values()]
-      .sort((a, b) => String(a.sessionId).localeCompare(String(b.sessionId)))
-      .map(({ sessionId, name, active }) => ({ sessionId, name, active })),
+    session: model.session,
     windows: [...model.windows.values()]
       .sort((a, b) => String(a.windowId).localeCompare(String(b.windowId)))
-      .map(({ windowId, sessionId, name, active, layout }) => ({
-        windowId, sessionId, name, active, layout,
+      .map(({ windowId, name, active, layout }) => ({
+        windowId, name, active, layout,
       })),
     panes: [...model.panes.values()]
       .sort((a, b) => String(a.paneId).localeCompare(String(b.paneId)))
-      .map(({ paneId, windowId, sessionId, cols, rows }) => ({
-        paneId, windowId, sessionId, cols, rows,
+      .map(({ paneId, windowId, cols, rows }) => ({
+        paneId, windowId, cols, rows,
       })),
     focus: model.focus,
   };
@@ -184,18 +179,16 @@ function normalizeModel(model: ClientModel) {
 /** Normalize a SnapshotMessage into the same shape as normalizeModel (no mode/seq). */
 function normalizeSnapshot(snap: SnapshotMessage) {
   return {
-    sessions: [...snap.sessions]
-      .sort((a, b) => String(a.sessionId).localeCompare(String(b.sessionId)))
-      .map(({ sessionId, name, active }) => ({ sessionId, name, active })),
+    session: snap.session,
     windows: [...snap.windows]
       .sort((a, b) => String(a.windowId).localeCompare(String(b.windowId)))
-      .map(({ windowId, sessionId, name, active, layout }) => ({
-        windowId, sessionId, name, active, layout,
+      .map(({ windowId, name, active, layout }) => ({
+        windowId, name, active, layout,
       })),
     panes: [...snap.panes]
       .sort((a, b) => String(a.paneId).localeCompare(String(b.paneId)))
-      .map(({ paneId, windowId, sessionId, cols, rows }) => ({
-        paneId, windowId, sessionId, cols, rows,
+      .map(({ paneId, windowId, cols, rows }) => ({
+        paneId, windowId, cols, rows,
       })),
     focus: snap.focus,
   };
@@ -206,18 +199,15 @@ function normalizeSnapshot(snap: SnapshotMessage) {
 // ---------------------------------------------------------------------------
 
 describe("applySnapshot — initializes mirror", () => {
-  it("snapshot initializes sessions, windows, panes, layout, and focus", () => {
+  it("snapshot initializes session, windows, panes, layout, and focus", () => {
     const snap = makeSnapshot(5);
     const { model, seq } = applySnapshot(snap);
 
     assert.equal(seq, 5);
 
-    // Sessions
-    assert.equal(model.sessions.size, 1);
-    const sess = model.sessions.get(S1);
-    assert.ok(sess, "session S1 should exist");
-    assert.equal(sess.name, "main");
-    assert.equal(sess.active, true);
+    // Session (v3: scalar, not a map)
+    assert.equal(model.session.sessionId, S1);
+    assert.equal(model.session.name, "main");
 
     // Windows
     assert.equal(model.windows.size, 1);
@@ -239,25 +229,25 @@ describe("applySnapshot — initializes mirror", () => {
     assert.equal(pane2.cols, 40);
     assert.equal(pane2.rows, 24);
 
-    // Focus
-    assert.deepEqual(model.focus, { paneId: P1, windowId: W1, sessionId: S1 });
+    // Focus (v3: no sessionId)
+    assert.deepEqual(model.focus, { paneId: P1, windowId: W1 });
   });
 
-  it("empty snapshot produces empty model with null focus", () => {
+  it("snapshot with no panes/windows produces minimal model with null focus", () => {
     const snap: SnapshotMessage = {
       type: "snapshot",
-      seq: 1,
-      sessions: [],
+      seq: 2,
+      session: { sessionId: S1, name: "empty" },
       windows: [],
       panes: [],
-      focus: { paneId: null, windowId: null, sessionId: null },
+      focus: { paneId: null, windowId: null },
     };
     const { model, seq } = applySnapshot(snap);
-    assert.equal(seq, 1);
-    assert.equal(model.sessions.size, 0);
+    assert.equal(seq, 2);
+    assert.equal(model.session.sessionId, S1);
     assert.equal(model.windows.size, 0);
     assert.equal(model.panes.size, 0);
-    assert.deepEqual(model.focus, { paneId: null, windowId: null, sessionId: null });
+    assert.deepEqual(model.focus, { paneId: null, windowId: null });
   });
 
   it("Mirror.receiveSnapshot initializes and fires onModelChange", () => {
@@ -274,25 +264,25 @@ describe("applySnapshot — initializes mirror", () => {
     assert.equal(mirror.initialized, true);
     assert.equal(changeCount, 1);
     assert.ok(lastModel);
-    assert.equal(lastModel.sessions.size, 1);
+    assert.equal(lastModel.session.sessionId, S1);
     assert.deepEqual(mirror.getModel(), lastModel);
   });
 
   it("Mirror.receiveSnapshot replaces previous state on re-init", () => {
     const mirror = new Mirror();
-    mirror.receiveSnapshot(makeSnapshot(1));
-    assert.equal(mirror.getModel().sessions.size, 1);
+    mirror.receiveSnapshot(makeSnapshot(2));
+    assert.equal(mirror.getModel().session.sessionId, S1);
 
-    // Re-init with empty snapshot
+    // Re-init with another snapshot
     mirror.receiveSnapshot({
       type: "snapshot",
       seq: 10,
-      sessions: [],
+      session: { sessionId: S2, name: "other" },
       windows: [],
       panes: [],
-      focus: { paneId: null, windowId: null, sessionId: null },
+      focus: { paneId: null, windowId: null },
     });
-    assert.equal(mirror.getModel().sessions.size, 0);
+    assert.equal(mirror.getModel().session.sessionId, S2);
   });
 });
 
@@ -302,13 +292,12 @@ describe("applySnapshot — initializes mirror", () => {
 
 describe("applyDelta — pane deltas", () => {
   it("pane.opened adds a new pane with mode=normal", () => {
-    const { model: init } = applySnapshot(makeSnapshot(1));
+    const { model: init } = applySnapshot(makeSnapshot(2));
     const msg: DaemonMessage = {
       type: "pane.opened",
-      seq: 2,
+      seq: 3,
       paneId: P3,
       windowId: W1,
-      sessionId: S1,
       cols: 30,
       rows: 24,
       active: false,
@@ -321,17 +310,15 @@ describe("applyDelta — pane deltas", () => {
     assert.equal(p3.rows, 24);
     assert.equal(p3.mode, "normal");
     assert.equal(p3.windowId, W1);
-    assert.equal(p3.sessionId, S1);
   });
 
   it("pane.closed removes a pane", () => {
-    const { model: init } = applySnapshot(makeSnapshot(1));
+    const { model: init } = applySnapshot(makeSnapshot(2));
     const msg: DaemonMessage = {
       type: "pane.closed",
-      seq: 2,
+      seq: 3,
       paneId: P2,
       windowId: W1,
-      sessionId: S1,
     };
     const model = applyDelta(init, msg);
     assert.equal(model.panes.size, 1);
@@ -373,12 +360,11 @@ describe("applyDelta — pane deltas", () => {
 
 describe("applyDelta — window deltas", () => {
   it("window.added adds a new window with zero-layout placeholder", () => {
-    const { model: init } = applySnapshot(makeSnapshot(1));
+    const { model: init } = applySnapshot(makeSnapshot(2));
     const msg: DaemonMessage = {
       type: "window.added",
-      seq: 2,
+      seq: 3,
       windowId: W2,
-      sessionId: S1,
       name: "terminal",
       active: false,
     };
@@ -391,15 +377,14 @@ describe("applyDelta — window deltas", () => {
     assert.equal(w2.layout.cols, 0); // zero-layout placeholder
   });
 
-  it("window.added with active=true clears other windows' active in same session", () => {
-    const { model: init } = applySnapshot(makeSnapshot(1));
+  it("window.added with active=true clears other windows' active flags", () => {
+    const { model: init } = applySnapshot(makeSnapshot(2));
     assert.equal(init.windows.get(W1)!.active, true);
 
     const msg: DaemonMessage = {
       type: "window.added",
-      seq: 2,
+      seq: 3,
       windowId: W2,
-      sessionId: S1,
       name: "terminal",
       active: true,
     };
@@ -409,12 +394,11 @@ describe("applyDelta — window deltas", () => {
   });
 
   it("window.closed removes the window", () => {
-    const { model: init } = applySnapshot(makeSnapshot(1));
+    const { model: init } = applySnapshot(makeSnapshot(2));
     const msg: DaemonMessage = {
       type: "window.closed",
-      seq: 2,
+      seq: 3,
       windowId: W1,
-      sessionId: S1,
     };
     const model = applyDelta(init, msg);
     assert.equal(model.windows.size, 0);
@@ -436,14 +420,13 @@ describe("applyDelta — window deltas", () => {
 
 describe("applyDelta — layout delta", () => {
   it("layout.updated replaces the window layout", () => {
-    const { model: init } = applySnapshot(makeSnapshot(1));
+    const { model: init } = applySnapshot(makeSnapshot(2));
     assert.deepEqual(init.windows.get(W1)!.layout, LAYOUT_2);
 
     const msg: DaemonMessage = {
       type: "layout.updated",
-      seq: 2,
+      seq: 3,
       windowId: W1,
-      sessionId: S1,
       layout: LAYOUT_1,
     };
     const model = applyDelta(init, msg);
@@ -452,130 +435,53 @@ describe("applyDelta — layout delta", () => {
 });
 
 describe("applyDelta — focus delta", () => {
-  it("focus.changed updates focus triple and active flags on sessions/windows", () => {
-    // Build a two-session, two-window snapshot
+  it("focus.changed updates focus pair and active flags on windows (v3: no sessionId)", () => {
+    // Two-window snapshot (single session, v3)
     const snap: SnapshotMessage = {
       type: "snapshot",
-      seq: 1,
-      sessions: [
-        { sessionId: S1, name: "main", active: true },
-        { sessionId: S2, name: "work", active: false },
-      ],
+      seq: 2,
+      session: { sessionId: S1, name: "main" },
       windows: [
-        { windowId: W1, sessionId: S1, name: "editor", active: true, layout: LAYOUT_1 },
-        { windowId: W2, sessionId: S2, name: "shell", active: true, layout: LAYOUT_1 },
+        { windowId: W1, name: "editor", active: true, layout: LAYOUT_1 },
+        { windowId: W2, name: "shell", active: false, layout: LAYOUT_1 },
       ],
       panes: [
-        { paneId: P1, windowId: W1, sessionId: S1, cols: 80, rows: 24 },
-        { paneId: P2, windowId: W2, sessionId: S2, cols: 80, rows: 24 },
+        { paneId: P1, windowId: W1, cols: 80, rows: 24 },
+        { paneId: P2, windowId: W2, cols: 80, rows: 24 },
       ],
-      focus: { paneId: P1, windowId: W1, sessionId: S1 },
+      focus: { paneId: P1, windowId: W1 },
     };
     const { model: init } = applySnapshot(snap);
 
     const msg: DaemonMessage = {
       type: "focus.changed",
-      seq: 2,
+      seq: 3,
       paneId: P2,
       windowId: W2,
-      sessionId: S2,
     };
     const model = applyDelta(init, msg);
 
-    // Focus triple updated
-    assert.deepEqual(model.focus, { paneId: P2, windowId: W2, sessionId: S2 });
-    // Session active flags updated
-    assert.equal(model.sessions.get(S1)!.active, false);
-    assert.equal(model.sessions.get(S2)!.active, true);
+    // Focus pair updated (v3: no sessionId)
+    assert.deepEqual(model.focus, { paneId: P2, windowId: W2 });
     // Window active flags updated
     assert.equal(model.windows.get(W1)!.active, false);
     assert.equal(model.windows.get(W2)!.active, true);
   });
 });
 
-describe("applyDelta — session deltas", () => {
-  it("session.added adds a new session", () => {
-    const { model: init } = applySnapshot(makeSnapshot(1));
-    const msg: DaemonMessage = {
-      type: "session.added",
-      seq: 2,
-      sessionId: S2,
-      name: "work",
-      active: false,
-    };
-    const model = applyDelta(init, msg);
-    assert.equal(model.sessions.size, 2);
-    const s2 = model.sessions.get(S2);
-    assert.ok(s2);
-    assert.equal(s2.name, "work");
-    assert.equal(s2.active, false);
-    // Original session unchanged
-    assert.equal(model.sessions.get(S1)!.active, true);
-  });
+describe("applyDelta — session deltas (v3: only session.renamed on daemon wire)", () => {
+  it("session.renamed updates the bound session name (no sessionId in v3)", () => {
+    const { model: init } = applySnapshot(makeSnapshot(2));
+    assert.equal(init.session.name, "main");
 
-  it("session.added with active=true clears other sessions' active flags", () => {
-    const { model: init } = applySnapshot(makeSnapshot(1));
-    assert.equal(init.sessions.get(S1)!.active, true);
-
-    const msg: DaemonMessage = {
-      type: "session.added",
-      seq: 2,
-      sessionId: S2,
-      name: "work",
-      active: true,
-    };
-    const model = applyDelta(init, msg);
-    assert.equal(model.sessions.get(S1)!.active, false);
-    assert.equal(model.sessions.get(S2)!.active, true);
-  });
-
-  it("session.closed removes the session", () => {
-    const { model: init } = applySnapshot(makeSnapshot(1));
-    const msg: DaemonMessage = {
-      type: "session.closed",
-      seq: 2,
-      sessionId: S1,
-    };
-    const model = applyDelta(init, msg);
-    assert.equal(model.sessions.size, 0);
-    assert.ok(!model.sessions.has(S1));
-  });
-
-  it("session.changed updates which session is active", () => {
-    // Two sessions: S1 active, S2 not.
-    const snap: SnapshotMessage = {
-      type: "snapshot",
-      seq: 1,
-      sessions: [
-        { sessionId: S1, name: "main", active: true },
-        { sessionId: S2, name: "work", active: false },
-      ],
-      windows: [],
-      panes: [],
-      focus: { paneId: null, windowId: null, sessionId: null },
-    };
-    const { model: init } = applySnapshot(snap);
-
-    const msg: DaemonMessage = {
-      type: "session.changed",
-      seq: 2,
-      newActiveSessionId: S2,
-    };
-    const model = applyDelta(init, msg);
-    assert.equal(model.sessions.get(S1)!.active, false);
-    assert.equal(model.sessions.get(S2)!.active, true);
-  });
-
-  it("session.renamed updates the session name", () => {
-    const { model: init } = applySnapshot(makeSnapshot(1));
     const msg: DaemonMessage = {
       type: "session.renamed",
-      seq: 2,
-      sessionId: S1,
+      seq: 3,
       newName: "production",
     };
     const model = applyDelta(init, msg);
-    assert.equal(model.sessions.get(S1)!.name, "production");
+    assert.equal(model.session.name, "production");
+    assert.equal(model.session.sessionId, S1); // sessionId unchanged
   });
 });
 
@@ -666,20 +572,11 @@ describe("round-trip vs daemon: client mirror == projectSnapshot(next)", () => {
     roundTrip(prev, next);
   });
 
-  it("add session + window + pane (multi-change)", () => {
+  it("add window + pane (multi-change within single session)", () => {
+    // v3: single-session. Add a second window and pane to the bound session.
     const prev = baseModel();
-    let next = addSession(prev, makeSession(S2, [], null, "work"));
-    next = addWindow(next, makeWindow(W2, S2, [], null, "shell", null));
-    next = addPane(next, makePane(P3, W2, S2, 100, 40));
-    roundTrip(prev, next);
-  });
-
-  it("remove session (multi-change)", () => {
-    let prev = baseModel();
-    prev = addSession(prev, makeSession(S2, [], null, "work"));
-    prev = addWindow(prev, makeWindow(W2, S2, [], null, "shell", null));
-    prev = addPane(prev, makePane(P3, W2, S2, 100, 40));
-    const next = removeSession(prev, S2);
+    let next = addWindow(prev, makeWindow(W2, S1, [], null, "shell", null));
+    next = addPane(next, makePane(P3, W2, S1, 100, 40));
     roundTrip(prev, next);
   });
 
@@ -904,7 +801,7 @@ describe("Mirror.onModelChange", () => {
     let fired = false;
     mirror.onModelChange((m) => {
       fired = true;
-      assert.equal(m.sessions.size, 1);
+      assert.ok(m.session.sessionId !== "");
     });
     mirror.receiveSnapshot(makeSnapshot(1));
     assert.equal(fired, true);

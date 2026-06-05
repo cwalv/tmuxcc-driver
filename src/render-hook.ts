@@ -51,11 +51,12 @@ export type { PaneId, WindowId, SessionId, WindowLayout, PaneMode, WireCommand }
 /**
  * Snapshot of a single pane's identity and geometry at the time of an event.
  * Passed to onPaneOpened and onPaneResized callbacks.
+ *
+ * v3: sessionId is absent — the daemon wire is single-session.
  */
 export interface PaneInfo {
   readonly paneId: PaneId;
   readonly windowId: WindowId;
-  readonly sessionId: SessionId;
   /** Width in terminal columns. */
   readonly cols: number;
   /** Height in terminal rows. */
@@ -68,21 +69,23 @@ export interface PaneInfo {
 }
 
 /**
- * Current focus state: which pane, window, and session are active.
- * All three are null when no pane is focused (e.g. no sessions exist).
+ * Current focus state: which pane and window are active.
+ * Both are null when no pane is focused.
+ *
+ * v3: sessionId is absent — the daemon wire is single-session.
  */
 export interface FocusInfo {
   readonly paneId: PaneId | null;
   readonly windowId: WindowId | null;
-  readonly sessionId: SessionId | null;
 }
 
 /**
  * Snapshot of a window's identity and geometry at the time of an event.
+ *
+ * v3: sessionId is absent — the daemon wire is single-session.
  */
 export interface WindowInfo {
   readonly windowId: WindowId;
-  readonly sessionId: SessionId;
   readonly name: string;
   /** True if this window is the active window in its session. */
   readonly active: boolean;
