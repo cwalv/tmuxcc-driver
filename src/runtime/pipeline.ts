@@ -65,6 +65,7 @@ import type { SessionModel, InvariantViolation } from "../state/model.js";
 import type { PaneBufferStore } from "../state/reducer.js";
 import type { SwitchClientOutcome } from "../state/reducer.js";
 import type { TmuxHost } from "./tmux-host.js";
+import { setOption } from "../parser/commands.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -281,6 +282,22 @@ class RuntimePipelineImpl implements RuntimePipeline {
 
     const paneResult = await paneResultPromise;
     coordinator.onPanesResult(paneResult);
+
+    // tc-95lue §3.4: Enable monitor-activity on all windows (global window
+    // default) so that tmux tracks pane activity.  This is a fire-and-forget
+    // command — we do not need to await the reply block; the option takes
+    // effect immediately and the %activity notification is available from this
+    // point on.  Using `-wg` (global window option) ensures every existing and
+    // future window in the session gets the option without per-window setup.
+    //
+    // NOTE: VS Code's tab-activity affordance (italicized name / dot) is
+    // triggered automatically by `onDidWrite` firing on a non-focused
+    // Pseudoterminal — it does NOT require monitor-activity.  Enabling
+    // monitor-activity here satisfies acceptance criterion (1) and ensures
+    // tmux-level activity tracking is on in case future features rely on it.
+    if (!this._stopped) {
+      this._host.write(setOption("window-global", "monitor-activity", "on") + "\n");
+    }
 
     // After both replies, the coordinator is live. The model now has the
     // initial session/window/pane state from bootstrap + any buffered events.

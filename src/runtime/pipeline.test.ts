@@ -666,3 +666,67 @@ describe("Pipeline: stop() behaviour", () => {
     assert.ok(model !== null);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Suite 7 — monitor-activity enabled after bootstrap (tc-95lue §3.4)
+// ---------------------------------------------------------------------------
+
+describe("Pipeline: monitor-activity enabled after bootstrap (tc-95lue §3.4)", () => {
+  /**
+   * After start() resolves, the pipeline must have written a
+   * `set-option -wg "monitor-activity" "on"` command to the host.
+   *
+   * This satisfies acceptance criterion (1): tmux monitor-activity is enabled
+   * on all tmuxcc panes (via window-global scope so every window inherits it).
+   *
+   * We capture ALL writes issued after the bootstrap command replies arrive and
+   * check that at least one of them is the set-option command.  We do this by
+   * draining the pre-start bootstrap writes, then awaiting start(), and finally
+   * inspecting the post-bootstrap writes.
+   */
+  it("bootstrap: set-option -wg monitor-activity on is written after bootstrap completes", async () => {
+    const host = new FakeTmuxHost();
+    const pipeline = createRuntimePipeline(host);
+
+    const startPromise = pipeline.start();
+
+    // Drain the initial bootstrap writes (list-windows + list-panes).
+    host.popWritten();
+
+    // Feed replies to let start() resolve.
+    host.pushData(buildBootstrapStream());
+    await startPromise;
+
+    // Collect writes that were issued after bootstrap resolved.
+    const postBootstrapWrites = host.popWritten();
+
+    const monitorActivityCmd = `set-option -wg monitor-activity on\n`;
+    assert.ok(
+      postBootstrapWrites.some((w) => w === monitorActivityCmd),
+      `expected a write of ${JSON.stringify(monitorActivityCmd)} after bootstrap; ` +
+      `got: ${JSON.stringify(postBootstrapWrites)}`,
+    );
+  });
+
+  it("bootstrap: set-option -wg monitor-activity on is NOT written before bootstrap resolves", async () => {
+    const host = new FakeTmuxHost();
+    const pipeline = createRuntimePipeline(host);
+
+    const startPromise = pipeline.start();
+
+    // The bootstrap writes (list-windows + list-panes) should be present but
+    // NOT the monitor-activity set-option — that comes only after start() resolves.
+    const preBootstrapWrites = host.popWritten();
+    const monitorActivityCmd = `set-option -wg monitor-activity on\n`;
+    assert.ok(
+      !preBootstrapWrites.some((w) => w === monitorActivityCmd),
+      `set-option monitor-activity must not be written before bootstrap resolves; ` +
+      `got: ${JSON.stringify(preBootstrapWrites)}`,
+    );
+
+    // Clean up: feed replies and await so the test does not leak.
+    host.pushData(buildBootstrapStream());
+    await startPromise;
+    pipeline.stop();
+  });
+});

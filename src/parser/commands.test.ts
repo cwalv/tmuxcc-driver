@@ -25,6 +25,7 @@ import {
   capturePane,
   newWindow,
   splitWindow,
+  setOption,
   LIST_WINDOWS_DEFAULT_FORMAT,
   LIST_PANES_DEFAULT_FORMAT,
   type PaneFlowState,
@@ -408,5 +409,59 @@ describe("splitWindow", () => {
       splitWindow(undefined, "vertical", { startDirectory: "/path with spaces" }),
       "split-window -v -c '/path with spaces'",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// set-option (tc-95lue §3.4)
+// ---------------------------------------------------------------------------
+
+describe("setOption", () => {
+  it("session scope: no flags", () => {
+    assert.equal(
+      setOption("session", "monitor-activity", "on"),
+      "set-option monitor-activity on",
+    );
+  });
+
+  it("window scope: -w flag", () => {
+    assert.equal(
+      setOption("window", "monitor-activity", "on"),
+      "set-option -w monitor-activity on",
+    );
+  });
+
+  it("session-global scope: -g flag", () => {
+    assert.equal(
+      setOption("session-global", "@tmuxcc", "1"),
+      "set-option -g @tmuxcc 1",
+    );
+  });
+
+  it("window-global scope: -wg flags (used for monitor-activity)", () => {
+    assert.equal(
+      setOption("window-global", "monitor-activity", "on"),
+      "set-option -wg monitor-activity on",
+    );
+  });
+
+  it("window-global monitor-activity off", () => {
+    assert.equal(
+      setOption("window-global", "monitor-activity", "off"),
+      "set-option -wg monitor-activity off",
+    );
+  });
+
+  it("quotes option name with special chars", () => {
+    // @tmuxcc starts with @, which is allowed by quoteArg without quoting
+    assert.equal(
+      setOption("session-global", "@tmuxcc", "1"),
+      "set-option -g @tmuxcc 1",
+    );
+  });
+
+  it("quotes value with spaces", () => {
+    const cmd = setOption("session", "status-left", "my status");
+    assert.equal(cmd, "set-option status-left 'my status'");
   });
 });

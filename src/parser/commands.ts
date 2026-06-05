@@ -327,6 +327,61 @@ export function newWindow(opts?: NewWindowOptions): string {
 }
 
 // ---------------------------------------------------------------------------
+// set-option
+// ---------------------------------------------------------------------------
+
+/**
+ * Scope for `set-option` / `set-window-option` commands.
+ *
+ *   "session" — `-s` flag (session-level option)
+ *   "window"  — `-w` flag (window-level option)
+ *   "global"  — combined with scope via `-g` flag (sets the global default)
+ */
+export type SetOptionScope = "session" | "window" | "session-global" | "window-global";
+
+/**
+ * Serialize a `set-option` command.
+ *
+ * Scope mapping:
+ *   "session"        → `set-option`         (current session)
+ *   "window"         → `set-option -w`      (current window)
+ *   "session-global" → `set-option -g`      (global session default)
+ *   "window-global"  → `set-option -wg`     (global window default)
+ *
+ * The option name and value are quoted when they contain special characters.
+ *
+ * Used by the pipeline to issue `set-option -wg monitor-activity on` after
+ * bootstrap (tc-95lue: activity indicators §3.4).
+ *
+ * @param scope   Scope of the option (see `SetOptionScope`).
+ * @param option  Option name (e.g. `monitor-activity`, `@tmuxcc`).
+ * @param value   Option value (e.g. `on`, `1`).
+ * @returns       e.g. `set-option -wg monitor-activity on`
+ */
+export function setOption(
+  scope: SetOptionScope,
+  option: string,
+  value: string,
+): string {
+  let flags: string;
+  switch (scope) {
+    case "session":
+      flags = "";
+      break;
+    case "window":
+      flags = " -w";
+      break;
+    case "session-global":
+      flags = " -g";
+      break;
+    case "window-global":
+      flags = " -wg";
+      break;
+  }
+  return `set-option${flags} ${quoteArg(option)} ${quoteArg(value)}`;
+}
+
+// ---------------------------------------------------------------------------
 // split-window
 // ---------------------------------------------------------------------------
 
