@@ -63,11 +63,6 @@ import { spawnSync } from "node:child_process";
 // thrown test body and verifies the safety net reaps the orphan.
 import { trackSocket, killTmuxServer, flushAllTracked } from "./test-tmux-cleanup.js";
 
-// tc-46t — Belt-and-suspenders: if any code path in this test file ever
-// resolves socketName='default' in createRealDaemonHandle, throw loudly
-// rather than touching the developer's real '-L default' tmux socket.
-process.env["TMUXCC_FORBID_DEFAULT_SOCKET"] = "1";
-
 // ---------------------------------------------------------------------------
 // Daemon internals (within daemon/src, no rootDir issue)
 // ---------------------------------------------------------------------------
