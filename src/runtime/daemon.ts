@@ -265,7 +265,7 @@ export function createDaemon(opts: DaemonOptions): Daemon {
 
       // 3. Wire input path: forward client control messages to tmux.
       transport.onControl((msg) => {
-        inputPath.handleClientMessage(msg as import("../wire/control.js").ClientMessage);
+        inputPath.handleClientMessage(msg as import("../wire/daemon-control.js").ClientMessage);
       });
 
       // 4. Clean up data plane when the transport closes.

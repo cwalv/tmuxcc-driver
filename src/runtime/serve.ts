@@ -73,13 +73,13 @@ import {
   runDaemonHandshake,
   type NegotiatedSession,
 } from "../wire/handshake.js";
-import {
-  WIRE_PROTOCOL_VERSION,
-  type Capabilities,
-  type DaemonMessage,
-  type ControlMessage,
-  type ErrorMessage,
-} from "../wire/control.js";
+import { WIRE_PROTOCOL_VERSION } from "../wire/envelope.js";
+import type { Capabilities } from "../wire/envelope.js";
+import type {
+  DaemonMessage,
+  ControlMessage,
+  ErrorMessage,
+} from "../wire/daemon-control.js";
 import { projectSnapshot } from "../state/projection.js";
 import { diffModel } from "../state/projection.js";
 

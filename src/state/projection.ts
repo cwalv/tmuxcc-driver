@@ -77,7 +77,7 @@ import type {
   SessionClosedMessage,
   SessionChangedMessage,
   SessionRenamedMessage,
-} from "../wire/control.js";
+} from "../wire/daemon-control.js";
 
 // ---------------------------------------------------------------------------
 // Public API

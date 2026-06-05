@@ -33,7 +33,7 @@
  *   - PaneId          — from ids.ts (shared primitive, used by both planes)
  */
 
-import type { ControlMessage } from "./control.js";
+import type { ControlMessage } from "./daemon-control.js";
 import type { PaneId } from "./ids.js";
 
 // ---------------------------------------------------------------------------

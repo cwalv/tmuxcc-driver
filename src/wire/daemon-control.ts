@@ -1,7 +1,8 @@
 /**
- * Control-plane message schema for the tmuxcc wire protocol.
+ * Daemon wire control-plane message schema for the tmuxcc wire protocol.
  *
- * These are the STRUCTURED messages that flow between daemon and client.
+ * These are the STRUCTURED messages that flow between daemon and client
+ * on the daemon wire (one connection = one tmux session).
  * They are transport-agnostic: no WebSocket frames, no pipe framing, no
  * length-prefixed byte streams (that is tc-2mq's job).
  *
@@ -18,11 +19,10 @@
  *
  * Daemon → Client (server push): the daemon is the source of truth and pushes
  *   state changes to the client. These are read-only events from the client's
- *   perspective. Types prefixed with no direction marker but tagged
- *   direction: "daemon→client" in their JSDoc.
+ *   perspective.
  *
  * Client → Daemon (client request): the client sends input or resize requests
- *   to the daemon. Types tagged direction: "client→daemon".
+ *   to the daemon.
  *
  * Both: the handshake messages (capabilities exchange) flow in both directions;
  *   their sequencing is defined by tc-auj; here we only define the data shapes.
@@ -31,16 +31,8 @@
  * VERSIONING
  * ---------------------------------------------------------------------------
  *
- * The protocol version is a single monotonically-increasing integer:
- *   WIRE_PROTOCOL_VERSION = 2
- *
- * It appears in the handshake-adjacent CapabilitiesMessage (both sides
- * advertise their supported version). Increment this constant for any
- * breaking change to this schema. Additive changes (new optional fields,
- * new message kinds) are non-breaking and do not require a bump.
- *
- * The version is NOT repeated in every message envelope to keep messages
- * compact. Version negotiation happens once at handshake time (tc-auj).
+ * See envelope.ts for WIRE_PROTOCOL_VERSION. This module re-exports it for
+ * backward-compatibility of callers that import directly from daemon-control.ts.
  *
  * v1 → v2 (tc-7ml.4): Added ResyncRequestMessage (type: "resync.request")
  * to ClientMessage. The new variant is a breaking change because a v1 daemon
@@ -50,72 +42,12 @@
 
 import type { PaneId, WindowId, SessionId } from "./ids.js";
 import type { WindowLayout } from "./layout.js";
+import type { MessageBase, Capabilities } from "./envelope.js";
 
-// ---------------------------------------------------------------------------
-// Protocol version
-// ---------------------------------------------------------------------------
-
-/**
- * Monotonically-increasing integer identifying this schema revision.
- * Increment on any breaking schema change. Non-breaking additions do not
- * require a bump. Version negotiation flow is defined by bead tc-auj.
- */
-export const WIRE_PROTOCOL_VERSION = 2 as const;
-
-// ---------------------------------------------------------------------------
-// Capabilities (data shape only — handshake flow is tc-auj's job)
-// ---------------------------------------------------------------------------
-
-/**
- * Feature flags and version info exchanged during handshake.
- * direction: both (daemon→client and client→daemon advertise their own).
- *
- * The handshake *sequence* (who sends first, fallback logic) is defined by
- * bead tc-auj; this type is only the data shape.
- */
-export interface Capabilities {
-  /** Wire protocol version this endpoint implements. */
-  readonly protocolVersion: typeof WIRE_PROTOCOL_VERSION;
-  /**
-   * Feature flags this endpoint supports.
-   * Both sides advertise; the intersection is the effective feature set.
-   */
-  readonly features: readonly WireFeature[];
-}
-
-/**
- * Named feature flags. Extensible: unknown strings are ignored by older
- * implementations (forward-compatible).
- */
-export type WireFeature =
-  | "pane-lifecycle" // pane open/close/resize events
-  | "layout-updates" // structured window layout pushes
-  | "focus-events" // active-pane focus notifications
-  | "input-forwarding" // client→daemon key/text input
-  | (string & Record<never, never>); // open-ended for future features
-
-// ---------------------------------------------------------------------------
-// Shared envelope fields
-// ---------------------------------------------------------------------------
-
-/**
- * Every control-plane message carries a `type` discriminant and a
- * monotonically-increasing sequence number.  The sequence number lets the
- * client detect drops and order events; it is per-connection, starting at 1.
- *
- * Extend with additional envelope fields here if needed — e.g. a correlation
- * ID for request/response pairing in future revisions.
- */
-interface MessageBase {
-  /** Discriminant for TypeScript narrowing. */
-  readonly type: string;
-  /**
-   * Per-connection sequence number, starting at 1, incremented by the
-   * SENDER for each message. Daemon-push messages use the daemon's counter;
-   * client-request messages use the client's counter.
-   */
-  readonly seq: number;
-}
+// Re-export envelope primitives so callers importing from daemon-control.ts
+// (e.g. handshake.ts) continue to work without changes to their imports.
+export { WIRE_PROTOCOL_VERSION } from "./envelope.js";
+export type { Capabilities, WireFeature } from "./envelope.js";
 
 // ---------------------------------------------------------------------------
 // Daemon → Client messages (server push)
@@ -716,7 +648,11 @@ export interface ResizeRequestMessage extends MessageBase {
 
 /**
  * Client's capabilities advertisement (sent once at handshake time).
- * direction: client→daemon
+ * direction: client→daemon (and client→broker)
+ *
+ * This message type is shared between both wires — the same `type:
+ * "client.capabilities"` discriminant is used on both the broker wire and
+ * the daemon wire (each connection sends this once at handshake).
  *
  * The handshake sequence is defined by bead tc-auj; this is just the shape.
  */
@@ -812,7 +748,7 @@ export type ClientMessage =
   | ResyncRequestMessage;
 
 /**
- * Any control-plane message (either direction).
+ * Any control-plane message (either direction) on the daemon wire.
  * Useful for generic transport code that doesn't care about direction.
  */
 export type ControlMessage = DaemonMessage | ClientMessage;
@@ -820,22 +756,6 @@ export type ControlMessage = DaemonMessage | ClientMessage;
 // ---------------------------------------------------------------------------
 // Type guards — runtime narrowing without external schema libraries.
 // ---------------------------------------------------------------------------
-
-/**
- * Checks whether a value looks like a ControlMessage at runtime (has a
- * string `type` and a numeric `seq`). Does NOT do deep field validation —
- * use a validator library (e.g. zod) if you need full schema validation.
- */
-export function isControlMessage(value: unknown): value is ControlMessage {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "type" in value &&
-    typeof (value as Record<string, unknown>)["type"] === "string" &&
-    "seq" in value &&
-    typeof (value as Record<string, unknown>)["seq"] === "number"
-  );
-}
 
 /** Narrows a ControlMessage to a specific daemon→client message type. */
 export function isDaemonMessage(msg: ControlMessage): msg is DaemonMessage {

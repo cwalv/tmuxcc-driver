@@ -34,7 +34,7 @@ import type { PaneId, WindowId, SessionId } from "../wire/ids.js";
 import type {
   SnapshotMessage,
   DaemonMessage,
-} from "../wire/control.js";
+} from "../wire/daemon-control.js";
 
 // ---------------------------------------------------------------------------
 // Test fixture helpers

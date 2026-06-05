@@ -14,6 +14,11 @@
  *
  * Handshake flow (tc-auj) uses the Capabilities / DaemonCapabilitiesMessage /
  * ClientCapabilitiesMessage types defined here; the sequence logic lives there.
+ *
+ * File layout (tc-j9c Stage 0):
+ *   envelope.ts        — MessageBase, Capabilities, WireFeature, WIRE_PROTOCOL_VERSION, isControlMessage
+ *   broker-control.ts  — Broker wire control messages + BrokerCommand union
+ *   daemon-control.ts  — Daemon wire control messages + WireCommand union
  */
 
 // Shared primitives — used by both planes
@@ -30,9 +35,32 @@ export type {
   WindowLayout,
 } from "./layout.js";
 
-// Control-plane messages and unions
-export { WIRE_PROTOCOL_VERSION } from "./control.js";
-export type { Capabilities, WireFeature } from "./control.js";
+// Shared envelope types — protocol version, capabilities, base types
+export { WIRE_PROTOCOL_VERSION } from "./envelope.js";
+export type { Capabilities, WireFeature, MessageBase } from "./envelope.js";
+export { isControlMessage } from "./envelope.js";
+
+// Broker wire control messages (placeholder — not yet wired, Stage 2)
+export type {
+  BrokerCapabilitiesMessage,
+  BrokerSessionInfo,
+  BrokerSnapshotMessage,
+  BrokerSessionAddedMessage,
+  BrokerSessionRemovedMessage,
+  BrokerSessionRenamedMessage,
+  BrokerCommand,
+  SessionClaimCommand,
+  SessionCreateCommand,
+  SessionDestroyCommand,
+  BrokerCommandRequestMessage,
+  BrokerCommandOkPayload,
+  BrokerCommandResponseMessage,
+  BrokerErrorCode,
+  BrokerMessage,
+} from "./broker-control.js";
+export { isBrokerMessage } from "./broker-control.js";
+
+// Daemon wire control-plane messages and unions
 export type {
   // Snapshot
   SnapshotSession,
@@ -85,10 +113,10 @@ export type {
   ResyncRequestMessage,
   // Client union
   ClientMessage,
-  // Either direction
+  // Either direction (daemon wire)
   ControlMessage,
-} from "./control.js";
-export { isControlMessage, isDaemonMessage, isClientMessage } from "./control.js";
+} from "./daemon-control.js";
+export { isDaemonMessage, isClientMessage } from "./daemon-control.js";
 
 // Data-plane binary frame format (tc-2mq)
 export { FRAME_MAGIC, encodeFrame, decodeFrame, FrameDecoder } from "./framing.js";
@@ -100,6 +128,7 @@ export {
   HandshakeError,
   intersectFeatures,
   negotiateCapabilities,
+  runServerHandshake,
   runDaemonHandshake,
   runClientHandshake,
 } from "./handshake.js";

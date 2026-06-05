@@ -50,7 +50,7 @@ import { emptyModel, checkInvariants, paneId, windowId, sessionId } from "./mode
 import type { SessionModel } from "./model.js";
 import { createPaneBufferStore } from "./scrollback.js";
 import { projectSnapshot, diffModel } from "./projection.js";
-import type { SnapshotMessage, DaemonMessage } from "../wire/control.js";
+import type { SnapshotMessage, DaemonMessage } from "../wire/daemon-control.js";
 import type { PaneId } from "../wire/ids.js";
 
 // ---------------------------------------------------------------------------

@@ -457,7 +457,7 @@ async function wireScriptedSession(
   // daemon-side onControl handler when the handshake settles inside it).
   // Client → daemon control messages (input, resize) route here.
   daemonTransport.onControl((msg) => {
-    inputPath.handleClientMessage(msg as import("../wire/control.js").ClientMessage);
+    inputPath.handleClientMessage(msg as import("../wire/daemon-control.js").ClientMessage);
   });
 
   const cleanup = async () => {

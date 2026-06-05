@@ -9,8 +9,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import { createInMemoryTransportPair } from "./transport.js";
-import { WIRE_PROTOCOL_VERSION } from "./control.js";
-import type { Capabilities } from "./control.js";
+import { WIRE_PROTOCOL_VERSION } from "./envelope.js";
+import type { Capabilities } from "./envelope.js";
 import {
   runDaemonHandshake,
   runClientHandshake,

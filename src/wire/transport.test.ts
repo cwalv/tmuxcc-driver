@@ -14,7 +14,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import { createInMemoryTransportPair } from "./transport.js";
-import type { ControlMessage } from "./control.js";
+import type { ControlMessage } from "./daemon-control.js";
 import { paneId } from "./ids.js";
 
 // ---------------------------------------------------------------------------

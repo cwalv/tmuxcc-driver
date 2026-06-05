@@ -1,26 +1,41 @@
 /**
- * Handshake sequence — daemon↔client capability negotiation.
+ * Handshake sequence — capability negotiation shared by daemon and broker wires.
  *
- * # Sequence
+ * # Sequence (server-initiates pattern, used by both wires)
  *
- * The daemon initiates the handshake immediately after a transport connection
- * is established.  The client waits for the daemon's advertisement, then
- * responds with its own.  This mirrors the convention used by other
- * server-first protocols (SSH, SMTP, FTP): the server speaks first so the
- * client can react to what the server actually supports before committing any
- * state.
+ * The server (daemon or broker) sends capabilities first; the client waits
+ * for the server's advertisement, then responds with its own. This mirrors
+ * the convention used by other server-first protocols (SSH, SMTP, FTP): the
+ * server speaks first so the client can react to what the server supports
+ * before committing any state.
  *
  * ```
- * Daemon                          Client
+ * Server (daemon or broker)       Client
  *   |                               |
- *   |-- daemon.capabilities ------->|   (1) daemon advertises version + features
+ *   |-- <server>.capabilities ----->|   (1) server advertises version + features
  *   |<-- client.capabilities -------|   (2) client responds with its own
  *   |                               |
  *   |  both sides compute:          |
  *   |    agreedVersion = v (if equal, else error)
- *   |    features = intersection(daemonFeatures, clientFeatures)
- *   |                               |
- *   |-- snapshot ------------------>|   (3) normal data flow begins
+ *   |    features = intersection(serverFeatures, clientFeatures)
+ * ```
+ *
+ * # Daemon wire
+ *
+ * ```
+ * Daemon                          Client
+ *   |-- daemon.capabilities ------->|
+ *   |<-- client.capabilities -------|
+ *   |-- snapshot ------------------>|   (normal data flow)
+ * ```
+ *
+ * # Broker wire
+ *
+ * ```
+ * Broker                          Client
+ *   |-- broker.capabilities ------->|
+ *   |<-- client.capabilities -------|
+ *   |-- sessions.snapshot ---------->|  (initial session list)
  * ```
  *
  * # Version policy (v1 — alpha)
@@ -30,7 +45,7 @@
  * with `HandshakeError` (code `"protocol.version-mismatch"`).  There is no
  * negotiation or downgrade: this is alpha software and back-compat bookkeeping
  * would hide real breaking changes.  Increment `WIRE_PROTOCOL_VERSION` in
- * control.ts for any breaking change; bump both sides in lockstep.
+ * envelope.ts for any breaking change; bump both sides in lockstep.
  *
  * # Feature negotiation
  *
@@ -49,15 +64,24 @@
  *   `HandshakeError` with code `"transport.closed"`.
  *
  * In all failure cases the caller is expected to close the transport.
+ *
+ * # Parameterization for broker vs daemon
+ *
+ * `runServerHandshake` and `runClientHandshake` accept the server-side
+ * capabilities message type discriminant as a parameter (`serverCapabilitiesType`).
+ * This lets both the daemon wire (`"daemon.capabilities"`) and the future broker
+ * wire (`"broker.capabilities"`) share the same handshake logic.
+ *
+ * The convenience wrappers `runDaemonHandshake` / `runDaemonClientHandshake`
+ * fix the discriminants for the daemon wire.
  */
 
-import { WIRE_PROTOCOL_VERSION } from "./control.js";
+import { WIRE_PROTOCOL_VERSION } from "./envelope.js";
 import type {
   Capabilities,
   WireFeature,
-  DaemonCapabilitiesMessage,
-  ClientCapabilitiesMessage,
-} from "./control.js";
+  MessageBase,
+} from "./envelope.js";
 import type { Transport } from "./transport.js";
 
 // ---------------------------------------------------------------------------
@@ -140,14 +164,20 @@ export function negotiateCapabilities(
 const HANDSHAKE_SEQ = 1 as const;
 
 // ---------------------------------------------------------------------------
-// Daemon-side handshake
+// Generic server-side handshake (shared by daemon and broker wires)
 // ---------------------------------------------------------------------------
 
 /**
- * Run the daemon side of the handshake over `transport`.
+ * Run the server side of the handshake over `transport`.
+ *
+ * This is the shared implementation used by both the daemon wire and the
+ * broker wire. The `serverCapabilitiesType` parameter controls which message
+ * type discriminant is sent in step (1):
+ *   - Daemon wire: `"daemon.capabilities"`
+ *   - Broker wire: `"broker.capabilities"`
  *
  * Steps:
- *   1. Send `daemon.capabilities` (seq=1) advertising `daemonCapabilities`.
+ *   1. Send `<serverCapabilitiesType>` (seq=1) advertising `serverCapabilities`.
  *   2. Wait for the client to send `client.capabilities`.
  *   3. Negotiate the session (version check + feature intersection).
  *
@@ -155,9 +185,10 @@ const HANDSHAKE_SEQ = 1 as const;
  * Rejects with `HandshakeError` on version mismatch, unexpected message type,
  * or transport closure before the client responds.
  */
-export function runDaemonHandshake(
+export function runServerHandshake(
   transport: Transport,
-  daemonCapabilities: Capabilities,
+  serverCapabilities: Capabilities,
+  serverCapabilitiesType: string,
 ): Promise<NegotiatedSession> {
   return new Promise<NegotiatedSession>((resolve, reject) => {
     let settled = false;
@@ -185,10 +216,10 @@ export function runDaemonHandshake(
         );
         return;
       }
-      const clientMsg = msg as ClientCapabilitiesMessage;
+      const clientMsg = msg as MessageBase & { capabilities: Capabilities };
       try {
         const session = negotiateCapabilities(
-          daemonCapabilities,
+          serverCapabilities,
           clientMsg.capabilities,
         );
         settle(() => resolve(session));
@@ -209,44 +240,51 @@ export function runDaemonHandshake(
       );
     });
 
-    // (1) Advertise daemon capabilities.
+    // (1) Advertise server capabilities.
     // Defer the send by one microtask so that callers who construct both
     // sides in the same synchronous turn (e.g. Promise.all([
-    //   runDaemonHandshake(...), runClientHandshake(...)
+    //   runServerHandshake(...), runClientHandshake(...)
     // ])) have a chance to register their onControl handlers before the
     // first message lands.  The in-memory transport delivers synchronously,
     // so without this deferral the client-side handler would not yet be
-    // registered when daemon.sendControl fires.
-    const daemonMsg: DaemonCapabilitiesMessage = {
-      type: "daemon.capabilities",
+    // registered when server.sendControl fires.
+    const serverMsg: MessageBase & { capabilities: Capabilities } = {
+      type: serverCapabilitiesType,
       seq: HANDSHAKE_SEQ,
-      capabilities: daemonCapabilities,
+      capabilities: serverCapabilities,
     };
     Promise.resolve().then(() => {
-      if (!settled) transport.sendControl(daemonMsg);
+      if (!settled) transport.sendControl(serverMsg as Parameters<typeof transport.sendControl>[0]);
     });
   });
 }
 
 // ---------------------------------------------------------------------------
-// Client-side handshake
+// Generic client-side handshake (shared by daemon and broker wires)
 // ---------------------------------------------------------------------------
 
 /**
  * Run the client side of the handshake over `transport`.
  *
+ * This is the shared implementation used by both the daemon wire and the
+ * broker wire. The `serverCapabilitiesType` parameter controls which message
+ * type discriminant is expected from the server in step (1):
+ *   - Daemon wire: `"daemon.capabilities"`
+ *   - Broker wire: `"broker.capabilities"`
+ *
  * Steps:
- *   1. Wait for the daemon to send `daemon.capabilities`.
+ *   1. Wait for the server to send `<serverCapabilitiesType>`.
  *   2. Send `client.capabilities` (seq=1) advertising `clientCapabilities`.
  *   3. Negotiate the session (version check + feature intersection).
  *
  * Resolves with `NegotiatedSession` on success.
  * Rejects with `HandshakeError` on version mismatch, unexpected message type,
- * or transport closure before the daemon advertises.
+ * or transport closure before the server advertises.
  */
 export function runClientHandshake(
   transport: Transport,
   clientCapabilities: Capabilities,
+  serverCapabilitiesType: string = "daemon.capabilities",
 ): Promise<NegotiatedSession> {
   return new Promise<NegotiatedSession>((resolve, reject) => {
     let settled = false;
@@ -259,34 +297,34 @@ export function runClientHandshake(
       fn();
     };
 
-    // (1) Wait for daemon.capabilities
+    // (1) Wait for <serverCapabilitiesType>
     transport.onControl((msg) => {
-      if (msg.type !== "daemon.capabilities") {
+      if (msg.type !== serverCapabilitiesType) {
         settle(() =>
           reject(
             new HandshakeError(
               "protocol.unexpected-message",
-              `Expected "daemon.capabilities" but received "${msg.type}"`,
+              `Expected "${serverCapabilitiesType}" but received "${msg.type}"`,
             ),
           ),
         );
         return;
       }
-      const daemonMsg = msg as DaemonCapabilitiesMessage;
+      const serverMsg = msg as MessageBase & { capabilities: Capabilities };
 
       // (2) Respond with client capabilities
-      const clientMsg: ClientCapabilitiesMessage = {
+      const clientMsg: MessageBase & { capabilities: Capabilities } = {
         type: "client.capabilities",
         seq: HANDSHAKE_SEQ,
         capabilities: clientCapabilities,
       };
-      transport.sendControl(clientMsg);
+      transport.sendControl(clientMsg as Parameters<typeof transport.sendControl>[0]);
 
       // (3) Negotiate
       try {
         const session = negotiateCapabilities(
           clientCapabilities,
-          daemonMsg.capabilities,
+          serverMsg.capabilities,
         );
         settle(() => resolve(session));
       } catch (err) {
@@ -294,16 +332,46 @@ export function runClientHandshake(
       }
     });
 
-    // Handle transport closure before daemon advertises
+    // Handle transport closure before server advertises
     transport.onClose(() => {
       settle(() =>
         reject(
           new HandshakeError(
             "transport.closed",
-            "Transport closed before daemon sent capabilities",
+            "Transport closed before server sent capabilities",
           ),
         ),
       );
     });
   });
 }
+
+// ---------------------------------------------------------------------------
+// Daemon wire convenience wrappers
+// ---------------------------------------------------------------------------
+
+/**
+ * Run the daemon side of the handshake over `transport`.
+ *
+ * Convenience wrapper over `runServerHandshake` fixing the discriminant to
+ * `"daemon.capabilities"`.
+ *
+ * Steps:
+ *   1. Send `daemon.capabilities` (seq=1) advertising `daemonCapabilities`.
+ *   2. Wait for the client to send `client.capabilities`.
+ *   3. Negotiate the session (version check + feature intersection).
+ *
+ * Resolves with `NegotiatedSession` on success.
+ * Rejects with `HandshakeError` on version mismatch, unexpected message type,
+ * or transport closure before the client responds.
+ */
+export function runDaemonHandshake(
+  transport: Transport,
+  daemonCapabilities: Capabilities,
+): Promise<NegotiatedSession> {
+  return runServerHandshake(transport, daemonCapabilities, "daemon.capabilities");
+}
+
+// Note: runClientHandshake already defaults serverCapabilitiesType to
+// "daemon.capabilities", so it serves as the daemon-wire client handshake
+// without any additional wrapper needed.

@@ -43,7 +43,7 @@ import {
 } from "../state/model.js";
 import type { SessionModel, Session, Window, Pane, FocusState } from "../state/model.js";
 import type { PaneId, WindowId, SessionId } from "../wire/ids.js";
-import { WIRE_PROTOCOL_VERSION as WPV } from "../wire/control.js";
+import { WIRE_PROTOCOL_VERSION as WPV } from "../wire/envelope.js";
 
 // ---------------------------------------------------------------------------
 // Fake pipeline

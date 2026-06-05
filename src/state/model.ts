@@ -38,7 +38,7 @@
  * `undefined` (the field is `ScrollbackHandle | undefined`).
  *
  * ## PaneMode
- * Reuses `PaneMode` from `src/wire/control.ts` directly. The wire type is
+ * Reuses `PaneMode` from `src/wire/daemon-control.ts` directly. The wire type is
  * already open-ended (`"normal" | "copy" | "view" | string`) so no translation
  * is needed at projection.
  *
@@ -78,13 +78,13 @@
 
 import type { PaneId, WindowId, SessionId } from "../wire/ids.js";
 import type { WindowLayout, LayoutNode } from "../wire/layout.js";
-import type { PaneMode } from "../wire/control.js";
+import type { PaneMode } from "../wire/daemon-control.js";
 import type { ParsedLayout, LayoutCell } from "../parser/layout-string.js";
 
 // Re-export id constructors for convenience of reducers (avoids extra import)
 export { paneId, windowId, sessionId } from "../wire/ids.js";
 // Re-export PaneMode for reducer/projection use
-export type { PaneMode } from "../wire/control.js";
+export type { PaneMode } from "../wire/daemon-control.js";
 // Re-export WindowLayout so projection imports it from one place
 export type { WindowLayout } from "../wire/layout.js";
 
