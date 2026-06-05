@@ -253,6 +253,27 @@ export function createDaemon(opts: DaemonOptions): Daemon {
       await host.start();
       await pipeline.start();
 
+      // tc-5166i: Enable monitor-bell on all windows in the attached session.
+      //
+      // `monitor-bell` is a window option that causes tmux to note bell events
+      // in its status line (and, in control mode, to handle bell tracking).
+      // Although tmux defaults to `monitor-bell on`, users may have turned it
+      // off in ~/.tmux.conf. We override it globally so tmuxcc panes always
+      // forward BEL bytes correctly via the %output stream.
+      //
+      // The command is sent fire-and-forget: no `expectCommand()` slot is
+      // registered, so the %begin/%end response block is silently discarded
+      // by the correlator (see correlator.ts _closeBlock — "unsolicited block").
+      //
+      // We also set `bell-action none` so that in the unlikely case the
+      // control-mode client is connected to a real terminal, tmux does not
+      // try to ring that terminal's bell (it would go nowhere in control mode,
+      // but this is clean hygiene).
+      if (!host.exited) {
+        host.write("set-option -g monitor-bell on\n");
+        host.write("set-option -g bell-action none\n");
+      }
+
       // Subscribe to host.onExit so that when tmux dies unexpectedly the
       // daemon tears down its pipeline and notifies all connected clients.
       host.onExit(() => {
