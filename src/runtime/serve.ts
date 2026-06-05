@@ -350,14 +350,11 @@ class ControlServerImpl implements ControlServer {
       state.nextSeq++;
       transport.sendControl(snapshot);
 
-      // tc-44wu0: notify ALL clients (including the newly-connected one) that
-      // the connected-client count has changed. This lets existing clients'
-      // status-bar tooltips update live.
-      //
-      // We broadcast AFTER the snapshot is sent so the new client receives the
-      // snapshot first (establishing its initial state) and then the count
-      // message (which may confirm or update that count).
-      this.broadcastClientCount();
+      // tc-44wu0: notify OTHER clients that the connected-client count has
+      // changed. The newly-connected client already received the current count
+      // via the snapshot's `attachedClientCount` field, so re-sending it would
+      // be redundant — and would shift its delta seq from the expected lastSeq+1.
+      this.broadcastClientCountTo({ exclude: transport });
     }
 
     return session;
@@ -405,14 +402,22 @@ class ControlServerImpl implements ControlServer {
   }
 
   broadcastClientCount(): void {
-    // tc-44wu0: push the current connected-client count to all clients so
-    // the status-bar tooltip updates live.
+    this.broadcastClientCountTo({});
+  }
+
+  /**
+   * Internal: broadcast client-count.changed to all clients except (optionally)
+   * one excluded transport. Used by `addClient` to skip the newly-connected
+   * client (which already received the count via the snapshot).
+   */
+  private broadcastClientCountTo(opts: { exclude?: Transport }): void {
     const count = this._clients.size;
     const base: Omit<ClientCountChangedMessage, "seq"> = {
       type: "client-count.changed",
       count,
     };
     for (const [transport, state] of this._clients) {
+      if (transport === opts.exclude) continue;
       const stamped: DaemonMessage = { ...base, seq: state.nextSeq } as DaemonMessage;
       state.nextSeq++;
       try {
