@@ -63,6 +63,7 @@ import { createPaneBufferStore } from "../state/scrollback.js";
 import { checkInvariants } from "../state/model.js";
 import type { SessionModel, InvariantViolation } from "../state/model.js";
 import type { PaneBufferStore } from "../state/reducer.js";
+import type { SwitchClientOutcome } from "../state/reducer.js";
 import type { TmuxHost } from "./tmux-host.js";
 
 // ---------------------------------------------------------------------------
@@ -103,6 +104,24 @@ export interface RuntimePipelineOptions {
    * Default: false (no invariant checks in production hot path).
    */
   checkInvariantsOnUpdate?: boolean;
+
+  /**
+   * The tmux session name this daemon is attached to.
+   * Forwarded to `BootstrapCoordinator` so that after bootstrap the
+   * coordinator can resolve `boundSessionId` from the initial model and
+   * wire it into the ReducerContext for switch-client narrowing (tc-j9c.7).
+   */
+  sessionName?: string;
+
+  /**
+   * Called when the reducer detects a switch-client drift from the bound
+   * session (tc-j9c.7). Forwarded into `BootstrapCoordinator` which places
+   * it in the ReducerContext after `boundSessionId` is resolved.
+   *
+   * "reattach"    — bound session still present.
+   * "unavailable" — bound session gone.
+   */
+  onSwitchClientDetected?: (outcome: SwitchClientOutcome) => void;
 }
 
 /**
@@ -184,7 +203,10 @@ export interface RuntimePipeline {
 
 class RuntimePipelineImpl implements RuntimePipeline {
   private readonly _host: TmuxHost;
-  private readonly _opts: Required<RuntimePipelineOptions>;
+  private readonly _opts: Required<Omit<RuntimePipelineOptions, "sessionName" | "onSwitchClientDetected">> & {
+    sessionName: string | undefined;
+    onSwitchClientDetected: ((outcome: SwitchClientOutcome) => void) | undefined;
+  };
   private readonly _tokenizer: ControlTokenizer;
   private readonly _correlator: CommandCorrelator;
   private _coordinator: BootstrapCoordinator | null = null;
@@ -202,6 +224,8 @@ class RuntimePipelineImpl implements RuntimePipeline {
     this._opts = {
       buffers: this.buffers,
       checkInvariantsOnUpdate: opts.checkInvariantsOnUpdate ?? false,
+      sessionName: opts.sessionName,
+      onSwitchClientDetected: opts.onSwitchClientDetected,
     };
 
     // The correlator routes notification tokens back to _onNotificationToken
@@ -221,8 +245,15 @@ class RuntimePipelineImpl implements RuntimePipeline {
     if (this._started) return;
     this._started = true;
 
-    // Create the bootstrap coordinator with our buffer store.
-    const coordinator = new BootstrapCoordinator({ buffers: this.buffers });
+    // Create the bootstrap coordinator with our buffer store and session binding.
+    const coordinatorOpts: import("../state/bootstrap.js").BootstrapCoordinatorOptions = {
+      buffers: this.buffers,
+      ...(this._opts.sessionName !== undefined ? { sessionName: this._opts.sessionName } : {}),
+      ...(this._opts.onSwitchClientDetected !== undefined
+        ? { onSwitchClientDetected: this._opts.onSwitchClientDetected }
+        : {}),
+    };
+    const coordinator = new BootstrapCoordinator(coordinatorOpts);
     this._coordinator = coordinator;
 
     // Register two expectCommand() slots BEFORE sending the bootstrap commands

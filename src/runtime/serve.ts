@@ -178,6 +178,18 @@ export interface ControlServer {
    * Clients that are removed concurrently are silently skipped.
    */
   broadcastError(error: Omit<ErrorMessage, "seq">): void;
+
+  /**
+   * Send an error to all connected clients and then close their transports.
+   *
+   * Equivalent to `broadcastError(error)` followed by closing every transport.
+   * The `onClose` cleanup runs automatically via the existing `transport.onClose`
+   * handler installed during `addClient`, so the server state is consistent.
+   *
+   * Use this for terminal conditions where the daemon cannot continue (e.g.
+   * `session.unavailable` due to switch-client beyond recovery).
+   */
+  broadcastErrorAndClose(error: Omit<ErrorMessage, "seq">): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -346,6 +358,26 @@ class ControlServerImpl implements ControlServer {
       } catch {
         // Transport may already be closed — clean it up and continue.
         this._cleanupClient(transport);
+      }
+    }
+  }
+
+  broadcastErrorAndClose(error: Omit<ErrorMessage, "seq">): void {
+    // Snapshot the client list before iterating — closing triggers onClose
+    // which calls _cleanupClient, mutating _clients.  Iterate the snapshot.
+    const clients = [...this._clients];
+    for (const [transport, state] of clients) {
+      const stamped: DaemonMessage = { ...error, seq: state.nextSeq } as DaemonMessage;
+      state.nextSeq++;
+      try {
+        transport.sendControl(stamped);
+      } catch {
+        // Transport already closed — fall through to close() below.
+      }
+      try {
+        transport.close();
+      } catch {
+        // Ignore: already closed.
       }
     }
   }

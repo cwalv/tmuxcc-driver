@@ -212,10 +212,17 @@ interface ReplayResult {
   eventCount: number;
 }
 
-function replayCapture(rawBuf: Uint8Array): ReplayResult {
+function replayCapture(rawBuf: Uint8Array, ctxExtras?: Omit<ReducerContext, "buffers">): ReplayResult {
   const tokens = tokenizeBuffer(rawBuf);
   const bufferStore = createPaneBufferStore();
-  const ctx: ReducerContext = { buffers: bufferStore };
+  // The golden capture always contains %session-changed $0 s0 as its first session
+  // notification.  Default boundSessionId to s0 so switch-client narrowing fires
+  // correctly; callers may override via ctxExtras.
+  const ctx: ReducerContext = {
+    buffers: bufferStore,
+    boundSessionId: sessionId("s0"),
+    ...(ctxExtras ?? {}),
+  };
 
   let model = emptyModel();
   const snapshots: SnapshotMessage[] = [];
@@ -410,7 +417,7 @@ describe("E3 e2e replay: tmux34-session.raw → reduce → model", () => {
     const rawBuf = loadGolden();
     const tokens = tokenizeBuffer(rawBuf);
     const bufferStore = createPaneBufferStore();
-    const ctx: ReducerContext = { buffers: bufferStore };
+    const ctx: ReducerContext = { buffers: bufferStore, boundSessionId: sessionId("s0") };
 
     let model = emptyModel();
     let step = 0;
@@ -652,7 +659,7 @@ describe("E3 e2e replay: delta round-trip", () => {
     const rawBuf = loadGolden();
     const tokens = tokenizeBuffer(rawBuf);
     const bufferStore = createPaneBufferStore();
-    const ctx: ReducerContext = { buffers: bufferStore };
+    const ctx: ReducerContext = { buffers: bufferStore, boundSessionId: sessionId("s0") };
 
     let model = emptyModel();
     let prevSnap = projectSnapshot(emptyModel(), { seq: 0 });
@@ -760,7 +767,7 @@ describe("E3 e2e replay: byte-exact buffer preservation", () => {
 
     // Byte-by-byte streaming replay
     const streamStore = createPaneBufferStore();
-    const streamCtx: ReducerContext = { buffers: streamStore };
+    const streamCtx: ReducerContext = { buffers: streamStore, boundSessionId: sessionId("s0") };
     const tok = new ControlTokenizer();
     let streamModel = emptyModel();
 
@@ -813,14 +820,16 @@ describe("E3 e2e synthetic: reduce+project paths not covered by real capture", (
     };
   }
 
-  function makeCtx(): { ctx: ReducerContext; store: ReturnType<typeof createPaneBufferStore> } {
+  function makeCtx(
+    extras?: Omit<ReducerContext, "buffers">,
+  ): { ctx: ReducerContext; store: ReturnType<typeof createPaneBufferStore> } {
     const store = createPaneBufferStore();
-    return { ctx: { buffers: store }, store };
+    return { ctx: { buffers: store, ...extras }, store };
   }
 
   it("SYNTHETIC: window-close removes window and its panes from the model", () => {
     // Build a model with 2 windows, then close one.
-    const { ctx } = makeCtx();
+    const { ctx } = makeCtx({ boundSessionId: sessionId("s0") });
     let model = emptyModel();
 
     // Establish session $0 with 2 windows via notifications
@@ -866,7 +875,7 @@ describe("E3 e2e synthetic: reduce+project paths not covered by real capture", (
   });
 
   it("SYNTHETIC: session rename updates name in model and emits session.renamed delta", () => {
-    const { ctx } = makeCtx();
+    const { ctx } = makeCtx({ boundSessionId: sessionId("s5") });
     let model = emptyModel();
 
     model = reduce(model, parseNotification(notifToken("%session-changed $5 old-name")), ctx);
@@ -891,7 +900,7 @@ describe("E3 e2e synthetic: reduce+project paths not covered by real capture", (
   });
 
   it("SYNTHETIC: window rename emits window.renamed delta and round-trips", () => {
-    const { ctx } = makeCtx();
+    const { ctx } = makeCtx({ boundSessionId: sessionId("s0") });
     let model = emptyModel();
 
     const setup: NotificationToken[] = [
@@ -923,7 +932,7 @@ describe("E3 e2e synthetic: reduce+project paths not covered by real capture", (
   });
 
   it("SYNTHETIC: %exit is a no-op at the model level", () => {
-    const { ctx } = makeCtx();
+    const { ctx } = makeCtx({ boundSessionId: sessionId("s0") });
     let model = emptyModel();
     model = reduce(model, parseNotification(notifToken("%session-changed $0 s")), ctx);
     const modelBeforeExit = model;
@@ -941,7 +950,7 @@ describe("E3 e2e synthetic: reduce+project paths not covered by real capture", (
   });
 
   it("SYNTHETIC: sessions-changed is a no-op at the model level", () => {
-    const { ctx } = makeCtx();
+    const { ctx } = makeCtx({ boundSessionId: sessionId("s0") });
     let model = emptyModel();
     model = reduce(model, parseNotification(notifToken("%session-changed $0 s")), ctx);
     const before = model;
@@ -961,7 +970,7 @@ describe("E3 e2e synthetic: reduce+project paths not covered by real capture", (
     //   (a) have window-pane-changed arrive AFTER panes exist, or
     //   (b) use a 2nd session-changed after panes exist.
     // We use approach (b): replay session-changed after panes are available.
-    const { ctx } = makeCtx();
+    const { ctx } = makeCtx({ boundSessionId: sessionId("s0") });
     let model = emptyModel();
 
     const setup: NotificationToken[] = [

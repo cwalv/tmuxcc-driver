@@ -54,6 +54,7 @@ import type { Transport } from "../wire/transport.js";
 import { paneId as mintPaneId } from "../wire/ids.js";
 import type { PaneId } from "../wire/ids.js";
 import type { PaneBufferStore } from "../state/reducer.js";
+import type { SwitchClientOutcome } from "../state/reducer.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -177,11 +178,44 @@ export function createDaemon(opts: DaemonOptions): Daemon {
     },
   };
 
-  // 5. Pipeline — uses the accounting (wrapped demux) store.
-  const pipeline = createRuntimePipeline(host, { buffers: accountingStore });
+  // 5. Pipeline — uses the accounting (wrapped demux) store, plus session
+  //    binding for switch-client narrowing (tc-j9c.7).
+  //
+  //    onSwitchClientDetected needs to call `server` (step 6), which is
+  //    created after the pipeline.  We use a late-binding reference that is
+  //    patched in step 6a immediately after server creation.  The callback
+  //    fires only at live-notification time (after start()), so serverRef is
+  //    always non-null by then.
+  let serverRef: ControlServer | null = null;
+
+  const pipeline = createRuntimePipeline(host, {
+    buffers: accountingStore,
+    sessionName: opts.host.sessionName,
+    onSwitchClientDetected: (outcome: SwitchClientOutcome) => {
+      if (outcome === "reattach") {
+        // The bound session is still alive but the -CC client drifted away.
+        // Silently issue attach-session to pull it back.  No wire emission.
+        if (!host.exited) {
+          host.write("attach-session -t " + opts.host.sessionName + "\n");
+        }
+      } else {
+        // outcome === "unavailable": the bound session is gone.
+        // Broadcast the error and close all client connections.
+        serverRef?.broadcastErrorAndClose({
+          type: "error",
+          code: "session.unavailable",
+          message: "The bound tmux session is no longer available.",
+        });
+      }
+    },
+  });
 
   // 6. Control-plane server.
   const server = createControlServer(pipeline, opts.server);
+
+  // 6a. Patch the late-binding reference so the switch-client callback
+  //     installed in step 5 can reach the server.
+  serverRef = server;
 
   // 7. Input path.
   const inputPath = createInputPath(host, opts.input);

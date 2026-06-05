@@ -524,6 +524,94 @@ describe("createControlServer", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Multi-client snapshot fan-out (tc-j9c.7)
+//
+// Verifies the fan-out contract from SCHEMA.md "Multiple clients on one daemon":
+//   - Each connection receives its own independent snapshot (seq=1).
+//   - A single tmux event fans out as N daemon-wire deltas, one per client,
+//     each stamped with that client's per-connection seq counter (seq=2, 3, …).
+//   - Seq counters are INDEPENDENT across clients: client A and client B both
+//     get their own seq=1 snapshot and seq=2 first-delta, regardless of when
+//     they connected relative to each other.
+// ---------------------------------------------------------------------------
+
+describe("multi-client snapshot fan-out (tc-j9c.7)", () => {
+
+  it("two clients each receive their own snapshot with seq=1", async () => {
+    const model = makeModel1();
+    const pipeline = createFakePipeline(model);
+    const server = createControlServer(pipeline);
+
+    const { received: recv1 } = await connectClient(server);
+    const { received: recv2 } = await connectClient(server);
+
+    // Each client's first message must be a snapshot at seq=1.
+    const snap1 = recv1[0]! as SnapshotMessage;
+    const snap2 = recv2[0]! as SnapshotMessage;
+    assert.equal(snap1.type, "snapshot", "client1 first message is snapshot");
+    assert.equal(snap2.type, "snapshot", "client2 first message is snapshot");
+    assert.equal(snap1.seq, 1, "client1 snapshot has seq=1");
+    assert.equal(snap2.seq, 1, "client2 snapshot has seq=1 (independent counter)");
+  });
+
+  it("model change fans out to both clients with independent seq counters", async () => {
+    const model1 = makeModel1();
+    const model2 = makeModel2();
+    const pipeline = createFakePipeline(model1);
+    const server = createControlServer(pipeline);
+
+    const { received: recv1 } = await connectClient(server);
+    const { received: recv2 } = await connectClient(server);
+
+    // Confirm both start with snapshot at seq=1.
+    assert.equal(recv1[0]!.seq, 1, "client1 snapshot seq=1");
+    assert.equal(recv2[0]!.seq, 1, "client2 snapshot seq=1");
+
+    // Fire a model change — P2 added.
+    pipeline.fireChange(model2, model1);
+
+    // Both clients should receive at least one delta (pane.opened for P2).
+    assert.ok(recv1.length > 1, "client1 should receive delta(s)");
+    assert.ok(recv2.length > 1, "client2 should receive delta(s)");
+
+    // The first delta for each client must be seq=2 (directly after snapshot seq=1).
+    assert.equal(recv1[1]!.seq, 2, "client1 first delta has seq=2");
+    assert.equal(recv2[1]!.seq, 2, "client2 first delta has seq=2 (independent counter)");
+
+    // Both clients receive the pane.opened delta for P2.
+    const delta1 = recv1.find((m) => m.type === "pane.opened");
+    const delta2 = recv2.find((m) => m.type === "pane.opened");
+    assert.ok(delta1 !== undefined, "client1 receives pane.opened delta for P2");
+    assert.ok(delta2 !== undefined, "client2 receives pane.opened delta for P2");
+    if (delta1?.type === "pane.opened") assert.equal(delta1.paneId, P2);
+    if (delta2?.type === "pane.opened") assert.equal(delta2.paneId, P2);
+  });
+
+  it("sequential model changes produce monotonic seq on both clients", async () => {
+    const model1 = makeModel1();
+    const model2 = makeModel2();
+    const pipeline = createFakePipeline(model1);
+    const server = createControlServer(pipeline);
+
+    const { received: recv1 } = await connectClient(server);
+    const { received: recv2 } = await connectClient(server);
+
+    // Two successive changes.
+    pipeline.fireChange(model2, model1); // P2 added
+    pipeline.fireChange(model1, model2); // P2 removed
+
+    // Each client's seq values must be 1, 2, 3, … with no gaps.
+    for (const [label, received] of [["client1", recv1], ["client2", recv2]] as const) {
+      const seqs = received.map((m) => m.seq);
+      for (let i = 0; i < seqs.length; i++) {
+        assert.equal(seqs[i], i + 1, `${label}: seq at index ${i} must be ${i + 1}`);
+      }
+    }
+  });
+
+});
+
+// ---------------------------------------------------------------------------
 // Async-transport pair — regression test helper (tc-3eh.2)
 //
 // createAsyncTransportPair() wraps the in-memory transport so that all

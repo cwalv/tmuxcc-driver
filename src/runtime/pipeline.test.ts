@@ -249,7 +249,10 @@ describe("Pipeline: golden capture replay (tc-4fo acceptance test)", () => {
     const rawBuf = loadGolden();
     const host = new FakeTmuxHost();
     const buffers = createPaneBufferStore();
-    const pipeline = createRuntimePipeline(host, { buffers });
+    // The golden capture has %session-changed $0 s0 — pass sessionName so
+    // the bootstrap coordinator can resolve boundSessionId for switch-client
+    // narrowing (tc-j9c.7).
+    const pipeline = createRuntimePipeline(host, { buffers, sessionName: "s0" });
 
     // start() is async (awaits two command block replies).
     // Feed the entire golden stream AFTER registering handlers so the correlator

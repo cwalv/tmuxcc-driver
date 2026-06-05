@@ -170,13 +170,13 @@ export interface ReducerContext {
    * argument). Used by the switch-client narrowing logic in the
    * `%session-changed` / `%client-session-changed` handlers.
    *
-   * When absent (undefined), switch-client narrowing is disabled: the
-   * reducer falls back to the legacy behaviour (update focus and ensure
-   * session, as before v3).
-   *
    * The value is a branded SessionId produced by mintSessionId() from the
    * tmux numeric id of the bound session. E4 bootstrap supplies this once at
    * daemon startup; it never changes for the lifetime of the daemon.
+   *
+   * When absent (undefined), `%session-changed` and `%client-session-changed`
+   * events are no-ops (model returned unchanged). This should only occur if
+   * bootstrap fails to resolve the session name to a numeric id.
    */
   readonly boundSessionId?: import("../wire/ids.js").SessionId;
 
@@ -189,9 +189,6 @@ export interface ReducerContext {
    * ("reattach") or emit `ErrorMessage{code:"session.unavailable"}` and close
    * all client connections ("unavailable"). In both cases the model is returned
    * UNCHANGED by the reducer (no focus update).
-   *
-   * When absent (undefined), this callback is a no-op: switch-client events
-   * fall through to the legacy focus-update path.
    *
    * @param outcome - "reattach" if the bound session is still present in the
    *                  model; "unavailable" if it has disappeared.
@@ -478,20 +475,16 @@ export function reduce(
     // -------------------------------------------------------------------------
     // %session-changed $<sess> <name>
     //
-    // The active session changed (or was created). In single-session mode
-    // (boundSessionId is set), apply the switch-client narrowing logic:
-    //   1. If the new session is the bound session: update name + focus (no-op
-    //      for the switch-client concern, but the name may have changed).
+    // Apply switch-client narrowing (tc-j9c.2):
+    //   1. If the new session is the bound session: update name + focus.
     //   2. If the new session differs from the bound session: check whether the
     //      bound session is still in the model.
     //      - Still present → call ctx.onSwitchClientDetected("reattach"), return
     //        model unchanged (E4 will issue attach-session silently).
     //      - Gone → call ctx.onSwitchClientDetected("unavailable"), return model
     //        unchanged (E4 will emit session.unavailable and close connections).
-    //
-    // Legacy fallback (no boundSessionId): ensure session, update name, update
-    // focus — the pre-v3 behaviour preserved for callers that do not set
-    // boundSessionId.
+    //   3. If ctx.boundSessionId is absent (bootstrap did not resolve session):
+    //      return model unchanged (safe no-op).
     // -------------------------------------------------------------------------
     case "session-changed": {
       const sid = mintSessionId(event.sessionId);
@@ -521,22 +514,7 @@ export function reduce(
         return model; // model unchanged — E4 handles the wire-level response
       }
 
-      // Legacy path (no boundSessionId): pre-v3 behaviour.
-      model = ensureSession(model, event.sessionId, event.name);
-      model = updateSession(model, sid, { name: event.name });
-      const sess = model.sessions.get(sid)!;
-      const activeWid = sess.activeWindowId;
-      if (activeWid !== null) {
-        const win = model.windows.get(activeWid);
-        const activePid = win?.activePaneId ?? null;
-        if (activePid !== null) {
-          model = setFocus(model, { paneId: activePid, windowId: activeWid, sessionId: sid });
-        } else {
-          model = setFocus(model, { paneId: null, windowId: null, sessionId: null });
-        }
-      } else {
-        model = setFocus(model, { paneId: null, windowId: null, sessionId: null });
-      }
+      // boundSessionId absent: safe no-op (bootstrap did not resolve session name).
       return model;
     }
 
@@ -544,11 +522,7 @@ export function reduce(
     // %client-session-changed <client> $<sess> <name>
     //
     // Applies the same switch-client narrowing as %session-changed (tc-j9c.2).
-    // In single-session mode: if the session changed to something other than
-    // the bound session, delegate to ctx.onSwitchClientDetected; otherwise
-    // update name + focus normally.
-    //
-    // Legacy fallback: same as session-changed legacy path.
+    // See session-changed case for the full logic description.
     // -------------------------------------------------------------------------
     case "client-session-changed": {
       const sid = mintSessionId(event.sessionId);
@@ -575,22 +549,7 @@ export function reduce(
         return model;
       }
 
-      // Legacy path.
-      model = ensureSession(model, event.sessionId, event.name);
-      model = updateSession(model, sid, { name: event.name });
-      const sess2 = model.sessions.get(sid)!;
-      const activeWid2 = sess2.activeWindowId;
-      if (activeWid2 !== null) {
-        const win = model.windows.get(activeWid2);
-        const activePid = win?.activePaneId ?? null;
-        if (activePid !== null) {
-          model = setFocus(model, { paneId: activePid, windowId: activeWid2, sessionId: sid });
-        } else {
-          model = setFocus(model, { paneId: null, windowId: null, sessionId: null });
-        }
-      } else {
-        model = setFocus(model, { paneId: null, windowId: null, sessionId: null });
-      }
+      // boundSessionId absent: safe no-op.
       return model;
     }
 

@@ -68,9 +68,11 @@ class MemPaneBufferStore implements PaneBufferStore {
   }
 }
 
-function makeCtx(): { ctx: ReducerContext; store: MemPaneBufferStore } {
+function makeCtx(
+  extras?: Omit<ReducerContext, "buffers">,
+): { ctx: ReducerContext; store: MemPaneBufferStore } {
   const store = new MemPaneBufferStore();
-  const ctx: ReducerContext = { buffers: store };
+  const ctx: ReducerContext = { buffers: store, ...extras };
   return { ctx, store };
 }
 
@@ -343,7 +345,8 @@ describe("reducer: window-pane-changed", () => {
 describe("reducer: session-changed", () => {
   it("%session-changed: creates session if absent, sets name, clears focus (no windows)", () => {
     const model = emptyModel();
-    const { ctx } = makeCtx();
+    // boundSessionId must be set — s3 is the bound (and only) session here.
+    const { ctx } = makeCtx({ boundSessionId: sessionId("s3") });
 
     const event: NotificationEvent = {
       kind: "session-changed",
@@ -360,7 +363,8 @@ describe("reducer: session-changed", () => {
 
   it("%session-changed: updates existing session name", () => {
     const model = baseModel();
-    const { ctx } = makeCtx();
+    // S0 = sessionId("s0") is the bound session.
+    const { ctx } = makeCtx({ boundSessionId: S0 });
 
     const event: NotificationEvent = {
       kind: "session-changed",
@@ -377,7 +381,8 @@ describe("reducer: session-changed", () => {
 describe("reducer: client-session-changed", () => {
   it("%client-session-changed: same as session-changed for model", () => {
     const model = emptyModel();
-    const { ctx } = makeCtx();
+    // s7 is the bound session.
+    const { ctx } = makeCtx({ boundSessionId: sessionId("s7") });
 
     const event: NotificationEvent = {
       kind: "client-session-changed",
@@ -391,6 +396,142 @@ describe("reducer: client-session-changed", () => {
     assert.ok(after.sessions.has(sid));
     assert.equal(after.sessions.get(sid)!.name, "s7");
     assert.deepEqual(checkInvariants(after), []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Switch-client narrowing unit tests (tc-j9c.7)
+//
+// Verify that when the reducer detects a drift from the bound session:
+//   - "reattach": bound session is still in the model → callback called,
+//     model returned UNCHANGED.
+//   - "unavailable": bound session is gone from the model → callback called,
+//     model returned UNCHANGED.
+// ---------------------------------------------------------------------------
+
+describe("reducer: switch-client narrowing (tc-j9c.7)", () => {
+  it("bound session still present → callback fired with 'reattach', model unchanged", () => {
+    // Model has session s0 (the bound session) and session s1 (another session).
+    let model = emptyModel();
+    model = addSession(model, makeSession(S0, [W1], null));
+    model = addSession(model, makeSession(sessionId("s1"), [], null, "other"));
+    // Add window and pane so invariants pass
+    model = addWindow(model, makeWindow(W1, S0, [P1], P1));
+    model = addPane(model, makePane(P1, W1, S0));
+
+    const outcomes: string[] = [];
+    const { ctx } = makeCtx({
+      boundSessionId: S0,
+      onSwitchClientDetected: (outcome) => outcomes.push(outcome),
+    });
+
+    // Simulate switch-client: %session-changed reports session s1 (not the bound s0).
+    const event: NotificationEvent = {
+      kind: "session-changed",
+      sessionId: 1,
+      name: "other",
+    };
+
+    const after = reduce(model, event, ctx);
+
+    // Callback must fire with "reattach" (bound session s0 is still in model).
+    assert.deepEqual(outcomes, ["reattach"], "callback should fire with 'reattach'");
+
+    // Model must be returned UNCHANGED (same reference or structurally equal).
+    assert.equal(after.sessions.size, model.sessions.size, "sessions unchanged");
+    assert.equal(after.windows.size, model.windows.size, "windows unchanged");
+    assert.equal(after.panes.size, model.panes.size, "panes unchanged");
+    assert.deepEqual(checkInvariants(after), []);
+  });
+
+  it("bound session gone → callback fired with 'unavailable', model unchanged", () => {
+    // Model only has session s1 (the bound session s0 is gone).
+    let model = emptyModel();
+    model = addSession(model, makeSession(sessionId("s1"), [], null, "other"));
+
+    const outcomes: string[] = [];
+    const { ctx } = makeCtx({
+      boundSessionId: S0,  // s0 is bound but NOT in model
+      onSwitchClientDetected: (outcome) => outcomes.push(outcome),
+    });
+
+    // Simulate switch-client: %session-changed reports session s1.
+    const event: NotificationEvent = {
+      kind: "session-changed",
+      sessionId: 1,
+      name: "other",
+    };
+
+    const after = reduce(model, event, ctx);
+
+    // Callback must fire with "unavailable" (bound session s0 is missing from model).
+    assert.deepEqual(outcomes, ["unavailable"], "callback should fire with 'unavailable'");
+
+    // Model must be returned UNCHANGED.
+    assert.equal(after.sessions.size, model.sessions.size, "sessions unchanged");
+    assert.deepEqual(checkInvariants(after), []);
+  });
+
+  it("client-session-changed: bound session present → 'reattach', model unchanged", () => {
+    // Same scenario as above but via %client-session-changed.
+    let model = emptyModel();
+    model = addSession(model, makeSession(S0, [], null));
+    model = addSession(model, makeSession(sessionId("s2"), [], null, "s2"));
+
+    const outcomes: string[] = [];
+    const { ctx } = makeCtx({
+      boundSessionId: S0,
+      onSwitchClientDetected: (outcome) => outcomes.push(outcome),
+    });
+
+    const event: NotificationEvent = {
+      kind: "client-session-changed",
+      clientName: "/dev/ttys001",
+      sessionId: 2,
+      name: "s2",
+    };
+
+    const after = reduce(model, event, ctx);
+
+    assert.deepEqual(outcomes, ["reattach"]);
+    assertModelUnchanged(model, after, "client-session-changed reattach");
+    assert.deepEqual(checkInvariants(after), []);
+  });
+
+  it("client-session-changed: bound session gone → 'unavailable', model unchanged", () => {
+    let model = emptyModel();
+    // Bound session s0 is not in the model.
+    model = addSession(model, makeSession(sessionId("s2"), [], null, "s2"));
+
+    const outcomes: string[] = [];
+    const { ctx } = makeCtx({
+      boundSessionId: S0,
+      onSwitchClientDetected: (outcome) => outcomes.push(outcome),
+    });
+
+    const event: NotificationEvent = {
+      kind: "client-session-changed",
+      clientName: "/dev/ttys001",
+      sessionId: 2,
+      name: "s2",
+    };
+
+    const after = reduce(model, event, ctx);
+
+    assert.deepEqual(outcomes, ["unavailable"]);
+    assertModelUnchanged(model, after, "client-session-changed unavailable");
+    assert.deepEqual(checkInvariants(after), []);
+  });
+
+  it("no boundSessionId set → session-changed is a no-op, model unchanged", () => {
+    const model = baseModel();
+    const { ctx } = makeCtx(); // no boundSessionId
+
+    const before = model;
+    const after = reduce(model, { kind: "session-changed", sessionId: 99, name: "x" }, ctx);
+
+    // Model must be unchanged — the no-op path.
+    assert.strictEqual(after, before, "model reference must be identical (strict no-op)");
   });
 });
 
@@ -684,7 +825,8 @@ describe("reducer: layout-change (via unknown keyword)", () => {
     // synthetic session ("s0"). The model must remain empty. Once %window-add
     // arrives for the real session, the final state must be correct with no s0.
 
-    const { ctx } = makeCtx();
+    // s3 is the bound session for this test sequence.
+    const { ctx } = makeCtx({ boundSessionId: sessionId("s3") });
 
     // Step 1: apply %layout-change on an empty model (no sessions, no windows).
     // Before the fix this would synthesize session "s0" and mis-parent the window.

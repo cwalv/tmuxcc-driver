@@ -175,7 +175,7 @@ import {
   sessionId,
 } from "./model.js";
 import type { PaneId, WindowId, SessionId } from "../wire/ids.js";
-import { reduce, type ReducerContext } from "./reducer.js";
+import { reduce, type ReducerContext, type SwitchClientOutcome } from "./reducer.js";
 
 // ---------------------------------------------------------------------------
 // Format strings
@@ -565,6 +565,29 @@ export interface BootstrapCoordinatorOptions {
    * Passed through to `reduce()` for `%output` / `%extended-output` events.
    */
   readonly buffers: ReducerContext["buffers"];
+
+  /**
+   * The tmux session name this daemon is attached to (the `-t <name>` argument
+   * from TmuxHostOptions). Used to resolve `boundSessionId` from the initial
+   * model after bootstrap: the coordinator finds the session whose name matches
+   * `sessionName` and wires the resulting `SessionId` into the ReducerContext
+   * so that switch-client narrowing fires correctly on live notifications.
+   *
+   * When absent, `boundSessionId` is left undefined in the ReducerContext and
+   * `%session-changed` / `%client-session-changed` events are no-ops.
+   */
+  readonly sessionName?: string;
+
+  /**
+   * Called by the reducer when a switch-client drift is detected (tc-j9c.7).
+   * Forwarded into the ReducerContext after bootstrap resolves `boundSessionId`.
+   *
+   * "reattach"   — bound session still present; caller should issue
+   *                `attach-session -t <bound>` silently.
+   * "unavailable" — bound session gone; caller should broadcast
+   *                 ErrorMessage{code:"session.unavailable"} and close clients.
+   */
+  readonly onSwitchClientDetected?: (outcome: SwitchClientOutcome) => void;
 }
 
 /**
@@ -593,7 +616,13 @@ export type BootstrapPhase = "bootstrapping" | "live";
 export class BootstrapCoordinator {
   private _phase: BootstrapPhase = "bootstrapping";
   private _model: SessionModel = emptyModel();
-  private readonly _ctx: ReducerContext;
+  private _ctx: ReducerContext;
+
+  /** The tmux session name to resolve boundSessionId from the initial model. */
+  private readonly _sessionName: string | undefined;
+
+  /** Callback forwarded into ReducerContext once boundSessionId is resolved. */
+  private readonly _onSwitchClientDetected: ((outcome: SwitchClientOutcome) => void) | undefined;
 
   /** Buffered live notifications that arrived during bootstrapping. */
   private _pendingEvents: NotificationEvent[] = [];
@@ -605,6 +634,8 @@ export class BootstrapCoordinator {
 
   constructor(opts: BootstrapCoordinatorOptions) {
     this._ctx = { buffers: opts.buffers };
+    this._sessionName = opts.sessionName;
+    this._onSwitchClientDetected = opts.onSwitchClientDetected;
   }
 
   // ---- Query ---------------------------------------------------------------
@@ -720,6 +751,56 @@ export class BootstrapCoordinator {
 
     // Build the initial model from the parsed rows.
     this._model = buildInitialModel(windowRows, paneRows);
+
+    // Resolve boundSessionId from the initial model by name (tc-j9c.7).
+    // We must do this BEFORE replaying buffered events so that any
+    // %session-changed / %client-session-changed in the buffer is handled
+    // with the correct narrowing context rather than being a no-op.
+    //
+    // Fallback: if the session is not in the initial model (e.g. bootstrap
+    // command replies were in unexpected format), scan the pending notification
+    // buffer for a %session-changed or %client-session-changed event whose
+    // name matches sessionName.  This handles the case where the bootstrap
+    // model is empty but a live notification carries the session id.
+    if (this._sessionName !== undefined) {
+      let foundId: SessionId | undefined;
+
+      // Primary: look in the initial model.
+      for (const [sid, sess] of this._model.sessions) {
+        if (sess.name === this._sessionName) {
+          foundId = sid;
+          break;
+        }
+      }
+
+      // Fallback: scan buffered notifications.
+      if (foundId === undefined) {
+        for (const event of this._pendingEvents) {
+          if (
+            (event.kind === "session-changed" || event.kind === "client-session-changed") &&
+            event.name === this._sessionName
+          ) {
+            foundId = sessionId("s" + event.sessionId);
+            break;
+          }
+        }
+      }
+
+      if (foundId !== undefined) {
+        this._ctx = {
+          buffers: this._ctx.buffers,
+          boundSessionId: foundId,
+          ...(this._onSwitchClientDetected !== undefined
+            ? { onSwitchClientDetected: this._onSwitchClientDetected }
+            : {}),
+        };
+      } else {
+        console.warn(
+          `[bootstrap] session name "${this._sessionName}" not found in initial model or` +
+            " buffered notifications — boundSessionId not set; switch-client narrowing disabled.",
+        );
+      }
+    }
 
     // Transition to live BEFORE replaying buffered events so that any event
     // that triggers onNotification() re-entrantly (pathological but safe) goes
