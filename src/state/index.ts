@@ -63,6 +63,10 @@ export {
 export type { PaneBufferStore } from "./scrollback.js";
 export { createPaneBufferStore, DEFAULT_CAP_BYTES } from "./scrollback.js";
 
+// Reducer types (tc-j9c.2: SwitchClientOutcome for switch-client narrowing)
+export type { ReducerContext, PaneBufferStore as ReducerPaneBufferStore, SwitchClientOutcome } from "./reducer.js";
+export { reduce } from "./reducer.js";
+
 // tc-835: attach-time bootstrap → live-delta handoff
 export {
   BOOTSTRAP_WINDOWS_FORMAT,

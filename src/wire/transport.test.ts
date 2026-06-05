@@ -33,7 +33,6 @@ describe("InMemoryTransportPair — control plane", () => {
       seq: 1,
       paneId: paneId("p0"),
       windowId: "w0" as ControlMessage extends { windowId: infer W } ? W : never,
-      sessionId: "s0" as ControlMessage extends { sessionId: infer S } ? S : never,
       cols: 80,
       rows: 24,
       active: true,
@@ -78,7 +77,6 @@ describe("InMemoryTransportPair — control plane", () => {
       seq: 2,
       paneId: paneId("p0"),
       windowId: null,
-      sessionId: null,
     };
 
     daemon.sendControl(msg);
@@ -249,7 +247,7 @@ describe("InMemoryTransportPair — lifecycle", () => {
 
     daemon.close();
 
-    const msg: ControlMessage = { type: "focus.changed", seq: 3, paneId: null, windowId: null, sessionId: null };
+    const msg: ControlMessage = { type: "focus.changed", seq: 3, paneId: null, windowId: null };
     daemon.sendControl(msg); // should silently drop
 
     assert.equal(received.length, 0, "messages after close should be dropped");

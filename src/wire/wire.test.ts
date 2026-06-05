@@ -42,10 +42,8 @@ import type {
   WindowAddedMessage,
   WindowClosedMessage,
   WindowRenamedMessage,
-  SessionAddedMessage,
-  SessionClosedMessage,
-  SessionChangedMessage,
-  SessionRenamedMessage,
+  DaemonSessionRenamedMessage,
+  // Backward-compat aliases (still exported for caller migration)
   CommandRequestMessage,
   CommandResponseMessage,
   ErrorMessage,
@@ -115,7 +113,6 @@ describe("PaneOpenedMessage", () => {
       seq: 1,
       paneId: P0,
       windowId: W0,
-      sessionId: S0,
       cols: 80,
       rows: 24,
       active: true,
@@ -135,7 +132,6 @@ describe("PaneClosedMessage", () => {
       seq: 2,
       paneId: P0,
       windowId: W0,
-      sessionId: S0,
     };
     assert.strictEqual(msg.type, "pane.closed");
   });
@@ -161,7 +157,6 @@ describe("LayoutUpdatedMessage", () => {
       type: "layout.updated",
       seq: 4,
       windowId: W0,
-      sessionId: S0,
       layout: sampleLayout,
     };
     assert.strictEqual(msg.type, "layout.updated");
@@ -183,7 +178,6 @@ describe("FocusChangedMessage", () => {
       seq: 5,
       paneId: P1,
       windowId: W0,
-      sessionId: S0,
     };
     assert.strictEqual(msg.type, "focus.changed");
     assert.strictEqual(msg.paneId as string, "p1");
@@ -195,7 +189,6 @@ describe("FocusChangedMessage", () => {
       seq: 6,
       paneId: null,
       windowId: null,
-      sessionId: null,
     };
     assert.strictEqual(msg.paneId, null);
   });
@@ -282,7 +275,6 @@ describe("isControlMessage", () => {
       seq: 1,
       paneId: P0,
       windowId: W0,
-      sessionId: S0,
       cols: 80,
       rows: 24,
       active: false,
@@ -341,35 +333,31 @@ describe("isDaemonMessage / isClientMessage", () => {
 // ---------------------------------------------------------------------------
 
 describe("SnapshotMessage", () => {
-  it("constructs a full-state snapshot with sessions, windows, panes, focus", () => {
-    const S1 = sessionId("s1");
+  it("constructs a full-state snapshot with session, windows, panes, focus (v3 single-session)", () => {
     const W1 = windowId("w1");
     const msg: SnapshotMessage = {
       type: "snapshot",
-      seq: 1,
-      sessions: [{ sessionId: S0, name: "main", active: true }],
+      seq: 2,
+      session: { sessionId: S0, name: "main" },
       windows: [
         {
           windowId: W0,
-          sessionId: S0,
           name: "editor",
           active: true,
           layout: sampleLayout,
         },
       ],
       panes: [
-        { paneId: P0, windowId: W0, sessionId: S0, cols: 40, rows: 24 },
-        { paneId: P1, windowId: W0, sessionId: S0, cols: 40, rows: 24 },
+        { paneId: P0, windowId: W0, cols: 40, rows: 24 },
+        { paneId: P1, windowId: W0, cols: 40, rows: 24 },
       ],
-      focus: { paneId: P0, windowId: W0, sessionId: S0 },
+      focus: { paneId: P0, windowId: W0 },
     };
     assert.strictEqual(msg.type, "snapshot");
-    assert.strictEqual(msg.sessions.length, 1);
+    assert.strictEqual(msg.session.sessionId as string, "s0");
     assert.strictEqual(msg.windows.length, 1);
     assert.strictEqual(msg.panes.length, 2);
     assert.strictEqual(msg.focus.paneId as string, "p0");
-    // Ensure the session id didn't bleed from the unused variable (satisfies TS)
-    void S1;
     void W1;
   });
 
@@ -377,10 +365,10 @@ describe("SnapshotMessage", () => {
     const msg: SnapshotMessage = {
       type: "snapshot",
       seq: 2,
-      sessions: [],
+      session: { sessionId: S0, name: "main" },
       windows: [],
       panes: [],
-      focus: { paneId: null, windowId: null, sessionId: null },
+      focus: { paneId: null, windowId: null },
     };
     assert.strictEqual(msg.focus.paneId, null);
   });
@@ -402,7 +390,6 @@ describe("WindowAddedMessage", () => {
       type: "window.added",
       seq: 10,
       windowId: W0,
-      sessionId: S0,
       name: "vim",
       active: false,
     };
@@ -423,7 +410,6 @@ describe("WindowClosedMessage", () => {
       type: "window.closed",
       seq: 11,
       windowId: W0,
-      sessionId: S0,
     };
     assert.strictEqual(msg.type, "window.closed");
     assert.strictEqual(msg.windowId as string, "w0");
@@ -444,64 +430,25 @@ describe("WindowRenamedMessage", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Session delta messages
+// Session delta messages (v3: only session.renamed on daemon wire)
 // ---------------------------------------------------------------------------
 
-describe("SessionAddedMessage", () => {
-  it("constructs correctly", () => {
-    const S1 = sessionId("s1");
-    const msg: SessionAddedMessage = {
-      type: "session.added",
-      seq: 20,
-      sessionId: S1,
-      name: "work",
-      active: false,
-    };
-    assert.strictEqual(msg.type, "session.added");
-    assert.strictEqual(msg.name, "work");
-  });
-});
-
-describe("SessionClosedMessage", () => {
-  it("constructs correctly", () => {
-    const msg: SessionClosedMessage = {
-      type: "session.closed",
-      seq: 21,
-      sessionId: S0,
-    };
-    assert.strictEqual(msg.type, "session.closed");
-    assert.strictEqual(msg.sessionId as string, "s0");
-  });
-});
-
-describe("SessionChangedMessage", () => {
-  it("constructs correctly", () => {
-    const S1 = sessionId("s1");
-    const msg: SessionChangedMessage = {
-      type: "session.changed",
-      seq: 22,
-      newActiveSessionId: S1,
-    };
-    assert.strictEqual(msg.type, "session.changed");
-    assert.strictEqual(msg.newActiveSessionId as string, "s1");
-  });
-
-  it("is a daemon message", () => {
-    const msg = { type: "session.changed", seq: 1 } as ControlMessage;
-    assert.strictEqual(isDaemonMessage(msg), true);
-  });
-});
-
-describe("SessionRenamedMessage", () => {
-  it("constructs correctly", () => {
-    const msg: SessionRenamedMessage = {
+describe("DaemonSessionRenamedMessage", () => {
+  it("constructs correctly (no sessionId field in v3)", () => {
+    const msg: DaemonSessionRenamedMessage = {
       type: "session.renamed",
       seq: 23,
-      sessionId: S0,
       newName: "prod",
     };
     assert.strictEqual(msg.type, "session.renamed");
     assert.strictEqual(msg.newName, "prod");
+    // v3: no sessionId field — the bound session is implicit
+    assert.ok(!("sessionId" in msg));
+  });
+
+  it("is a daemon message", () => {
+    const msg = { type: "session.renamed", seq: 1 } as ControlMessage;
+    assert.strictEqual(isDaemonMessage(msg), true);
   });
 });
 
@@ -557,7 +504,7 @@ describe("CommandRequestMessage", () => {
       type: "command.request",
       seq: 1,
       correlationId: "req-001",
-      command: { kind: "open-window", sessionId: S0, name: "logs" },
+      command: { kind: "open-window", name: "logs" },
     };
     assert.strictEqual(msg.type, "command.request");
     assert.strictEqual(msg.correlationId, "req-001");
@@ -722,15 +669,13 @@ describe("ErrorMessage", () => {
 // ---------------------------------------------------------------------------
 
 describe("isDaemonMessage covers all new daemon type strings", () => {
+  // v3: session.added / session.closed / session.changed removed from daemon wire
   const newDaemonTypes = [
     "snapshot",
     "pane.mode-changed",
     "window.added",
     "window.closed",
     "window.renamed",
-    "session.added",
-    "session.closed",
-    "session.changed",
     "session.renamed",
     "command.response",
     "error",
@@ -774,7 +719,6 @@ describe("wire invariant", () => {
       type: "layout.updated",
       seq: 1,
       windowId: W0,
-      sessionId: S0,
       layout: sampleLayout,
     };
     // layout.root is a LayoutNode, not a string

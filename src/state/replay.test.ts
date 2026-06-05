@@ -73,45 +73,24 @@ function loadGolden(): Uint8Array {
 // ---------------------------------------------------------------------------
 
 function applyDeltas(snap: SnapshotMessage, deltas: DaemonMessage[]): SnapshotMessage {
-  let sessions = [...snap.sessions];
+  // v3 single-session wire: no sessions array, no sessionId on deltas.
+  let session = snap.session;
   let windows = [...snap.windows];
   let panes = [...snap.panes];
   let focus = { ...snap.focus };
 
   for (const delta of deltas) {
     switch (delta.type) {
-      case "session.added":
-        sessions = [
-          ...sessions.map((s) => (delta.active ? { ...s, active: false } : s)),
-          { sessionId: delta.sessionId, name: delta.name, active: delta.active },
-        ];
-        break;
-
-      case "session.closed":
-        sessions = sessions.filter((s) => s.sessionId !== delta.sessionId);
-        break;
-
+      // --- session lifecycle (only rename on daemon wire in v3) ---
       case "session.renamed":
-        sessions = sessions.map((s) =>
-          s.sessionId === delta.sessionId ? { ...s, name: delta.newName } : s,
-        );
-        break;
-
-      case "session.changed":
-        sessions = sessions.map((s) => ({
-          ...s,
-          active: s.sessionId === delta.newActiveSessionId,
-        }));
+        session = { sessionId: session.sessionId, name: delta.newName };
         break;
 
       case "window.added":
         windows = [
-          ...windows.map((w) =>
-            delta.active && w.sessionId === delta.sessionId ? { ...w, active: false } : w,
-          ),
+          ...windows.map((w) => (delta.active ? { ...w, active: false } : w)),
           {
             windowId: delta.windowId,
-            sessionId: delta.sessionId,
             name: delta.name,
             active: delta.active,
             layout: {
@@ -149,7 +128,6 @@ function applyDeltas(snap: SnapshotMessage, deltas: DaemonMessage[]): SnapshotMe
           {
             paneId: delta.paneId,
             windowId: delta.windowId,
-            sessionId: delta.sessionId,
             cols: delta.cols,
             rows: delta.rows,
           },
@@ -174,12 +152,7 @@ function applyDeltas(snap: SnapshotMessage, deltas: DaemonMessage[]): SnapshotMe
         focus = {
           paneId: delta.paneId,
           windowId: delta.windowId,
-          sessionId: delta.sessionId,
         };
-        sessions = sessions.map((s) => ({
-          ...s,
-          active: s.sessionId === delta.sessionId,
-        }));
         windows = windows.map((w) => ({
           ...w,
           active: w.windowId === delta.windowId,
@@ -191,7 +164,7 @@ function applyDeltas(snap: SnapshotMessage, deltas: DaemonMessage[]): SnapshotMe
     }
   }
 
-  return { type: "snapshot", seq: snap.seq, sessions, windows, panes, focus };
+  return { type: "snapshot", seq: snap.seq, session, windows, panes, focus };
 }
 
 /**
@@ -199,25 +172,22 @@ function applyDeltas(snap: SnapshotMessage, deltas: DaemonMessage[]): SnapshotMe
  * Strips seq (seq is a connection-level counter, not part of observable state).
  */
 function normalizeSnapshot(snap: SnapshotMessage) {
+  // v3 single-session: session is a scalar, no sessionId on windows/panes.
   return {
-    sessions: [...snap.sessions]
-      .sort((a, b) => String(a.sessionId).localeCompare(String(b.sessionId)))
-      .map(({ sessionId, name, active }) => ({ sessionId, name, active })),
+    session: snap.session,
     windows: [...snap.windows]
       .sort((a, b) => String(a.windowId).localeCompare(String(b.windowId)))
-      .map(({ windowId, sessionId, name, active, layout }) => ({
+      .map(({ windowId, name, active, layout }) => ({
         windowId,
-        sessionId,
         name,
         active,
         layout,
       })),
     panes: [...snap.panes]
       .sort((a, b) => String(a.paneId).localeCompare(String(b.paneId)))
-      .map(({ paneId, windowId, sessionId, cols, rows }) => ({
+      .map(({ paneId, windowId, cols, rows }) => ({
         paneId,
         windowId,
-        sessionId,
         cols,
         rows,
       })),
@@ -473,7 +443,7 @@ describe("E3 e2e replay: projectSnapshot on final model", () => {
     const snap = projectSnapshot(finalModel, { seq: 42 });
     assert.equal(snap.type, "snapshot");
     assert.equal(snap.seq, 42);
-    assert.ok(Array.isArray(snap.sessions));
+    assert.ok(snap.session !== undefined, "snapshot must have a session");
     assert.ok(Array.isArray(snap.windows));
     assert.ok(Array.isArray(snap.panes));
     assert.ok(snap.focus !== undefined);
@@ -484,58 +454,57 @@ describe("E3 e2e replay: projectSnapshot on final model", () => {
     const { finalModel } = replayCapture(rawBuf);
     const snap = projectSnapshot(finalModel, { seq: 1 });
 
-    assert.equal(snap.sessions.length, 1, "snapshot should have 1 session");
+    // v3: session is a scalar field, not an array
+    assert.ok(snap.session !== undefined, "snapshot should have a session");
     assert.equal(snap.windows.length, 1, "snapshot should have 1 window");
     assert.equal(snap.panes.length, 2, `snapshot should have 2 panes, got ${snap.panes.length}`);
   });
 
-  it("SNAPSHOT: session is present and named 's0' (not active because focus is null)", () => {
-    // Focus is null after pure notification replay (bootstrap gap), so active=false.
+  it("SNAPSHOT: session is present and named 's0'", () => {
     const rawBuf = loadGolden();
     const { finalModel } = replayCapture(rawBuf);
     const snap = projectSnapshot(finalModel, { seq: 1 });
 
-    const sess = snap.sessions[0]!;
-    assert.equal(sess.name, "s0");
-    assert.equal(sess.active, false); // no focus → active=false
+    // v3: SnapshotSession has no 'active' field
+    assert.equal(snap.session.name, "s0");
+    assert.equal(snap.session.sessionId, sessionId("s0"));
   });
 
-  it("SNAPSHOT: window belongs to session s0 and has a non-null layout", () => {
+  it("SNAPSHOT: window is active (session.activeWindowId = w1) and has a non-null layout", () => {
     const rawBuf = loadGolden();
     const { finalModel } = replayCapture(rawBuf);
     const snap = projectSnapshot(finalModel, { seq: 1 });
 
     const win = snap.windows[0]!;
-    assert.equal(win.sessionId, sessionId("s0"));
+    // v3: SnapshotWindow has no sessionId field
     // Window is active in session (session.activeWindowId = w1)
     assert.equal(win.active, true);
     assert.ok(win.layout !== null);
     assert.ok(win.layout!.cols > 0 && win.layout!.rows > 0);
   });
 
-  it("SNAPSHOT: focus triple in snapshot matches model focus (all null)", () => {
+  it("SNAPSHOT: focus pair in snapshot matches model focus (all null)", () => {
     const rawBuf = loadGolden();
     const { finalModel } = replayCapture(rawBuf);
     const snap = projectSnapshot(finalModel, { seq: 1 });
 
     // Focus is null after pure notification replay (bootstrap gap)
-    assert.equal(snap.focus.sessionId, null);
+    // v3: focus has paneId and windowId only (no sessionId)
     assert.equal(snap.focus.windowId, null);
     assert.equal(snap.focus.paneId, null);
     // Must match the model
-    assert.equal(snap.focus.sessionId, finalModel.focus.sessionId);
     assert.equal(snap.focus.windowId, finalModel.focus.windowId);
     assert.equal(snap.focus.paneId, finalModel.focus.paneId);
   });
 
-  it("SNAPSHOT: all pane entries belong to window w1 and session s0", () => {
+  it("SNAPSHOT: all pane entries belong to window w1 with positive dimensions", () => {
     const rawBuf = loadGolden();
     const { finalModel } = replayCapture(rawBuf);
     const snap = projectSnapshot(finalModel, { seq: 1 });
 
     for (const p of snap.panes) {
+      // v3: SnapshotPane has no sessionId field
       assert.equal(p.windowId, windowId("w1"), `pane ${p.paneId} should be in w1`);
-      assert.equal(p.sessionId, sessionId("s0"), `pane ${p.paneId} should be in s0`);
       assert.ok(p.cols > 0, `pane ${p.paneId} cols should be > 0`);
       assert.ok(p.rows > 0, `pane ${p.paneId} rows should be > 0`);
     }
@@ -547,13 +516,22 @@ describe("E3 e2e replay: projectSnapshot on final model", () => {
 // ===========================================================================
 
 describe("E3 e2e replay: delta round-trip", () => {
-  it("DELTA ROUND-TRIP: applyDeltas(snap(empty), all_deltas) deep-equals snap(final)", () => {
+  it("DELTA ROUND-TRIP: applyDeltas(snap(post-session-bootstrap), all_deltas) deep-equals snap(final)", () => {
+    // v3: session identity is established at connection time (in the snapshot), not via deltas.
+    // There is no session.added delta on the daemon wire. The round-trip property therefore
+    // requires the initial snapshot to already carry the session identity.
+    // We use snapshots[0] (after the first notification event, which establishes the session)
+    // as the baseline, since step 1 (session-changed) emits no wire deltas.
     const rawBuf = loadGolden();
-    const { finalModel, allDeltas } = replayCapture(rawBuf);
+    const { finalModel, allDeltas, snapshots } = replayCapture(rawBuf);
 
-    // Initial snapshot (empty model)
-    const initialSnap = projectSnapshot(emptyModel(), { seq: 1 });
-    // Apply all accumulated deltas to the initial snapshot
+    // Initial snapshot (after first event = session established, no windows/panes yet)
+    const initialSnap = snapshots[0]!;
+    assert.ok(
+      initialSnap !== undefined,
+      "expected at least one snapshot step (session bootstrap)",
+    );
+    // Apply all accumulated deltas to the post-session-bootstrap snapshot
     const reconstructed = applyDeltas(initialSnap, allDeltas);
     // Final snapshot
     const finalSnap = projectSnapshot(finalModel, { seq: 1 });
@@ -575,7 +553,9 @@ describe("E3 e2e replay: delta round-trip", () => {
     );
   });
 
-  it("DELTA STREAM: first delta is session.added (session must be added before anything else)", () => {
+  it("DELTA STREAM: first delta is window.added (v3 daemon wire has no session.added)", () => {
+    // v3: session.added is not on the daemon wire — the bound session is established
+    // at connection time. The first observable delta is window.added.
     const rawBuf = loadGolden();
     const { allDeltas } = replayCapture(rawBuf);
 
@@ -583,19 +563,9 @@ describe("E3 e2e replay: delta round-trip", () => {
     assert.ok(firstDelta !== undefined, "expected at least one delta");
     assert.equal(
       firstDelta!.type,
-      "session.added",
-      `expected first delta to be session.added, got ${firstDelta!.type}`,
+      "window.added",
+      `expected first delta to be window.added (v3 has no session.added), got ${firstDelta!.type}`,
     );
-  });
-
-  it("DELTA STREAM: session.added delta carries name 's0'", () => {
-    const rawBuf = loadGolden();
-    const { allDeltas } = replayCapture(rawBuf);
-
-    const sessionAdded = allDeltas.find((d) => d.type === "session.added");
-    assert.ok(sessionAdded !== undefined, "expected a session.added delta");
-    if (sessionAdded?.type !== "session.added") return;
-    assert.equal(sessionAdded.name, "s0");
   });
 
   it("DELTA STREAM: window.added delta is present for window w1", () => {
@@ -614,11 +584,10 @@ describe("E3 e2e replay: delta round-trip", () => {
 
     const paneOpened = allDeltas.filter((d) => d.type === "pane.opened");
     assert.ok(paneOpened.length > 0, `expected at least one pane.opened delta, got ${paneOpened.length}`);
-    // All opened panes must be in w1
+    // All opened panes must be in w1 (v3: no sessionId on pane.opened)
     for (const d of paneOpened) {
       if (d.type !== "pane.opened") continue;
       assert.equal(d.windowId, windowId("w1"), `pane ${d.paneId} should be in w1`);
-      assert.equal(d.sessionId, sessionId("s0"), `pane ${d.paneId} should be in s0`);
     }
   });
 
@@ -656,21 +625,16 @@ describe("E3 e2e replay: delta round-trip", () => {
     );
   });
 
-  it("DELTA STREAM: ordering — session.added precedes window.added precedes pane.opened", () => {
+  it("DELTA STREAM: ordering — window.added precedes pane.opened", () => {
+    // v3: no session.added on the daemon wire; first structural delta is window.added
     const rawBuf = loadGolden();
     const { allDeltas } = replayCapture(rawBuf);
 
-    const sessionAddedIdx = allDeltas.findIndex((d) => d.type === "session.added");
     const windowAddedIdx = allDeltas.findIndex((d) => d.type === "window.added");
     const paneOpenedIdx = allDeltas.findIndex((d) => d.type === "pane.opened");
 
-    assert.ok(sessionAddedIdx !== -1, "session.added missing from delta stream");
     assert.ok(windowAddedIdx !== -1, "window.added missing from delta stream");
     assert.ok(paneOpenedIdx !== -1, "pane.opened missing from delta stream");
-    assert.ok(
-      sessionAddedIdx < windowAddedIdx,
-      `session.added (${sessionAddedIdx}) must precede window.added (${windowAddedIdx})`,
-    );
     assert.ok(
       windowAddedIdx < paneOpenedIdx,
       `window.added (${windowAddedIdx}) must precede pane.opened (${paneOpenedIdx})`,
@@ -678,7 +642,13 @@ describe("E3 e2e replay: delta round-trip", () => {
   });
 
   it("DELTA ROUND-TRIP: step-by-step reconstruction holds for every intermediate state", () => {
-    // Verify: for each step i, applyDeltas(snap(i-1), deltas_i) == snap(i)
+    // Verify: for each step i, applyDeltas(snap(i-1), deltas_i) == snap(i).
+    //
+    // v3 note: session identity is established at connection time (snapshot), not via
+    // deltas. The first event (session-changed) transitions the model from no-session to
+    // session-present, but emits no wire delta. We handle this by seeding prevSnap from
+    // the snapshot whenever the session identity transitions (empty → present), so the
+    // delta property is verified for all steps where deltas actually carry state.
     const rawBuf = loadGolden();
     const tokens = tokenizeBuffer(rawBuf);
     const bufferStore = createPaneBufferStore();
@@ -695,8 +665,20 @@ describe("E3 e2e replay: delta round-trip", () => {
       model = reduce(model, event, ctx);
       step++;
 
-      const deltas = diffModel(prev, model);
       const nextSnap = projectSnapshot(model, { seq: step });
+
+      // v3: session identity cannot be derived from deltas alone.
+      // When the session transitions from absent to present, reseed prevSnap
+      // from the current snapshot so subsequent steps check the delta property.
+      const prevSessId = prevSnap.session.sessionId;
+      const nextSessId = nextSnap.session.sessionId;
+      if (prevSessId === "" && nextSessId !== "") {
+        // Session bootstrap step — delta property not testable; reseed baseline.
+        prevSnap = nextSnap;
+        continue;
+      }
+
+      const deltas = diffModel(prev, model);
       const reconstructed = applyDeltas(prevSnap, deltas);
 
       assert.deepEqual(

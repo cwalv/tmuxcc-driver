@@ -147,12 +147,56 @@ export interface PaneBufferStore {
 // ---------------------------------------------------------------------------
 
 /**
+ * The outcome of a switch-client narrowing check.
+ *
+ * "reattach" — the bound session is still alive; the caller should silently
+ *              issue `attach-session -t <bound>` on the -CC connection.
+ * "unavailable" — the bound session is gone; the caller should emit
+ *                 ErrorMessage{code:"session.unavailable"} and close all
+ *                 client connections on this daemon.
+ */
+export type SwitchClientOutcome = "reattach" | "unavailable";
+
+/**
  * Mutable context threaded through `reduce`. Keeps side effects explicit and
  * allows test doubles to be injected without global state.
  */
 export interface ReducerContext {
   /** The per-pane byte buffer store (tc-fx2). */
   readonly buffers: PaneBufferStore;
+
+  /**
+   * The session id this daemon is bound to (the `-CC attach -t <session>`
+   * argument). Used by the switch-client narrowing logic in the
+   * `%session-changed` / `%client-session-changed` handlers.
+   *
+   * When absent (undefined), switch-client narrowing is disabled: the
+   * reducer falls back to the legacy behaviour (update focus and ensure
+   * session, as before v3).
+   *
+   * The value is a branded SessionId produced by mintSessionId() from the
+   * tmux numeric id of the bound session. E4 bootstrap supplies this once at
+   * daemon startup; it never changes for the lifetime of the daemon.
+   */
+  readonly boundSessionId?: import("../wire/ids.js").SessionId;
+
+  /**
+   * Called by the reducer when it detects that the attached session has
+   * drifted away from the bound session (switch-client narrowing, tc-j9c.2).
+   *
+   * The reducer calls this INSTEAD of updating the model's focus: the E4
+   * runtime uses the outcome to either silently issue `attach-session -t <bound>`
+   * ("reattach") or emit `ErrorMessage{code:"session.unavailable"}` and close
+   * all client connections ("unavailable"). In both cases the model is returned
+   * UNCHANGED by the reducer (no focus update).
+   *
+   * When absent (undefined), this callback is a no-op: switch-client events
+   * fall through to the legacy focus-update path.
+   *
+   * @param outcome - "reattach" if the bound session is still present in the
+   *                  model; "unavailable" if it has disappeared.
+   */
+  readonly onSwitchClientDetected?: (outcome: SwitchClientOutcome) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -434,16 +478,52 @@ export function reduce(
     // -------------------------------------------------------------------------
     // %session-changed $<sess> <name>
     //
-    // The active session changed (or was created). Ensure the session exists in
-    // the model, update its name if needed, and set global focus to it.
+    // The active session changed (or was created). In single-session mode
+    // (boundSessionId is set), apply the switch-client narrowing logic:
+    //   1. If the new session is the bound session: update name + focus (no-op
+    //      for the switch-client concern, but the name may have changed).
+    //   2. If the new session differs from the bound session: check whether the
+    //      bound session is still in the model.
+    //      - Still present → call ctx.onSwitchClientDetected("reattach"), return
+    //        model unchanged (E4 will issue attach-session silently).
+    //      - Gone → call ctx.onSwitchClientDetected("unavailable"), return model
+    //        unchanged (E4 will emit session.unavailable and close connections).
+    //
+    // Legacy fallback (no boundSessionId): ensure session, update name, update
+    // focus — the pre-v3 behaviour preserved for callers that do not set
+    // boundSessionId.
     // -------------------------------------------------------------------------
     case "session-changed": {
       const sid = mintSessionId(event.sessionId);
-      model = ensureSession(model, event.sessionId, event.name);
-      // Update name in case it changed.
-      model = updateSession(model, sid, { name: event.name });
 
-      // Set focus: use the session's active window + pane if known.
+      if (ctx.boundSessionId !== undefined) {
+        // Single-session narrowing (tc-j9c.2).
+        if (sid === ctx.boundSessionId) {
+          // Still on the bound session — update name in case it changed, update focus.
+          model = ensureSession(model, event.sessionId, event.name);
+          model = updateSession(model, sid, { name: event.name });
+          const sess = model.sessions.get(sid)!;
+          const activeWid = sess.activeWindowId;
+          if (activeWid !== null) {
+            const win = model.windows.get(activeWid);
+            const activePid = win?.activePaneId ?? null;
+            if (activePid !== null) {
+              model = setFocus(model, { paneId: activePid, windowId: activeWid, sessionId: sid });
+            }
+          }
+          return model;
+        }
+        // Drifted to a different session — determine outcome.
+        const outcome: SwitchClientOutcome = model.sessions.has(ctx.boundSessionId)
+          ? "reattach"
+          : "unavailable";
+        ctx.onSwitchClientDetected?.(outcome);
+        return model; // model unchanged — E4 handles the wire-level response
+      }
+
+      // Legacy path (no boundSessionId): pre-v3 behaviour.
+      model = ensureSession(model, event.sessionId, event.name);
+      model = updateSession(model, sid, { name: event.name });
       const sess = model.sessions.get(sid)!;
       const activeWid = sess.activeWindowId;
       if (activeWid !== null) {
@@ -457,35 +537,60 @@ export function reduce(
       } else {
         model = setFocus(model, { paneId: null, windowId: null, sessionId: null });
       }
-
       return model;
     }
 
     // -------------------------------------------------------------------------
     // %client-session-changed <client> $<sess> <name>
     //
-    // Same semantics as session-changed for model purposes: the client's attached
-    // session changed. Ensure the session exists, update name, update focus.
+    // Applies the same switch-client narrowing as %session-changed (tc-j9c.2).
+    // In single-session mode: if the session changed to something other than
+    // the bound session, delegate to ctx.onSwitchClientDetected; otherwise
+    // update name + focus normally.
+    //
+    // Legacy fallback: same as session-changed legacy path.
     // -------------------------------------------------------------------------
     case "client-session-changed": {
       const sid = mintSessionId(event.sessionId);
+
+      if (ctx.boundSessionId !== undefined) {
+        if (sid === ctx.boundSessionId) {
+          model = ensureSession(model, event.sessionId, event.name);
+          model = updateSession(model, sid, { name: event.name });
+          const sess = model.sessions.get(sid)!;
+          const activeWid = sess.activeWindowId;
+          if (activeWid !== null) {
+            const win = model.windows.get(activeWid);
+            const activePid = win?.activePaneId ?? null;
+            if (activePid !== null) {
+              model = setFocus(model, { paneId: activePid, windowId: activeWid, sessionId: sid });
+            }
+          }
+          return model;
+        }
+        const outcome: SwitchClientOutcome = model.sessions.has(ctx.boundSessionId)
+          ? "reattach"
+          : "unavailable";
+        ctx.onSwitchClientDetected?.(outcome);
+        return model;
+      }
+
+      // Legacy path.
       model = ensureSession(model, event.sessionId, event.name);
       model = updateSession(model, sid, { name: event.name });
-
-      const sess = model.sessions.get(sid)!;
-      const activeWid = sess.activeWindowId;
-      if (activeWid !== null) {
-        const win = model.windows.get(activeWid);
+      const sess2 = model.sessions.get(sid)!;
+      const activeWid2 = sess2.activeWindowId;
+      if (activeWid2 !== null) {
+        const win = model.windows.get(activeWid2);
         const activePid = win?.activePaneId ?? null;
         if (activePid !== null) {
-          model = setFocus(model, { paneId: activePid, windowId: activeWid, sessionId: sid });
+          model = setFocus(model, { paneId: activePid, windowId: activeWid2, sessionId: sid });
         } else {
           model = setFocus(model, { paneId: null, windowId: null, sessionId: null });
         }
       } else {
         model = setFocus(model, { paneId: null, windowId: null, sessionId: null });
       }
-
       return model;
     }
 

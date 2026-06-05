@@ -1,5 +1,5 @@
 /**
- * Model→wire projection for the tmuxcc daemon (tc-7gp).
+ * Model→wire projection for the tmuxcc daemon (tc-7gp, updated tc-j9c.2).
  *
  * Two entry points:
  *   - `projectSnapshot(model, opts?)` — full-state snapshot for a new client.
@@ -10,20 +10,23 @@
  * DESIGN NOTES
  * ---------------------------------------------------------------------------
  *
+ * ## Single-session (v3)
+ * The daemon wire is single-session. `projectSnapshot` takes the first session
+ * from the model as the bound session. `diffModel` emits only
+ * `DaemonSessionRenamedMessage` for session renames (no session.added,
+ * session.closed, session.changed). The `sessionId` field is absent from
+ * all pane/window/layout/focus deltas.
+ *
  * ## SnapshotPane and pane bytes
- * `SnapshotPane` in control.ts does NOT carry pane byte content (no `contents`
- * field — only paneId, windowId, sessionId, cols, rows). Initial byte sync is
- * therefore the data-plane's responsibility (tc-2mq / tc-fbz), not the
- * projection's. `projectSnapshot` therefore takes only the `SessionModel` and
- * does not require a `PaneBufferStore`. If a future schema revision adds
- * `contents` to `SnapshotPane`, inject a `PaneBufferStore` via `opts` at that
- * point.
+ * `SnapshotPane` in daemon-control.ts does NOT carry pane byte content.
+ * Initial byte sync is therefore the data-plane's responsibility (tc-2mq /
+ * tc-fbz), not the projection's.
  *
  * ## Sequence numbers (seq)
  * `seq` is a per-connection counter owned by the SENDER (spec: MessageBase).
  * The daemon runtime (E4 / tc-dv3) maintains the counter and passes `nextSeq`
- * via `ProjectSnapshotOpts`. If not supplied, `projectSnapshot` starts at 1
- * (safe for testing; callers responsible for correct sequencing in production).
+ * via `ProjectSnapshotOpts`. If not supplied, `projectSnapshot` starts at 2
+ * (the snapshot is always the second message after capabilities at seq=1).
  * `diffModel` does NOT assign seq values — the returned delta array has
  * `seq: 0` placeholders. The E4 caller stamps actual seq values before sending,
  * iterating the array in order. This lets the projection stay stateless (no
@@ -33,19 +36,16 @@
  * Deltas are ordered so a client can always apply them sequentially without
  * referencing an entity that hasn't been announced yet:
  *
- *   1. session.added       — new sessions first (windows/panes reference them)
- *   2. window.added        — new windows (panes reference them)
- *   3. pane.opened         — new panes
- *   4. layout.updated      — window layout changes (may ref existing panes)
- *   5. pane.resized        — size changes on existing panes
- *   6. pane.mode-changed   — mode changes on existing panes
- *   7. window.renamed      — renames (entity already exists)
- *   8. session.renamed     — renames
- *   9. session.changed     — active-session pointer change
- *  10. focus.changed       — focus (all referenced entities now exist)
- *  11. pane.closed         — removals after any focus update away from them
- *  12. window.closed       — window removals after pane removals
- *  13. session.closed      — session removals last
+ *   1. window.added        — new windows (panes reference them)
+ *   2. pane.opened         — new panes
+ *   3. layout.updated      — window layout changes (may ref existing panes)
+ *   4. pane.resized        — size changes on existing panes
+ *   5. pane.mode-changed   — mode changes on existing panes
+ *   6. window.renamed      — renames (entity already exists)
+ *   7. session.renamed     — session rename
+ *   8. focus.changed       — focus (all referenced entities now exist)
+ *   9. pane.closed         — removals after any focus update away from them
+ *  10. window.closed       — window removals after pane removals
  *
  * Within each group, ordering is Map-iteration order (stable insertion order).
  *
@@ -73,10 +73,7 @@ import type {
   WindowRenamedMessage,
   LayoutUpdatedMessage,
   FocusChangedMessage,
-  SessionAddedMessage,
-  SessionClosedMessage,
-  SessionChangedMessage,
-  SessionRenamedMessage,
+  DaemonSessionRenamedMessage,
 } from "../wire/daemon-control.js";
 
 // ---------------------------------------------------------------------------
@@ -87,8 +84,9 @@ import type {
  * Options for projectSnapshot.
  *
  * `seq`: the sequence number to stamp on the snapshot message. The E4 daemon
- * runtime owns the per-connection counter and passes it here. Defaults to 1
- * (safe for tests; callers must supply the correct value in production).
+ * runtime owns the per-connection counter and passes it here. Defaults to 2
+ * (snapshot is always the second daemon→client message after capabilities
+ * at seq=1).
  *
  * `attachedClientCount`: the number of daemon-protocol clients connected at
  * snapshot time (tc-1elae, §11.4 tooltip). The serve layer (tc-dv3) passes
@@ -104,9 +102,13 @@ export interface ProjectSnapshotOpts {
  * Project the full model state into a wire SnapshotMessage.
  *
  * Called once per new client connection, immediately after the capabilities
- * handshake. The snapshot carries flat arrays (sessions, windows, panes) plus
- * the focus triple. All ids are the model's branded ids (same types as the
- * wire uses — no conversion needed).
+ * handshake. The snapshot carries the bound session, flat arrays
+ * (windows, panes), and the focus pair. All ids are the model's branded ids
+ * (same types as the wire uses — no conversion needed).
+ *
+ * Assumes the model has exactly one session (the daemon's bound session).
+ * If the model is empty (no sessions), returns a snapshot with a placeholder
+ * session identity.
  *
  * SnapshotPane does NOT carry pane byte content; initial byte delivery is the
  * data-plane's responsibility (see module-level design notes).
@@ -115,33 +117,23 @@ export function projectSnapshot(
   model: SessionModel,
   opts: ProjectSnapshotOpts = {},
 ): SnapshotMessage {
-  const seq = opts.seq ?? 1;
+  const seq = opts.seq ?? 2;
   const attachedClientCount = opts.attachedClientCount;
 
-  const sessions: SnapshotSession[] = [];
-  for (const sess of model.sessions.values()) {
-    sessions.push({
-      sessionId: sess.sessionId,
-      name: sess.name,
-      active: model.focus.sessionId === sess.sessionId,
-    });
-  }
+  // Take the first (and only) session as the bound session.
+  const sessEntry = model.sessions.values().next().value;
+  const session: SnapshotSession = sessEntry
+    ? { sessionId: sessEntry.sessionId, name: sessEntry.name }
+    : { sessionId: "" as import("../wire/ids.js").SessionId, name: "" };
 
   const windows: SnapshotWindow[] = [];
   for (const win of model.windows.values()) {
     windows.push({
       windowId: win.windowId,
-      sessionId: win.sessionId,
       name: win.name,
       active: model.sessions.get(win.sessionId)?.activeWindowId === win.windowId,
       // layout is required by SnapshotWindow; use a zero-pane placeholder when
       // null (bootstrap lag — layout arrives via %layout-change shortly after).
-      // The wire type requires WindowLayout, not WindowLayout | null, so we
-      // synthesize a minimal valid tree. paneId is set to "" (empty) because
-      // the placeholder is a type-only sentinel and must be stable/predictable
-      // for round-trip reconstruction (applyDeltas produces the same zero-rect
-      // placeholder for window.added; no layout.updated is emitted until the
-      // model has a real layout).
       layout: win.layout ?? {
         cols: 0,
         rows: 0,
@@ -155,7 +147,6 @@ export function projectSnapshot(
     panes.push({
       paneId: pane.paneId,
       windowId: pane.windowId,
-      sessionId: pane.sessionId,
       cols: pane.cols,
       rows: pane.rows,
     });
@@ -164,17 +155,14 @@ export function projectSnapshot(
   const msg: SnapshotMessage = {
     type: "snapshot",
     seq,
-    sessions,
+    session,
     windows,
     panes,
     focus: {
       paneId: model.focus.paneId,
       windowId: model.focus.windowId,
-      sessionId: model.focus.sessionId,
     },
   };
-  // tc-1elae: include attachedClientCount when provided (omit to keep the
-  // field absent for backwards compatibility with older consumers).
   if (attachedClientCount !== undefined) {
     return { ...msg, attachedClientCount };
   }
@@ -199,32 +187,16 @@ export function diffModel(prev: SessionModel, next: SessionModel): DaemonMessage
   const SEQ = 0;
 
   // -------------------------------------------------------------------------
-  // 1. session.added — new sessions
-  // -------------------------------------------------------------------------
-  for (const [id, sess] of next.sessions) {
-    if (!prev.sessions.has(id)) {
-      const msg: SessionAddedMessage = {
-        type: "session.added",
-        seq: SEQ,
-        sessionId: sess.sessionId,
-        name: sess.name,
-        active: next.focus.sessionId === sess.sessionId,
-      };
-      out.push(msg);
-    }
-  }
-
-  // -------------------------------------------------------------------------
-  // 2. window.added — new windows
+  // 1. window.added — new windows
   // -------------------------------------------------------------------------
   for (const [id, win] of next.windows) {
     if (!prev.windows.has(id)) {
+      // Determine active flag: is this the activeWindowId in its owning session?
       const sess = next.sessions.get(win.sessionId);
       const msg: WindowAddedMessage = {
         type: "window.added",
         seq: SEQ,
         windowId: win.windowId,
-        sessionId: win.sessionId,
         name: win.name,
         active: sess?.activeWindowId === win.windowId,
       };
@@ -233,7 +205,7 @@ export function diffModel(prev: SessionModel, next: SessionModel): DaemonMessage
   }
 
   // -------------------------------------------------------------------------
-  // 3. pane.opened — new panes
+  // 2. pane.opened — new panes
   // -------------------------------------------------------------------------
   for (const [id, pane] of next.panes) {
     if (!prev.panes.has(id)) {
@@ -243,7 +215,6 @@ export function diffModel(prev: SessionModel, next: SessionModel): DaemonMessage
         seq: SEQ,
         paneId: pane.paneId,
         windowId: pane.windowId,
-        sessionId: pane.sessionId,
         cols: pane.cols,
         rows: pane.rows,
         active: win?.activePaneId === pane.paneId,
@@ -253,7 +224,7 @@ export function diffModel(prev: SessionModel, next: SessionModel): DaemonMessage
   }
 
   // -------------------------------------------------------------------------
-  // 4. layout.updated — changed window layouts (for existing windows)
+  // 3. layout.updated — changed window layouts (for existing windows)
   // -------------------------------------------------------------------------
   for (const [id, win] of next.windows) {
     const prevWin = prev.windows.get(id);
@@ -263,7 +234,6 @@ export function diffModel(prev: SessionModel, next: SessionModel): DaemonMessage
         type: "layout.updated",
         seq: SEQ,
         windowId: win.windowId,
-        sessionId: win.sessionId,
         layout: win.layout,
       };
       out.push(msg);
@@ -271,7 +241,7 @@ export function diffModel(prev: SessionModel, next: SessionModel): DaemonMessage
   }
 
   // -------------------------------------------------------------------------
-  // 5. pane.resized — size changes on existing panes
+  // 4. pane.resized — size changes on existing panes
   // -------------------------------------------------------------------------
   for (const [id, pane] of next.panes) {
     const prevPane = prev.panes.get(id);
@@ -289,7 +259,7 @@ export function diffModel(prev: SessionModel, next: SessionModel): DaemonMessage
   }
 
   // -------------------------------------------------------------------------
-  // 6. pane.mode-changed — mode changes on existing panes
+  // 5. pane.mode-changed — mode changes on existing panes
   // -------------------------------------------------------------------------
   for (const [id, pane] of next.panes) {
     const prevPane = prev.panes.get(id);
@@ -306,7 +276,7 @@ export function diffModel(prev: SessionModel, next: SessionModel): DaemonMessage
   }
 
   // -------------------------------------------------------------------------
-  // 7. window.renamed — name changes on existing windows
+  // 6. window.renamed — name changes on existing windows
   // -------------------------------------------------------------------------
   for (const [id, win] of next.windows) {
     const prevWin = prev.windows.get(id);
@@ -323,57 +293,37 @@ export function diffModel(prev: SessionModel, next: SessionModel): DaemonMessage
   }
 
   // -------------------------------------------------------------------------
-  // 8. session.renamed — name changes on existing sessions
+  // 7. session.renamed — name change on the bound session
   // -------------------------------------------------------------------------
-  for (const [id, sess] of next.sessions) {
-    const prevSess = prev.sessions.get(id);
-    if (!prevSess) continue; // already handled in session.added
-    if (prevSess.name !== sess.name) {
-      const msg: SessionRenamedMessage = {
-        type: "session.renamed",
-        seq: SEQ,
-        sessionId: sess.sessionId,
-        newName: sess.name,
-      };
-      out.push(msg);
-    }
-  }
-
-  // -------------------------------------------------------------------------
-  // 9. session.changed — active session pointer changed
-  // -------------------------------------------------------------------------
-  if (
-    prev.focus.sessionId !== next.focus.sessionId &&
-    next.focus.sessionId !== null
-  ) {
-    const msg: SessionChangedMessage = {
-      type: "session.changed",
+  const prevSess = prev.sessions.values().next().value;
+  const nextSess = next.sessions.values().next().value;
+  if (prevSess && nextSess && prevSess.name !== nextSess.name) {
+    const msg: DaemonSessionRenamedMessage = {
+      type: "session.renamed",
       seq: SEQ,
-      newActiveSessionId: next.focus.sessionId,
+      newName: nextSess.name,
     };
     out.push(msg);
   }
 
   // -------------------------------------------------------------------------
-  // 10. focus.changed — focus triple changed
+  // 8. focus.changed — focus pair changed
   // -------------------------------------------------------------------------
   if (
     prev.focus.paneId !== next.focus.paneId ||
-    prev.focus.windowId !== next.focus.windowId ||
-    prev.focus.sessionId !== next.focus.sessionId
+    prev.focus.windowId !== next.focus.windowId
   ) {
     const msg: FocusChangedMessage = {
       type: "focus.changed",
       seq: SEQ,
       paneId: next.focus.paneId,
       windowId: next.focus.windowId,
-      sessionId: next.focus.sessionId,
     };
     out.push(msg);
   }
 
   // -------------------------------------------------------------------------
-  // 11. pane.closed — removed panes (after focus update away from them)
+  // 9. pane.closed — removed panes (after focus update away from them)
   // -------------------------------------------------------------------------
   for (const [id, pane] of prev.panes) {
     if (!next.panes.has(id)) {
@@ -382,14 +332,13 @@ export function diffModel(prev: SessionModel, next: SessionModel): DaemonMessage
         seq: SEQ,
         paneId: pane.paneId,
         windowId: pane.windowId,
-        sessionId: pane.sessionId,
       };
       out.push(msg);
     }
   }
 
   // -------------------------------------------------------------------------
-  // 12. window.closed — removed windows (after pane removals)
+  // 10. window.closed — removed windows (after pane removals)
   // -------------------------------------------------------------------------
   for (const [id, win] of prev.windows) {
     if (!next.windows.has(id)) {
@@ -397,21 +346,6 @@ export function diffModel(prev: SessionModel, next: SessionModel): DaemonMessage
         type: "window.closed",
         seq: SEQ,
         windowId: win.windowId,
-        sessionId: win.sessionId,
-      };
-      out.push(msg);
-    }
-  }
-
-  // -------------------------------------------------------------------------
-  // 13. session.closed — removed sessions (last)
-  // -------------------------------------------------------------------------
-  for (const [id, sess] of prev.sessions) {
-    if (!next.sessions.has(id)) {
-      const msg: SessionClosedMessage = {
-        type: "session.closed",
-        seq: SEQ,
-        sessionId: sess.sessionId,
       };
       out.push(msg);
     }

@@ -337,10 +337,10 @@ describe("handshake — unexpected message type", () => {
     daemonTransport.sendControl({
       type: "snapshot",
       seq: 1,
-      sessions: [],
+      session: { sessionId: "s0" as ReturnType<typeof import("./ids.js").sessionId>, name: "s0" },
       windows: [],
       panes: [],
-      focus: { paneId: null, windowId: null, sessionId: null },
+      focus: { paneId: null, windowId: null },
     });
 
     const result = await clientPromise.then(

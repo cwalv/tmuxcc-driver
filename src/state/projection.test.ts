@@ -1,9 +1,9 @@
 /**
- * Tests for the model→wire projection (tc-7gp).
+ * Tests for the model→wire projection (tc-7gp, updated tc-j9c.2 for single-session).
  *
  * Covers:
- *   1. Snapshot reflects full state.
- *   2. Deltas are minimal + correct (one change → one delta).
+ *   1. Snapshot reflects full state (single session in `session` field).
+ *   2. Deltas are minimal + correct (one change → one delta; sessionId stripped).
  *   3. Round-trip: applyDeltas(projectSnapshot(prev), diffModel(prev, next))
  *      deep-equals projectSnapshot(next).
  *   4. Ordering: pane.opened precedes focus.changed when a new pane is
@@ -135,63 +135,35 @@ function baseModel(): SessionModel {
 //
 // This is a reference applier used only in tests (not production code). It
 // produces a new SnapshotMessage by folding over the delta list.
+// In v3 single-session shape: no sessions array, no sessionId on deltas.
 // ---------------------------------------------------------------------------
 
 function applyDeltas(snap: SnapshotMessage, deltas: DaemonMessage[]): SnapshotMessage {
   // Work on mutable copies of the flat arrays.
-  let sessions = [...snap.sessions];
+  let session = snap.session;
   let windows = [...snap.windows];
   let panes = [...snap.panes];
   let focus = { ...snap.focus };
 
   for (const delta of deltas) {
     switch (delta.type) {
-      // --- session lifecycle ---
-      case "session.added":
-        sessions = [
-          // Only clear existing sessions' active flag if the new session is
-          // immediately active (i.e. delta.active === true).
-          ...sessions.map((s) => (delta.active ? { ...s, active: false } : s)),
-          {
-            sessionId: delta.sessionId,
-            name: delta.name,
-            active: delta.active,
-          },
-        ];
-        break;
-
-      case "session.closed":
-        sessions = sessions.filter((s) => s.sessionId !== delta.sessionId);
-        break;
-
+      // --- session lifecycle (only rename on daemon wire) ---
       case "session.renamed":
-        sessions = sessions.map((s) =>
-          s.sessionId === delta.sessionId ? { ...s, name: delta.newName } : s,
-        );
-        break;
-
-      case "session.changed":
-        sessions = sessions.map((s) => ({
-          ...s,
-          active: s.sessionId === delta.newActiveSessionId,
-        }));
+        session = { ...session, newName: delta.newName } as typeof session;
+        session = { sessionId: session.sessionId, name: delta.newName };
         break;
 
       // --- window lifecycle ---
       case "window.added":
         windows = [
           ...windows.map((w) =>
-            delta.active && w.sessionId === delta.sessionId
-              ? { ...w, active: false }
-              : w,
+            delta.active ? { ...w, active: false } : w,
           ),
           {
             windowId: delta.windowId,
-            sessionId: delta.sessionId,
             name: delta.name,
             active: delta.active,
             // layout will be filled by a subsequent layout.updated if needed.
-            // Use a zero-layout placeholder so the shape is valid.
             layout: {
               cols: 0,
               rows: 0,
@@ -229,7 +201,6 @@ function applyDeltas(snap: SnapshotMessage, deltas: DaemonMessage[]): SnapshotMe
           {
             paneId: delta.paneId,
             windowId: delta.windowId,
-            sessionId: delta.sessionId,
             cols: delta.cols,
             rows: delta.rows,
           },
@@ -249,7 +220,7 @@ function applyDeltas(snap: SnapshotMessage, deltas: DaemonMessage[]): SnapshotMe
         break;
 
       case "pane.mode-changed":
-        // SnapshotPane has no mode field; ignore (mode is not in snapshot shape).
+        // SnapshotPane has no mode field; ignore.
         break;
 
       // --- focus ---
@@ -257,13 +228,7 @@ function applyDeltas(snap: SnapshotMessage, deltas: DaemonMessage[]): SnapshotMe
         focus = {
           paneId: delta.paneId,
           windowId: delta.windowId,
-          sessionId: delta.sessionId,
         };
-        // Also update active flags in sessions and windows to match the new focus.
-        sessions = sessions.map((s) => ({
-          ...s,
-          active: s.sessionId === delta.sessionId,
-        }));
         windows = windows.map((w) => ({
           ...w,
           active: w.windowId === delta.windowId,
@@ -279,7 +244,7 @@ function applyDeltas(snap: SnapshotMessage, deltas: DaemonMessage[]): SnapshotMe
   return {
     type: "snapshot",
     seq: snap.seq,
-    sessions,
+    session,
     windows,
     panes,
     focus,
@@ -287,29 +252,25 @@ function applyDeltas(snap: SnapshotMessage, deltas: DaemonMessage[]): SnapshotMe
 }
 
 /**
- * Normalize a SnapshotMessage for deep comparison: sort all arrays by id so
+ * Normalize a SnapshotMessage for deep comparison: sort arrays by id so
  * order doesn't affect equality. Also strip seq (not part of state).
  */
 function normalizeSnapshot(snap: SnapshotMessage) {
   return {
-    sessions: [...snap.sessions]
-      .sort((a, b) => String(a.sessionId).localeCompare(String(b.sessionId)))
-      .map(({ sessionId, name, active }) => ({ sessionId, name, active })),
+    session: snap.session,
     windows: [...snap.windows]
       .sort((a, b) => String(a.windowId).localeCompare(String(b.windowId)))
-      .map(({ windowId, sessionId, name, active, layout }) => ({
+      .map(({ windowId, name, active, layout }) => ({
         windowId,
-        sessionId,
         name,
         active,
         layout,
       })),
     panes: [...snap.panes]
       .sort((a, b) => String(a.paneId).localeCompare(String(b.paneId)))
-      .map(({ paneId, windowId, sessionId, cols, rows }) => ({
+      .map(({ paneId, windowId, cols, rows }) => ({
         paneId,
         windowId,
-        sessionId,
         cols,
         rows,
       })),
@@ -321,74 +282,69 @@ function normalizeSnapshot(snap: SnapshotMessage) {
 // 1. Snapshot reflects full state
 // ---------------------------------------------------------------------------
 
-describe("projectSnapshot — full state", () => {
+describe("projectSnapshot — full state (v3 single-session)", () => {
   it("empty model produces empty arrays and null focus", () => {
     const snap = projectSnapshot(emptyModel(), { seq: 1 });
     assert.equal(snap.type, "snapshot");
     assert.equal(snap.seq, 1);
-    assert.deepEqual(snap.sessions, []);
+    // Empty model — session is a placeholder with empty strings
+    assert.equal(snap.session.sessionId as string, "");
     assert.deepEqual(snap.windows, []);
     assert.deepEqual(snap.panes, []);
-    assert.deepEqual(snap.focus, { paneId: null, windowId: null, sessionId: null });
+    assert.deepEqual(snap.focus, { paneId: null, windowId: null });
   });
 
-  it("snapshot contains all entities and correct focus triple", () => {
+  it("snapshot carries single session in session field (not an array)", () => {
     const model = baseModel();
     const snap = projectSnapshot(model, { seq: 5 });
-
     assert.equal(snap.type, "snapshot");
     assert.equal(snap.seq, 5);
 
-    // Sessions
-    assert.equal(snap.sessions.length, 1);
-    const s = snap.sessions[0]!;
-    assert.equal(s.sessionId, S1);
-    assert.equal(s.name, "test-session");
-    assert.equal(s.active, true); // S1 is focused
+    // Single session field (not sessions[])
+    assert.ok("session" in snap, "snapshot must have 'session' field");
+    assert.ok(!("sessions" in snap), "snapshot must NOT have 'sessions' field");
+    assert.equal(snap.session.sessionId, S1);
+    assert.equal(snap.session.name, "test-session");
+    // No 'active' field on SnapshotSession (always bound session)
+    assert.ok(!("active" in snap.session), "SnapshotSession must not carry 'active' field");
+  });
 
-    // Windows
+  it("snapshot contains all windows and panes", () => {
+    const model = baseModel();
+    const snap = projectSnapshot(model, { seq: 5 });
+
+    // Windows — no sessionId field
     assert.equal(snap.windows.length, 1);
     const w = snap.windows[0]!;
     assert.equal(w.windowId, W1);
-    assert.equal(w.sessionId, S1);
+    assert.ok(!("sessionId" in w), "SnapshotWindow must not carry sessionId");
     assert.equal(w.name, "main");
-    assert.equal(w.active, true); // W1 is the active window in S1
+    assert.equal(w.active, true);
     assert.deepEqual(w.layout, LAYOUT_2);
 
-    // Panes
+    // Panes — no sessionId field
     assert.equal(snap.panes.length, 2);
     const paneMap = new Map(snap.panes.map((p) => [p.paneId, p]));
     const sp1 = paneMap.get(P1)!;
     assert.equal(sp1.windowId, W1);
-    assert.equal(sp1.sessionId, S1);
+    assert.ok(!("sessionId" in sp1), "SnapshotPane must not carry sessionId");
     assert.equal(sp1.cols, 80);
     assert.equal(sp1.rows, 24);
     const sp2 = paneMap.get(P2)!;
     assert.equal(sp2.cols, 40);
     assert.equal(sp2.rows, 24);
-
-    // Focus
-    assert.deepEqual(snap.focus, { paneId: P1, windowId: W1, sessionId: S1 });
   });
 
-  it("multi-session model: active flags on sessions are set correctly", () => {
-    let model = emptyModel();
-    model = addSession(model, makeSession(S1, [], null, "session-one"));
-    model = addSession(model, makeSession(S2, [], null, "session-two"));
-    // Only S2 is focused
-    model = { ...model, focus: { paneId: null, windowId: null, sessionId: null } };
-    // Sessions are present but no focus
-    const snap = projectSnapshot(model, { seq: 1 });
-    assert.equal(snap.sessions.length, 2);
-    // Neither is active (no focus)
-    for (const s of snap.sessions) {
-      assert.equal(s.active, false);
-    }
+  it("focus carries paneId and windowId only (no sessionId)", () => {
+    const model = baseModel();
+    const snap = projectSnapshot(model, { seq: 5 });
+    assert.deepEqual(snap.focus, { paneId: P1, windowId: W1 });
+    assert.ok(!("sessionId" in snap.focus), "focus must not carry sessionId");
   });
 
-  it("seq defaults to 1 when not provided", () => {
+  it("seq defaults to 2 when not provided (snapshot is always second message)", () => {
     const snap = projectSnapshot(emptyModel());
-    assert.equal(snap.seq, 1);
+    assert.equal(snap.seq, 2);
   });
 
   it("snapshot panes carry cols/rows from model", () => {
@@ -400,14 +356,23 @@ describe("projectSnapshot — full state", () => {
     assert.equal(p2snap.rows, 24);
   });
 
-  it("SnapshotPane has no bytes/content field (data-plane responsibility)", () => {
+  it("SnapshotPane has no bytes/content/sessionId field", () => {
     const model = baseModel();
     const snap = projectSnapshot(model);
     const pane = snap.panes[0]!;
-    // The SnapshotPane type has exactly: paneId, windowId, sessionId, cols, rows.
-    // Confirm no extra content field leaked in.
     assert.ok(!("contents" in pane), "SnapshotPane must not carry byte contents");
     assert.ok(!("bytes" in pane), "SnapshotPane must not carry byte contents");
+    assert.ok(!("sessionId" in pane), "SnapshotPane must not carry sessionId");
+  });
+
+  it("attachedClientCount is included when provided in opts", () => {
+    const snap = projectSnapshot(emptyModel(), { seq: 2, attachedClientCount: 3 });
+    assert.equal(snap.attachedClientCount, 3);
+  });
+
+  it("attachedClientCount is absent when not provided", () => {
+    const snap = projectSnapshot(emptyModel(), { seq: 2 });
+    assert.ok(!("attachedClientCount" in snap) || snap.attachedClientCount === undefined);
   });
 });
 
@@ -415,14 +380,14 @@ describe("projectSnapshot — full state", () => {
 // 2. Deltas are minimal + correct (one change → exactly the right delta)
 // ---------------------------------------------------------------------------
 
-describe("diffModel — minimal deltas", () => {
+describe("diffModel — minimal deltas (v3 single-session)", () => {
   it("identical models produce no deltas", () => {
     const model = baseModel();
     const deltas = diffModel(model, model);
     assert.deepEqual(deltas, []);
   });
 
-  it("add a pane → exactly one pane.opened delta", () => {
+  it("add a pane → exactly one pane.opened delta (no sessionId)", () => {
     const prev = baseModel();
     const next = addPane(prev, makePane(P3, W1, S1, 30, 24));
     const deltas = diffModel(prev, next);
@@ -432,26 +397,24 @@ describe("diffModel — minimal deltas", () => {
     if (d.type === "pane.opened") {
       assert.equal(d.paneId, P3);
       assert.equal(d.windowId, W1);
-      assert.equal(d.sessionId, S1);
+      assert.ok(!("sessionId" in d), "pane.opened must not carry sessionId");
       assert.equal(d.cols, 30);
       assert.equal(d.rows, 24);
     }
   });
 
-  it("remove a pane → exactly one pane.closed delta", () => {
+  it("remove a pane → exactly one pane.closed delta (no sessionId)", () => {
     const prev = baseModel();
     const next = removePane(prev, P2);
     const deltas = diffModel(prev, next);
-    // Also possibly a focus.changed if P2 was focused — but P1 is focused in base.
     const closed = deltas.filter((d) => d.type === "pane.closed");
     assert.equal(closed.length, 1);
     const d = closed[0]!;
     if (d.type === "pane.closed") {
       assert.equal(d.paneId, P2);
       assert.equal(d.windowId, W1);
-      assert.equal(d.sessionId, S1);
+      assert.ok(!("sessionId" in d), "pane.closed must not carry sessionId");
     }
-    // No spurious pane.opened
     assert.equal(deltas.filter((d) => d.type === "pane.opened").length, 0);
   });
 
@@ -495,7 +458,7 @@ describe("diffModel — minimal deltas", () => {
     }
   });
 
-  it("add a window → exactly one window.added delta", () => {
+  it("add a window → exactly one window.added delta (no sessionId)", () => {
     const prev = baseModel();
     const next = addWindow(prev, makeWindow(W2, S1, [], null, "second-window"));
     const deltas = diffModel(prev, next);
@@ -504,13 +467,12 @@ describe("diffModel — minimal deltas", () => {
     assert.equal(d.type, "window.added");
     if (d.type === "window.added") {
       assert.equal(d.windowId, W2);
-      assert.equal(d.sessionId, S1);
+      assert.ok(!("sessionId" in d), "window.added must not carry sessionId");
       assert.equal(d.name, "second-window");
     }
   });
 
-  it("remove a window → exactly one window.closed delta", () => {
-    // Add a second window so P1/W1 still exists and focus doesn't get nulled
+  it("remove a window → exactly one window.closed delta (no sessionId)", () => {
     let prev = baseModel();
     prev = addWindow(prev, makeWindow(W2, S1, [], null, "second-window"));
     const next = removeWindow(prev, W2);
@@ -520,12 +482,12 @@ describe("diffModel — minimal deltas", () => {
     const closedMsg = closed[0]!;
     if (closedMsg.type === "window.closed") {
       assert.equal(closedMsg.windowId, W2);
+      assert.ok(!("sessionId" in closedMsg), "window.closed must not carry sessionId");
     }
-    // No spurious window.added
     assert.equal(deltas.filter((d) => d.type === "window.added").length, 0);
   });
 
-  it("layout change → exactly one layout.updated delta", () => {
+  it("layout change → exactly one layout.updated delta (no sessionId)", () => {
     const prev = baseModel();
     const newLayout = {
       cols: 80,
@@ -543,13 +505,13 @@ describe("diffModel — minimal deltas", () => {
     assert.equal(d.type, "layout.updated");
     if (d.type === "layout.updated") {
       assert.equal(d.windowId, W1);
+      assert.ok(!("sessionId" in d), "layout.updated must not carry sessionId");
       assert.deepEqual(d.layout, newLayout);
     }
   });
 
-  it("focus change → exactly one focus.changed delta", () => {
+  it("focus change → exactly one focus.changed delta (no sessionId)", () => {
     const prev = baseModel();
-    // Switch focus to P2 (must also update activePaneId)
     let next = updateWindow(prev, W1, { activePaneId: P2 });
     next = setFocus(next, { paneId: P2, windowId: W1, sessionId: S1 });
     const deltas = diffModel(prev, next);
@@ -559,37 +521,11 @@ describe("diffModel — minimal deltas", () => {
     if (d.type === "focus.changed") {
       assert.equal(d.paneId, P2);
       assert.equal(d.windowId, W1);
-      assert.equal(d.sessionId, S1);
+      assert.ok(!("sessionId" in d), "focus.changed must not carry sessionId");
     }
   });
 
-  it("add a session → exactly one session.added delta", () => {
-    const prev = baseModel();
-    const next = addSession(prev, makeSession(S2, [], null, "second-session"));
-    const deltas = diffModel(prev, next);
-    assert.equal(deltas.length, 1);
-    const d = deltas[0]!;
-    assert.equal(d.type, "session.added");
-    if (d.type === "session.added") {
-      assert.equal(d.sessionId, S2);
-      assert.equal(d.name, "second-session");
-    }
-  });
-
-  it("remove a session → session.closed delta (plus possible focus.changed)", () => {
-    let prev = baseModel();
-    // Add a second session so removal of S2 doesn't require clearing S1
-    prev = addSession(prev, makeSession(S2, [], null, "second-session"));
-    const next = removeSession(prev, S2);
-    const closed = diffModel(prev, next).filter((d) => d.type === "session.closed");
-    assert.equal(closed.length, 1);
-    const closedMsg = closed[0]!;
-    if (closedMsg.type === "session.closed") {
-      assert.equal(closedMsg.sessionId, S2);
-    }
-  });
-
-  it("session rename → exactly one session.renamed delta", () => {
+  it("session rename → exactly one session.renamed delta (no sessionId)", () => {
     const prev = baseModel();
     const next = updateSession(prev, S1, { name: "renamed-session" });
     const deltas = diffModel(prev, next);
@@ -597,16 +533,15 @@ describe("diffModel — minimal deltas", () => {
     const d = deltas[0]!;
     assert.equal(d.type, "session.renamed");
     if (d.type === "session.renamed") {
-      assert.equal(d.sessionId, S1);
+      assert.ok(!("sessionId" in d), "session.renamed must not carry sessionId");
       assert.equal(d.newName, "renamed-session");
     }
   });
 
-  it("no spurious deltas when an unchanged pane exists alongside a changed one", () => {
+  it("no spurious deltas when unchanged pane exists alongside changed one", () => {
     const prev = baseModel();
     const next = updatePane(prev, P1, { cols: 100, rows: 30 });
     const deltas = diffModel(prev, next);
-    // Only P1 changed; P2 unchanged → only one delta for P1
     assert.equal(deltas.length, 1);
     const d0 = deltas[0]!;
     assert.equal(d0.type, "pane.resized");
@@ -619,9 +554,6 @@ describe("diffModel — minimal deltas", () => {
 // ---------------------------------------------------------------------------
 // 3. Round-trip: applyDeltas(projectSnapshot(prev), diffModel(prev, next))
 //               deep-equals projectSnapshot(next)
-//
-// Proof approach: normalize both snapshots (sort arrays, strip seq) and
-// assert structural equality.
 // ---------------------------------------------------------------------------
 
 describe("round-trip: applyDeltas(snapshot(prev), diff(prev,next)) == snapshot(next)", () => {
@@ -674,21 +606,18 @@ describe("round-trip: applyDeltas(snapshot(prev), diff(prev,next)) == snapshot(n
     roundTrip(prev, next);
   });
 
-  it("add a session + window + pane (multi-change)", () => {
+  it("add a window + pane (multi-change)", () => {
     const prev = baseModel();
-    let next = addSession(prev, makeSession(S2, [], null, "session-two"));
-    next = addWindow(next, makeWindow(W2, S2, [], null, "win-two"));
-    next = addPane(next, makePane(P3, W2, S2, 100, 40));
+    let next = addWindow(prev, makeWindow(W2, S1, [], null, "win-two"));
+    next = addPane(next, makePane(P3, W2, S1, 100, 40));
     roundTrip(prev, next);
   });
 
-  it("remove session (multi-change)", () => {
-    // Build a two-session model, then remove one
+  it("remove window (multi-change)", () => {
     let prev = baseModel();
-    prev = addSession(prev, makeSession(S2, [], null, "session-two"));
-    prev = addWindow(prev, makeWindow(W2, S2, [], null, "win-two"));
-    prev = addPane(prev, makePane(P3, W2, S2, 100, 40));
-    const next = removeSession(prev, S2);
+    prev = addWindow(prev, makeWindow(W2, S1, [], null, "win-two"));
+    prev = addPane(prev, makePane(P3, W2, S1, 100, 40));
+    const next = removeWindow(prev, W2);
     roundTrip(prev, next);
   });
 
@@ -698,16 +627,21 @@ describe("round-trip: applyDeltas(snapshot(prev), diff(prev,next)) == snapshot(n
     next = updatePane(next, P1, { cols: 120, rows: 40 });
     roundTrip(prev, next);
   });
+
+  it("session rename round-trips correctly", () => {
+    const prev = baseModel();
+    const next = updateSession(prev, S1, { name: "new-session-name" });
+    roundTrip(prev, next);
+  });
 });
 
 // ---------------------------------------------------------------------------
 // 4. Ordering: pane.opened precedes focus.changed when a new pane is focused
 // ---------------------------------------------------------------------------
 
-describe("delta ordering", () => {
+describe("delta ordering (v3)", () => {
   it("pane.opened appears before focus.changed in the same diff", () => {
     const prev = baseModel();
-    // Add P3 and immediately focus it
     let next = addPane(prev, makePane(P3, W1, S1, 30, 24));
     next = updateWindow(next, W1, { activePaneId: P3 });
     next = setFocus(next, { paneId: P3, windowId: W1, sessionId: S1 });
@@ -725,7 +659,7 @@ describe("delta ordering", () => {
     );
   });
 
-  it("session.added appears before window.added which appears before pane.opened", () => {
+  it("window.added appears before pane.opened", () => {
     const prev = emptyModel();
     let next = addSession(prev, makeSession(S1, [], null));
     next = addWindow(next, makeWindow(W1, S1, [], null));
@@ -734,36 +668,29 @@ describe("delta ordering", () => {
     const deltas = diffModel(prev, next);
     const types = deltas.map((d) => d.type);
 
-    const sessionIdx = types.indexOf("session.added");
     const windowIdx = types.indexOf("window.added");
     const paneIdx = types.indexOf("pane.opened");
 
-    assert.ok(sessionIdx !== -1, "session.added must be present");
     assert.ok(windowIdx !== -1, "window.added must be present");
     assert.ok(paneIdx !== -1, "pane.opened must be present");
-    assert.ok(sessionIdx < windowIdx, "session.added before window.added");
     assert.ok(windowIdx < paneIdx, "window.added before pane.opened");
   });
 
-  it("pane.closed appears before window.closed which appears before session.closed", () => {
+  it("pane.closed appears before window.closed", () => {
     let prev = baseModel();
-    prev = addSession(prev, makeSession(S2, [], null));
-    prev = addWindow(prev, makeWindow(W2, S2, [], null));
-    prev = addPane(prev, makePane(P3, W2, S2));
+    prev = addWindow(prev, makeWindow(W2, S1, [], null));
+    prev = addPane(prev, makePane(P3, W2, S1));
 
-    const next = removeSession(prev, S2);
+    const next = removeWindow(prev, W2);
 
     const deltas = diffModel(prev, next);
     const types = deltas.map((d) => d.type);
 
     const paneClosedIdx = types.indexOf("pane.closed");
     const windowClosedIdx = types.indexOf("window.closed");
-    const sessionClosedIdx = types.indexOf("session.closed");
 
     assert.ok(paneClosedIdx !== -1, "pane.closed must be present");
     assert.ok(windowClosedIdx !== -1, "window.closed must be present");
-    assert.ok(sessionClosedIdx !== -1, "session.closed must be present");
     assert.ok(paneClosedIdx < windowClosedIdx, "pane.closed before window.closed");
-    assert.ok(windowClosedIdx < sessionClosedIdx, "window.closed before session.closed");
   });
 });

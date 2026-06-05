@@ -513,7 +513,7 @@ describe("tc-93a: Daemon integration — fake-tmux harness", () => {
       assert.equal(snapshot!.seq, 1, "snapshot must be seq=1");
 
       // The bootstrap exchange gives 1 session, 1 window, 1 pane.
-      assert.ok(snapshot!.sessions.length >= 1, "snapshot must have at least 1 session");
+      assert.ok(snapshot!.session !== undefined, "snapshot must have a session");
       assert.ok(snapshot!.windows.length >= 1, "snapshot must have at least 1 window");
       assert.ok(snapshot!.panes.length >= 1, "snapshot must have at least 1 pane");
     } finally {
@@ -1350,7 +1350,7 @@ describe(
 
       assert.ok(snapshot !== undefined, "real tmux session must produce a snapshot");
       assert.equal(snapshot!.seq, 1, "snapshot seq must be 1");
-      assert.ok(snapshot!.sessions.length >= 1, "real session must have ≥1 session in snapshot");
+      assert.ok(snapshot!.session !== undefined, "real session must have a session in snapshot");
       assert.ok(snapshot!.windows.length >= 1, "real session must have ≥1 window in snapshot");
       assert.ok(snapshot!.panes.length >= 1, "real session must have ≥1 pane in snapshot");
 

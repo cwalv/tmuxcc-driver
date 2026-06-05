@@ -228,8 +228,7 @@ describe("createControlServer", () => {
       const { received } = await connectClient(server);
 
       const snap = received[0]! as SnapshotMessage;
-      assert.equal(snap.sessions.length, 1);
-      assert.equal(snap.sessions[0]!.sessionId, S1);
+      assert.equal(snap.session.sessionId, S1);
       assert.equal(snap.windows.length, 1);
       assert.equal(snap.windows[0]!.windowId, W1);
       assert.equal(snap.panes.length, 1);
@@ -697,7 +696,7 @@ describe("tc-3eh.2: addClient snapshot timing — async transport regression", (
       `snapshot must arrive on async transport; received ${received.length} message(s): ${received.map((m) => m.type).join(", ")}`,
     );
     assert.equal(snapshot!.seq, 1, "snapshot seq must be 1");
-    assert.equal(snapshot!.sessions.length, 1, "snapshot must reflect the current model");
+    assert.ok(snapshot!.session !== undefined, "snapshot must have a session");
 
     daemonTransport.close();
   });

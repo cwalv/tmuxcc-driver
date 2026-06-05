@@ -81,16 +81,13 @@ export type {
   LayoutUpdatedMessage,
   // Daemon → Client (focus deltas)
   FocusChangedMessage,
-  // Daemon → Client (session deltas)
-  SessionAddedMessage,
-  SessionClosedMessage,
-  SessionChangedMessage,
-  SessionRenamedMessage,
+  // Daemon → Client (session delta — only rename on daemon wire)
+  DaemonSessionRenamedMessage,
   // Daemon → Client (capabilities)
   DaemonCapabilitiesMessage,
   // Daemon → Client (command response + error)
-  CommandOkPayload,
-  CommandResponseMessage,
+  DaemonCommandOkPayload,
+  DaemonCommandResponseMessage,
   WireErrorCode,
   ErrorMessage,
   // Daemon union
@@ -108,13 +105,17 @@ export type {
   SelectPaneCommand,
   ResizePaneCommand,
   KillSessionCommand,
-  CommandRequestMessage,
+  DaemonCommandRequestMessage,
   // Client → Daemon (resync)
   ResyncRequestMessage,
   // Client union
   ClientMessage,
   // Either direction (daemon wire)
   ControlMessage,
+  // Backward-compat aliases (deprecated)
+  CommandOkPayload,
+  CommandResponseMessage,
+  CommandRequestMessage,
 } from "./daemon-control.js";
 export { isDaemonMessage, isClientMessage } from "./daemon-control.js";
 

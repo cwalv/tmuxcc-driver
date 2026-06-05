@@ -363,7 +363,6 @@ describe("createInputPath — CommandRequestMessage", () => {
       correlationId: "c3",
       command: {
         kind: "open-window",
-        sessionId: sessionId("s0"),
       },
     };
     path.handleClientMessage(msg);
@@ -381,7 +380,6 @@ describe("createInputPath — CommandRequestMessage", () => {
       correlationId: "c4",
       command: {
         kind: "open-window",
-        sessionId: sessionId("s0"),
         name: "editor",
       },
     };

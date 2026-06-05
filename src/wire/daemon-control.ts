@@ -33,13 +33,25 @@
  *
  * See envelope.ts for WIRE_PROTOCOL_VERSION.
  *
- * v1 → v2 (tc-7ml.4): Added ResyncRequestMessage (type: "resync.request")
- * to ClientMessage. The new variant is a breaking change because a v1 daemon
- * would receive an unknown message type; both sides must be updated in lockstep
- * per the exact-version-match policy.
+ * v2 → v3 (tc-j9c.1/tc-j9c.2): Daemon wire becomes single-session.
+ *   - Plural `sessions[]` snapshot replaced by singular `session`.
+ *   - `sessionId` stripped from every delta (PaneOpenedMessage, PaneClosedMessage,
+ *     LayoutUpdatedMessage, FocusChangedMessage, WindowAddedMessage, WindowClosedMessage).
+ *   - `active` stripped from SnapshotSession (always true — bound session).
+ *   - `sessionId` stripped from SnapshotWindow, SnapshotPane, and focus.
+ *   - SessionAddedMessage, SessionChangedMessage removed from daemon wire
+ *     (moved to broker wire).
+ *   - SessionRenamedMessage renamed DaemonSessionRenamedMessage; sessionId dropped.
+ *   - SessionClosedMessage removed; session destruction surfaces as ErrorMessage
+ *     with code "session.unavailable".
+ *   - CommandRequestMessage renamed DaemonCommandRequestMessage;
+ *     CommandResponseMessage renamed DaemonCommandResponseMessage;
+ *     CommandOkPayload renamed DaemonCommandOkPayload.
+ *   - `sessionId` dropped from OpenWindowCommand.
+ *   - "session.closed" removed from WireErrorCode; "session.unavailable" remains.
  */
 
-import type { PaneId, WindowId, SessionId } from "./ids.js";
+import type { PaneId, WindowId } from "./ids.js";
 import type { WindowLayout } from "./layout.js";
 import type { MessageBase, Capabilities } from "./envelope.js";
 
@@ -59,7 +71,6 @@ export interface PaneOpenedMessage extends MessageBase {
   readonly type: "pane.opened";
   readonly paneId: PaneId;
   readonly windowId: WindowId;
-  readonly sessionId: SessionId;
   /** Initial size of the pane in terminal cells. */
   readonly cols: number;
   readonly rows: number;
@@ -86,7 +97,6 @@ export interface PaneClosedMessage extends MessageBase {
   readonly type: "pane.closed";
   readonly paneId: PaneId;
   readonly windowId: WindowId;
-  readonly sessionId: SessionId;
   /**
    * Exit code of the pane's process, if known.
    * Absent when the daemon could not determine the exit code (most common case:
@@ -123,7 +133,6 @@ export interface PaneResizedMessage extends MessageBase {
 export interface LayoutUpdatedMessage extends MessageBase {
   readonly type: "layout.updated";
   readonly windowId: WindowId;
-  readonly sessionId: SessionId;
   readonly layout: WindowLayout;
 }
 
@@ -138,7 +147,6 @@ export interface FocusChangedMessage extends MessageBase {
   readonly type: "focus.changed";
   readonly paneId: PaneId | null;
   readonly windowId: WindowId | null;
-  readonly sessionId: SessionId | null;
 }
 
 /**
@@ -157,13 +165,12 @@ export interface DaemonCapabilitiesMessage extends MessageBase {
 // ---------------------------------------------------------------------------
 
 /**
- * A session as represented in a Snapshot.
+ * The bound session as represented in a Snapshot.
+ * Only carries identity — the session is always the bound session (always active).
  */
 export interface SnapshotSession {
-  readonly sessionId: SessionId;
+  readonly sessionId: import("./ids.js").SessionId;
   readonly name: string;
-  /** True if this is the currently active session. */
-  readonly active: boolean;
 }
 
 /**
@@ -171,9 +178,8 @@ export interface SnapshotSession {
  */
 export interface SnapshotWindow {
   readonly windowId: WindowId;
-  readonly sessionId: SessionId;
   readonly name: string;
-  /** True if this is the currently active window in its session. */
+  /** True if this is the active window in the session. */
   readonly active: boolean;
   /** Structured pane layout for this window. */
   readonly layout: WindowLayout;
@@ -185,7 +191,6 @@ export interface SnapshotWindow {
 export interface SnapshotPane {
   readonly paneId: PaneId;
   readonly windowId: WindowId;
-  readonly sessionId: SessionId;
   /** Width in columns. */
   readonly cols: number;
   /** Height in rows. */
@@ -206,25 +211,28 @@ export interface SnapshotPane {
  * (ordered by seq) to maintain an up-to-date local model. The Snapshot
  * seq acts as the baseline; any Delta with a higher seq is applied on top.
  *
- * Focus state (active pane/window/session) is carried separately in the
- * `focus` field to avoid scattering active-flag logic across three lists.
+ * The daemon is bound to exactly one session for its lifetime; that session
+ * is carried in `session`. There is no `sessions[]` array — the plural
+ * multi-session shape was removed in v3 (tc-j9c.2).
+ *
+ * Focus state (active pane/window) is carried separately in the `focus`
+ * field to avoid scattering active-flag logic across two lists.
  */
 export interface SnapshotMessage extends MessageBase {
   readonly type: "snapshot";
-  /** All sessions in the daemon's model. */
-  readonly sessions: readonly SnapshotSession[];
-  /** All windows across all sessions. */
+  /** The daemon's bound session. */
+  readonly session: SnapshotSession;
+  /** All windows in the bound session. */
   readonly windows: readonly SnapshotWindow[];
   /** All panes across all windows. */
   readonly panes: readonly SnapshotPane[];
   /**
-   * Currently focused pane/window/session triple.
-   * All three are null if no pane is focused (e.g. no sessions exist).
+   * Currently focused pane/window pair.
+   * Both are null if no pane is focused (e.g. no windows exist).
    */
   readonly focus: {
     readonly paneId: PaneId | null;
     readonly windowId: WindowId | null;
-    readonly sessionId: SessionId | null;
   };
   /**
    * Number of daemon-protocol clients currently connected to the server at
@@ -246,16 +254,15 @@ export interface SnapshotMessage extends MessageBase {
 // ---------------------------------------------------------------------------
 
 /**
- * A new window was added to a session.
+ * A new window was added to the bound session.
  * direction: daemon→client
  */
 export interface WindowAddedMessage extends MessageBase {
   readonly type: "window.added";
   readonly windowId: WindowId;
-  readonly sessionId: SessionId;
   readonly name: string;
   /**
-   * True if the new window immediately became the active window in its session.
+   * True if the new window immediately became the active window in the session.
    * Clients may use this to avoid a separate focus event.
    */
   readonly active: boolean;
@@ -268,7 +275,6 @@ export interface WindowAddedMessage extends MessageBase {
 export interface WindowClosedMessage extends MessageBase {
   readonly type: "window.closed";
   readonly windowId: WindowId;
-  readonly sessionId: SessionId;
 }
 
 /**
@@ -286,48 +292,18 @@ export interface WindowRenamedMessage extends MessageBase {
 // ---------------------------------------------------------------------------
 
 /**
- * A new session was created.
+ * The bound session was renamed.
  * direction: daemon→client
  *
- * Included for completeness — clients that track the full session set need
- * this to stay in sync without reconnecting.
+ * There is only one session on the daemon wire; no sessionId is needed.
+ * The broker wire emits its own BrokerSessionRenamedMessage to broker-wire
+ * subscribers for the same rename event.
+ *
+ * Session creation and destruction are broker-wire concerns. Session
+ * destruction surfaces on the daemon wire as ErrorMessage{code:"session.unavailable"}.
  */
-export interface SessionAddedMessage extends MessageBase {
-  readonly type: "session.added";
-  readonly sessionId: SessionId;
-  readonly name: string;
-  /**
-   * True if this session immediately became the active session.
-   */
-  readonly active: boolean;
-}
-
-/**
- * A session was destroyed (detached and killed, or all windows closed).
- * direction: daemon→client
- */
-export interface SessionClosedMessage extends MessageBase {
-  readonly type: "session.closed";
-  readonly sessionId: SessionId;
-}
-
-/**
- * The active session changed (user switched sessions).
- * direction: daemon→client
- */
-export interface SessionChangedMessage extends MessageBase {
-  readonly type: "session.changed";
-  /** The session that is now active. */
-  readonly newActiveSessionId: SessionId;
-}
-
-/**
- * A session was renamed.
- * direction: daemon→client
- */
-export interface SessionRenamedMessage extends MessageBase {
+export interface DaemonSessionRenamedMessage extends MessageBase {
   readonly type: "session.renamed";
-  readonly sessionId: SessionId;
   readonly newName: string;
 }
 
@@ -366,13 +342,12 @@ export interface PaneModeChangedMessage extends MessageBase {
 // ---------------------------------------------------------------------------
 
 /**
- * Open a new window in a session.
+ * Open a new window in the bound session.
  * The daemon chooses the pane id(s); the created window/pane ids arrive via
- * CommandResponseMessage on success (payload.windowId, payload.paneId).
+ * DaemonCommandResponseMessage on success (payload.windowId, payload.paneId).
  */
 export interface OpenWindowCommand {
   readonly kind: "open-window";
-  readonly sessionId: SessionId;
   /** Optional name for the new window. If omitted the daemon picks one. */
   readonly name?: string;
   /**
@@ -392,7 +367,7 @@ export interface OpenWindowCommand {
 
 /**
  * Split an existing pane into two.
- * The new pane's id arrives in CommandResponseMessage on success (payload.paneId).
+ * The new pane's id arrives in DaemonCommandResponseMessage on success (payload.paneId).
  */
 export interface SplitPaneCommand {
   readonly kind: "split-pane";
@@ -464,7 +439,7 @@ export interface ResizePaneCommand {
  *
  * Used when `tmuxcc.killSessionOnLastWindowClose: true` (ux-design.md §13)
  * and the last window of the session is closed. The daemon emits
- * session.closed on success; no further interaction is possible after this.
+ * ErrorMessage{code:"session.unavailable"} and closes all client connections.
  *
  * Additive addition — non-breaking per the versioning policy
  * (new optional command kind; existing implementations silently drop unknown
@@ -487,6 +462,8 @@ export interface KillSessionCommand {
  * The daemon translates each command kind to the appropriate tmux operation
  * internally (south-side boundary). The E4 daemon runtime implements the
  * actual tmux side; this is the wire shape only.
+ *
+ * All commands operate within the bound session. None carry sessionId.
  */
 export type WireCommand =
   | OpenWindowCommand
@@ -503,10 +480,10 @@ export type WireCommand =
  *
  * `correlationId` is a client-generated opaque string (e.g. a UUID or
  * monotonic counter string) that the daemon echoes back in
- * `CommandResponseMessage`. Clients use it to match responses to outstanding
+ * `DaemonCommandResponseMessage`. Clients use it to match responses to outstanding
  * requests. The daemon does NOT assign correlation ids.
  */
-export interface CommandRequestMessage extends MessageBase {
+export interface DaemonCommandRequestMessage extends MessageBase {
   readonly type: "command.request";
   /** Client-generated opaque string, echoed in the matching response. */
   readonly correlationId: string;
@@ -519,13 +496,13 @@ export interface CommandRequestMessage extends MessageBase {
  * command produces a new entity. The daemon includes ids for newly created
  * entities (open-window → windowId + paneId, split-pane → paneId).
  */
-export interface CommandOkPayload {
+export interface DaemonCommandOkPayload {
   readonly windowId?: WindowId;
   readonly paneId?: PaneId;
 }
 
 /**
- * The daemon's response to a CommandRequestMessage.
+ * The daemon's response to a DaemonCommandRequestMessage.
  * direction: daemon→client
  *
  * Error handling: command-specific failures (unknown pane, invalid size,
@@ -533,17 +510,17 @@ export interface CommandOkPayload {
  * `ErrorMessage` (type: "error") is for UNSOLICITED / protocol-level errors
  * (malformed message, unknown message type, session in bad state) where there
  * is no in-flight command to correlate. If a failure is attributable to a
- * specific command request, the error comes in CommandResponseMessage, not
+ * specific command request, the error comes in DaemonCommandResponseMessage, not
  * ErrorMessage. This keeps the contract simple: command.request always gets
  * exactly one command.response.
  */
-export interface CommandResponseMessage extends MessageBase {
+export interface DaemonCommandResponseMessage extends MessageBase {
   readonly type: "command.response";
-  /** Echoed from the matching CommandRequestMessage. */
+  /** Echoed from the matching DaemonCommandRequestMessage. */
   readonly correlationId: string;
   /** Discriminated result: success or failure. */
   readonly result:
-    | { readonly ok: true; readonly payload?: CommandOkPayload }
+    | { readonly ok: true; readonly payload?: DaemonCommandOkPayload }
     | { readonly ok: false; readonly code: string; readonly message: string };
 }
 
@@ -560,7 +537,8 @@ export interface CommandResponseMessage extends MessageBase {
  *                                (e.g. missing required field, wrong type).
  * "protocol.version-mismatch"  — protocol version negotiation failed.
  * "session.unavailable"        — the tmux session the connection was bound to
- *                                has gone away unexpectedly.
+ *                                has gone away unexpectedly, or a switch-client
+ *                                caused the bound session to disappear.
  * "internal"                   — unexpected daemon-side error not attributable
  *                                to a specific command.
  *
@@ -579,8 +557,8 @@ export type WireErrorCode =
  * direction: daemon→client
  *
  * ONLY for errors that are NOT attributable to a specific outstanding
- * CommandRequestMessage. If the error IS attributable to a command, the daemon
- * sends a CommandResponseMessage with `result.ok = false` instead.
+ * DaemonCommandRequestMessage. If the error IS attributable to a command, the daemon
+ * sends a DaemonCommandResponseMessage with `result.ok = false` instead.
  *
  * `correlationId` is OPTIONAL: if present, it ties the error to an earlier
  * command request that the daemon is now aborting without a normal response
@@ -596,7 +574,7 @@ export interface ErrorMessage extends MessageBase {
   readonly code: WireErrorCode;
   /** Human-readable error description (English, for logging/debugging). */
   readonly message: string;
-  /** If set, ties this error to a prior CommandRequestMessage. */
+  /** If set, ties this error to a prior DaemonCommandRequestMessage. */
   readonly correlationId?: string;
 }
 
@@ -676,7 +654,7 @@ export interface ClientCapabilitiesMessage extends MessageBase {
  *      escalate to `transport.close()` — the reconnect path handles the rest.
  *
  * Added in protocol v2 (tc-7ml.4). A v1 daemon receiving this message will
- * treat it as an unknown type; both sides must be v2 for resync to work.
+ * treat it as an unknown type; both sides must be v2+ for resync to work.
  * The exact-version handshake enforces this.
  */
 export interface ResyncRequestMessage extends MessageBase {
@@ -698,8 +676,8 @@ export interface ResyncRequestMessage extends MessageBase {
  *   Window deltas: WindowAddedMessage | WindowClosedMessage | WindowRenamedMessage
  *   Layout deltas: LayoutUpdatedMessage
  *   Focus deltas:  FocusChangedMessage
- *   Session delta: SessionAddedMessage | SessionClosedMessage | SessionChangedMessage | SessionRenamedMessage
- *   Commands:      CommandResponseMessage
+ *   Session delta: DaemonSessionRenamedMessage
+ *   Commands:      DaemonCommandResponseMessage
  *   Errors:        ErrorMessage
  */
 export type DaemonMessage =
@@ -720,13 +698,10 @@ export type DaemonMessage =
   | LayoutUpdatedMessage
   // Focus deltas
   | FocusChangedMessage
-  // Session deltas
-  | SessionAddedMessage
-  | SessionClosedMessage
-  | SessionChangedMessage
-  | SessionRenamedMessage
+  // Session delta (only rename survives in the daemon wire)
+  | DaemonSessionRenamedMessage
   // Command responses
-  | CommandResponseMessage
+  | DaemonCommandResponseMessage
   // Unsolicited errors
   | ErrorMessage;
 
@@ -738,7 +713,7 @@ export type ClientMessage =
   | InputMessage
   | ResizeRequestMessage
   | ClientCapabilitiesMessage
-  | CommandRequestMessage
+  | DaemonCommandRequestMessage
   | ResyncRequestMessage;
 
 /**
@@ -772,10 +747,7 @@ export function isDaemonMessage(msg: ControlMessage): msg is DaemonMessage {
     t === "layout.updated" ||
     // Focus deltas
     t === "focus.changed" ||
-    // Session deltas
-    t === "session.added" ||
-    t === "session.closed" ||
-    t === "session.changed" ||
+    // Session delta
     t === "session.renamed" ||
     // Command responses
     t === "command.response" ||
@@ -795,3 +767,22 @@ export function isClientMessage(msg: ControlMessage): msg is ClientMessage {
     t === "resync.request"
   );
 }
+
+// ---------------------------------------------------------------------------
+// Backward-compatible type aliases
+// ---------------------------------------------------------------------------
+
+/**
+ * @deprecated Use DaemonCommandRequestMessage. Kept for transition period.
+ */
+export type CommandRequestMessage = DaemonCommandRequestMessage;
+
+/**
+ * @deprecated Use DaemonCommandResponseMessage. Kept for transition period.
+ */
+export type CommandResponseMessage = DaemonCommandResponseMessage;
+
+/**
+ * @deprecated Use DaemonCommandOkPayload. Kept for transition period.
+ */
+export type CommandOkPayload = DaemonCommandOkPayload;

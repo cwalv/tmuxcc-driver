@@ -39,7 +39,7 @@
  * Increment on any breaking schema change. Non-breaking additions do not
  * require a bump. Version negotiation flow is defined by bead tc-auj.
  */
-export const WIRE_PROTOCOL_VERSION = 2 as const;
+export const WIRE_PROTOCOL_VERSION = 3 as const;
 
 // ---------------------------------------------------------------------------
 // Shared envelope
