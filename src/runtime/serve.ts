@@ -79,6 +79,7 @@ import type {
   DaemonMessage,
   ControlMessage,
   ErrorMessage,
+  ClientCountChangedMessage,
 } from "../wire/daemon-control.js";
 import { projectSnapshot } from "../state/projection.js";
 import { diffModel } from "../state/projection.js";
@@ -190,6 +191,18 @@ export interface ControlServer {
    * `session.unavailable` due to switch-client beyond recovery).
    */
   broadcastErrorAndClose(error: Omit<ErrorMessage, "seq">): void;
+
+  /**
+   * Push a `ClientCountChangedMessage` to ALL currently connected clients.
+   *
+   * Called internally after a client connects or disconnects (tc-44wu0).
+   * Public so that integration tests can assert on its shape without mocking
+   * internal state.  Normal code should call `addClient` / `removeClient` —
+   * those methods call this automatically.
+   *
+   * @internal — not part of the external daemon API; exposed only for testing.
+   */
+  broadcastClientCount(): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -336,6 +349,15 @@ class ControlServerImpl implements ControlServer {
       });
       state.nextSeq++;
       transport.sendControl(snapshot);
+
+      // tc-44wu0: notify ALL clients (including the newly-connected one) that
+      // the connected-client count has changed. This lets existing clients'
+      // status-bar tooltips update live.
+      //
+      // We broadcast AFTER the snapshot is sent so the new client receives the
+      // snapshot first (establishing its initial state) and then the count
+      // message (which may confirm or update that count).
+      this.broadcastClientCount();
     }
 
     return session;
@@ -382,6 +404,26 @@ class ControlServerImpl implements ControlServer {
     }
   }
 
+  broadcastClientCount(): void {
+    // tc-44wu0: push the current connected-client count to all clients so
+    // the status-bar tooltip updates live.
+    const count = this._clients.size;
+    const base: Omit<ClientCountChangedMessage, "seq"> = {
+      type: "client-count.changed",
+      count,
+    };
+    for (const [transport, state] of this._clients) {
+      const stamped: DaemonMessage = { ...base, seq: state.nextSeq } as DaemonMessage;
+      state.nextSeq++;
+      try {
+        transport.sendControl(stamped);
+      } catch {
+        // Transport may already be closed — clean it up and continue.
+        this._cleanupClient(transport);
+      }
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Internal helpers
   // ---------------------------------------------------------------------------
@@ -414,6 +456,13 @@ class ControlServerImpl implements ControlServer {
     state.unsubModelChange?.();
     state.unsubModelChange = null;
     this._clients.delete(transport);
+
+    // tc-44wu0: notify remaining clients that the count has decreased.
+    // Only broadcast if there are still clients to notify (no-op if the
+    // last client just disconnected).
+    if (this._clients.size > 0) {
+      this.broadcastClientCount();
+    }
   }
 }
 

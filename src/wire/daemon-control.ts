@@ -288,6 +288,32 @@ export interface WindowRenamedMessage extends MessageBase {
 }
 
 // ---------------------------------------------------------------------------
+// Additional Deltas — client-count changes (daemon→client, tc-44wu0)
+// ---------------------------------------------------------------------------
+
+/**
+ * The number of daemon-protocol clients connected to this session has changed.
+ * direction: daemon→client
+ *
+ * Sent by the ControlServer whenever a client connects or disconnects so that
+ * every still-connected client can update its "Attached clients: K" tooltip
+ * line without waiting for the next snapshot (tc-44wu0 / ux-design.md §11.4).
+ *
+ * `count` is the authoritative connected-client count at the moment the event
+ * is sent:
+ *   - On connect  : count includes the newly-connected client (≥ 1).
+ *   - On disconnect: count excludes the just-disconnected client (≥ 0).
+ *
+ * Non-breaking additive field — older clients that do not recognise this type
+ * fall through to the `default` branch in `applyDelta` and ignore it.
+ */
+export interface ClientCountChangedMessage extends MessageBase {
+  readonly type: "client-count.changed";
+  /** Authoritative number of connected daemon-protocol clients. */
+  readonly count: number;
+}
+
+// ---------------------------------------------------------------------------
 // Additional Deltas — session lifecycle (daemon→client)
 // ---------------------------------------------------------------------------
 
@@ -677,6 +703,7 @@ export interface ResyncRequestMessage extends MessageBase {
  *   Layout deltas: LayoutUpdatedMessage
  *   Focus deltas:  FocusChangedMessage
  *   Session delta: DaemonSessionRenamedMessage
+ *   Client delta:  ClientCountChangedMessage
  *   Commands:      DaemonCommandResponseMessage
  *   Errors:        ErrorMessage
  */
@@ -700,6 +727,8 @@ export type DaemonMessage =
   | FocusChangedMessage
   // Session delta (only rename survives in the daemon wire)
   | DaemonSessionRenamedMessage
+  // Client-count delta (tc-44wu0)
+  | ClientCountChangedMessage
   // Command responses
   | DaemonCommandResponseMessage
   // Unsolicited errors
@@ -749,6 +778,8 @@ export function isDaemonMessage(msg: ControlMessage): msg is DaemonMessage {
     t === "focus.changed" ||
     // Session delta
     t === "session.renamed" ||
+    // Client-count delta (tc-44wu0)
+    t === "client-count.changed" ||
     // Command responses
     t === "command.response" ||
     // Unsolicited errors

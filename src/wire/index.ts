@@ -83,6 +83,8 @@ export type {
   FocusChangedMessage,
   // Daemon → Client (session delta — only rename on daemon wire)
   DaemonSessionRenamedMessage,
+  // Daemon → Client (client-count delta — tc-44wu0)
+  ClientCountChangedMessage,
   // Daemon → Client (capabilities)
   DaemonCapabilitiesMessage,
   // Daemon → Client (command response + error)

@@ -214,7 +214,10 @@ describe("createControlServer", () => {
       // The snapshot is the first message (after handshake traffic which is
       // handled inside runClientHandshake and runDaemonHandshake, not re-delivered
       // to the application-level onControl after they unregister their handlers).
-      assert.equal(received.length, 1, "should have received exactly the snapshot");
+      //
+      // tc-44wu0: a client-count.changed message is broadcast immediately after
+      // the snapshot, so the single-client case receives [snapshot, ccc].
+      assert.ok(received.length >= 1, "should have received at least the snapshot");
       const snap = received[0]! as SnapshotMessage;
       assert.equal(snap.type, "snapshot");
       assert.equal(snap.seq, 1);
@@ -371,9 +374,15 @@ describe("createControlServer", () => {
       // Connect client2 AFTER the change
       const { received: recv2 } = await connectClient(server);
 
-      // client2 should only have snapshot (no deltas before its connect)
-      assert.equal(recv2.length, 1, "client2 should only have the snapshot, no pre-connect deltas");
+      // client2 should have snapshot and a client-count.changed (but no model
+      // deltas that occurred before its connect — tc-44wu0).
+      assert.ok(recv2.length >= 1, "client2 should have received at least the snapshot");
       assert.equal((recv2[0]! as SnapshotMessage).type, "snapshot");
+      // Any messages beyond the snapshot must all be client-count.changed (not model deltas).
+      for (let i = 1; i < recv2.length; i++) {
+        assert.equal(recv2[i]!.type, "client-count.changed",
+          "client2 must not receive model deltas that occurred before it connected");
+      }
 
       // client1 should have snapshot + the delta
       assert.ok(recv1.length > 1, "client1 should have received the delta");
@@ -470,7 +479,17 @@ describe("createControlServer", () => {
       // Fire a change — only client2 should receive deltas
       pipeline.fireChange(model2, model1);
 
-      assert.equal(recv1.length, 1, "client1 should have only the snapshot (no deltas post-disconnect)");
+      // tc-44wu0: client1 may have received client-count.changed messages (from
+      // client2 connecting, and from client1's own connect), but no model
+      // deltas should have arrived after disconnect.
+      const client1ModelDeltas = recv1.filter(
+        (m) => m.type !== "snapshot" && m.type !== "client-count.changed",
+      );
+      assert.equal(
+        client1ModelDeltas.length,
+        0,
+        "client1 should have only snapshot + count-changes (no model deltas post-disconnect)",
+      );
       assert.ok(recv2.length > 1, "client2 should still receive deltas");
     });
 
