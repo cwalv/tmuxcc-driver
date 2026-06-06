@@ -758,7 +758,7 @@ describe(
         const session = await setupE2E("sync-panes");
         after(() => killServer(session.socketName));
         try {
-          const { hook, controller, paneId: pane1Id, socketName } = session;
+          const { hook, controller, paneId: pane1Id } = session;
           const calls: RenderHookCall[] = hook.calls as RenderHookCall[];
 
           // Step 1: split to get a second pane.
@@ -795,48 +795,35 @@ describe(
             `windowId must be a wire WindowId, got: ${windowId}`,
           );
 
-          // Step 4: enable synchronize-panes via direct tmux (broker path).
-          // This maps to: tmux -L <sock> set-option -wt @N synchronize-panes on
-          // Same as broker.setSynchronizePanes(windowId, true).
-          const winNum = parseInt(windowId.slice(1), 10);
-          const syncOnResult = spawnSync(
-            "tmux",
-            ["-L", socketName, "set-option", "-wt", `@${winNum}`, "synchronize-panes", "on"],
-            { encoding: "utf8", timeout: 5_000 },
-          );
-          assert.equal(
-            syncOnResult.status,
-            0,
-            `tmux set-option synchronize-panes on failed: ${syncOnResult.stderr}`,
-          );
+          // Step 4 (SP1): enable synchronize-panes via the BROKER command path.
+          //
+          // This sends a set-synchronize-panes WireCommand through the daemon's
+          // input-path, which: (a) sends `set-option -wt @N synchronize-panes on`
+          // to tmux, and (b) immediately injects an optimistic model update via
+          // injectNotification (tc-7xv.12 fix).  No external CLI or polling needed.
+          controller.sendCommand({
+            kind: "set-synchronize-panes",
+            windowId: windowId as import("../wire/ids.js").WindowId,
+            on: true,
+          });
 
-          // Step 5 (SP1): wait for window.sync.changed delta to reach mirror.
-          // The daemon's pipeline detects %window-option-changed and emits the delta.
-          // We poll the mirror model via a hook subscription.
-          let syncModel = await waitFor(
+          // Step 5 (SP1): wait for the optimistic model update to be reflected
+          // in the daemon model.  injectNotification fires synchronously, so
+          // the model should already be updated by the time we poll here.
+          const syncModel = await waitFor(
             () => {
-              // Re-read mirror state via a model-change: the easiest way is to
-              // look for a model-change call on the hook (any new windowAdded would
-              // carry the flag, but we can also just check a direct model read).
-              // Since we're testing via EchoRenderHook which doesn't expose model,
-              // we send a no-op and wait for the pipeline to process the hook.
-              // The model is accessible via session.daemon.pipeline.getModel().
               const m = session.daemon.pipeline.getModel();
-              // Find the window in the daemon model.
-              const [wid, win] = [...m.windows.entries()].find(([id]) => {
-                const n = parseInt((id as string).slice(1), 10);
-                return n === winNum;
-              }) ?? [];
+              const win = m.windows.get(windowId as import("../wire/ids.js").WindowId);
               if (win?.synchronizePanes === true) return win;
               return undefined;
             },
-            10_000,
+            5_000,
             "window.synchronizePanes did not become true in daemon model",
           );
           assert.equal(syncModel.synchronizePanes, true, "daemon model: synchronizePanes must be true");
 
           // Step 6 (SP2 — the REGRESSION criterion): send input to pane1 only.
-          // With sync ON, tmux broadcasts to all panes natively.
+          // With sync ON, tmux broadcasts to all panes natively (§4.5 VERIFIED).
           const syncMarker = `sync-broadcast-${Date.now()}`;
           controller.sendInput(pane1Id, `echo ${syncMarker}\n`);
 
@@ -853,26 +840,22 @@ describe(
             `when synchronize-panes is on (§4.5 VERIFIED). Got ${pane2Bytes.length} bytes.`,
           );
 
-          // Step 7 (SP3): turn sync off and verify independence is restored.
-          const syncOffResult = spawnSync(
-            "tmux",
-            ["-L", socketName, "set-option", "-wt", `@${winNum}`, "synchronize-panes", "off"],
-            { encoding: "utf8", timeout: 5_000 },
-          );
-          assert.equal(syncOffResult.status, 0, "tmux set-option synchronize-panes off failed");
+          // Step 7 (SP3): turn sync off via the broker command path.
+          controller.sendCommand({
+            kind: "set-synchronize-panes",
+            windowId: windowId as import("../wire/ids.js").WindowId,
+            on: false,
+          });
 
-          // Wait for the model to reflect sync=off.
+          // Wait for the optimistic model update to reflect sync=off.
           await waitFor(
             () => {
               const m = session.daemon.pipeline.getModel();
-              const win = [...m.windows.values()].find((w) => {
-                const n = parseInt((w.windowId as string).slice(1), 10);
-                return n === winNum;
-              });
+              const win = m.windows.get(windowId as import("../wire/ids.js").WindowId);
               if (win?.synchronizePanes === false) return win;
               return undefined;
             },
-            8_000,
+            5_000,
             "window.synchronizePanes did not become false after sync off",
           );
 

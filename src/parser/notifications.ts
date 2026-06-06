@@ -60,6 +60,7 @@
  */
 
 import type { NotificationToken } from "./tokenizer.js";
+import type { WindowId } from "../wire/ids.js";
 
 // ---------------------------------------------------------------------------
 // Event types
@@ -272,6 +273,26 @@ export interface UnknownNotification {
   readonly rawLine: Uint8Array;
 }
 
+// --- Internal (synthetic, never from tmux wire) ----------------------------
+
+/**
+ * Synthetic internal event: the daemon applied a set-synchronize-panes command
+ * and assumes tmux accepted it.
+ *
+ * This event is NEVER parsed from tmux control-mode output — it is injected by
+ * input-path.ts after sending `set-option -wt @N synchronize-panes on|off` to
+ * tmux (tc-7xv.12 optimistic-update pattern).
+ *
+ * Assumption: tmux applied the option. If tmux rejects it (e.g. no such
+ * window), the model will be stale until the next bootstrap. Error reversal
+ * is out of scope — document this as a known limitation.
+ */
+export interface InternalWindowSyncSetNotification {
+  readonly kind: "internal:set-window-sync";
+  readonly windowId: WindowId;
+  readonly on: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Discriminated union
 // ---------------------------------------------------------------------------
@@ -293,7 +314,8 @@ export type NotificationEvent =
   | PauseNotification
   | ContinueNotification
   | ExitNotification
-  | UnknownNotification;
+  | UnknownNotification
+  | InternalWindowSyncSetNotification;
 
 // ---------------------------------------------------------------------------
 // Internal parsing helpers (byte-level, zero-copy where possible)

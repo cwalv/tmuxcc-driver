@@ -185,9 +185,9 @@ export interface Window {
    *
    * When true, tmux broadcasts every `send-keys` to ALL panes in this window
    * (native tmux broadcast — no extension-side fan-out needed; §4.5 VERIFIED).
-   * Defaults to false. Updated via `set-option -wt @N synchronize-panes on/off`
-   * (from a `set-synchronize-panes` command) and confirmed by a
-   * `window-option-changed` hook. See tc-7xv.12.
+   * Defaults to false. Updated via an optimistic `internal:set-window-sync`
+   * synthetic event after a `set-synchronize-panes` command is sent to tmux.
+   * See tc-7xv.12.
    */
   readonly synchronizePanes: boolean;
 }

@@ -301,8 +301,8 @@ export interface WindowRenamedMessage extends MessageBase {
  * direction: daemon→client
  *
  * Emitted by the daemon when `synchronize-panes` is toggled for a window —
- * either via a `set-synchronize-panes` command (tc-7xv.12) or detected
- * reactively via a `set-hook` on `window-option-changed`.
+ * either via a `set-synchronize-panes` command (tc-7xv.12, optimistic update)
+ * or via a future reactive mechanism for out-of-band CLI changes.
  *
  * `on: true`  → broadcasting is active (all send-keys go to every pane).
  * `on: false` → normal per-pane targeting.

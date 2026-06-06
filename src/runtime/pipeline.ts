@@ -196,6 +196,20 @@ export interface RuntimePipeline {
    * tc-fbz reads from this store to frame pane byte content for the wire.
    */
   readonly buffers: PaneBufferStore;
+
+  /**
+   * Inject a synthetic (internal) NotificationEvent directly into the live
+   * pipeline, bypassing the tmux wire.
+   *
+   * Used by input-path.ts for the optimistic-update path (tc-7xv.12):
+   * after sending a tmux command, callers inject the expected model change so
+   * the model and delta stream are updated immediately — without waiting for a
+   * tmux notification that may never arrive.
+   *
+   * No-op before start() resolves (pipeline not yet live).
+   * Fires onModelChange if the injected event changes the model.
+   */
+  injectNotification(event: NotificationEvent): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -299,13 +313,11 @@ class RuntimePipelineImpl implements RuntimePipeline {
       this._host.write(setOption("window-global", "monitor-activity", "on") + "\n");
     }
 
-    // tc-7xv.12: No explicit hook registration needed for synchronize-panes
-    // detection.  tmux 3.2+ emits `%window-option-changed @<winId> <opt> <val>`
-    // natively in control mode whenever a window option changes (see
-    // notify_hook_table "window-option-changed" in tmux source).  The reducer
-    // handles this notification in its `unknown` case and applies it to
-    // `Window.synchronizePanes`.  Catches BOTH daemon-issued set-option commands
-    // AND external changes from other tmux clients.
+    // tc-7xv.12: synchronize-panes model updates are applied via the
+    // optimistic-update path in input-path.ts (injectNotification), NOT via a
+    // tmux notification.  tmux 3.4 does NOT emit %window-option-changed for
+    // synchronize-panes (verified empirically).  External-CLI sync changes
+    // (out-of-band) are not reflected — filed as a follow-up bead under tc-7xv.
 
     // After both replies, the coordinator is live. The model now has the
     // initial session/window/pane state from bootstrap + any buffered events.
@@ -341,6 +353,20 @@ class RuntimePipelineImpl implements RuntimePipeline {
     return () => {
       this._notificationHandlers.delete(handler);
     };
+  }
+
+  injectNotification(event: NotificationEvent): void {
+    const coordinator = this._coordinator;
+    // No-op if pipeline not yet live (start() not called or bootstrap incomplete).
+    if (coordinator === null || !coordinator.isLive()) return;
+
+    const prev = coordinator.getModel();
+    coordinator.onNotification(event);
+    const next = coordinator.getModel();
+
+    if (next !== prev) {
+      this._emitModelChange(next, prev);
+    }
   }
 
   // -------------------------------------------------------------------------

@@ -77,6 +77,9 @@ function createFakePipeline(initialModel?: SessionModel): FakePipeline {
       // FakePipeline does not emit notifications — no-op for serve.test.ts.
       return () => {};
     },
+    injectNotification(_event: import("../parser/notifications.js").NotificationEvent) {
+      // FakePipeline: no-op — serve.test.ts does not test the optimistic-update path.
+    },
     get buffers(): never {
       throw new Error("FakePipeline has no buffers");
     },

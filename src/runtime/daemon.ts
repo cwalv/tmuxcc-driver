@@ -217,8 +217,13 @@ export function createDaemon(opts: DaemonOptions): Daemon {
   //     installed in step 5 can reach the server.
   serverRef = server;
 
-  // 7. Input path.
-  const inputPath = createInputPath(host, opts.input);
+  // 7. Input path — with synthetic-dispatch wired to the pipeline so that
+  //    optimistic model updates (e.g. set-synchronize-panes, tc-7xv.12) are
+  //    applied immediately without waiting for a tmux notification.
+  const inputPath = createInputPath(host, {
+    ...opts.input,
+    dispatchSynthetic: (event) => pipeline.injectNotification(event),
+  });
 
   // 8. Route %pause / %continue notifications from the pipeline to the
   //    FlowController.  These are no-ops at the model level (reducer returns

@@ -69,6 +69,7 @@ import {
   newWindow,
   setOptionForWindow,
 } from "../parser/commands.js";
+import type { NotificationEvent } from "../parser/notifications.js";
 
 // ---------------------------------------------------------------------------
 // Id-mapping helpers
@@ -125,6 +126,21 @@ export interface InputPathOptions {
    * The default strips the "w" prefix and parses the trailing decimal integer.
    */
   windowIdToTmux?: (id: WindowId) => number;
+
+  /**
+   * Inject a synthetic NotificationEvent into the live pipeline after a
+   * daemon-issued command that needs to immediately update the model.
+   *
+   * Used for the optimistic-update path: input-path sends a tmux command and
+   * then injects the expected model change without waiting for a tmux
+   * notification (tc-7xv.12 synchronize-panes). The pipeline's injectNotification
+   * fires onModelChange if the event changes the model.
+   *
+   * Omitting this option disables optimistic updates (model unchanged until
+   * next notification from tmux). This is safe for tests that mock the host
+   * without a real pipeline.
+   */
+  dispatchSynthetic?: (event: NotificationEvent) => void;
 }
 
 /** The input path handle returned by createInputPath. */
@@ -166,6 +182,7 @@ export function createInputPath(
 ): InputPath {
   const toTmuxPane = opts.paneIdToTmux ?? defaultPaneIdToTmux;
   const toTmuxWindow = opts.windowIdToTmux ?? defaultWindowIdToTmux;
+  const dispatchSynthetic = opts.dispatchSynthetic;
 
   /** Write a tmux command line (appends \n). */
   function sendCommand(cmd: string): void {
@@ -345,14 +362,27 @@ export function createInputPath(
             // When on, tmux broadcasts every send-keys to ALL panes in the
             // window natively — no extension-side fan-out needed (§4.5 VERIFIED).
             //
-            // The model change is NOT applied here; the pipeline will detect it
-            // via the `window-option-changed` hook and emit a
-            // `window.sync.changed` delta.  That delta drives diffModel and
-            // reaches all connected clients through the normal model-change path.
+            // Optimistic model update: after sending the tmux command we
+            // immediately inject a synthetic NotificationEvent to update the
+            // model without waiting for a tmux notification.  tmux 3.4 does NOT
+            // emit %window-option-changed for synchronize-panes (verified
+            // empirically; the string "window-option-changed" does not appear in
+            // tmux source).  The optimistic-update pattern is correct here:
+            // the daemon sent the command and assumes tmux accepted it.  If tmux
+            // rejects the command (e.g. no such window), the model will be
+            // stale; error reversal is out of scope (tc-7xv follow-up bead).
             const tmuxWinNum = toTmuxWindow(command.windowId);
             if (!validWindowId(tmuxWinNum, command.windowId as string)) return;
 
             sendCommand(setOptionForWindow(tmuxWinNum, "synchronize-panes", command.on ? "on" : "off"));
+
+            // Inject the synthetic model update so diffModel emits
+            // window.sync.changed and downstream clients see the change.
+            dispatchSynthetic?.({
+              kind: "internal:set-window-sync",
+              windowId: command.windowId,
+              on: command.on,
+            });
             break;
           }
 
