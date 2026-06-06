@@ -110,6 +110,8 @@ export type {
   ResizePaneCommand,
   KillSessionCommand,
   SetSynchronizePanesCommand,
+  KillWindowCommand,
+  SwapWindowCommand,
   DaemonCommandRequestMessage,
   // Client → Daemon (resync)
   ResyncRequestMessage,

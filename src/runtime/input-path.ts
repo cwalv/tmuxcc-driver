@@ -429,6 +429,34 @@ export function createInputPath(
             sendCommand(`select-pane -T ${quotedTitle} -t %${tmuxPaneNum}`);
             break;
           }
+          // ── tc-7xv.18: window verbs ──────────────────────────────────────────
+
+          case "kill-window": {
+            // kill-window -t @<N>  (tc-7xv.18)
+            //
+            // Kills the tmux window and all its panes.  tmux emits pane-exited
+            // and window-close notifications which flow back through the daemon
+            // mirror as pane.closed + window.removed deltas.
+            const tmuxWinNum = toTmuxWindow(command.windowId);
+            if (!validWindowId(tmuxWinNum, command.windowId as string)) return;
+            sendCommand(`kill-window -t @${tmuxWinNum}`);
+            break;
+          }
+
+          case "swap-window": {
+            // swap-window -s @<S> -t @<T>  (tc-7xv.18)
+            //
+            // Exchanges the positions of two windows within the session.
+            // No panes are created or destroyed; tmux reorders the window list.
+            const srcNum = toTmuxWindow(command.sourceWindowId);
+            const tgtNum = toTmuxWindow(command.targetWindowId);
+            if (!validWindowId(srcNum, command.sourceWindowId as string)) return;
+            if (!validWindowId(tgtNum, command.targetWindowId as string)) return;
+            sendCommand(`swap-window -s @${srcNum} -t @${tgtNum}`);
+            break;
+          }
+
+          // ── end tc-7xv.18 ────────────────────────────────────────────────────
 
           default: {
             // Forward-compatible: unknown command kinds are silently dropped.

@@ -590,6 +590,42 @@ export interface RenamePaneCommand {
   /** New display title.  Empty string clears the tmux title. */
   readonly title: string;
 }
+// ── tc-7xv.18: window verbs ──────────────────────────────────────────────────
+
+/**
+ * Kill a tmux window and all its panes.
+ *
+ * Issues `kill-window -t @<N>` in the bound session.
+ * The daemon emits window.removed + pane.closed deltas for each affected pane.
+ *
+ * `windowId` is the wire WindowId of the window to kill (e.g. "w2").
+ *
+ * Additive addition — non-breaking per the versioning policy.
+ */
+export interface KillWindowCommand {
+  readonly kind: "kill-window";
+  readonly windowId: WindowId;
+}
+
+/**
+ * Swap two windows within the session.
+ *
+ * Issues `swap-window -s @<S> -t @<T>`.
+ * Positions are exchanged; no panes are closed.  The mirror will emit
+ * window.reordered (or equivalent) deltas reflecting the new order.
+ *
+ * `sourceWindowId` is the window to move; `targetWindowId` is the destination
+ * slot.  Both must exist in the bound session.
+ *
+ * Additive addition — non-breaking per the versioning policy.
+ */
+export interface SwapWindowCommand {
+  readonly kind: "swap-window";
+  readonly sourceWindowId: WindowId;
+  readonly targetWindowId: WindowId;
+}
+
+// ── end tc-7xv.18 ──────────────────────────────────────────────────────────
 
 /**
  * Discriminated union of all model-level commands a client may issue.
@@ -614,7 +650,10 @@ export type WireCommand =
   // tc-7xv.9: pane verbs
   | BreakPaneCommand
   | SwapPaneCommand
-  | RenamePaneCommand;
+  | RenamePaneCommand
+  // tc-7xv.18: window verbs
+  | KillWindowCommand
+  | SwapWindowCommand;
 
 /**
  * Client issues a model-level command to the daemon.
