@@ -183,6 +183,11 @@ export interface SnapshotWindow {
   readonly active: boolean;
   /** Structured pane layout for this window. */
   readonly layout: WindowLayout;
+  /**
+   * True when `synchronize-panes` is on for this window at snapshot time.
+   * tc-7xv.12: present in all snapshots; defaults to false.
+   */
+  readonly synchronizePanes: boolean;
 }
 
 /**
@@ -285,6 +290,34 @@ export interface WindowRenamedMessage extends MessageBase {
   readonly type: "window.renamed";
   readonly windowId: WindowId;
   readonly newName: string;
+}
+
+// ---------------------------------------------------------------------------
+// Additional Deltas — synchronize-panes state (daemon→client, tc-7xv.12)
+// ---------------------------------------------------------------------------
+
+/**
+ * The synchronize-panes state of a window has changed.
+ * direction: daemon→client
+ *
+ * Emitted by the daemon when `synchronize-panes` is toggled for a window —
+ * either via a `set-synchronize-panes` command (tc-7xv.12) or detected
+ * reactively via a `set-hook` on `window-option-changed`.
+ *
+ * `on: true`  → broadcasting is active (all send-keys go to every pane).
+ * `on: false` → normal per-pane targeting.
+ *
+ * tc-7xv.17 (b2b) consumes this delta to render the amber pill in the
+ * window tree and to keep the window menu toggle in sync.
+ *
+ * Non-breaking additive delta — older clients that do not recognise this type
+ * fall through to the `default` branch in `applyDelta` and ignore it.
+ */
+export interface WindowSyncChangedMessage extends MessageBase {
+  readonly type: "window.sync.changed";
+  readonly windowId: WindowId;
+  /** True when synchronize-panes is on for this window. */
+  readonly on: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -481,6 +514,26 @@ export interface KillSessionCommand {
 }
 
 /**
+ * Toggle `synchronize-panes` for a window.
+ * direction: client→daemon
+ *
+ * The daemon emits `set-option -wt @<N> synchronize-panes on|off` and, when the
+ * hook detects the option change, pushes a `window.sync.changed` delta to all
+ * connected clients (tc-7xv.12).
+ *
+ * `windowId` is the wire WindowId of the target window (e.g. "w3").
+ * `on: true` enables broadcasting; `on: false` disables it.
+ *
+ * Additive addition — non-breaking per the versioning policy.
+ */
+export interface SetSynchronizePanesCommand {
+  readonly kind: "set-synchronize-panes";
+  readonly windowId: WindowId;
+  /** True to enable synchronize-panes; false to disable. */
+  readonly on: boolean;
+}
+
+/**
  * Discriminated union of all model-level commands a client may issue.
  * Narrow with `cmd.kind` to get the specific shape.
  *
@@ -498,7 +551,8 @@ export type WireCommand =
   | RenameWindowCommand
   | SelectPaneCommand
   | ResizePaneCommand
-  | KillSessionCommand;
+  | KillSessionCommand
+  | SetSynchronizePanesCommand;
 
 /**
  * Client issues a model-level command to the daemon.
@@ -699,7 +753,7 @@ export interface ResyncRequestMessage extends MessageBase {
  *   Capabilities:  DaemonCapabilitiesMessage
  *   Snapshot:      SnapshotMessage
  *   Pane deltas:   PaneOpenedMessage | PaneClosedMessage | PaneResizedMessage | PaneModeChangedMessage
- *   Window deltas: WindowAddedMessage | WindowClosedMessage | WindowRenamedMessage
+ *   Window deltas: WindowAddedMessage | WindowClosedMessage | WindowRenamedMessage | WindowSyncChangedMessage
  *   Layout deltas: LayoutUpdatedMessage
  *   Focus deltas:  FocusChangedMessage
  *   Session delta: DaemonSessionRenamedMessage
@@ -721,6 +775,8 @@ export type DaemonMessage =
   | WindowAddedMessage
   | WindowClosedMessage
   | WindowRenamedMessage
+  // Sync-panes delta (tc-7xv.12)
+  | WindowSyncChangedMessage
   // Layout deltas
   | LayoutUpdatedMessage
   // Focus deltas
@@ -772,6 +828,8 @@ export function isDaemonMessage(msg: ControlMessage): msg is DaemonMessage {
     t === "window.added" ||
     t === "window.closed" ||
     t === "window.renamed" ||
+    // Sync-panes delta (tc-7xv.12)
+    t === "window.sync.changed" ||
     // Layout deltas
     t === "layout.updated" ||
     // Focus deltas

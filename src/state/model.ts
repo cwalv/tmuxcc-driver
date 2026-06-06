@@ -180,6 +180,16 @@ export interface Window {
    * See `parsedLayoutToWindowLayout` for the parser→model conversion.
    */
   readonly layout: WindowLayout | null;
+  /**
+   * Whether `synchronize-panes` is currently on for this window.
+   *
+   * When true, tmux broadcasts every `send-keys` to ALL panes in this window
+   * (native tmux broadcast — no extension-side fan-out needed; §4.5 VERIFIED).
+   * Defaults to false. Updated via `set-option -wt @N synchronize-panes on/off`
+   * (from a `set-synchronize-panes` command) and confirmed by a
+   * `window-option-changed` hook. See tc-7xv.12.
+   */
+  readonly synchronizePanes: boolean;
 }
 
 /**
@@ -734,11 +744,11 @@ export function updatePane(
   return { ...model, panes };
 }
 
-/** Replace a window's fields (e.g. rename, layout update). */
+/** Replace a window's fields (e.g. rename, layout update, synchronize-panes toggle). */
 export function updateWindow(
   model: SessionModel,
   windowId: WindowId,
-  patch: Partial<Pick<Window, "name" | "layout" | "activePaneId">>,
+  patch: Partial<Pick<Window, "name" | "layout" | "activePaneId" | "synchronizePanes">>,
 ): SessionModel {
   const win = model.windows.get(windowId);
   if (!win) return model;

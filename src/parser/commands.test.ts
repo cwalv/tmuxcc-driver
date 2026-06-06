@@ -26,6 +26,8 @@ import {
   newWindow,
   splitWindow,
   setOption,
+  setOptionForWindow,
+  showOptionsForWindow,
   LIST_WINDOWS_DEFAULT_FORMAT,
   LIST_PANES_DEFAULT_FORMAT,
   type PaneFlowState,
@@ -463,5 +465,59 @@ describe("setOption", () => {
   it("quotes value with spaces", () => {
     const cmd = setOption("session", "status-left", "my status");
     assert.equal(cmd, "set-option status-left 'my status'");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// setOptionForWindow — tc-7xv.12
+// ---------------------------------------------------------------------------
+
+describe("setOptionForWindow", () => {
+  it("sets synchronize-panes on for window @3", () => {
+    assert.equal(
+      setOptionForWindow(3, "synchronize-panes", "on"),
+      "set-option -wt @3 synchronize-panes on",
+    );
+  });
+
+  it("sets synchronize-panes off for window @5", () => {
+    assert.equal(
+      setOptionForWindow(5, "synchronize-panes", "off"),
+      "set-option -wt @5 synchronize-panes off",
+    );
+  });
+
+  it("window @0 edge case", () => {
+    assert.equal(
+      setOptionForWindow(0, "monitor-activity", "off"),
+      "set-option -wt @0 monitor-activity off",
+    );
+  });
+
+  it("quotes option value with spaces", () => {
+    assert.equal(
+      setOptionForWindow(1, "some-option", "a value"),
+      "set-option -wt @1 some-option 'a value'",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// showOptionsForWindow — tc-7xv.12
+// ---------------------------------------------------------------------------
+
+describe("showOptionsForWindow", () => {
+  it("emits show-options -wvt @3 synchronize-panes", () => {
+    assert.equal(
+      showOptionsForWindow(3, "synchronize-panes"),
+      "show-options -wvt @3 synchronize-panes",
+    );
+  });
+
+  it("works for window @0", () => {
+    assert.equal(
+      showOptionsForWindow(0, "monitor-activity"),
+      "show-options -wvt @0 monitor-activity",
+    );
   });
 });

@@ -71,6 +71,7 @@ import type {
   WindowAddedMessage,
   WindowClosedMessage,
   WindowRenamedMessage,
+  WindowSyncChangedMessage,
   LayoutUpdatedMessage,
   FocusChangedMessage,
   DaemonSessionRenamedMessage,
@@ -139,6 +140,8 @@ export function projectSnapshot(
         rows: 0,
         root: { kind: "pane", paneId: "" as import("../wire/ids.js").PaneId, rect: { x: 0, y: 0, cols: 0, rows: 0 } },
       },
+      // tc-7xv.12: synchronize-panes state at snapshot time.
+      synchronizePanes: win.synchronizePanes,
     });
   }
 
@@ -287,6 +290,23 @@ export function diffModel(prev: SessionModel, next: SessionModel): DaemonMessage
         seq: SEQ,
         windowId: win.windowId,
         newName: win.name,
+      };
+      out.push(msg);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 6b. window.sync.changed — synchronize-panes toggle on existing windows (tc-7xv.12)
+  // -------------------------------------------------------------------------
+  for (const [id, win] of next.windows) {
+    const prevWin = prev.windows.get(id);
+    if (!prevWin) continue; // new windows handled above
+    if (prevWin.synchronizePanes !== win.synchronizePanes) {
+      const msg: WindowSyncChangedMessage = {
+        type: "window.sync.changed",
+        seq: SEQ,
+        windowId: win.windowId,
+        on: win.synchronizePanes,
       };
       out.push(msg);
     }

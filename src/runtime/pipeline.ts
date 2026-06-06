@@ -299,6 +299,14 @@ class RuntimePipelineImpl implements RuntimePipeline {
       this._host.write(setOption("window-global", "monitor-activity", "on") + "\n");
     }
 
+    // tc-7xv.12: No explicit hook registration needed for synchronize-panes
+    // detection.  tmux 3.2+ emits `%window-option-changed @<winId> <opt> <val>`
+    // natively in control mode whenever a window option changes (see
+    // notify_hook_table "window-option-changed" in tmux source).  The reducer
+    // handles this notification in its `unknown` case and applies it to
+    // `Window.synchronizePanes`.  Catches BOTH daemon-issued set-option commands
+    // AND external changes from other tmux clients.
+
     // After both replies, the coordinator is live. The model now has the
     // initial session/window/pane state from bootstrap + any buffered events.
     // Fire a model-change so downstream beads see the initial snapshot.

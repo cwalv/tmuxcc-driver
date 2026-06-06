@@ -77,6 +77,8 @@ export type {
   WindowAddedMessage,
   WindowClosedMessage,
   WindowRenamedMessage,
+  // Daemon → Client (sync-panes delta — tc-7xv.12)
+  WindowSyncChangedMessage,
   // Daemon → Client (layout deltas)
   LayoutUpdatedMessage,
   // Daemon → Client (focus deltas)
@@ -107,6 +109,7 @@ export type {
   SelectPaneCommand,
   ResizePaneCommand,
   KillSessionCommand,
+  SetSynchronizePanesCommand,
   DaemonCommandRequestMessage,
   // Client → Daemon (resync)
   ResyncRequestMessage,

@@ -422,6 +422,7 @@ export function reduce(
         paneIds: [],
         activePaneId: null,
         layout: null,
+        synchronizePanes: false,
       };
       return addWindow(model, win);
     }
@@ -698,6 +699,11 @@ export function reduce(
       if (event.keyword === "layout-change") {
         return handleLayoutChange(model, event.rawLine);
       }
+      // tc-7xv.12: window-option-changed hook fires when set-option -wt is used.
+      // Raw line format: %window-option-changed @<winId> <optionName> <value>
+      if (event.keyword === "window-option-changed") {
+        return handleWindowOptionChanged(model, event.rawLine);
+      }
       // Truly unknown keyword — no-op, don't crash.
       return model;
     }
@@ -813,6 +819,55 @@ function handleLayoutChange(model: SessionModel, rawLine: Uint8Array): SessionMo
   model = updateWindow(model, wid, { layout: windowLayout });
 
   return model;
+}
+
+// ---------------------------------------------------------------------------
+// window-option-changed handler (tc-7xv.12)
+// ---------------------------------------------------------------------------
+
+/**
+ * Process a `%window-option-changed @<win> <optionName> <value>` raw line.
+ *
+ * This notification is fired by the `set-hook -g window-option-changed`
+ * hook registered during pipeline bootstrap (see pipeline.ts).  It is the
+ * reactive mechanism for detecting `synchronize-panes` state changes: when
+ * `set-option -wt @N synchronize-panes on/off` takes effect tmux emits this
+ * notification, which the reducer picks up and applies to the model.
+ *
+ * If the option is not `synchronize-panes` the notification is a no-op —
+ * future options can be added here when needed.
+ *
+ * Line format: `%window-option-changed @<winId> <optionName> <value>`
+ */
+function handleWindowOptionChanged(model: SessionModel, rawLine: Uint8Array): SessionModel {
+  // Parse: skip keyword (%window-option-changed), then @winId, optionName, value.
+  const line = new TextDecoder().decode(rawLine).trimEnd();
+  // Typical form: "%window-option-changed @3 synchronize-panes on"
+  const parts = line.split(" ");
+  // parts[0] = "%window-option-changed", parts[1] = "@N", parts[2] = optName, parts[3] = value
+  if (parts.length < 4) return model;
+
+  const windowRef = parts[1] ?? "";
+  if (!windowRef.startsWith("@")) return model;
+  const tmuxWinNum = parseInt(windowRef.slice(1), 10);
+  if (Number.isNaN(tmuxWinNum)) return model;
+
+  const optionName = parts[2] ?? "";
+  const optionValue = parts[3] ?? "";
+
+  if (optionName !== "synchronize-panes") {
+    // Not an option we track — ignore.
+    return model;
+  }
+
+  const wid = mintWindowId(tmuxWinNum);
+  const win = model.windows.get(wid);
+  if (!win) return model; // window not in model yet — drop
+
+  const on = optionValue === "on";
+  if (win.synchronizePanes === on) return model; // no change
+
+  return updateWindow(model, wid, { synchronizePanes: on });
 }
 
 // ---------------------------------------------------------------------------

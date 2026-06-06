@@ -381,6 +381,47 @@ export function setOption(
   return `set-option${flags} ${quoteArg(option)} ${quoteArg(value)}`;
 }
 
+/**
+ * Serialize a `set-option -wt @<windowId>` command targeting a specific window.
+ *
+ * Emits `set-option -wt @<windowId> <option> <value>`.
+ *
+ * Used for window-scoped options that must target a specific window rather
+ * than the current window. Primary consumer: `synchronize-panes` (tc-7xv.12).
+ *
+ * @param windowId  Numeric window ID (the N in `@N`).
+ * @param option    Window option name (e.g. `synchronize-panes`).
+ * @param value     Option value (e.g. `on`, `off`).
+ * @returns         e.g. `set-option -wt @3 synchronize-panes on`
+ */
+export function setOptionForWindow(
+  windowId: number,
+  option: string,
+  value: string,
+): string {
+  return `set-option -wt @${windowId} ${quoteArg(option)} ${quoteArg(value)}`;
+}
+
+/**
+ * Serialize a `show-options -wvt @<windowId> <option>` command.
+ *
+ * Emits `show-options -wvt @<windowId> <option>`.
+ *
+ * The `-v` flag (value-only) makes the response body contain just the option
+ * value with no name prefix, which is easier to parse.  The `-w` flag selects
+ * window options.
+ *
+ * Used by the synchronize-panes observable (tc-7xv.12) to read the current
+ * value for a specific window after a hook fires.
+ *
+ * @param windowId  Numeric window ID (the N in `@N`).
+ * @param option    Window option name (e.g. `synchronize-panes`).
+ * @returns         e.g. `show-options -wvt @3 synchronize-panes`
+ */
+export function showOptionsForWindow(windowId: number, option: string): string {
+  return `show-options -wvt @${windowId} ${quoteArg(option)}`;
+}
+
 // ---------------------------------------------------------------------------
 // split-window
 // ---------------------------------------------------------------------------

@@ -67,6 +67,7 @@ import {
   refreshClientWindowSize,
   splitWindow,
   newWindow,
+  setOptionForWindow,
 } from "../parser/commands.js";
 
 // ---------------------------------------------------------------------------
@@ -334,6 +335,24 @@ export function createInputPath(
             // target selector, which avoids ambiguity when session names share a
             // prefix.
             sendCommand(`kill-session -t =${command.sessionName}`);
+            break;
+          }
+
+          case "set-synchronize-panes": {
+            // set-option -wt @<N> synchronize-panes on|off  (tc-7xv.12)
+            //
+            // Toggles tmux's synchronize-panes option for the target window.
+            // When on, tmux broadcasts every send-keys to ALL panes in the
+            // window natively — no extension-side fan-out needed (§4.5 VERIFIED).
+            //
+            // The model change is NOT applied here; the pipeline will detect it
+            // via the `window-option-changed` hook and emit a
+            // `window.sync.changed` delta.  That delta drives diffModel and
+            // reaches all connected clients through the normal model-change path.
+            const tmuxWinNum = toTmuxWindow(command.windowId);
+            if (!validWindowId(tmuxWinNum, command.windowId as string)) return;
+
+            sendCommand(setOptionForWindow(tmuxWinNum, "synchronize-panes", command.on ? "on" : "off"));
             break;
           }
 
