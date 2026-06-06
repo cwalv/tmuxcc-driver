@@ -60,12 +60,12 @@ import type { NotificationToken } from "../parser/tokenizer.js";
 import { CommandCorrelator } from "../parser/correlator.js";
 import { BootstrapCoordinator } from "../state/bootstrap.js";
 import { createPaneBufferStore } from "../state/scrollback.js";
-import { checkInvariants } from "../state/model.js";
+import { checkInvariants, windowId } from "../state/model.js";
 import type { SessionModel, InvariantViolation } from "../state/model.js";
 import type { PaneBufferStore } from "../state/reducer.js";
 import type { SwitchClientOutcome } from "../state/reducer.js";
 import type { TmuxHost } from "./tmux-host.js";
-import { setOption } from "../parser/commands.js";
+import { setOption, refreshClientSubscribeWindows } from "../parser/commands.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -216,6 +216,20 @@ export interface RuntimePipeline {
 // Implementation
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Subscription name constant
+// ---------------------------------------------------------------------------
+
+/**
+ * Name of the tmux control-mode subscription used to detect external
+ * synchronize-panes changes (tc-7xv.28).
+ *
+ * Registered via `refresh-client -B 'sync-watch:@*:#{?synchronize-panes,1,0}'`
+ * after bootstrap. When `%subscription-changed sync-watch …` arrives, the
+ * pipeline injects an `internal:set-window-sync` event to update the model.
+ */
+const SYNC_WATCH_SUBSCRIPTION_NAME = "sync-watch";
+
 class RuntimePipelineImpl implements RuntimePipeline {
   private readonly _host: TmuxHost;
   private readonly _opts: Required<Omit<RuntimePipelineOptions, "sessionName" | "onSwitchClientDetected">> & {
@@ -313,11 +327,28 @@ class RuntimePipelineImpl implements RuntimePipeline {
       this._host.write(setOption("window-global", "monitor-activity", "on") + "\n");
     }
 
-    // tc-7xv.12: synchronize-panes model updates are applied via the
-    // optimistic-update path in input-path.ts (injectNotification), NOT via a
-    // tmux notification.  tmux 3.4 does NOT emit %window-option-changed for
-    // synchronize-panes (verified empirically).  External-CLI sync changes
-    // (out-of-band) are not reflected — filed as a follow-up bead under tc-7xv.
+    // tc-7xv.28: register a per-window subscription so the daemon detects
+    // synchronize-panes changes made by external tmux clients (e.g.
+    // `tmux set-option -wt @N synchronize-panes on`).
+    //
+    // tmux 3.4 does NOT emit %window-option-changed for synchronize-panes
+    // (confirmed by tc-7xv.12 investigation).  The subscription mechanism
+    // (`refresh-client -B`) polls the format string on a 1-second timer and
+    // delivers %subscription-changed only when the value changes — giving us
+    // reactive detection with at most ~1 s latency, at zero polling overhead
+    // when sync state is stable.
+    //
+    // _onNotificationToken handles "subscription-changed" events for the
+    // SYNC_WATCH_SUBSCRIPTION_NAME subscription name by injecting an
+    // `internal:set-window-sync` synthetic event into the pipeline.
+    if (!this._stopped) {
+      this._host.write(
+        refreshClientSubscribeWindows(
+          SYNC_WATCH_SUBSCRIPTION_NAME,
+          "#{?synchronize-panes,1,0}",
+        ) + "\n",
+      );
+    }
 
     // After both replies, the coordinator is live. The model now has the
     // initial session/window/pane state from bootstrap + any buffered events.
@@ -390,6 +421,31 @@ class RuntimePipelineImpl implements RuntimePipeline {
     if (coordinator === null) return; // start() not yet called — should not happen
 
     const event = parseNotification(token);
+
+    // tc-7xv.28: intercept %subscription-changed for the sync-watch subscription
+    // BEFORE feeding it to the coordinator/reducer, so we can inject the correct
+    // synthetic event. The reducer treats "subscription-changed" as a no-op; we
+    // produce an `internal:set-window-sync` instead, which the reducer handles.
+    if (
+      coordinator.isLive() &&
+      event.kind === "subscription-changed" &&
+      event.name === SYNC_WATCH_SUBSCRIPTION_NAME &&
+      event.windowId !== null
+    ) {
+      this._handleSyncWatchNotification(event.windowId, event.value);
+      // Also fire notification subscribers for observability (e.g. tests).
+      if (this._notificationHandlers.size > 0) {
+        for (const handler of this._notificationHandlers) {
+          try {
+            handler(event);
+          } catch (e) {
+            console.warn("[pipeline] notification handler threw:", e);
+          }
+        }
+      }
+      return; // Skip the generic coordinator.onNotification path for this event.
+    }
+
     const prev = coordinator.getModel();
     coordinator.onNotification(event);
     const next = coordinator.getModel();
@@ -415,6 +471,19 @@ class RuntimePipelineImpl implements RuntimePipeline {
     if (coordinator.isLive() && next !== prev) {
       this._emitModelChange(next, prev);
     }
+  }
+
+  /**
+   * Handle a %subscription-changed event for the sync-watch subscription
+   * (tc-7xv.28).
+   *
+   * @param tmuxWindowId  The numeric tmux window id from the notification header.
+   * @param value         The formatted value: "1" (on) or "0" (off).
+   */
+  private _handleSyncWatchNotification(tmuxWindowId: number, value: string): void {
+    const on = value.trim() === "1";
+    const wid = windowId("w" + tmuxWindowId);
+    this.injectNotification({ kind: "internal:set-window-sync", windowId: wid, on });
   }
 
   private _emitModelChange(model: SessionModel, prev: SessionModel): void {

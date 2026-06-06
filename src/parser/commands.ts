@@ -486,3 +486,40 @@ export function splitWindow(
   }
   return parts.join(" ");
 }
+
+// ---------------------------------------------------------------------------
+// refresh-client -B (subscription)
+// ---------------------------------------------------------------------------
+
+/**
+ * Register a tmux control-mode subscription that polls a format string for
+ * each window every ~1 second and delivers `%subscription-changed` only when
+ * the value changes.
+ *
+ * Emits: `refresh-client -B 'name:@*:format'`
+ *
+ * The `@*` scope means one notification per window. tmux fires the check on a
+ * 1-second internal timer (control.c control_check_subs_timer). Notifications
+ * arrive as:
+ *   `%subscription-changed <name> $<sess> @<win> <idx> - : <value>`
+ *
+ * The parsed `SubscriptionChangedNotification.windowId` carries the numeric
+ * window id; `.value` carries the expanded format string for that window.
+ *
+ * Verified against tmux 3.4 (empirically — tc-7xv.28 investigation):
+ *   `refresh-client -B 'sync-watch:@*:#{?synchronize-panes,1,0}'`
+ *   → initial `%subscription-changed sync-watch $0 @0 0 - : 0`
+ *   → after external `tmux set-option -wt @0 synchronize-panes on`:
+ *     `%subscription-changed sync-watch $0 @0 0 - : 1` (within ~1 s)
+ *
+ * @param name    Subscription name (used as the `name` field in %subscription-changed).
+ * @param format  tmux format string evaluated per window (e.g. `#{?synchronize-panes,1,0}`).
+ * @returns       e.g. `refresh-client -B 'sync-watch:@*:#{?synchronize-panes,1,0}'`
+ */
+export function refreshClientSubscribeWindows(name: string, format: string): string {
+  // The argument to -B is `name:@*:format`. Single-quote the entire argument
+  // so #{ } and ? are not interpreted by the shell. Escape any embedded
+  // single-quotes in name or format via the `'\''` idiom.
+  const arg = `${name}:@*:${format}`;
+  return `refresh-client -B '${arg.replace(/'/g, "'\\''")}'`;
+}

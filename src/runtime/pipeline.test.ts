@@ -731,4 +731,130 @@ describe("Pipeline: monitor-activity enabled after bootstrap (tc-95lue §3.4)", 
     await startPromise;
     pipeline.stop();
   });
+
+  // tc-7xv.28: sync-watch subscription registration
+  it("bootstrap: refresh-client -B sync-watch subscription is registered after bootstrap", async () => {
+    const host = new FakeTmuxHost();
+    const pipeline = createRuntimePipeline(host);
+
+    const startPromise = pipeline.start();
+    host.popWritten(); // drain bootstrap command writes
+
+    host.pushData(buildBootstrapStream());
+    await startPromise;
+
+    const postBootstrapWrites = host.popWritten();
+    const syncWatchCmd = "refresh-client -B 'sync-watch:@*:#{?synchronize-panes,1,0}'\n";
+    assert.ok(
+      postBootstrapWrites.some((w) => w === syncWatchCmd),
+      `expected sync-watch subscription command after bootstrap; ` +
+      `got: ${JSON.stringify(postBootstrapWrites)}`,
+    );
+    pipeline.stop();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite 5 — sync-watch subscription: external synchronize-panes change detection (tc-7xv.28)
+// ---------------------------------------------------------------------------
+
+describe("Pipeline: sync-watch subscription (tc-7xv.28)", () => {
+  /**
+   * Helper: build a %subscription-changed line for the sync-watch subscription.
+   *
+   * Format from control.c (all-windows scope):
+   *   %subscription-changed <name> $<sess> @<win> <idx> - : <value>
+   */
+  function syncWatchLine(tmuxWindowNum: number, value: "0" | "1"): string {
+    return `%subscription-changed sync-watch $0 @${tmuxWindowNum} 0 - : ${value}\r\n`;
+  }
+
+  it("external sync ON: %subscription-changed sync-watch value=1 updates model", async () => {
+    const host = new FakeTmuxHost();
+    const pipeline = createRuntimePipeline(host);
+
+    const startPromise = pipeline.start();
+    // Boot with window @1, sync initially off
+    host.pushData(buildBootstrapStream("", { windowId: "@1", paneId: "%1" }));
+    await startPromise;
+
+    // Verify initial state: synchronizePanes is false
+    const winBefore = pipeline.getModel().windows.get(windowId("w1"));
+    assert.ok(winBefore !== undefined, "window w1 must exist after bootstrap");
+    assert.equal(winBefore!.synchronizePanes, false, "synchronizePanes should be false initially");
+
+    // Simulate external CLI toggle: %subscription-changed arrives with value "1"
+    let changeCount = 0;
+    pipeline.onModelChange(() => { changeCount++; });
+    host.pushData(bytes(syncWatchLine(1, "1")));
+
+    // Model should now reflect sync ON
+    const winAfter = pipeline.getModel().windows.get(windowId("w1"));
+    assert.ok(winAfter !== undefined, "window w1 must still exist");
+    assert.equal(winAfter!.synchronizePanes, true,
+      "synchronizePanes should be true after sync-watch value=1");
+    assert.ok(changeCount >= 1, "onModelChange should have fired");
+
+    pipeline.stop();
+  });
+
+  it("external sync OFF: %subscription-changed sync-watch value=0 updates model", async () => {
+    const host = new FakeTmuxHost();
+    const pipeline = createRuntimePipeline(host);
+
+    const startPromise = pipeline.start();
+    host.pushData(buildBootstrapStream("", { windowId: "@1", paneId: "%1" }));
+    await startPromise;
+
+    // First turn sync on via injectNotification (simulating the optimistic path)
+    pipeline.injectNotification({ kind: "internal:set-window-sync", windowId: windowId("w1"), on: true });
+    assert.equal(
+      pipeline.getModel().windows.get(windowId("w1"))!.synchronizePanes, true,
+      "sync should be on before external OFF",
+    );
+
+    // Now simulate external CLI turning it off
+    host.pushData(bytes(syncWatchLine(1, "0")));
+
+    assert.equal(
+      pipeline.getModel().windows.get(windowId("w1"))!.synchronizePanes, false,
+      "synchronizePanes should be false after sync-watch value=0",
+    );
+    pipeline.stop();
+  });
+
+  it("no-op: %subscription-changed sync-watch same value does not fire onModelChange", async () => {
+    const host = new FakeTmuxHost();
+    const pipeline = createRuntimePipeline(host);
+
+    const startPromise = pipeline.start();
+    host.pushData(buildBootstrapStream("", { windowId: "@1", paneId: "%1" }));
+    await startPromise;
+
+    let changeCount = 0;
+    pipeline.onModelChange(() => { changeCount++; });
+
+    // Value "0" when already off — should be a no-op
+    host.pushData(bytes(syncWatchLine(1, "0")));
+    assert.equal(changeCount, 0, "no model change expected when sync state is unchanged");
+    pipeline.stop();
+  });
+
+  it("unknown window id in sync-watch is silently dropped (no crash)", async () => {
+    const host = new FakeTmuxHost();
+    const pipeline = createRuntimePipeline(host);
+
+    const startPromise = pipeline.start();
+    host.pushData(buildBootstrapStream("", { windowId: "@1", paneId: "%1" }));
+    await startPromise;
+
+    let changeCount = 0;
+    pipeline.onModelChange(() => { changeCount++; });
+
+    // Notify for window @99 which is not in the model
+    host.pushData(bytes(syncWatchLine(99, "1")));
+    assert.equal(changeCount, 0, "notification for unknown window should not fire model change");
+    assert.ok(pipeline.isLive(), "pipeline should still be live after unknown window notification");
+    pipeline.stop();
+  });
 });

@@ -20,6 +20,7 @@ import {
   refreshClientSize,
   refreshClientWindowSize,
   refreshClientFlow,
+  refreshClientSubscribeWindows,
   listWindows,
   listPanes,
   capturePane,
@@ -518,6 +519,31 @@ describe("showOptionsForWindow", () => {
     assert.equal(
       showOptionsForWindow(0, "monitor-activity"),
       "show-options -wvt @0 monitor-activity",
+    );
+  });
+});
+
+// refreshClientSubscribeWindows — tc-7xv.28
+describe("refreshClientSubscribeWindows", () => {
+  it("emits refresh-client -B with @* scope for synchronize-panes watch", () => {
+    assert.equal(
+      refreshClientSubscribeWindows("sync-watch", "#{?synchronize-panes,1,0}"),
+      "refresh-client -B 'sync-watch:@*:#{?synchronize-panes,1,0}'",
+    );
+  });
+
+  it("works with a simple name and format", () => {
+    assert.equal(
+      refreshClientSubscribeWindows("my-sub", "#{window_name}"),
+      "refresh-client -B 'my-sub:@*:#{window_name}'",
+    );
+  });
+
+  it("escapes embedded single quotes in name via the \\' idiom", () => {
+    // name contains a single-quote — verify escaping
+    assert.equal(
+      refreshClientSubscribeWindows("it's", "#{window_name}"),
+      "refresh-client -B 'it'\\''s:@*:#{window_name}'",
     );
   });
 });
