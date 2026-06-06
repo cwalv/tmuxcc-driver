@@ -344,6 +344,7 @@ describe("SnapshotMessage", () => {
           windowId: W0,
           name: "editor",
           active: true,
+          synchronizePanes: false,
           layout: sampleLayout,
         },
       ],

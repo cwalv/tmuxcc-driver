@@ -101,7 +101,7 @@ function makeWindow(
   activePaneId: PaneId | null,
   name = "win",
 ): Window {
-  return { windowId: wid, sessionId: sid, name, paneIds, activePaneId, layout: null };
+  return { windowId: wid, sessionId: sid, name, paneIds, activePaneId, layout: null, synchronizePanes: false };
 }
 
 function makePane(

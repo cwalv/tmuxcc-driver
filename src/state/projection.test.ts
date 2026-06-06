@@ -88,7 +88,7 @@ function makeWindow(
   name = "test-window",
   layout = null as import("../wire/layout.js").WindowLayout | null,
 ): Window {
-  return { windowId: id, sessionId: sessId, name, paneIds, activePaneId, layout };
+  return { windowId: id, sessionId: sessId, name, paneIds, activePaneId, layout, synchronizePanes: false };
 }
 
 function makePane(
@@ -163,6 +163,7 @@ function applyDeltas(snap: SnapshotMessage, deltas: DaemonMessage[]): SnapshotMe
             windowId: delta.windowId,
             name: delta.name,
             active: delta.active,
+            synchronizePanes: false,
             // layout will be filled by a subsequent layout.updated if needed.
             layout: {
               cols: 0,

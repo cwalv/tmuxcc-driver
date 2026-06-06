@@ -167,7 +167,7 @@ function makePane(id: PaneId, winId: WindowId, sessId: SessionId, cols = 80, row
 
 function makeModel1(): SessionModel {
   const sess: Session = { sessionId: S1, name: "main", windowIds: [W1], activeWindowId: W1 };
-  const win: Window = { windowId: W1, sessionId: S1, name: "editor", paneIds: [P1], activePaneId: P1, layout: null };
+  const win: Window = { windowId: W1, sessionId: S1, name: "editor", paneIds: [P1], activePaneId: P1, layout: null, synchronizePanes: false };
   const p1 = makePane(P1, W1, S1);
 
   return {
@@ -181,7 +181,7 @@ function makeModel1(): SessionModel {
 function makeModel2(): SessionModel {
   // model1 + an additional pane P2
   const sess: Session = { sessionId: S1, name: "main", windowIds: [W1], activeWindowId: W1 };
-  const win: Window = { windowId: W1, sessionId: S1, name: "editor", paneIds: [P1, P2], activePaneId: P1, layout: null };
+  const win: Window = { windowId: W1, sessionId: S1, name: "editor", paneIds: [P1, P2], activePaneId: P1, layout: null, synchronizePanes: false };
   const p1 = makePane(P1, W1, S1);
   const p2 = makePane(P2, W1, S1, 40, 24);
 

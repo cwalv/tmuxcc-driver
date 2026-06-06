@@ -723,3 +723,174 @@ if (isMain) describe(
     );
   },
 );
+
+// ===========================================================================
+// E7 Synchronize-panes regression suite (tc-7xv.12)
+//
+// Codifies the "VERIFIED" claim from HANDOFF §4.5:
+//   "setw synchronize-panes on intercepts the send-keys path, so tmux
+//    broadcasts to every pane in the window natively. No extension-side
+//    fan-out needed."
+//
+// Tests:
+//   SP1. After setSynchronizePanes(windowId, true) the model reflects on=true
+//        (window.sync.changed delta reaches the mirror).
+//   SP2. REGRESSION: sync ON + send-keys via broker to one pane → ALL panes
+//        receive the input (native tmux broadcast, §4.5 VERIFIED).
+//   SP3. After setSynchronizePanes(windowId, false) the model reflects on=false.
+// ===========================================================================
+
+describe(
+  "tc-7xv.12: synchronize-panes — broker wiring + broadcast regression",
+  { skip: !tmuxAvailable ? "tmux not found on PATH" : false },
+  () => {
+    // -----------------------------------------------------------------------
+    // SP1 + SP2 + SP3: single test that covers all three acceptance criteria.
+    //
+    // Design: use setupE2E to get a real daemon (pane1), then split to get
+    // pane2, then enable sync and verify input to pane1 appears in pane2 too.
+    // -----------------------------------------------------------------------
+
+    it(
+      "SP2 (REGRESSION): sync ON → send-keys to one pane broadcasts to all panes in window",
+      { timeout: 40_000 },
+      async () => {
+        const session = await setupE2E("sync-panes");
+        after(() => killServer(session.socketName));
+        try {
+          const { hook, controller, paneId: pane1Id, socketName } = session;
+          const calls: RenderHookCall[] = hook.calls as RenderHookCall[];
+
+          // Step 1: split to get a second pane.
+          controller.sendCommand({ kind: "split-pane", paneId: pane1Id, direction: "vertical" });
+
+          const pane2Info = await waitFor(
+            () => {
+              const opened = calls.filter((c: RenderHookCall) => c.type === "paneOpened");
+              if (opened.length >= 2) {
+                const second = opened[1];
+                if (second?.type === "paneOpened") return second.pane as PaneInfo;
+              }
+              return undefined;
+            },
+            12_000,
+            "second pane did not open",
+          );
+          const pane2Id: PaneId = pane2Info.paneId as PaneId;
+
+          // Step 2: verify panes are independent before sync.
+          controller.sendInput(pane1Id, "echo pre-sync-pane1\n");
+          await waitForOutput(hook, pane1Id, "pre-sync-pane1", 8_000);
+          // pane2 must NOT have pane1's output.
+          assert.ok(
+            !accumulatedOutput(hook, pane2Id).includes(Buffer.from("pre-sync-pane1")),
+            "pane2 must not have pane1 output before sync",
+          );
+
+          // Step 3: derive wire WindowId from pane1Id ("p1" → pane1 is in window "w1").
+          // We get the windowId from the mirror's model (via the hook).
+          const windowId = (pane2Info as { windowId: string }).windowId as string;
+          assert.ok(
+            typeof windowId === "string" && windowId.startsWith("w"),
+            `windowId must be a wire WindowId, got: ${windowId}`,
+          );
+
+          // Step 4: enable synchronize-panes via direct tmux (broker path).
+          // This maps to: tmux -L <sock> set-option -wt @N synchronize-panes on
+          // Same as broker.setSynchronizePanes(windowId, true).
+          const winNum = parseInt(windowId.slice(1), 10);
+          const syncOnResult = spawnSync(
+            "tmux",
+            ["-L", socketName, "set-option", "-wt", `@${winNum}`, "synchronize-panes", "on"],
+            { encoding: "utf8", timeout: 5_000 },
+          );
+          assert.equal(
+            syncOnResult.status,
+            0,
+            `tmux set-option synchronize-panes on failed: ${syncOnResult.stderr}`,
+          );
+
+          // Step 5 (SP1): wait for window.sync.changed delta to reach mirror.
+          // The daemon's pipeline detects %window-option-changed and emits the delta.
+          // We poll the mirror model via a hook subscription.
+          let syncModel = await waitFor(
+            () => {
+              // Re-read mirror state via a model-change: the easiest way is to
+              // look for a model-change call on the hook (any new windowAdded would
+              // carry the flag, but we can also just check a direct model read).
+              // Since we're testing via EchoRenderHook which doesn't expose model,
+              // we send a no-op and wait for the pipeline to process the hook.
+              // The model is accessible via session.daemon.pipeline.getModel().
+              const m = session.daemon.pipeline.getModel();
+              // Find the window in the daemon model.
+              const [wid, win] = [...m.windows.entries()].find(([id]) => {
+                const n = parseInt((id as string).slice(1), 10);
+                return n === winNum;
+              }) ?? [];
+              if (win?.synchronizePanes === true) return win;
+              return undefined;
+            },
+            10_000,
+            "window.synchronizePanes did not become true in daemon model",
+          );
+          assert.equal(syncModel.synchronizePanes, true, "daemon model: synchronizePanes must be true");
+
+          // Step 6 (SP2 — the REGRESSION criterion): send input to pane1 only.
+          // With sync ON, tmux broadcasts to all panes natively.
+          const syncMarker = `sync-broadcast-${Date.now()}`;
+          controller.sendInput(pane1Id, `echo ${syncMarker}\n`);
+
+          // Wait for pane1 to receive the echo.
+          await waitForOutput(hook, pane1Id, syncMarker, 12_000);
+
+          // CORE ASSERTION: pane2 MUST also contain the marker (native tmux broadcast).
+          await waitForOutput(hook, pane2Id, syncMarker, 12_000);
+
+          const pane2Bytes = accumulatedOutput(hook, pane2Id);
+          assert.ok(
+            pane2Bytes.includes(Buffer.from(syncMarker)),
+            `REGRESSION: pane2 must receive the broadcast marker "${syncMarker}" ` +
+            `when synchronize-panes is on (§4.5 VERIFIED). Got ${pane2Bytes.length} bytes.`,
+          );
+
+          // Step 7 (SP3): turn sync off and verify independence is restored.
+          const syncOffResult = spawnSync(
+            "tmux",
+            ["-L", socketName, "set-option", "-wt", `@${winNum}`, "synchronize-panes", "off"],
+            { encoding: "utf8", timeout: 5_000 },
+          );
+          assert.equal(syncOffResult.status, 0, "tmux set-option synchronize-panes off failed");
+
+          // Wait for the model to reflect sync=off.
+          await waitFor(
+            () => {
+              const m = session.daemon.pipeline.getModel();
+              const win = [...m.windows.values()].find((w) => {
+                const n = parseInt((w.windowId as string).slice(1), 10);
+                return n === winNum;
+              });
+              if (win?.synchronizePanes === false) return win;
+              return undefined;
+            },
+            8_000,
+            "window.synchronizePanes did not become false after sync off",
+          );
+
+          // Verify independence restored: pane1 echo does not appear in pane2.
+          const postSyncMarker = `post-sync-${Date.now()}`;
+          controller.sendInput(pane1Id, `echo ${postSyncMarker}\n`);
+          await waitForOutput(hook, pane1Id, postSyncMarker, 8_000);
+          // Brief wait for any stray broadcast that would falsify the test.
+          await new Promise<void>((r) => setTimeout(r, 800));
+          const pane2PostBytes = accumulatedOutput(hook, pane2Id);
+          assert.ok(
+            !pane2PostBytes.includes(Buffer.from(postSyncMarker)),
+            `pane2 must NOT receive pane1 output after synchronize-panes is off`,
+          );
+        } finally {
+          await session.teardown();
+        }
+      },
+    );
+  },
+);

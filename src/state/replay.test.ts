@@ -93,6 +93,7 @@ function applyDeltas(snap: SnapshotMessage, deltas: DaemonMessage[]): SnapshotMe
             windowId: delta.windowId,
             name: delta.name,
             active: delta.active,
+            synchronizePanes: false,
             layout: {
               cols: 0,
               rows: 0,
