@@ -333,8 +333,12 @@ describe("golden: tmux34-session.raw (real tmux 3.4 -C capture)", () => {
       },
     });
 
-    // Count the number of block-begin tokens to know how many commands to register.
-    const beginCount = countKind(tokens, "block-begin");
+    // Count the number of user-command block-begin tokens (flags != 0) to know
+    // how many expectCommand() slots to register. The startup block (flags=0)
+    // is silently discarded by the correlator and must NOT get a slot.
+    const beginCount = tokens.filter(
+      (t) => t.kind === "block-begin" && t.flags !== 0,
+    ).length;
     const promises: Promise<CommandResult>[] = [];
     for (let i = 0; i < beginCount; i++) {
       promises.push(corr.expectCommand());
@@ -591,11 +595,12 @@ describe("golden: non-UTF-8 %output payload (byte-exact preservation)", () => {
 // ---------------------------------------------------------------------------
 
 describe("golden: %error command block", () => {
+  // flags=1 → user-command response (real tmux protocol)
   const fixture = bytes(
     [
-      "%begin 1700000100 5 0",
+      "%begin 1700000100 5 1",
       "unknown command: foobar",
-      "%error 1700000100 5 0",
+      "%error 1700000100 5 1",
       "%exit",
     ].join("\n") + "\n",
   );
@@ -614,7 +619,7 @@ describe("golden: %error command block", () => {
     if (errToken?.kind !== "block-error") return;
     assert.equal(errToken.timestamp, 1700000100);
     assert.equal(errToken.commandNumber, 5);
-    assert.equal(errToken.flags, 0);
+    assert.equal(errToken.flags, 1);
   });
 
   it("CommandCorrelator resolves error block as ok=false", async () => {
@@ -640,12 +645,13 @@ describe("golden: %error command block", () => {
 // ---------------------------------------------------------------------------
 
 describe("golden: percent-line inside block is block-body, not notification", () => {
+  // flags=1 → user-command response (real tmux protocol)
   const fixture = bytes(
     [
-      "%begin 1700000200 10 0",
+      "%begin 1700000200 10 1",
       "%this-looks-like-a-notification",
       "%another-percent-line with args",
-      "%end 1700000200 10 0",
+      "%end 1700000200 10 1",
     ].join("\n") + "\n",
   );
 
@@ -680,15 +686,16 @@ describe("golden: percent-line inside block is block-body, not notification", ()
 
 describe("golden: sequential command blocks (realistic pipeline)", () => {
   // Simulates a client sending 3 commands in sequence.
+  // flags=1 for all user-command replies (real tmux protocol).
   const fixture = bytes(
     [
       "%session-changed $0 main",
-      "%begin 1700001000 1 0",
+      "%begin 1700001000 1 1",
       "window0",
-      "%end 1700001000 1 0",
+      "%end 1700001000 1 1",
       "%window-add @5",
-      "%begin 1700001001 2 0",
-      "%end 1700001001 2 0",
+      "%begin 1700001001 2 1",
+      "%end 1700001001 2 1",
       "%begin 1700001002 3 1",
       "pane0",
       "pane1",

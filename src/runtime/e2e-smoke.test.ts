@@ -56,6 +56,7 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 // tc-blk — process-level safety net: register every spawned tmux socket so a
 // thrown / timed-out test still has its server killed.
@@ -92,6 +93,17 @@ import { createInputApi } from "../../../tmuxcc-client/src/input.js";
 import { EchoRenderHook } from "../../../tmuxcc-client/src/render-hook.js";
 // @ts-ignore — outside rootDir; resolved by tsx at runtime
 import type { RenderHookCall, PaneInfo, ClientController } from "../../../tmuxcc-client/src/render-hook.js";
+
+// ---------------------------------------------------------------------------
+// Guard: only register the E1-E6 describe block when this file is the direct
+// test entry point.  Other test files (resize-roundtrip.test.ts,
+// resilience.test.ts, flow-load.test.ts) import setupE2E from this file.
+// Without this guard the Node.js test runner re-registers the full E1-E6 suite
+// in each importer's subprocess, causing 4× concurrent real-tmux load that
+// produces intermittent "snapshot may be empty" failures under system pressure.
+// ---------------------------------------------------------------------------
+
+const isMain = fileURLToPath(import.meta.url) === (process.argv[1] ?? "");
 
 // ---------------------------------------------------------------------------
 // Guard: skip entire suite if tmux absent
@@ -437,9 +449,13 @@ export async function setupE2E(
 
 // ===========================================================================
 // E7 Full-stack smoke suite
+//
+// Only registered when this file is the direct test entry point (isMain).
+// Importing files (resize-roundtrip.test.ts, resilience.test.ts,
+// flow-load.test.ts) use setupE2E() without re-running the full suite.
 // ===========================================================================
 
-describe(
+if (isMain) describe(
   "tc-2ph: Full e2e smoke — real tmux → daemon → client → render hooks",
   { skip: !tmuxAvailable ? "tmux not found on PATH" : false },
   () => {

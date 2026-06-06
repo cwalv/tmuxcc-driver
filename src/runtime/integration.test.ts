@@ -148,8 +148,10 @@ function makeBootstrapBytes(opts: {
   const panesBody = `${pid_}\t${wid}\t${sid}\t0\t${cols}\t${rows}\t0\t0\t1\t1234\tbash\n`;
 
   const preNotif = `%session-changed ${sid} ${sname}\r\n`;
-  const winBlock = `%begin ${ts} 100 0\r\n${windowsBody}%end ${ts} 100 0\r\n`;
-  const paneBlock = `%begin ${ts} 101 0\r\n${panesBody}%end ${ts} 101 0\r\n`;
+  // flags=1 → user-command reply (real tmux uses 0 only for the implicit
+  // startup block; all user-command responses carry flags=1).
+  const winBlock = `%begin ${ts} 100 1\r\n${windowsBody}%end ${ts} 100 1\r\n`;
+  const paneBlock = `%begin ${ts} 101 1\r\n${panesBody}%end ${ts} 101 1\r\n`;
 
   return new TextEncoder().encode(preNotif + winBlock + paneBlock);
 }

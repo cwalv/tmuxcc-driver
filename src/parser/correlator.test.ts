@@ -68,6 +68,12 @@ function feedBuffer(
 // ---------------------------------------------------------------------------
 // 1. Two commands in FIFO order — each resolves with its own body
 // ---------------------------------------------------------------------------
+//
+// NOTE on flags values: real tmux uses flags=0 for the implicit startup block
+// (emitted once at session open, before any user commands) and flags=1 for
+// every user-command reply.  Tests that simulate command replies must use
+// flags=1 so the correlator correctly binds them to pending expectCommand()
+// slots.
 
 describe("FIFO correlation: two sequential commands", () => {
   it("resolves each command with its own body in registration order", async () => {
@@ -77,9 +83,10 @@ describe("FIFO correlation: two sequential commands", () => {
     const p1 = corr.expectCommand();
     const p2 = corr.expectCommand();
 
+    // flags=1 → user-command reply (as real tmux sends for bootstrap commands)
     const input = bytes(
-      "%begin 1000 1 0\nfirst body\n%end 1000 1 0\n" +
-        "%begin 2000 2 0\nsecond body\n%end 2000 2 0\n",
+      "%begin 1000 1 1\nfirst body\n%end 1000 1 1\n" +
+        "%begin 2000 2 1\nsecond body\n%end 2000 2 1\n",
     );
     feedBuffer(corr, input);
 
@@ -104,8 +111,8 @@ describe("FIFO correlation: two sequential commands", () => {
     feedBuffer(
       corr,
       bytes(
-        "%begin 10 10 0\nalpha\n%end 10 10 0\n" +
-          "%begin 20 11 0\nbeta\n%end 20 11 0\n",
+        "%begin 10 10 1\nalpha\n%end 10 10 1\n" +
+          "%begin 20 11 1\nbeta\n%end 20 11 1\n",
       ),
     );
 
@@ -137,9 +144,9 @@ describe("notifications interleaved between command blocks", () => {
     const p2 = corr.expectCommand();
 
     const input = bytes(
-      "%begin 100 1 0\nbody-one\n%end 100 1 0\n" +
+      "%begin 100 1 1\nbody-one\n%end 100 1 1\n" +
         "%output %1 hello\n" + // notification between blocks
-        "%begin 200 2 0\nbody-two\n%end 200 2 0\n",
+        "%begin 200 2 1\nbody-two\n%end 200 2 1\n",
     );
     feedBuffer(corr, input);
 
@@ -168,10 +175,10 @@ describe("notifications interleaved between command blocks", () => {
     feedBuffer(
       corr,
       bytes(
-        "%begin 1 1 0\na\n%end 1 1 0\n" +
+        "%begin 1 1 1\na\n%end 1 1 1\n" +
           "%sessions-changed\n" +
           "%window-add @1\n" +
-          "%begin 2 2 0\nb\n%end 2 2 0\n",
+          "%begin 2 2 1\nb\n%end 2 2 1\n",
       ),
     );
 
@@ -193,7 +200,7 @@ describe("notifications interleaved between command blocks", () => {
       corr,
       bytes(
         "%sessions-changed\n" +
-          "%begin 1 5 0\nresult\n%end 1 5 0\n",
+          "%begin 1 5 1\nresult\n%end 1 5 1\n",
       ),
     );
 
@@ -218,7 +225,7 @@ describe("block-body: % lines inside a block are body, not notifications", () =>
 
     // The tokenizer guarantees body lines start life as block-body tokens.
     // This test exercises the full tokenizer→correlator pipeline.
-    const input = bytes("%begin 500 2 0\n%output %1 some text\n%end 500 2 0\n");
+    const input = bytes("%begin 500 2 1\n%output %1 some text\n%end 500 2 1\n");
     feedBuffer(corr, input);
 
     const r1 = await p1;
@@ -239,10 +246,10 @@ describe("block-body: % lines inside a block are body, not notifications", () =>
     feedBuffer(
       corr,
       bytes(
-        "%begin 1 1 0\n" +
+        "%begin 1 1 1\n" +
           "%session-changed foo\n" +
           "%window-add @99\n" +
-          "%end 1 1 0\n",
+          "%end 1 1 1\n",
       ),
     );
 
@@ -270,7 +277,7 @@ describe("%error block resolves command as failed", () => {
 
     feedBuffer(
       corr,
-      bytes("%begin 9999 3 0\nbad command\n%error 9999 3 0\n"),
+      bytes("%begin 9999 3 1\nbad command\n%error 9999 3 1\n"),
     );
 
     const r1 = await p1;
@@ -283,7 +290,7 @@ describe("%error block resolves command as failed", () => {
     const corr = new CommandCorrelator();
     const p1 = corr.expectCommand();
 
-    feedBuffer(corr, bytes("%begin 1 1 0\n%error 1 1 0\n"));
+    feedBuffer(corr, bytes("%begin 1 1 1\n%error 1 1 1\n"));
 
     const r1 = await p1;
     assert.strictEqual(r1.ok, false);
@@ -298,8 +305,8 @@ describe("%error block resolves command as failed", () => {
     feedBuffer(
       corr,
       bytes(
-        "%begin 1 1 0\ngood\n%end 1 1 0\n" +
-          "%begin 2 2 0\nbad\n%error 2 2 0\n",
+        "%begin 1 1 1\ngood\n%end 1 1 1\n" +
+          "%begin 2 2 1\nbad\n%error 2 2 1\n",
       ),
     );
 
@@ -322,10 +329,10 @@ describe("non-UTF-8 body bytes preserved", () => {
     const nonUtf8 = new Uint8Array([0x80, 0xff, 0x00, 0xfe, 0xc3, 0x28]);
 
     const input = concat(
-      bytes("%begin 1 1 0\n"),
+      bytes("%begin 1 1 1\n"),
       nonUtf8,
       bytes("\n"),
-      bytes("%end 1 1 0\n"),
+      bytes("%end 1 1 1\n"),
     );
 
     const corr = new CommandCorrelator();
@@ -340,10 +347,10 @@ describe("non-UTF-8 body bytes preserved", () => {
     const withNull = new Uint8Array([0x61, 0x00, 0x62]); // "a\0b"
 
     const input = concat(
-      bytes("%begin 1 1 0\n"),
+      bytes("%begin 1 1 1\n"),
       withNull,
       bytes("\n"),
-      bytes("%end 1 1 0\n"),
+      bytes("%end 1 1 1\n"),
     );
 
     const corr = new CommandCorrelator();
@@ -364,7 +371,7 @@ describe("integration: ControlTokenizer → CommandCorrelator", () => {
     const corr = new CommandCorrelator();
     const p1 = corr.expectCommand();
 
-    const input = bytes("%begin 42 7 0\nhello world\n%end 42 7 0\n");
+    const input = bytes("%begin 42 7 1\nhello world\n%end 42 7 1\n");
 
     // Feed byte-by-byte through the tokenizer
     const tok = new ControlTokenizer();
@@ -384,7 +391,7 @@ describe("integration: ControlTokenizer → CommandCorrelator", () => {
     const corr = new CommandCorrelator();
     const p1 = corr.expectCommand();
 
-    const tokens = tokenizeBuffer(bytes("%begin 1 1 0\ndata\n%end 1 1 0\n"));
+    const tokens = tokenizeBuffer(bytes("%begin 1 1 1\ndata\n%end 1 1 1\n"));
     for (const token of tokens) {
       corr.push(token);
     }
@@ -404,11 +411,11 @@ describe("integration: ControlTokenizer → CommandCorrelator", () => {
     const p3 = corr.expectCommand();
 
     const input = bytes(
-      "%begin 1 1 0\nblock-one\n%end 1 1 0\n" +
+      "%begin 1 1 1\nblock-one\n%end 1 1 1\n" +
         "%window-add @1\n" +
-        "%begin 2 2 0\nblock-two\n%end 2 2 0\n" +
+        "%begin 2 2 1\nblock-two\n%end 2 2 1\n" +
         "%sessions-changed\n" +
-        "%begin 3 3 0\nblock-three\n%error 3 3 0\n",
+        "%begin 3 3 1\nblock-three\n%error 3 3 1\n",
     );
 
     feedBuffer(corr, input);
@@ -433,7 +440,7 @@ describe("integration: ControlTokenizer → CommandCorrelator", () => {
     const corr = new CommandCorrelator();
     const p1 = corr.expectCommand();
 
-    feedBuffer(corr, bytes("%begin 1 1 0\n%end 1 1 0\n"));
+    feedBuffer(corr, bytes("%begin 1 1 1\n%end 1 1 1\n"));
 
     const r1 = await p1;
     assert.strictEqual(r1.ok, true);
@@ -446,7 +453,7 @@ describe("integration: ControlTokenizer → CommandCorrelator", () => {
 
     feedBuffer(
       corr,
-      bytes("%begin 1 1 0\nline-a\nline-b\nline-c\n%end 1 1 0\n"),
+      bytes("%begin 1 1 1\nline-a\nline-b\nline-c\n%end 1 1 1\n"),
     );
 
     const r1 = await p1;
@@ -454,5 +461,77 @@ describe("integration: ControlTokenizer → CommandCorrelator", () => {
     // Correlator concatenates them directly.
     const expected = concat(bytes("line-a"), bytes("line-b"), bytes("line-c"));
     assertBytesEqual(r1.body, expected, "multi-line body concatenated");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. Startup block (flags=0) is NOT bound to pending expectCommand() slots
+// ---------------------------------------------------------------------------
+//
+// Real tmux sends one implicit startup block (%begin ... 0 / %end ... 0) at
+// the very beginning of a -CC session, before any user commands. This block
+// must NOT consume an expectCommand() slot, otherwise the bootstrap command
+// sequence (list-windows, list-panes) gets corrupted.
+
+describe("startup block (flags=0) does not consume expectCommand() slots", () => {
+  it("startup block before user commands is silently discarded", async () => {
+    const corr = new CommandCorrelator();
+
+    // Register a slot for a real command reply
+    const p1 = corr.expectCommand();
+
+    // Simulate: startup block (flags=0) arrives first, then the real command reply (flags=1)
+    feedBuffer(
+      corr,
+      bytes(
+        "%begin 1000 272 0\n%end 1000 272 0\n" +   // startup block (flags=0) → discard
+          "%begin 1000 277 1\nmy result\n%end 1000 277 1\n", // real reply (flags=1) → slot 1
+      ),
+    );
+
+    const r1 = await p1;
+    assert.strictEqual(r1.ok, true, "real command resolved");
+    assert.strictEqual(r1.commandNumber, 277, "correct cmdnum");
+    assertBytesEqual(r1.body, bytes("my result"), "correct body");
+  });
+
+  it("bootstrap sequence: startup + list-windows + list-panes all resolve correctly", async () => {
+    const corr = new CommandCorrelator();
+
+    // Register two slots (like pipeline.ts bootstrap)
+    const winP = corr.expectCommand();
+    const paneP = corr.expectCommand();
+
+    // Simulate exact tmux startup sequence from golden fixture
+    feedBuffer(
+      corr,
+      bytes(
+        // startup block (flags=0) — must NOT consume winP
+        "%begin 1000 272 0\n%end 1000 272 0\n" +
+          // list-windows reply (flags=1) — must resolve winP
+          "%begin 1000 277 1\n0: zsh* [80x24]\n%end 1000 277 1\n" +
+          // list-panes reply (flags=1) — must resolve paneP
+          "%begin 1000 278 1\n0: [80x24] %0\n%end 1000 278 1\n",
+      ),
+    );
+
+    const winResult = await winP;
+    const paneResult = await paneP;
+
+    assert.strictEqual(winResult.ok, true, "list-windows ok");
+    assert.strictEqual(winResult.commandNumber, 277, "list-windows cmdnum");
+    assertBytesEqual(winResult.body, bytes("0: zsh* [80x24]"), "list-windows body");
+
+    assert.strictEqual(paneResult.ok, true, "list-panes ok");
+    assert.strictEqual(paneResult.commandNumber, 278, "list-panes cmdnum");
+    assertBytesEqual(paneResult.body, bytes("0: [80x24] %0"), "list-panes body");
+  });
+
+  it("startup block with no pending slots is silently discarded", async () => {
+    // No expectCommand() registered — startup block should not throw
+    const corr = new CommandCorrelator();
+    assert.doesNotThrow(() => {
+      feedBuffer(corr, bytes("%begin 1000 272 0\n%end 1000 272 0\n"));
+    }, "startup block with no pending slots is silently discarded");
   });
 });

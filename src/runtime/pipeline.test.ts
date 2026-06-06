@@ -162,7 +162,9 @@ function bytes(s: string): Uint8Array {
 
 function makeCommandBlock(cmdNum: number, body: string): string {
   const ts = 1000000;
-  return `%begin ${ts} ${cmdNum} 0\r\n${body}%end ${ts} ${cmdNum} 0\r\n`;
+  // flags=1 → user-command reply (real tmux uses 0 only for the implicit
+  // startup block; all user-command responses carry flags=1).
+  return `%begin ${ts} ${cmdNum} 1\r\n${body}%end ${ts} ${cmdNum} 1\r\n`;
 }
 
 // ---------------------------------------------------------------------------

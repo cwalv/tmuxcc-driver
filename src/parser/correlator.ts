@@ -156,6 +156,12 @@ export class CommandCorrelator {
     commandNumber: number;
     bodyChunks: Uint8Array[];
     bodyLen: number;
+    /**
+     * True when this in-flight block was opened by a %begin with flags=0
+     * (the implicit tmux startup block).  Startup blocks must NOT be matched
+     * to any pending expectCommand() slot — they are silently discarded on close.
+     */
+    isStartupBlock: boolean;
   } | null = null;
 
   constructor(options: CommandCorrelatorOptions = {}) {
@@ -249,12 +255,26 @@ export class CommandCorrelator {
       );
     }
 
+    // tmux uses flags=0 for the implicit startup block that it emits once at
+    // the very start of a -CC session (before responding to any user commands).
+    // This block is NOT the reply to any expectCommand() slot — binding it to
+    // the oldest pending entry would consume a slot intended for the first real
+    // bootstrap command (list-windows), corrupting the FIFO sequence.
+    const isStartupBlock = token.flags === 0;
+
     // Open a new in-flight accumulation slot.
     this._inFlight = {
       commandNumber: token.commandNumber,
       bodyChunks: [],
       bodyLen: 0,
+      isStartupBlock,
     };
+
+    if (isStartupBlock) {
+      // Startup block: accumulate body/end but do NOT bind to any pending entry.
+      // _closeBlock will check isStartupBlock and silently discard on close.
+      return;
+    }
 
     // Bind the commandNumber to the oldest pending command, if any.
     const oldest = this._pending[0];
@@ -308,10 +328,18 @@ export class CommandCorrelator {
       return;
     }
 
+    const { isStartupBlock } = this._inFlight;
+
     // Materialise the accumulated body.
     const body = this._collectBody();
     const commandNumber = closingCmdNum;
     this._inFlight = null;
+
+    // Startup blocks (flags=0) are never bound to a pending expectCommand() slot.
+    // Silently discard rather than dequeuing from _pending.
+    if (isStartupBlock) {
+      return;
+    }
 
     // Dequeue the oldest pending command.
     const pending = this._pending.shift();
