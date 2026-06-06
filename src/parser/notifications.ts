@@ -60,7 +60,7 @@
  */
 
 import type { NotificationToken } from "./tokenizer.js";
-import type { WindowId } from "../wire/ids.js";
+import type { WindowId } from "../ids.js";
 
 // ---------------------------------------------------------------------------
 // Event types
