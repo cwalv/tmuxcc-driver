@@ -101,7 +101,7 @@ function makeWindow(
   activePaneId: PaneId | null,
   name = "win",
 ): Window {
-  return { windowId: wid, sessionId: sid, name, paneIds, activePaneId, layout: null, synchronizePanes: false };
+  return { windowId: wid, sessionId: sid, name, paneIds, activePaneId, layout: null, synchronizePanes: false, monitorActivity: true, monitorSilence: 0 }; // ── tc-7xv.15 ──
 }
 
 function makePane(
@@ -1020,5 +1020,126 @@ describe("reducer: multiple events sequenced", () => {
 
     const bytes = store.getContents(P1);
     assert.deepEqual(bytes, enc.encode("foobar"), "bytes accumulated in order");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// tc-7xv.15: internal:set-window-monitor-activity
+// ---------------------------------------------------------------------------
+
+describe("reducer: internal:set-window-monitor-activity (tc-7xv.15)", () => {
+  it("sets monitorActivity to false when window has it true", () => {
+    const model = baseModel();
+    // Baseline: window-add initialises monitorActivity to true
+    assert.equal(model.windows.get(W1)!.monitorActivity, true, "initial monitorActivity is true");
+
+    const { ctx } = makeCtx();
+    const event: NotificationEvent = {
+      kind: "internal:set-window-monitor-activity",
+      windowId: W1,
+      on: false,
+    };
+    const after = reduce(model, event, ctx);
+
+    assert.equal(after.windows.get(W1)!.monitorActivity, false, "monitorActivity toggled off");
+    assert.deepEqual(checkInvariants(after), [], "no invariant violations");
+  });
+
+  it("sets monitorActivity to true", () => {
+    const model = baseModel();
+    const { ctx } = makeCtx();
+    // First set to false
+    let m = reduce(model, { kind: "internal:set-window-monitor-activity", windowId: W1, on: false }, ctx);
+    assert.equal(m.windows.get(W1)!.monitorActivity, false);
+
+    // Then set back to true
+    m = reduce(m, { kind: "internal:set-window-monitor-activity", windowId: W1, on: true }, ctx);
+    assert.equal(m.windows.get(W1)!.monitorActivity, true, "monitorActivity restored to true");
+  });
+
+  it("returns same model reference when monitorActivity unchanged", () => {
+    const model = baseModel();
+    // monitorActivity starts as true; sending on:true is a no-op
+    const { ctx } = makeCtx();
+    const event: NotificationEvent = {
+      kind: "internal:set-window-monitor-activity",
+      windowId: W1,
+      on: true,
+    };
+    const after = reduce(model, event, ctx);
+
+    assert.strictEqual(after, model, "same model reference returned on no-op");
+  });
+
+  it("unknown window id → no-op, model unchanged", () => {
+    const model = baseModel();
+    const { ctx } = makeCtx();
+    const event: NotificationEvent = {
+      kind: "internal:set-window-monitor-activity",
+      windowId: windowId("w999"),
+      on: false,
+    };
+    const after = reduce(model, event, ctx);
+
+    assert.strictEqual(after, model, "unknown window id is a no-op");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// tc-7xv.15: internal:set-window-monitor-silence
+// ---------------------------------------------------------------------------
+
+describe("reducer: internal:set-window-monitor-silence (tc-7xv.15)", () => {
+  it("sets monitorSilence to 30 when window has it 0", () => {
+    const model = baseModel();
+    assert.equal(model.windows.get(W1)!.monitorSilence, 0, "initial monitorSilence is 0");
+
+    const { ctx } = makeCtx();
+    const event: NotificationEvent = {
+      kind: "internal:set-window-monitor-silence",
+      windowId: W1,
+      seconds: 30,
+    };
+    const after = reduce(model, event, ctx);
+
+    assert.equal(after.windows.get(W1)!.monitorSilence, 30, "monitorSilence set to 30");
+    assert.deepEqual(checkInvariants(after), [], "no invariant violations");
+  });
+
+  it("sets monitorSilence back to 0 (disable)", () => {
+    const model = baseModel();
+    const { ctx } = makeCtx();
+    let m = reduce(model, { kind: "internal:set-window-monitor-silence", windowId: W1, seconds: 60 }, ctx);
+    assert.equal(m.windows.get(W1)!.monitorSilence, 60);
+
+    m = reduce(m, { kind: "internal:set-window-monitor-silence", windowId: W1, seconds: 0 }, ctx);
+    assert.equal(m.windows.get(W1)!.monitorSilence, 0, "monitorSilence disabled");
+  });
+
+  it("returns same model reference when monitorSilence unchanged", () => {
+    const model = baseModel();
+    // monitorSilence starts as 0; sending seconds:0 is a no-op
+    const { ctx } = makeCtx();
+    const event: NotificationEvent = {
+      kind: "internal:set-window-monitor-silence",
+      windowId: W1,
+      seconds: 0,
+    };
+    const after = reduce(model, event, ctx);
+
+    assert.strictEqual(after, model, "same model reference returned on no-op");
+  });
+
+  it("unknown window id → no-op, model unchanged", () => {
+    const model = baseModel();
+    const { ctx } = makeCtx();
+    const event: NotificationEvent = {
+      kind: "internal:set-window-monitor-silence",
+      windowId: windowId("w999"),
+      seconds: 45,
+    };
+    const after = reduce(model, event, ctx);
+
+    assert.strictEqual(after, model, "unknown window id is a no-op");
   });
 });

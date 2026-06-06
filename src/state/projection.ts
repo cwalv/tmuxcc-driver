@@ -72,6 +72,8 @@ import type {
   WindowClosedMessage,
   WindowRenamedMessage,
   WindowSyncChangedMessage,
+  WindowMonitorActivityChangedMessage,
+  WindowMonitorSilenceChangedMessage,
   LayoutUpdatedMessage,
   FocusChangedMessage,
   DaemonSessionRenamedMessage,
@@ -142,6 +144,9 @@ export function projectSnapshot(
       },
       // tc-7xv.12: synchronize-panes state at snapshot time.
       synchronizePanes: win.synchronizePanes,
+      // tc-7xv.15: monitor-activity / monitor-silence state at snapshot time.
+      monitorActivity: win.monitorActivity,
+      monitorSilence: win.monitorSilence,
     });
   }
 
@@ -307,6 +312,40 @@ export function diffModel(prev: SessionModel, next: SessionModel): DaemonMessage
         seq: SEQ,
         windowId: win.windowId,
         on: win.synchronizePanes,
+      };
+      out.push(msg);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 6c. window.monitor.activity.changed — monitor-activity toggle (tc-7xv.15)
+  // -------------------------------------------------------------------------
+  for (const [id, win] of next.windows) {
+    const prevWin = prev.windows.get(id);
+    if (!prevWin) continue; // new windows handled above
+    if (prevWin.monitorActivity !== win.monitorActivity) {
+      const msg: WindowMonitorActivityChangedMessage = {
+        type: "window.monitor.activity.changed",
+        seq: SEQ,
+        windowId: win.windowId,
+        on: win.monitorActivity,
+      };
+      out.push(msg);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 6d. window.monitor.silence.changed — monitor-silence toggle (tc-7xv.15)
+  // -------------------------------------------------------------------------
+  for (const [id, win] of next.windows) {
+    const prevWin = prev.windows.get(id);
+    if (!prevWin) continue; // new windows handled above
+    if (prevWin.monitorSilence !== win.monitorSilence) {
+      const msg: WindowMonitorSilenceChangedMessage = {
+        type: "window.monitor.silence.changed",
+        seq: SEQ,
+        windowId: win.windowId,
+        seconds: win.monitorSilence,
       };
       out.push(msg);
     }

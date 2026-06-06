@@ -479,6 +479,8 @@ export function buildInitialModel(
       activePaneId, // we know the active pane from panes reply
       layout,
       synchronizePanes: false, // default; updated by hook if already on (tc-7xv.12)
+      monitorActivity: true,   // ── tc-7xv.15 ── default; updated by hook if off
+      monitorSilence: 0,       // ── tc-7xv.15 ── default; updated by hook if on
     };
 
     // addWindow appends to session.windowIds and sets session.activeWindowId

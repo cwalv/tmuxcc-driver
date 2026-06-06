@@ -423,6 +423,8 @@ export function reduce(
         activePaneId: null,
         layout: null,
         synchronizePanes: false,
+        monitorActivity: true,  // inherits global default (set-option -wg monitor-activity on)
+        monitorSilence: 0,      // off by default (HANDOFF §4.7)
       };
       return addWindow(model, win);
     }
@@ -718,6 +720,42 @@ export function reduce(
       if (win.synchronizePanes === event.on) return model; // no change
       return updateWindow(model, event.windowId, { synchronizePanes: event.on });
     }
+
+    // ── tc-7xv.15 ──────────────────────────────────────────────────────────────
+
+    // -------------------------------------------------------------------------
+    // internal:set-window-monitor-activity — optimistic model update (tc-7xv.15)
+    //
+    // Synthetic event injected by input-path.ts after sending
+    // `set-option -wt @N monitor-activity on|off` to tmux.
+    //
+    // Assumption: tmux applied the option. Error reversal is out of scope.
+    // -------------------------------------------------------------------------
+    case "internal:set-window-monitor-activity": {
+      const win = model.windows.get(event.windowId);
+      if (!win) return model; // window not in model — drop
+      if (win.monitorActivity === event.on) return model; // no change
+      return updateWindow(model, event.windowId, { monitorActivity: event.on });
+    }
+
+    // -------------------------------------------------------------------------
+    // internal:set-window-monitor-silence — optimistic model update (tc-7xv.15)
+    //
+    // Synthetic event injected by input-path.ts after sending
+    // `set-option -wt @N monitor-silence <seconds|0>` to tmux.
+    //
+    // `seconds === 0` means disabled (tmux interprets `monitor-silence 0` as off).
+    //
+    // Assumption: tmux applied the option. Error reversal is out of scope.
+    // -------------------------------------------------------------------------
+    case "internal:set-window-monitor-silence": {
+      const win = model.windows.get(event.windowId);
+      if (!win) return model; // window not in model — drop
+      if (win.monitorSilence === event.seconds) return model; // no change
+      return updateWindow(model, event.windowId, { monitorSilence: event.seconds });
+    }
+
+    // ── end tc-7xv.15 ─────────────────────────────────────────────────────────
 
     // -------------------------------------------------------------------------
     // Exhaustiveness check

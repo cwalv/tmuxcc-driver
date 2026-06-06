@@ -760,3 +760,195 @@ describe("createInputPath — rename-pane command (tc-7xv.9)", () => {
     assert.equal(host.writes.length, 0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Suite: tc-7xv.15 — set-monitor-activity / set-monitor-silence commands
+// ---------------------------------------------------------------------------
+
+import type { NotificationEvent } from "../parser/notifications.js";
+
+describe("createInputPath — set-monitor-activity (tc-7xv.15)", () => {
+  it("set-monitor-activity on → set-option -wt @<N> monitor-activity on", () => {
+    const host = makeFakeHost();
+    const path = createInputPath(host);
+
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "ma1",
+      command: { kind: "set-monitor-activity", windowId: windowId("w3"), on: true },
+    };
+    path.handleClientMessage(msg);
+
+    assert.equal(host.lastWrite, "set-option -wt @3 monitor-activity on\n");
+  });
+
+  it("set-monitor-activity off → set-option -wt @<N> monitor-activity off", () => {
+    const host = makeFakeHost();
+    const path = createInputPath(host);
+
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "ma2",
+      command: { kind: "set-monitor-activity", windowId: windowId("w5"), on: false },
+    };
+    path.handleClientMessage(msg);
+
+    assert.equal(host.lastWrite, "set-option -wt @5 monitor-activity off\n");
+  });
+
+  it("set-monitor-activity dispatches synthetic internal event", () => {
+    const host = makeFakeHost();
+    const dispatched: NotificationEvent[] = [];
+    const path = createInputPath(host, {
+      dispatchSynthetic: (ev) => { dispatched.push(ev); },
+    });
+
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "ma3",
+      command: { kind: "set-monitor-activity", windowId: windowId("w7"), on: true },
+    };
+    path.handleClientMessage(msg);
+
+    assert.equal(dispatched.length, 1);
+    assert.deepEqual(dispatched[0], {
+      kind: "internal:set-window-monitor-activity",
+      windowId: windowId("w7"),
+      on: true,
+    });
+  });
+
+  it("set-monitor-activity with invalid window id drops the message", () => {
+    const host = makeFakeHost();
+    const dispatched: NotificationEvent[] = [];
+    const path = createInputPath(host, {
+      dispatchSynthetic: (ev) => { dispatched.push(ev); },
+    });
+
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "ma-bad",
+      command: { kind: "set-monitor-activity", windowId: windowId("BAD"), on: true },
+    };
+    path.handleClientMessage(msg);
+
+    assert.equal(host.writes.length, 0);
+    assert.equal(dispatched.length, 0);
+  });
+});
+
+describe("createInputPath — set-monitor-silence (tc-7xv.15)", () => {
+  it("set-monitor-silence 30 → set-option -wt @<N> monitor-silence 30", () => {
+    const host = makeFakeHost();
+    const path = createInputPath(host);
+
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "ms1",
+      command: { kind: "set-monitor-silence", windowId: windowId("w2"), seconds: 30 },
+    };
+    path.handleClientMessage(msg);
+
+    assert.equal(host.lastWrite, "set-option -wt @2 monitor-silence 30\n");
+  });
+
+  it("set-monitor-silence null → set-option -wt @<N> monitor-silence 0 (disable)", () => {
+    const host = makeFakeHost();
+    const path = createInputPath(host);
+
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "ms2",
+      command: { kind: "set-monitor-silence", windowId: windowId("w4"), seconds: null },
+    };
+    path.handleClientMessage(msg);
+
+    assert.equal(host.lastWrite, "set-option -wt @4 monitor-silence 0\n");
+  });
+
+  it("set-monitor-silence 0 → set-option -wt @<N> monitor-silence 0 (disable)", () => {
+    const host = makeFakeHost();
+    const path = createInputPath(host);
+
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "ms3",
+      command: { kind: "set-monitor-silence", windowId: windowId("w1"), seconds: 0 },
+    };
+    path.handleClientMessage(msg);
+
+    assert.equal(host.lastWrite, "set-option -wt @1 monitor-silence 0\n");
+  });
+
+  it("set-monitor-silence dispatches synthetic internal event with normalised seconds", () => {
+    const host = makeFakeHost();
+    const dispatched: NotificationEvent[] = [];
+    const path = createInputPath(host, {
+      dispatchSynthetic: (ev) => { dispatched.push(ev); },
+    });
+
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "ms4",
+      command: { kind: "set-monitor-silence", windowId: windowId("w6"), seconds: 60 },
+    };
+    path.handleClientMessage(msg);
+
+    assert.equal(dispatched.length, 1);
+    assert.deepEqual(dispatched[0], {
+      kind: "internal:set-window-monitor-silence",
+      windowId: windowId("w6"),
+      seconds: 60,
+    });
+  });
+
+  it("set-monitor-silence null dispatches synthetic event with seconds=0", () => {
+    const host = makeFakeHost();
+    const dispatched: NotificationEvent[] = [];
+    const path = createInputPath(host, {
+      dispatchSynthetic: (ev) => { dispatched.push(ev); },
+    });
+
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "ms5",
+      command: { kind: "set-monitor-silence", windowId: windowId("w8"), seconds: null },
+    };
+    path.handleClientMessage(msg);
+
+    assert.equal(dispatched.length, 1);
+    assert.deepEqual(dispatched[0], {
+      kind: "internal:set-window-monitor-silence",
+      windowId: windowId("w8"),
+      seconds: 0,
+    });
+  });
+
+  it("set-monitor-silence with invalid window id drops the message", () => {
+    const host = makeFakeHost();
+    const dispatched: NotificationEvent[] = [];
+    const path = createInputPath(host, {
+      dispatchSynthetic: (ev) => { dispatched.push(ev); },
+    });
+
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "ms-bad",
+      command: { kind: "set-monitor-silence", windowId: windowId("BAD"), seconds: 30 },
+    };
+    path.handleClientMessage(msg);
+
+    assert.equal(host.writes.length, 0);
+    assert.equal(dispatched.length, 0);
+  });
+});

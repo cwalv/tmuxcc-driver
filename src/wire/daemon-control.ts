@@ -188,6 +188,16 @@ export interface SnapshotWindow {
    * tc-7xv.12: present in all snapshots; defaults to false.
    */
   readonly synchronizePanes: boolean;
+  /**
+   * True when `monitor-activity` is on for this window at snapshot time.
+   * tc-7xv.15: present in all snapshots; defaults to true (global default).
+   */
+  readonly monitorActivity: boolean;
+  /**
+   * Current `monitor-silence` threshold in seconds, or 0 when disabled.
+   * tc-7xv.15: present in all snapshots; defaults to 0 (off).
+   */
+  readonly monitorSilence: number;
 }
 
 /**
@@ -318,6 +328,53 @@ export interface WindowSyncChangedMessage extends MessageBase {
   readonly windowId: WindowId;
   /** True when synchronize-panes is on for this window. */
   readonly on: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Additional Deltas — monitor-activity / monitor-silence state (tc-7xv.15)
+// ---------------------------------------------------------------------------
+
+/**
+ * The monitor-activity state of a window has changed.
+ * direction: daemon→client
+ *
+ * Emitted by the daemon when `monitor-activity` is toggled for a window via a
+ * `set-monitor-activity` command (tc-7xv.15, optimistic update).
+ *
+ * `on: true`  → activity monitoring is active for this window.
+ * `on: false` → activity monitoring is disabled.
+ *
+ * Non-breaking additive delta — older clients that do not recognise this type
+ * fall through to the `default` branch in `applyDelta` and ignore it.
+ */
+export interface WindowMonitorActivityChangedMessage extends MessageBase {
+  readonly type: "window.monitor.activity.changed";
+  readonly windowId: WindowId;
+  /** True when monitor-activity is on for this window. */
+  readonly on: boolean;
+}
+
+/**
+ * The monitor-silence state of a window has changed.
+ * direction: daemon→client
+ *
+ * Emitted by the daemon when `monitor-silence` is toggled for a window via a
+ * `set-monitor-silence` command (tc-7xv.15, optimistic update).
+ *
+ * `seconds > 0` → silence monitoring is active (fires after N seconds of no output).
+ * `seconds === 0` → silence monitoring is disabled (tmux `monitor-silence 0` = off).
+ *
+ * Non-breaking additive delta — older clients that do not recognise this type
+ * fall through to the `default` branch in `applyDelta` and ignore it.
+ */
+export interface WindowMonitorSilenceChangedMessage extends MessageBase {
+  readonly type: "window.monitor.silence.changed";
+  readonly windowId: WindowId;
+  /**
+   * Silence threshold in seconds (positive = on), or 0 when disabled.
+   * Clients may treat 0 as "off" and any positive value as "on for N seconds".
+   */
+  readonly seconds: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -590,6 +647,52 @@ export interface RenamePaneCommand {
   /** New display title.  Empty string clears the tmux title. */
   readonly title: string;
 }
+// ── tc-7xv.15: monitor-activity / monitor-silence commands ──────────────────
+
+/**
+ * Set `monitor-activity` for a window.
+ * direction: client→daemon
+ *
+ * The daemon emits `set-option -wt @<N> monitor-activity on|off` and injects
+ * an optimistic `internal:set-window-monitor-activity` event to update the
+ * model immediately (tc-7xv.15).
+ *
+ * `windowId` is the wire WindowId of the target window (e.g. "w3").
+ * `on: true` enables activity monitoring; `on: false` disables it.
+ *
+ * Additive addition — non-breaking per the versioning policy.
+ */
+export interface SetMonitorActivityCommand {
+  readonly kind: "set-monitor-activity";
+  readonly windowId: WindowId;
+  /** True to enable monitor-activity; false to disable. */
+  readonly on: boolean;
+}
+
+/**
+ * Set `monitor-silence` for a window.
+ * direction: client→daemon
+ *
+ * The daemon emits `set-option -wt @<N> monitor-silence <seconds>` (when
+ * enabling) or `set-option -wt @<N> monitor-silence 0` (when disabling) and
+ * injects an optimistic `internal:set-window-monitor-silence` event (tc-7xv.15).
+ *
+ * `windowId` is the wire WindowId of the target window (e.g. "w3").
+ * `seconds`: positive number to enable silence monitoring after that many
+ *   seconds of inactivity; 0 or null to disable.
+ *
+ * Additive addition — non-breaking per the versioning policy.
+ */
+export interface SetMonitorSilenceCommand {
+  readonly kind: "set-monitor-silence";
+  readonly windowId: WindowId;
+  /**
+   * Silence threshold in seconds (1..N to enable), or 0/null to disable.
+   * tmux interprets `monitor-silence 0` as "off".
+   */
+  readonly seconds: number | null;
+}
+
 // ── tc-7xv.18: window verbs ──────────────────────────────────────────────────
 
 /**
@@ -647,6 +750,9 @@ export type WireCommand =
   | ResizePaneCommand
   | KillSessionCommand
   | SetSynchronizePanesCommand
+  // tc-7xv.15: monitor-activity / monitor-silence
+  | SetMonitorActivityCommand
+  | SetMonitorSilenceCommand
   // tc-7xv.9: pane verbs
   | BreakPaneCommand
   | SwapPaneCommand
@@ -854,7 +960,7 @@ export interface ResyncRequestMessage extends MessageBase {
  *   Capabilities:  DaemonCapabilitiesMessage
  *   Snapshot:      SnapshotMessage
  *   Pane deltas:   PaneOpenedMessage | PaneClosedMessage | PaneResizedMessage | PaneModeChangedMessage
- *   Window deltas: WindowAddedMessage | WindowClosedMessage | WindowRenamedMessage | WindowSyncChangedMessage
+ *   Window deltas: WindowAddedMessage | WindowClosedMessage | WindowRenamedMessage | WindowSyncChangedMessage | WindowMonitorActivityChangedMessage | WindowMonitorSilenceChangedMessage
  *   Layout deltas: LayoutUpdatedMessage
  *   Focus deltas:  FocusChangedMessage
  *   Session delta: DaemonSessionRenamedMessage
@@ -878,6 +984,9 @@ export type DaemonMessage =
   | WindowRenamedMessage
   // Sync-panes delta (tc-7xv.12)
   | WindowSyncChangedMessage
+  // Monitor deltas (tc-7xv.15)
+  | WindowMonitorActivityChangedMessage
+  | WindowMonitorSilenceChangedMessage
   // Layout deltas
   | LayoutUpdatedMessage
   // Focus deltas
@@ -931,6 +1040,9 @@ export function isDaemonMessage(msg: ControlMessage): msg is DaemonMessage {
     t === "window.renamed" ||
     // Sync-panes delta (tc-7xv.12)
     t === "window.sync.changed" ||
+    // Monitor deltas (tc-7xv.15)
+    t === "window.monitor.activity.changed" ||
+    t === "window.monitor.silence.changed" ||
     // Layout deltas
     t === "layout.updated" ||
     // Focus deltas

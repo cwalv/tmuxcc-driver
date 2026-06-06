@@ -386,6 +386,65 @@ export function createInputPath(
             break;
           }
 
+          // ── tc-7xv.15: monitor-activity / monitor-silence ─────────────────
+
+          case "set-monitor-activity": {
+            // set-option -wt @<N> monitor-activity on|off  (tc-7xv.15)
+            //
+            // Toggles tmux's monitor-activity option for the target window.
+            // When on, tmux flags this window in status-bar when panes produce
+            // output while the window is in the background.
+            //
+            // Optimistic model update: after sending the tmux command we
+            // immediately inject a synthetic NotificationEvent to update the
+            // model without waiting for a tmux notification.  tmux 3.4 does NOT
+            // emit %window-option-changed for monitor-activity.  Same pattern
+            // as set-synchronize-panes (tc-7xv.12).
+            const tmuxWinNum = toTmuxWindow(command.windowId);
+            if (!validWindowId(tmuxWinNum, command.windowId as string)) return;
+
+            sendCommand(setOptionForWindow(tmuxWinNum, "monitor-activity", command.on ? "on" : "off"));
+
+            // Inject the synthetic model update so diffModel emits
+            // window.monitor.activity.changed and downstream clients see the change.
+            dispatchSynthetic?.({
+              kind: "internal:set-window-monitor-activity",
+              windowId: command.windowId,
+              on: command.on,
+            });
+            break;
+          }
+
+          case "set-monitor-silence": {
+            // set-option -wt @<N> monitor-silence <seconds>  (tc-7xv.15)
+            //
+            // Enables or disables tmux's monitor-silence option for the target
+            // window.  `seconds === null` or `seconds === 0` → disables (sends
+            // `monitor-silence 0`).  Positive seconds → enables.
+            //
+            // tmux interprets `monitor-silence 0` as disabled; any positive
+            // integer is the threshold in seconds.
+            //
+            // Optimistic model update: same pattern as set-synchronize-panes
+            // (tc-7xv.12).  We do NOT emit %window-option-changed.
+            const tmuxWinNum = toTmuxWindow(command.windowId);
+            if (!validWindowId(tmuxWinNum, command.windowId as string)) return;
+
+            const secondsVal = command.seconds !== null && command.seconds > 0 ? command.seconds : 0;
+            sendCommand(setOptionForWindow(tmuxWinNum, "monitor-silence", String(secondsVal)));
+
+            // Inject the synthetic model update so diffModel emits
+            // window.monitor.silence.changed and downstream clients see the change.
+            dispatchSynthetic?.({
+              kind: "internal:set-window-monitor-silence",
+              windowId: command.windowId,
+              seconds: secondsVal,
+            });
+            break;
+          }
+
+          // ── end tc-7xv.15 ────────────────────────────────────────────────────
+
           // ── tc-7xv.9: pane verbs ───────────────────────────────────────────
 
           case "break-pane": {

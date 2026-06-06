@@ -293,6 +293,48 @@ export interface InternalWindowSyncSetNotification {
   readonly on: boolean;
 }
 
+// ── tc-7xv.15 ─────────────────────────────────────────────────────────────────
+
+/**
+ * Synthetic internal event: the daemon applied a set-monitor-activity command
+ * and assumes tmux accepted it.
+ *
+ * This event is NEVER parsed from tmux control-mode output — it is injected by
+ * input-path.ts after sending `set-option -wt @N monitor-activity on|off` to
+ * tmux (tc-7xv.15 optimistic-update pattern).
+ *
+ * Assumption: tmux applied the option. If tmux rejects it (e.g. no such
+ * window), the model will be stale until the next bootstrap. Error reversal
+ * is out of scope — documented as a known limitation.
+ */
+export interface InternalWindowMonitorActivitySetNotification {
+  readonly kind: "internal:set-window-monitor-activity";
+  readonly windowId: WindowId;
+  readonly on: boolean;
+}
+
+/**
+ * Synthetic internal event: the daemon applied a set-monitor-silence command
+ * and assumes tmux accepted it.
+ *
+ * This event is NEVER parsed from tmux control-mode output — it is injected by
+ * input-path.ts after sending `set-option -wt @N monitor-silence <seconds|0>`
+ * to tmux (tc-7xv.15 optimistic-update pattern).
+ *
+ * `seconds === 0` means disabled (tmux `monitor-silence 0` = off).
+ *
+ * Assumption: tmux applied the option. If tmux rejects it, the model will be
+ * stale. Error reversal is out of scope.
+ */
+export interface InternalWindowMonitorSilenceSetNotification {
+  readonly kind: "internal:set-window-monitor-silence";
+  readonly windowId: WindowId;
+  /** 0 means disabled; positive values are the threshold in seconds. */
+  readonly seconds: number;
+}
+
+// ── end tc-7xv.15 ─────────────────────────────────────────────────────────────
+
 // ---------------------------------------------------------------------------
 // Discriminated union
 // ---------------------------------------------------------------------------
@@ -315,7 +357,10 @@ export type NotificationEvent =
   | ContinueNotification
   | ExitNotification
   | UnknownNotification
-  | InternalWindowSyncSetNotification;
+  | InternalWindowSyncSetNotification
+  // tc-7xv.15: monitor-activity / monitor-silence
+  | InternalWindowMonitorActivitySetNotification
+  | InternalWindowMonitorSilenceSetNotification;
 
 // ---------------------------------------------------------------------------
 // Internal parsing helpers (byte-level, zero-copy where possible)

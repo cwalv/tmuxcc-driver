@@ -94,6 +94,8 @@ function applyDeltas(snap: SnapshotMessage, deltas: DaemonMessage[]): SnapshotMe
             name: delta.name,
             active: delta.active,
             synchronizePanes: false,
+            monitorActivity: true,  // ── tc-7xv.15 ──
+            monitorSilence: 0,      // ── tc-7xv.15 ──
             layout: {
               cols: 0,
               rows: 0,

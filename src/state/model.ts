@@ -190,6 +190,26 @@ export interface Window {
    * See tc-7xv.12.
    */
   readonly synchronizePanes: boolean;
+  /**
+   * Whether `monitor-activity` is currently on for this window (tc-7xv.15).
+   *
+   * When true, tmux flags this window when any pane produces output while it
+   * is in the background.  Defaults to true (matching the global default set
+   * at bootstrap via `set-option -wg monitor-activity on`; HANDOFF §4.7).
+   * Updated via an optimistic `internal:set-window-monitor-activity` synthetic
+   * event after a `set-monitor-activity` command is sent to tmux.
+   */
+  readonly monitorActivity: boolean;
+  /**
+   * Current `monitor-silence` threshold for this window, in seconds (tc-7xv.15).
+   *
+   * 0 means disabled (tmux `monitor-silence 0` = off).
+   * Positive values mean tmux will alert after that many seconds of no output.
+   * Defaults to 0 (off; HANDOFF §4.7 — silence is opt-in).
+   * Updated via an optimistic `internal:set-window-monitor-silence` synthetic
+   * event after a `set-monitor-silence` command is sent to tmux.
+   */
+  readonly monitorSilence: number;
 }
 
 /**
@@ -748,7 +768,7 @@ export function updatePane(
 export function updateWindow(
   model: SessionModel,
   windowId: WindowId,
-  patch: Partial<Pick<Window, "name" | "layout" | "activePaneId" | "synchronizePanes">>,
+  patch: Partial<Pick<Window, "name" | "layout" | "activePaneId" | "synchronizePanes" | "monitorActivity" | "monitorSilence">>,
 ): SessionModel {
   const win = model.windows.get(windowId);
   if (!win) return model;
