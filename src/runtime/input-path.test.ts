@@ -577,3 +577,186 @@ describe("createInputPath — mixed message sequence", () => {
     assert.equal(host.writes[2], "send-keys -H -t %2 63\n");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Suite: tc-7xv.9 pane verb commands — break-pane, swap-pane, rename-pane
+// ---------------------------------------------------------------------------
+
+describe("createInputPath — break-pane command (tc-7xv.9)", () => {
+  it("break-pane → break-pane -d -t %<N>", () => {
+    const host = makeFakeHost();
+    const path = createInputPath(host);
+
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "bp1",
+      command: { kind: "break-pane", paneId: paneId("p3") },
+    };
+    path.handleClientMessage(msg);
+
+    assert.equal(host.lastWrite, "break-pane -d -t %3\n");
+  });
+
+  it("invalid pane id drops the message (no write)", () => {
+    const host = makeFakeHost();
+    const path = createInputPath(host);
+
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "bp-bad",
+      command: { kind: "break-pane", paneId: paneId("INVALID") },
+    };
+    path.handleClientMessage(msg);
+
+    assert.equal(host.writes.length, 0);
+  });
+});
+
+describe("createInputPath — swap-pane command (tc-7xv.9)", () => {
+  it("swap-pane without target → swap-pane -D -t %<N>", () => {
+    const host = makeFakeHost();
+    const path = createInputPath(host);
+
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "sp1",
+      command: { kind: "swap-pane", paneId: paneId("p2") },
+    };
+    path.handleClientMessage(msg);
+
+    assert.equal(host.lastWrite, "swap-pane -D -t %2\n");
+  });
+
+  it("swap-pane with explicit target → swap-pane -s %<src> -t %<tgt>", () => {
+    const host = makeFakeHost();
+    const path = createInputPath(host);
+
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "sp2",
+      command: {
+        kind: "swap-pane",
+        paneId: paneId("p1"),
+        targetPaneId: paneId("p4"),
+      },
+    };
+    path.handleClientMessage(msg);
+
+    assert.equal(host.lastWrite, "swap-pane -s %1 -t %4\n");
+  });
+
+  it("swap-pane with invalid source drops the message", () => {
+    const host = makeFakeHost();
+    const path = createInputPath(host);
+
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "sp-bad",
+      command: { kind: "swap-pane", paneId: paneId("BAD") },
+    };
+    path.handleClientMessage(msg);
+
+    assert.equal(host.writes.length, 0);
+  });
+
+  it("swap-pane with invalid target drops the message", () => {
+    const host = makeFakeHost();
+    const path = createInputPath(host);
+
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "sp-bad2",
+      command: {
+        kind: "swap-pane",
+        paneId: paneId("p1"),
+        targetPaneId: paneId("BAD"),
+      },
+    };
+    path.handleClientMessage(msg);
+
+    assert.equal(host.writes.length, 0);
+  });
+});
+
+describe("createInputPath — rename-pane command (tc-7xv.9)", () => {
+  it("rename-pane → select-pane -T '<title>' -t %<N>", () => {
+    const host = makeFakeHost();
+    const path = createInputPath(host);
+
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "rp1",
+      command: { kind: "rename-pane", paneId: paneId("p5"), title: "build" },
+    };
+    path.handleClientMessage(msg);
+
+    assert.equal(host.lastWrite, "select-pane -T 'build' -t %5\n");
+  });
+
+  it("rename-pane with empty title clears the tmux title", () => {
+    const host = makeFakeHost();
+    const path = createInputPath(host);
+
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "rp2",
+      command: { kind: "rename-pane", paneId: paneId("p1"), title: "" },
+    };
+    path.handleClientMessage(msg);
+
+    assert.equal(host.lastWrite, "select-pane -T '' -t %1\n");
+  });
+
+  it("rename-pane with title containing single quotes escapes them", () => {
+    const host = makeFakeHost();
+    const path = createInputPath(host);
+
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "rp3",
+      command: { kind: "rename-pane", paneId: paneId("p2"), title: "it's" },
+    };
+    path.handleClientMessage(msg);
+
+    assert.equal(host.lastWrite, "select-pane -T 'it'\\''s' -t %2\n");
+  });
+
+  it("rename-pane with title containing spaces works correctly", () => {
+    const host = makeFakeHost();
+    const path = createInputPath(host);
+
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "rp4",
+      command: { kind: "rename-pane", paneId: paneId("p3"), title: "my server" },
+    };
+    path.handleClientMessage(msg);
+
+    assert.equal(host.lastWrite, "select-pane -T 'my server' -t %3\n");
+  });
+
+  it("rename-pane with invalid pane id drops the message", () => {
+    const host = makeFakeHost();
+    const path = createInputPath(host);
+
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "rp-bad",
+      command: { kind: "rename-pane", paneId: paneId("BAD"), title: "test" },
+    };
+    path.handleClientMessage(msg);
+
+    assert.equal(host.writes.length, 0);
+  });
+});

@@ -533,6 +533,64 @@ export interface SetSynchronizePanesCommand {
   readonly on: boolean;
 }
 
+// ── tc-7xv.9: pane verbs ──────────────────────────────────────────────────
+
+/**
+ * Break a pane out of its window into a new window.
+ * direction: client→daemon
+ *
+ * Corresponds to `break-pane -dP -t %<N>`.  The `-d` flag keeps the new
+ * window in the background so VS Code's tab strip doesn't jump focus.
+ *
+ * The daemon will emit a window.added delta (new window) followed by
+ * pane.opened (the pane in its new home).  The old window may emit
+ * window.closed if it had only one pane.
+ *
+ * Additive addition — non-breaking per the versioning policy.
+ */
+export interface BreakPaneCommand {
+  readonly kind: "break-pane";
+  readonly paneId: PaneId;
+}
+
+/**
+ * Swap a pane with the most-recently-used (MRU) other pane.
+ * direction: client→daemon
+ *
+ * When `targetPaneId` is absent the daemon calls `swap-pane -D`, which
+ * rotates the active pane with the next pane in the window's layout — a
+ * simple "swap with next" that requires no picker.  When `targetPaneId`
+ * is supplied the daemon calls `swap-pane -s %<src> -t %<tgt>`.
+ *
+ * Additive addition — non-breaking per the versioning policy.
+ */
+export interface SwapPaneCommand {
+  readonly kind: "swap-pane";
+  readonly paneId: PaneId;
+  /** Optional explicit target pane.  When absent, rotates with -D. */
+  readonly targetPaneId?: PaneId;
+}
+
+/**
+ * Set a display title on a pane (`select-pane -T <title>`).
+ * direction: client→daemon
+ *
+ * tmux does not persist pane titles across restarts; they are display-only
+ * decorations.  The extension stores the user-visible label in the binding
+ * registry (PersistedBinding.label) and also pushes the title to tmux so
+ * `display-pane` and status-line formats that use #{pane_title} reflect it.
+ *
+ * An empty string clears the tmux title (resets to the process name).
+ *
+ * Additive addition — non-breaking per the versioning policy.
+ */
+export interface RenamePaneCommand {
+  readonly kind: "rename-pane";
+  readonly paneId: PaneId;
+  /** New display title.  Empty string clears the tmux title. */
+  readonly title: string;
+}
+
 /**
  * Discriminated union of all model-level commands a client may issue.
  * Narrow with `cmd.kind` to get the specific shape.
@@ -552,7 +610,11 @@ export type WireCommand =
   | SelectPaneCommand
   | ResizePaneCommand
   | KillSessionCommand
-  | SetSynchronizePanesCommand;
+  | SetSynchronizePanesCommand
+  // tc-7xv.9: pane verbs
+  | BreakPaneCommand
+  | SwapPaneCommand
+  | RenamePaneCommand;
 
 /**
  * Client issues a model-level command to the daemon.

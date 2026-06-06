@@ -386,6 +386,50 @@ export function createInputPath(
             break;
           }
 
+          // ── tc-7xv.9: pane verbs ───────────────────────────────────────────
+
+          case "break-pane": {
+            // break-pane -dP -t %<N>
+            // -d keeps the new window in the background (no focus steal).
+            // -P would print the new window ID but control-mode captures it
+            // as a command response; we don't parse the response here.
+            const tmuxPaneNum = toTmuxPane(command.paneId);
+            if (!validPaneId(tmuxPaneNum, command.paneId as string)) return;
+
+            sendCommand(`break-pane -d -t %${tmuxPaneNum}`);
+            break;
+          }
+
+          case "swap-pane": {
+            // swap-pane: without target uses -D to rotate with next pane;
+            // with explicit target uses -s <src> -t <tgt>.
+            const tmuxPaneNum = toTmuxPane(command.paneId);
+            if (!validPaneId(tmuxPaneNum, command.paneId as string)) return;
+
+            if (command.targetPaneId !== undefined) {
+              const tmuxTargetNum = toTmuxPane(command.targetPaneId);
+              if (!validPaneId(tmuxTargetNum, command.targetPaneId as string)) return;
+              sendCommand(`swap-pane -s %${tmuxPaneNum} -t %${tmuxTargetNum}`);
+            } else {
+              // No explicit target: rotate the pane down (-D) within its window.
+              sendCommand(`swap-pane -D -t %${tmuxPaneNum}`);
+            }
+            break;
+          }
+
+          case "rename-pane": {
+            // select-pane -T <title> -t %<N>
+            // Sets the pane's display title (#{pane_title}).
+            // An empty title resets to the default (process name).
+            const tmuxPaneNum = toTmuxPane(command.paneId);
+            if (!validPaneId(tmuxPaneNum, command.paneId as string)) return;
+
+            // Single-quote the title to handle spaces / special chars.
+            const quotedTitle = "'" + command.title.replace(/'/g, "'\\''") + "'";
+            sendCommand(`select-pane -T ${quotedTitle} -t %${tmuxPaneNum}`);
+            break;
+          }
+
           default: {
             // Forward-compatible: unknown command kinds are silently dropped.
             const _exhaustive = command as { kind: string };
