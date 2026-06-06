@@ -121,7 +121,7 @@ function makeSnapshot(opts: SnapshotOpts = {}): SnapshotMessage {
       windowId: w.windowId,
       name: w.name ?? "main",
       active: w.active ?? false,
-      synchronizePanes: w.synchronizePanes ?? false,
+      synchronizePanes: w.synchronizePanes ?? false, monitorActivity: true, monitorSilence: 0,
       layout: w.layout ?? makeLayout(),
     })),
     panes: panes.map((p) => ({

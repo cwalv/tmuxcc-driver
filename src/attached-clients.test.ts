@@ -75,7 +75,7 @@ function buildBaseModel() {
     paneIds: [],
     activePaneId: null,
     layout: null,
-    synchronizePanes: false,
+    synchronizePanes: false, monitorActivity: true, monitorSilence: 0,
   });
   m = addPane(m, {
     paneId: P0,

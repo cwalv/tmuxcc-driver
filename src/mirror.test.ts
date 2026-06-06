@@ -703,8 +703,8 @@ describe("applyDelta — focus delta", () => {
       seq: 2,
       session: { sessionId: S1, name: "main" },
       windows: [
-        { windowId: W1, name: "editor", active: true, layout: LAYOUT_1, synchronizePanes: false },
-        { windowId: W2, name: "shell", active: false, layout: LAYOUT_1, synchronizePanes: false },
+        { windowId: W1, name: "editor", active: true, layout: LAYOUT_1, synchronizePanes: false, monitorActivity: true, monitorSilence: 0 },
+        { windowId: W2, name: "shell", active: false, layout: LAYOUT_1, synchronizePanes: false, monitorActivity: true, monitorSilence: 0 },
       ],
       panes: [
         { paneId: P1, windowId: W1, cols: 80, rows: 24 },

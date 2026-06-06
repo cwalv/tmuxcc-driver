@@ -126,6 +126,8 @@ function buildDaemonMessages(): DaemonMessage[] {
         name: "editor",
         active: true,
         synchronizePanes: false,
+        monitorActivity: true,
+        monitorSilence: 0,
         layout: sampleLayout,
       },
     ],
