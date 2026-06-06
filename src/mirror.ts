@@ -113,6 +113,18 @@ export interface ClientWindow {
    * tc-7xv.17 (b2b) reads this to render the amber pill.
    */
   readonly synchronizePanes: boolean;
+  /**
+   * True when monitor-activity is on for this window (tc-7xv.15).
+   * Updated by `window.monitor.activity.changed` deltas; populated from snapshot.
+   * Defaults to true (inherits the global `-wg monitor-activity on` default).
+   */
+  readonly monitorActivity: boolean;
+  /**
+   * Current monitor-silence threshold in seconds, or 0 when disabled (tc-7xv.15).
+   * Updated by `window.monitor.silence.changed` deltas; populated from snapshot.
+   * 0 = disabled (tmux `monitor-silence 0`); positive = threshold in seconds.
+   */
+  readonly monitorSilence: number;
 }
 
 /**
@@ -252,6 +264,9 @@ export function applySnapshot(snapshot: SnapshotMessage): {
       layout: w.layout,
       // tc-7xv.12: snapshot carries synchronizePanes; default false for older daemons.
       synchronizePanes: w.synchronizePanes ?? false,
+      // tc-7xv.15: snapshot carries monitor state; defaults for older daemons.
+      monitorActivity: w.monitorActivity ?? true,
+      monitorSilence: w.monitorSilence ?? 0,
     });
   }
 
@@ -377,6 +392,10 @@ export function applyDelta(model: ClientModel, msg: DaemonMessage): ClientModel 
         },
         // New windows default to synchronize-panes off.
         synchronizePanes: false,
+        // New windows inherit the global monitor-activity default (on).
+        // tc-7xv.15: the global `-wg monitor-activity on` is set at bootstrap.
+        monitorActivity: true,
+        monitorSilence: 0,
       });
       return { ...model, windows };
     }
@@ -403,6 +422,28 @@ export function applyDelta(model: ClientModel, msg: DaemonMessage): ClientModel 
       if (win.synchronizePanes === msg.on) return model; // no change
       const windows = new Map(model.windows);
       windows.set(msg.windowId, { ...win, synchronizePanes: msg.on });
+      return { ...model, windows };
+    }
+
+    // ── Monitor state (tc-7xv.15) ────────────────────────────────────────────
+
+    // tc-7xv.15: monitor-activity toggle
+    case "window.monitor.activity.changed": {
+      const win = model.windows.get(msg.windowId);
+      if (!win) return model;
+      if (win.monitorActivity === msg.on) return model; // no change
+      const windows = new Map(model.windows);
+      windows.set(msg.windowId, { ...win, monitorActivity: msg.on });
+      return { ...model, windows };
+    }
+
+    // tc-7xv.15: monitor-silence toggle
+    case "window.monitor.silence.changed": {
+      const win = model.windows.get(msg.windowId);
+      if (!win) return model;
+      if (win.monitorSilence === msg.seconds) return model; // no change
+      const windows = new Map(model.windows);
+      windows.set(msg.windowId, { ...win, monitorSilence: msg.seconds });
       return { ...model, windows };
     }
 

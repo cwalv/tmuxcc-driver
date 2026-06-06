@@ -88,6 +88,8 @@ function makeSnapshot(seq = 2): SnapshotMessage {
         active: true,
         layout: LAYOUT_2,
         synchronizePanes: false,
+        monitorActivity: true,  // ── tc-7xv.15 ──
+        monitorSilence: 0,      // ── tc-7xv.15 ──
       },
     ],
     panes: [
@@ -119,8 +121,10 @@ function makeWindow(
   name = "test-window",
   layout: WindowLayout | null = null,
   synchronizePanes = false,
+  monitorActivity = true,   // ── tc-7xv.15 ──
+  monitorSilence = 0,       // ── tc-7xv.15 ──
 ): import("@tmuxcc/daemon").Window {
-  return { windowId: id, sessionId: sessId, name, paneIds, activePaneId, layout, synchronizePanes };
+  return { windowId: id, sessionId: sessId, name, paneIds, activePaneId, layout, synchronizePanes, monitorActivity, monitorSilence }; // ── tc-7xv.15 ──
 }
 
 function makePane(
@@ -166,8 +170,8 @@ function normalizeModel(model: ClientModel) {
     session: model.session,
     windows: [...model.windows.values()]
       .sort((a, b) => String(a.windowId).localeCompare(String(b.windowId)))
-      .map(({ windowId, name, active, layout, synchronizePanes }) => ({
-        windowId, name, active, layout, synchronizePanes,
+      .map(({ windowId, name, active, layout, synchronizePanes, monitorActivity, monitorSilence }) => ({
+        windowId, name, active, layout, synchronizePanes, monitorActivity, monitorSilence, // ── tc-7xv.15 ──
       })),
     panes: [...model.panes.values()]
       .sort((a, b) => String(a.paneId).localeCompare(String(b.paneId)))
@@ -184,8 +188,8 @@ function normalizeSnapshot(snap: SnapshotMessage) {
     session: snap.session,
     windows: [...snap.windows]
       .sort((a, b) => String(a.windowId).localeCompare(String(b.windowId)))
-      .map(({ windowId, name, active, layout, synchronizePanes }) => ({
-        windowId, name, active, layout, synchronizePanes,
+      .map(({ windowId, name, active, layout, synchronizePanes, monitorActivity, monitorSilence }) => ({
+        windowId, name, active, layout, synchronizePanes, monitorActivity, monitorSilence, // ── tc-7xv.15 ──
       })),
     panes: [...snap.panes]
       .sort((a, b) => String(a.paneId).localeCompare(String(b.paneId)))
@@ -440,7 +444,7 @@ describe("applyDelta — window deltas", () => {
     // Start with sync on — use a snapshot that has synchronizePanes: true
     const snap: SnapshotMessage = {
       ...makeSnapshot(1),
-      windows: [{ windowId: W1, name: "editor", active: true, layout: LAYOUT_2, synchronizePanes: true }],
+      windows: [{ windowId: W1, name: "editor", active: true, layout: LAYOUT_2, synchronizePanes: true, monitorActivity: true, monitorSilence: 0 }], // ── tc-7xv.15 ──
     };
     const { model: init } = applySnapshot(snap);
     assert.equal(init.windows.get(W1)!.synchronizePanes, true);
@@ -483,7 +487,7 @@ describe("applyDelta — window deltas", () => {
   it("snapshot populates synchronizePanes from snapshot windows", () => {
     const snap: SnapshotMessage = {
       ...makeSnapshot(1),
-      windows: [{ windowId: W1, name: "editor", active: true, layout: LAYOUT_2, synchronizePanes: true }],
+      windows: [{ windowId: W1, name: "editor", active: true, layout: LAYOUT_2, synchronizePanes: true, monitorActivity: true, monitorSilence: 0 }], // ── tc-7xv.15 ──
     };
     const { model } = applySnapshot(snap);
     assert.equal(model.windows.get(W1)!.synchronizePanes, true);
@@ -502,6 +506,178 @@ describe("applyDelta — window deltas", () => {
     assert.equal(model.windows.get(W2)!.synchronizePanes, false);
   });
 });
+
+// ── tc-7xv.15 ────────────────────────────────────────────────────────────────
+
+describe("applyDelta — window.monitor.activity.changed (tc-7xv.15)", () => {
+  it("sets monitorActivity to false", () => {
+    const { model: init } = applySnapshot(makeSnapshot(1));
+    assert.equal(init.windows.get(W1)!.monitorActivity, true); // snapshot default
+
+    const msg: DaemonMessage = {
+      type: "window.monitor.activity.changed",
+      seq: 2,
+      windowId: W1,
+      on: false,
+    };
+    const model = applyDelta(init, msg);
+    assert.equal(model.windows.get(W1)!.monitorActivity, false);
+    // Other window fields preserved
+    assert.equal(model.windows.get(W1)!.name, "editor");
+  });
+
+  it("sets monitorActivity to true", () => {
+    // Start with monitorActivity: false
+    const snap: SnapshotMessage = {
+      ...makeSnapshot(1),
+      windows: [{ windowId: W1, name: "editor", active: true, layout: LAYOUT_2, synchronizePanes: false, monitorActivity: false, monitorSilence: 0 }],
+    };
+    const { model: init } = applySnapshot(snap);
+    assert.equal(init.windows.get(W1)!.monitorActivity, false);
+
+    const msg: DaemonMessage = {
+      type: "window.monitor.activity.changed",
+      seq: 2,
+      windowId: W1,
+      on: true,
+    };
+    const model = applyDelta(init, msg);
+    assert.equal(model.windows.get(W1)!.monitorActivity, true);
+  });
+
+  it("is no-op when value unchanged (reference equality)", () => {
+    const { model: init } = applySnapshot(makeSnapshot(1));
+    // monitorActivity is already true in default snapshot
+    const msg: DaemonMessage = {
+      type: "window.monitor.activity.changed",
+      seq: 2,
+      windowId: W1,
+      on: true,
+    };
+    const model = applyDelta(init, msg);
+    assert.strictEqual(model, init, "same reference on no-op");
+  });
+
+  it("is no-op for unknown window", () => {
+    const { model: init } = applySnapshot(makeSnapshot(1));
+    const msg: DaemonMessage = {
+      type: "window.monitor.activity.changed",
+      seq: 2,
+      windowId: W2, // not in model
+      on: false,
+    };
+    const model = applyDelta(init, msg);
+    assert.strictEqual(model, init);
+  });
+
+  it("snapshot populates monitorActivity from snapshot windows", () => {
+    const snap: SnapshotMessage = {
+      ...makeSnapshot(1),
+      windows: [{ windowId: W1, name: "editor", active: true, layout: LAYOUT_2, synchronizePanes: false, monitorActivity: false, monitorSilence: 0 }],
+    };
+    const { model } = applySnapshot(snap);
+    assert.equal(model.windows.get(W1)!.monitorActivity, false);
+  });
+
+  it("window.added defaults monitorActivity to true", () => {
+    const { model: init } = applySnapshot(makeSnapshot(1));
+    const msg: DaemonMessage = {
+      type: "window.added",
+      seq: 2,
+      windowId: W2,
+      name: "new",
+      active: false,
+    };
+    const model = applyDelta(init, msg);
+    assert.equal(model.windows.get(W2)!.monitorActivity, true);
+  });
+});
+
+describe("applyDelta — window.monitor.silence.changed (tc-7xv.15)", () => {
+  it("sets monitorSilence to 30", () => {
+    const { model: init } = applySnapshot(makeSnapshot(1));
+    assert.equal(init.windows.get(W1)!.monitorSilence, 0); // default is 0 (off)
+
+    const msg: DaemonMessage = {
+      type: "window.monitor.silence.changed",
+      seq: 2,
+      windowId: W1,
+      seconds: 30,
+    };
+    const model = applyDelta(init, msg);
+    assert.equal(model.windows.get(W1)!.monitorSilence, 30);
+    // Other window fields preserved
+    assert.equal(model.windows.get(W1)!.name, "editor");
+  });
+
+  it("sets monitorSilence back to 0 (disable)", () => {
+    // Start with monitorSilence: 60
+    const snap: SnapshotMessage = {
+      ...makeSnapshot(1),
+      windows: [{ windowId: W1, name: "editor", active: true, layout: LAYOUT_2, synchronizePanes: false, monitorActivity: true, monitorSilence: 60 }],
+    };
+    const { model: init } = applySnapshot(snap);
+    assert.equal(init.windows.get(W1)!.monitorSilence, 60);
+
+    const msg: DaemonMessage = {
+      type: "window.monitor.silence.changed",
+      seq: 2,
+      windowId: W1,
+      seconds: 0,
+    };
+    const model = applyDelta(init, msg);
+    assert.equal(model.windows.get(W1)!.monitorSilence, 0);
+  });
+
+  it("is no-op when value unchanged (reference equality)", () => {
+    const { model: init } = applySnapshot(makeSnapshot(1));
+    // monitorSilence is already 0 in default snapshot
+    const msg: DaemonMessage = {
+      type: "window.monitor.silence.changed",
+      seq: 2,
+      windowId: W1,
+      seconds: 0,
+    };
+    const model = applyDelta(init, msg);
+    assert.strictEqual(model, init, "same reference on no-op");
+  });
+
+  it("is no-op for unknown window", () => {
+    const { model: init } = applySnapshot(makeSnapshot(1));
+    const msg: DaemonMessage = {
+      type: "window.monitor.silence.changed",
+      seq: 2,
+      windowId: W2, // not in model
+      seconds: 45,
+    };
+    const model = applyDelta(init, msg);
+    assert.strictEqual(model, init);
+  });
+
+  it("snapshot populates monitorSilence from snapshot windows", () => {
+    const snap: SnapshotMessage = {
+      ...makeSnapshot(1),
+      windows: [{ windowId: W1, name: "editor", active: true, layout: LAYOUT_2, synchronizePanes: false, monitorActivity: true, monitorSilence: 120 }],
+    };
+    const { model } = applySnapshot(snap);
+    assert.equal(model.windows.get(W1)!.monitorSilence, 120);
+  });
+
+  it("window.added defaults monitorSilence to 0", () => {
+    const { model: init } = applySnapshot(makeSnapshot(1));
+    const msg: DaemonMessage = {
+      type: "window.added",
+      seq: 2,
+      windowId: W2,
+      name: "new",
+      active: false,
+    };
+    const model = applyDelta(init, msg);
+    assert.equal(model.windows.get(W2)!.monitorSilence, 0);
+  });
+});
+
+// ── end tc-7xv.15 ────────────────────────────────────────────────────────────
 
 describe("applyDelta — layout delta", () => {
   it("layout.updated replaces the window layout", () => {
