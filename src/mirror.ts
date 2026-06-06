@@ -107,6 +107,12 @@ export interface ClientWindow {
   readonly name: string;
   readonly active: boolean;
   readonly layout: WindowLayout;
+  /**
+   * True when synchronize-panes is on for this window (HANDOFF §4.5, tc-7xv.12).
+   * Updated by `window.sync.changed` deltas; populated from snapshot.
+   * tc-7xv.17 (b2b) reads this to render the amber pill.
+   */
+  readonly synchronizePanes: boolean;
 }
 
 /**
@@ -244,6 +250,8 @@ export function applySnapshot(snapshot: SnapshotMessage): {
       name: w.name,
       active: w.active,
       layout: w.layout,
+      // tc-7xv.12: snapshot carries synchronizePanes; default false for older daemons.
+      synchronizePanes: w.synchronizePanes ?? false,
     });
   }
 
@@ -367,6 +375,8 @@ export function applyDelta(model: ClientModel, msg: DaemonMessage): ClientModel 
             rect: { x: 0, y: 0, cols: 0, rows: 0 },
           },
         },
+        // New windows default to synchronize-panes off.
+        synchronizePanes: false,
       });
       return { ...model, windows };
     }
@@ -383,6 +393,16 @@ export function applyDelta(model: ClientModel, msg: DaemonMessage): ClientModel 
       if (!win) return model;
       const windows = new Map(model.windows);
       windows.set(msg.windowId, { ...win, name: msg.newName });
+      return { ...model, windows };
+    }
+
+    // tc-7xv.12: synchronize-panes toggle
+    case "window.sync.changed": {
+      const win = model.windows.get(msg.windowId);
+      if (!win) return model;
+      if (win.synchronizePanes === msg.on) return model; // no change
+      const windows = new Map(model.windows);
+      windows.set(msg.windowId, { ...win, synchronizePanes: msg.on });
       return { ...model, windows };
     }
 

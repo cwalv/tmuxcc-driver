@@ -87,6 +87,7 @@ function makeSnapshot(seq = 2): SnapshotMessage {
         name: "editor",
         active: true,
         layout: LAYOUT_2,
+        synchronizePanes: false,
       },
     ],
     panes: [
@@ -117,8 +118,9 @@ function makeWindow(
   activePaneId: PaneId | null,
   name = "test-window",
   layout: WindowLayout | null = null,
+  synchronizePanes = false,
 ): import("@tmuxcc/daemon").Window {
-  return { windowId: id, sessionId: sessId, name, paneIds, activePaneId, layout };
+  return { windowId: id, sessionId: sessId, name, paneIds, activePaneId, layout, synchronizePanes };
 }
 
 function makePane(
@@ -164,8 +166,8 @@ function normalizeModel(model: ClientModel) {
     session: model.session,
     windows: [...model.windows.values()]
       .sort((a, b) => String(a.windowId).localeCompare(String(b.windowId)))
-      .map(({ windowId, name, active, layout }) => ({
-        windowId, name, active, layout,
+      .map(({ windowId, name, active, layout, synchronizePanes }) => ({
+        windowId, name, active, layout, synchronizePanes,
       })),
     panes: [...model.panes.values()]
       .sort((a, b) => String(a.paneId).localeCompare(String(b.paneId)))
@@ -182,8 +184,8 @@ function normalizeSnapshot(snap: SnapshotMessage) {
     session: snap.session,
     windows: [...snap.windows]
       .sort((a, b) => String(a.windowId).localeCompare(String(b.windowId)))
-      .map(({ windowId, name, active, layout }) => ({
-        windowId, name, active, layout,
+      .map(({ windowId, name, active, layout, synchronizePanes }) => ({
+        windowId, name, active, layout, synchronizePanes,
       })),
     panes: [...snap.panes]
       .sort((a, b) => String(a.paneId).localeCompare(String(b.paneId)))
@@ -416,6 +418,89 @@ describe("applyDelta — window deltas", () => {
     const model = applyDelta(init, msg);
     assert.equal(model.windows.get(W1)!.name, "shell");
   });
+
+  // tc-7xv.12 — synchronize-panes toggle
+  it("window.sync.changed sets synchronizePanes to true", () => {
+    const { model: init } = applySnapshot(makeSnapshot(1));
+    assert.equal(init.windows.get(W1)!.synchronizePanes, false); // default
+
+    const msg: DaemonMessage = {
+      type: "window.sync.changed",
+      seq: 2,
+      windowId: W1,
+      on: true,
+    };
+    const model = applyDelta(init, msg);
+    assert.equal(model.windows.get(W1)!.synchronizePanes, true);
+    // other window fields must be preserved
+    assert.equal(model.windows.get(W1)!.name, "editor");
+  });
+
+  it("window.sync.changed sets synchronizePanes to false", () => {
+    // Start with sync on — use a snapshot that has synchronizePanes: true
+    const snap: SnapshotMessage = {
+      ...makeSnapshot(1),
+      windows: [{ windowId: W1, name: "editor", active: true, layout: LAYOUT_2, synchronizePanes: true }],
+    };
+    const { model: init } = applySnapshot(snap);
+    assert.equal(init.windows.get(W1)!.synchronizePanes, true);
+
+    const msg: DaemonMessage = {
+      type: "window.sync.changed",
+      seq: 2,
+      windowId: W1,
+      on: false,
+    };
+    const model = applyDelta(init, msg);
+    assert.equal(model.windows.get(W1)!.synchronizePanes, false);
+  });
+
+  it("window.sync.changed is no-op when value unchanged", () => {
+    const { model: init } = applySnapshot(makeSnapshot(1));
+    const msg: DaemonMessage = {
+      type: "window.sync.changed",
+      seq: 2,
+      windowId: W1,
+      on: false, // already false
+    };
+    const model = applyDelta(init, msg);
+    // Reference equality: same model returned since nothing changed.
+    assert.strictEqual(model, init);
+  });
+
+  it("window.sync.changed is no-op for unknown window", () => {
+    const { model: init } = applySnapshot(makeSnapshot(1));
+    const msg: DaemonMessage = {
+      type: "window.sync.changed",
+      seq: 2,
+      windowId: W2, // not in model
+      on: true,
+    };
+    const model = applyDelta(init, msg);
+    assert.strictEqual(model, init);
+  });
+
+  it("snapshot populates synchronizePanes from snapshot windows", () => {
+    const snap: SnapshotMessage = {
+      ...makeSnapshot(1),
+      windows: [{ windowId: W1, name: "editor", active: true, layout: LAYOUT_2, synchronizePanes: true }],
+    };
+    const { model } = applySnapshot(snap);
+    assert.equal(model.windows.get(W1)!.synchronizePanes, true);
+  });
+
+  it("window.added defaults synchronizePanes to false", () => {
+    const { model: init } = applySnapshot(makeSnapshot(1));
+    const msg: DaemonMessage = {
+      type: "window.added",
+      seq: 2,
+      windowId: W2,
+      name: "new",
+      active: false,
+    };
+    const model = applyDelta(init, msg);
+    assert.equal(model.windows.get(W2)!.synchronizePanes, false);
+  });
 });
 
 describe("applyDelta — layout delta", () => {
@@ -442,8 +527,8 @@ describe("applyDelta — focus delta", () => {
       seq: 2,
       session: { sessionId: S1, name: "main" },
       windows: [
-        { windowId: W1, name: "editor", active: true, layout: LAYOUT_1 },
-        { windowId: W2, name: "shell", active: false, layout: LAYOUT_1 },
+        { windowId: W1, name: "editor", active: true, layout: LAYOUT_1, synchronizePanes: false },
+        { windowId: W2, name: "shell", active: false, layout: LAYOUT_1, synchronizePanes: false },
       ],
       panes: [
         { paneId: P1, windowId: W1, cols: 80, rows: 24 },
@@ -590,6 +675,19 @@ describe("round-trip vs daemon: client mirror == projectSnapshot(next)", () => {
   it("session rename", () => {
     const prev = baseModel();
     const next = updateSession(prev, S1, { name: "renamed-session" });
+    roundTrip(prev, next);
+  });
+
+  // tc-7xv.12: synchronize-panes toggle
+  it("synchronizePanes toggle off→on (window.sync.changed round-trip)", () => {
+    const prev = baseModel(); // synchronizePanes defaults to false
+    const next = updateWindow(prev, W1, { synchronizePanes: true });
+    roundTrip(prev, next);
+  });
+
+  it("synchronizePanes toggle on→off (window.sync.changed round-trip)", () => {
+    const prev = updateWindow(baseModel(), W1, { synchronizePanes: true });
+    const next = updateWindow(prev, W1, { synchronizePanes: false });
     roundTrip(prev, next);
   });
 });

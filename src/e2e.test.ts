@@ -133,6 +133,7 @@ function buildBaseModel() {
     paneIds: [],
     activePaneId: null,
     layout: SAMPLE_LAYOUT,
+    synchronizePanes: false,
   });
   m = addPane(m, {
     paneId: P0,

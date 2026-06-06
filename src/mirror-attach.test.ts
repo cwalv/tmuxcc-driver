@@ -102,7 +102,7 @@ interface SnapshotOpts {
   seq?: number;
   sessionId?: SessionId;
   panes?: Array<{ paneId: PaneId; windowId: WindowId; cols?: number; rows?: number }>;
-  windows?: Array<{ windowId: WindowId; name?: string; active?: boolean; layout?: WindowLayout }>;
+  windows?: Array<{ windowId: WindowId; name?: string; active?: boolean; synchronizePanes?: boolean; layout?: WindowLayout }>;
   focus?: { paneId: PaneId | null; windowId: WindowId | null };
 }
 
@@ -121,6 +121,7 @@ function makeSnapshot(opts: SnapshotOpts = {}): SnapshotMessage {
       windowId: w.windowId,
       name: w.name ?? "main",
       active: w.active ?? false,
+      synchronizePanes: w.synchronizePanes ?? false,
       layout: w.layout ?? makeLayout(),
     })),
     panes: panes.map((p) => ({
