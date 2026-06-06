@@ -304,49 +304,58 @@ export async function setupE2E(
   // 3. Attach data-plane demux BEFORE handshake so byte frames are received.
   const detach = daemon.demux.attachTransport(daemonTransport);
 
-  // 4. Run server-side and client-side handshakes concurrently.
-  //    This is the proven pattern from integration.test.ts R1/R2.
-  const addPromise = daemon.server.addClient(daemonTransport);
-  const handshakePromise = runClientHandshake(clientTransport, CLIENT_CAPS);
-  await Promise.all([addPromise, handshakePromise]);
-
-  // 5. Wire the input path (daemon.addClient() sets this up automatically,
-  //    but since we're using daemon.server.addClient directly, we wire it).
-  daemonTransport.onControl((msg) => {
-    daemon.inputPath.handleClientMessage(msg as ClientMessage);
-  });
-
-  // 6. Build client-side modules: Mirror + PaneStreamConsumer.
-  //
-  //    The snapshot was sent synchronously by server.addClient() inside addPromise.
-  //    At this point we need the snapshot in the mirror.  We get it via
-  //    daemon.pipeline.getModel() (projectSnapshot), matching daemon-transport.test.ts.
-  const { projectSnapshot } = await import("../state/projection.js");
-  const snapshotMsg = projectSnapshot(daemon.pipeline.getModel(), { seq: 1 });
-
-  // Manually set up the mirror:
+  // 4. Build client-side modules upfront — they don't require the snapshot yet.
   const mirror = new Mirror();
-  mirror.receiveSnapshot(snapshotMsg);
+  const paneConsumer = new PaneStreamConsumer();
 
-  // Future deltas go through connection's onControl handler → mirror.
-  // But connection.connect() was never called, so we wire directly.
+  // 5. Start the server-side handshake concurrently with the client handshake.
+  //    We do NOT await addClient yet — we must wire clientTransport.onControl
+  //    BEFORE addClient's snapshot arrives.
+  //
+  //    Timing contract (mirrors DaemonConnection.connect()):
+  //      addClient:           await runDaemonHandshake → ... → await Promise.resolve()
+  //                           → sendSnapshot  (microtask N+1)
+  //      runClientHandshake:  receives daemon.capabilities → sends client.capabilities
+  //                           → resolves (microtask N)
+  //      THIS CODE:           await runClientHandshake resolves (microtask N)
+  //                           → install clientTransport.onControl synchronously (no await)
+  //                           → addClient's snapshot arrives into our handler (microtask N+1) ✓
+  //
+  //    The microtask gap (await Promise.resolve() in serve.ts addClient) is the
+  //    seam that lets us install the handler between handshake-settle and snapshot-send.
+  const addPromise = daemon.server.addClient(daemonTransport);
+  await runClientHandshake(clientTransport, CLIENT_CAPS);
+
+  // 6. Wire clientTransport.onControl → mirror SYNCHRONOUSLY here, before the
+  //    next microtask (which is when addClient sends the real wire snapshot).
+  //    This is the same pattern used by DaemonConnection.#installPostHandshakeRouting().
+  //    Any subsequent wire message (snapshot, deltas, client-count.changed, etc.)
+  //    is routed through here — no manual snapshot construction needed.
   clientTransport.onControl((msg: ClientMessage) => {
     const dm = msg as { type: string };
     if (dm.type === "snapshot") {
       mirror.receiveSnapshot(msg as Parameters<typeof mirror.receiveSnapshot>[0]);
     } else {
-      // Deltas, command responses, errors
+      // Deltas, command responses, client-count.changed, errors, etc.
       try { mirror.receiveDelta(msg as Parameters<typeof mirror.receiveDelta>[0]); } catch { /**/ }
     }
   });
 
-  // 7. PaneStreamConsumer — wires data frames to per-pane callbacks.
-  const paneConsumer = new PaneStreamConsumer();
-  // Wire data frames from clientTransport → paneConsumer.
+  // Wire data frames from clientTransport → paneConsumer (also before addClient
+  // returns, in case any pane output arrives during the startup sequence).
   clientTransport.onData((paneId: PaneId, bytes: Uint8Array) => {
-    // PaneStreamConsumer expects to be wired via connectPaneStream(connection).
-    // Since we bypass DaemonConnection, we push directly.
     paneConsumer.push(paneId, bytes);
+  });
+
+  // Now await addClient to complete — the snapshot (and any subsequent startup
+  // wire messages) will have flowed through clientTransport.onControl above.
+  await addPromise;
+
+  // 7. Wire the input path (daemon.server.addClient() sets up resync handling
+  //    on daemonTransport.onControl; we overwrite it here with our inputPath
+  //    handler since these tests do not exercise resync).
+  daemonTransport.onControl((msg) => {
+    daemon.inputPath.handleClientMessage(msg as ClientMessage);
   });
 
   // 8. InputApi — for sendInput / resizePane / sendCommand.
