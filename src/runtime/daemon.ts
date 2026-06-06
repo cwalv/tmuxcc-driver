@@ -299,6 +299,15 @@ export function createDaemon(opts: DaemonOptions): Daemon {
       //    each sendData call also notifies the flow controller that bytes have
       //    been drained from the backpressure counter for that pane.
       //
+      //    tc-7xv.6 / tc-7xv.24 wedge fix: the noteDrained call MUST be paired
+      //    with actual transport drain.  Previously we called noteDrained
+      //    synchronously after transport.sendData returned, which credited
+      //    bytes as drained the instant they entered the kernel send buffer —
+      //    so the daemon never observed real consumer backpressure and tmux
+      //    was never told to pause.  Now we await the Promise returned by
+      //    transport.sendData (set when the underlying socket is backpressured)
+      //    and only credit drain after the socket reports 'drain'.
+      //
       //    Without this call fc.bufferedBytes grows monotonically and a pane
       //    that crosses the high-water mark is paused and NEVER resumed — the
       //    resume path (fc.noteDrained → below low-water → _resume) never fires
@@ -310,10 +319,18 @@ export function createDaemon(opts: DaemonOptions): Daemon {
         ...transport,
         sendData(pid: PaneId, bytes: Uint8Array): void | Promise<void> {
           const result = transport.sendData(pid, bytes);
-          if (bytes.length > 0) {
-            fc.noteDrained(pid, bytes.length);
+          if (bytes.length === 0) return result;
+          // Promise<void>: transport is backpressured; defer the drain credit
+          // until the underlying socket reports drain.
+          if (result !== undefined && typeof (result as Promise<void>).then === "function") {
+            return (result as Promise<void>).then(() => {
+              fc.noteDrained(pid, bytes.length);
+            });
           }
-          return result;
+          // void: kernel send buffer accepted the bytes immediately.  Credit
+          // drain synchronously — there's no further wait.
+          fc.noteDrained(pid, bytes.length);
+          return undefined;
         },
       };
       const detach = demux.attachTransport(drainingTransport);

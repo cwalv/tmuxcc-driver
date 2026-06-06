@@ -246,10 +246,18 @@ class FlowControllerImpl implements FlowController {
     const next = Math.max(0, prev - byteCount);
     this._buffered.set(paneId, next);
 
-    // Trigger resume if we fell below low-water and the pane is currently
-    // paused by backpressure (we only resume what we paused — unsolicited
-    // tmux pauses are released via onContinueNotification).
-    if (this._paused.has(paneId) && next < this._lowWater) {
+    // Trigger resume if we fell at or below low-water and the pane is
+    // currently paused by backpressure (we only resume what we paused —
+    // unsolicited tmux pauses are released via onContinueNotification).
+    //
+    // The original condition was `next < this._lowWater` (strict less-than),
+    // but real-world drain credits often arrive in chunk-sized batches that
+    // land EXACTLY on the low-water boundary (e.g. drained 192 KiB out of a
+    // 256-KiB pause, the last credit lands at 64 KiB = low_water).  Strict
+    // less-than would never trigger resume in that case, leaving the pane
+    // paused forever under perfectly-aligned drains.  Hysteresis is still
+    // preserved by the 192-KiB gap between high- and low-water defaults.
+    if (this._paused.has(paneId) && next <= this._lowWater) {
       this._resume(paneId);
     }
   }

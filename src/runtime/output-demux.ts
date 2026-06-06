@@ -190,8 +190,22 @@ export function createOutputDemux(opts: OutputDemuxOptions = {}): OutputDemux {
       if (_transports.size === 0) return;
 
       // Fan out to all attached transports — byte-exact, no copy or stringify.
+      //
+      // sendData MAY return a Promise<void> when the underlying transport is
+      // backpressured (kernel send buffer full).  Per the upstream daemon's
+      // accountingStore wrapper (daemon.ts addClient), the noteDrained call is
+      // chained off that Promise; we just need to NOT swallow it.  The
+      // PaneBufferStore.append contract is synchronous (legacy callers do not
+      // await), so we drop the Promise reference here — fc.noteDrained still
+      // fires correctly because daemon.ts chains it off the same Promise.
+      //
+      // tc-7xv.6 / tc-7xv.24 wedge fix: callers of demux.store.append that DO
+      // care about backpressure (e.g. a future smarter pipeline) can switch to
+      // an awaiting append; the contract upgrade is straightforward.
       for (const transport of _transports) {
-        transport.sendData(paneId, bytes);
+        // sendData returns void | Promise<void>; the daemon wrapper handles
+        // the Promise — see addClient in daemon.ts.
+        void transport.sendData(paneId, bytes);
       }
     },
 

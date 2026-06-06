@@ -53,7 +53,21 @@ export type { ProjectSnapshotOpts } from "./state/projection.js";
 // without reaching into internal sub-paths.
 export { createDaemon } from "./runtime/daemon.js";
 export type { Daemon, DaemonOptions } from "./runtime/daemon.js";
-export type { TmuxHostOptions } from "./runtime/tmux-host.js";
+export type { TmuxHost, TmuxHostOptions } from "./runtime/tmux-host.js";
+
+// Flow-control + output-demux primitives — exported so tc-7xv.6/tc-7xv.24
+// regression tests in @tmuxcc/broker can drive a real SocketTransport through
+// the same daemon-side wiring without booting a full Daemon.
+export {
+  createOutputDemux,
+} from "./runtime/output-demux.js";
+export type { OutputDemux, OutputDemuxOptions } from "./runtime/output-demux.js";
+export {
+  createFlowController,
+  DEFAULT_HIGH_WATER_BYTES,
+  DEFAULT_LOW_WATER_BYTES,
+} from "./runtime/flow-control.js";
+export type { FlowController, FlowControllerOptions } from "./runtime/flow-control.js";
 
 // Control server — re-exported so Layer A tests in @tmuxcc/client can
 // instantiate ControlServer without reaching into internal sub-paths.
