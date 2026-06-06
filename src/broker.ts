@@ -61,7 +61,7 @@ import type {
 
 import { createSocketServer, createSocketTransport } from "./socket-transport.js";
 import { brokerSocketPath, daemonSocketPath, removeSocket, restrictSocket } from "./runtime-dir.js";
-import { listSessions, createSession, killSession, createTmuxWatcher, setWindowSynchronizePanes } from "./tmux-south.js";
+import { listSessions, createSession, killSession, createTmuxWatcher, setWindowSynchronizePanes, setWindowMonitorActivity, setWindowMonitorSilence } from "./tmux-south.js";
 import { createDaemonSupervisor } from "./daemon-supervisor.js";
 import type { DaemonSupervisor } from "./daemon-supervisor.js";
 import type { RuntimeDirOptions } from "./runtime-dir.js";
@@ -118,6 +118,35 @@ export interface BrokerHandle {
    * Throws if tmux is unavailable or the window does not exist.
    */
   setSynchronizePanes(windowId: string, on: boolean): void;
+
+  // ── tc-7xv.15 ──────────────────────────────────────────────────────────────
+
+  /**
+   * Set `monitor-activity` for a tmux window (tc-7xv.15).
+   *
+   * `windowId` is the daemon wire WindowId (e.g. `"w3"` for tmux window `@3`).
+   * `on` controls the desired state.
+   *
+   * Issues `tmux set-option -wt @<N> monitor-activity on|off` synchronously.
+   *
+   * Throws if tmux is unavailable or the window does not exist.
+   */
+  setMonitorActivity(windowId: string, on: boolean): void;
+
+  /**
+   * Set `monitor-silence` for a tmux window (tc-7xv.15).
+   *
+   * `windowId` is the daemon wire WindowId (e.g. `"w3"` for tmux window `@3`).
+   * `seconds` is the silence threshold (1..N), or 0/null to disable.
+   *
+   * Issues `tmux set-option -wt @<N> monitor-silence <seconds>` synchronously.
+   * Pass `seconds = null` to disable (sends `monitor-silence 0`).
+   *
+   * Throws if tmux is unavailable or the window does not exist.
+   */
+  setMonitorSilence(windowId: string, seconds: number | null): void;
+
+  // ── end tc-7xv.15 ─────────────────────────────────────────────────────────
 }
 
 // ---------------------------------------------------------------------------
@@ -198,22 +227,30 @@ class BrokerImpl implements BrokerHandle {
     return this._socketPath;
   }
 
-  setSynchronizePanes(windowId: string, on: boolean): void {
-    // Map wire WindowId ("w3") → tmux numeric id (3).
-    // Convention mirrors input-path.ts defaultWindowIdToTmux.
+  /**
+   * Map a wire WindowId string ("w3") → tmux numeric id (3).
+   * Convention mirrors input-path.ts defaultWindowIdToTmux.
+   * Throws with code "internal" on malformed input.
+   */
+  private _parseWindowId(windowId: string, caller: string): number {
     if (!windowId.startsWith("w")) {
       throw Object.assign(
-        new Error(`setSynchronizePanes: invalid windowId "${windowId}" — must start with "w"`),
+        new Error(`${caller}: invalid windowId "${windowId}" — must start with "w"`),
         { code: "internal" },
       );
     }
     const windowNum = parseInt(windowId.slice(1), 10);
     if (Number.isNaN(windowNum)) {
       throw Object.assign(
-        new Error(`setSynchronizePanes: cannot parse numeric window id from "${windowId}"`),
+        new Error(`${caller}: cannot parse numeric window id from "${windowId}"`),
         { code: "internal" },
       );
     }
+    return windowNum;
+  }
+
+  setSynchronizePanes(windowId: string, on: boolean): void {
+    const windowNum = this._parseWindowId(windowId, "setSynchronizePanes");
     try {
       setWindowSynchronizePanes(this._opts.socketName, windowNum, on);
     } catch (err: unknown) {
@@ -221,6 +258,31 @@ class BrokerImpl implements BrokerHandle {
       throw Object.assign(new Error(`tmux.unavailable: ${msg}`), { code: "tmux.unavailable" });
     }
   }
+
+  // ── tc-7xv.15 ──────────────────────────────────────────────────────────────
+
+  setMonitorActivity(windowId: string, on: boolean): void {
+    const windowNum = this._parseWindowId(windowId, "setMonitorActivity");
+    try {
+      setWindowMonitorActivity(this._opts.socketName, windowNum, on);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw Object.assign(new Error(`tmux.unavailable: ${msg}`), { code: "tmux.unavailable" });
+    }
+  }
+
+  setMonitorSilence(windowId: string, seconds: number | null): void {
+    const windowNum = this._parseWindowId(windowId, "setMonitorSilence");
+    const secondsVal = seconds !== null && seconds > 0 ? seconds : 0;
+    try {
+      setWindowMonitorSilence(this._opts.socketName, windowNum, secondsVal);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw Object.assign(new Error(`tmux.unavailable: ${msg}`), { code: "tmux.unavailable" });
+    }
+  }
+
+  // ── end tc-7xv.15 ─────────────────────────────────────────────────────────
 
   async start(): Promise<void> {
     if (this._started) throw new Error("Broker already started");

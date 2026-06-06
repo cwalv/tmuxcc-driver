@@ -142,6 +142,64 @@ export function setWindowSynchronizePanes(
 }
 
 /**
+ * Set `monitor-activity` for a specific tmux window.
+ *
+ * Runs `tmux -L <socketName> set-option -wt @<windowNum> monitor-activity on|off`.
+ *
+ * `windowNum` is the numeric tmux window id (the N in `@N`).
+ * `on` specifies the desired state.
+ *
+ * Throws if the command fails (tmux server unavailable or invalid window target).
+ *
+ * tc-7xv.15: broker-side surface for `setMonitorActivity`.
+ */
+export function setWindowMonitorActivity(
+  socketName: string,
+  windowNum: number,
+  on: boolean,
+): void {
+  const result = spawnSync(
+    "tmux",
+    ["-L", socketName, "set-option", "-wt", `@${windowNum}`, "monitor-activity", on ? "on" : "off"],
+    { encoding: "utf8", timeout: 5_000 },
+  );
+  if (result.status !== 0 || result.error) {
+    throw new Error(
+      `tmux set-option monitor-activity failed: ${result.stderr?.trim() ?? result.error?.message ?? "unknown error"}`,
+    );
+  }
+}
+
+/**
+ * Set `monitor-silence` for a specific tmux window.
+ *
+ * Runs `tmux -L <socketName> set-option -wt @<windowNum> monitor-silence <seconds>`.
+ * Pass `seconds = 0` to disable (tmux interprets `monitor-silence 0` as off).
+ *
+ * `windowNum` is the numeric tmux window id (the N in `@N`).
+ *
+ * Throws if the command fails (tmux server unavailable or invalid window target).
+ *
+ * tc-7xv.15: broker-side surface for `setMonitorSilence`.
+ */
+export function setWindowMonitorSilence(
+  socketName: string,
+  windowNum: number,
+  seconds: number,
+): void {
+  const result = spawnSync(
+    "tmux",
+    ["-L", socketName, "set-option", "-wt", `@${windowNum}`, "monitor-silence", String(seconds)],
+    { encoding: "utf8", timeout: 5_000 },
+  );
+  if (result.status !== 0 || result.error) {
+    throw new Error(
+      `tmux set-option monitor-silence failed: ${result.stderr?.trim() ?? result.error?.message ?? "unknown error"}`,
+    );
+  }
+}
+
+/**
  * Run `tmux -L <socketName> kill-session -t <id>` to destroy a session.
  * `id` can be a session name or tmux `$N` id.
  * Throws if the command fails.
