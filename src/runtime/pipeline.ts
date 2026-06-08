@@ -58,6 +58,7 @@ import { parseNotification } from "../parser/notifications.js";
 import type { NotificationEvent } from "../parser/notifications.js";
 import type { NotificationToken } from "../parser/tokenizer.js";
 import { CommandCorrelator } from "../parser/correlator.js";
+import type { CommandResult } from "../parser/correlator.js";
 import { BootstrapCoordinator } from "../state/bootstrap.js";
 import { createPaneBufferStore } from "../state/scrollback.js";
 import { checkInvariants, windowId } from "../state/model.js";
@@ -210,6 +211,24 @@ export interface RuntimePipeline {
    * Fires onModelChange if the injected event changes the model.
    */
   injectNotification(event: NotificationEvent): void;
+
+  /**
+   * Register a pending tmux command slot on the underlying CommandCorrelator
+   * (tc-7xv.37).
+   *
+   * Callers issuing a tmux command directly (bypassing the bootstrap path)
+   * should call `expectCommand()` BEFORE sending the bytes so that the
+   * correlator's FIFO queue stays in sync with tmux's reply order.  The
+   * returned Promise resolves when the matching `%end` or `%error` block is
+   * fully received: `result.ok === true` on `%end`, `false` on `%error`.
+   *
+   * Used by input-path.ts to observe set-option command outcomes for the
+   * optimistic-update error-reversal pattern.
+   *
+   * Note: the pipeline does not write the command itself — that remains the
+   * caller's responsibility (e.g. via `host.write()` from input-path).
+   */
+  expectCommand(): Promise<CommandResult>;
 }
 
 // ---------------------------------------------------------------------------
@@ -398,6 +417,13 @@ class RuntimePipelineImpl implements RuntimePipeline {
     if (next !== prev) {
       this._emitModelChange(next, prev);
     }
+  }
+
+  expectCommand(): Promise<CommandResult> {
+    // Delegates to the underlying correlator; safe to call before start()
+    // (the slot will be filled when the matching %begin/%end arrives, though
+    // in practice callers issue this only after start() resolves).
+    return this._correlator.expectCommand();
   }
 
   // -------------------------------------------------------------------------

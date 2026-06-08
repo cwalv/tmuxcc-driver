@@ -952,3 +952,472 @@ describe("createInputPath — set-monitor-silence (tc-7xv.15)", () => {
     assert.equal(dispatched.length, 0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Suite: tc-7xv.37 — optimistic-update error reversal
+//
+// The 3 set-* window-option commands (sync, monitor-activity, monitor-silence)
+// each fire an optimistic synthetic event immediately, then await the tmux
+// command result via the correlator.  On %error, input-path dispatches a
+// compensating synthetic carrying the captured before-value so the model
+// re-converges with tmux truth.
+//
+// These tests drive a fake `expectCommand` Promise + fake `getModel` snapshot
+// to verify reversal happens (or doesn't, when ok=true).
+// ---------------------------------------------------------------------------
+
+import {
+  emptyModel,
+  addSession,
+  addWindow,
+  addPane,
+  paneId as makePaneId,
+  windowId as makeWindowId,
+  sessionId as makeSessionId,
+} from "../state/model.js";
+import type { SessionModel, Session, Window, Pane } from "../state/model.js";
+import type { PaneId as MPaneId, WindowId as MWindowId, SessionId as MSessionId } from "../wire/ids.js";
+import type { InputPathCommandResult } from "./input-path.js";
+
+/**
+ * Build a one-window/one-pane model fixture with explicit before-values
+ * for the three window options under test.
+ */
+function makeReversalModel(opts: {
+  windowSuffix: string;
+  synchronizePanes: boolean;
+  monitorActivity: boolean;
+  monitorSilence: number;
+}): SessionModel {
+  const sid: MSessionId = makeSessionId("s0");
+  const wid: MWindowId = makeWindowId("w" + opts.windowSuffix);
+  const pid: MPaneId = makePaneId("p" + opts.windowSuffix + "00");
+
+  const session: Session = { sessionId: sid, name: "sess", windowIds: [wid], activeWindowId: wid };
+  const window: Window = {
+    windowId: wid,
+    sessionId: sid,
+    name: "win",
+    paneIds: [pid],
+    activePaneId: pid,
+    layout: null,
+    synchronizePanes: opts.synchronizePanes,
+    monitorActivity: opts.monitorActivity,
+    monitorSilence: opts.monitorSilence,
+  };
+  const pane: Pane = {
+    paneId: pid,
+    windowId: wid,
+    sessionId: sid,
+    cols: 80,
+    rows: 24,
+    mode: "normal",
+    scrollbackHandle: undefined,
+  };
+
+  let m = emptyModel();
+  m = addSession(m, session);
+  m = addWindow(m, window);
+  m = addPane(m, pane);
+  return m;
+}
+
+/**
+ * Deferred Promise helper: returns a Promise + resolver so the test can
+ * decide when (and how) tmux's reply arrives.
+ */
+function defer<T>(): { promise: Promise<T>; resolve: (v: T) => void; reject: (e: Error) => void } {
+  let resolve!: (v: T) => void;
+  let reject!: (e: Error) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+describe("createInputPath — tc-7xv.37 reversal: set-synchronize-panes", () => {
+  it("on %error reverts to captured before-value (was off, requested on, tmux rejected)", async () => {
+    const host = makeFakeHost();
+    const dispatched: NotificationEvent[] = [];
+    const wid = windowId("w42");
+
+    // Initial model: synchronizePanes = false.
+    const before = makeReversalModel({
+      windowSuffix: "42",
+      synchronizePanes: false,
+      monitorActivity: true,
+      monitorSilence: 0,
+    });
+
+    const d = defer<InputPathCommandResult>();
+    const path = createInputPath(host, {
+      dispatchSynthetic: (ev) => { dispatched.push(ev); },
+      expectCommand: () => d.promise,
+      getModel: () => before,
+    });
+
+    path.handleClientMessage({
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "sync-revert-1",
+      command: { kind: "set-synchronize-panes", windowId: wid, on: true },
+    });
+
+    // The optimistic apply fires synchronously with the requested on:true.
+    assert.equal(host.lastWrite, "set-option -wt @42 synchronize-panes on\n");
+    assert.equal(dispatched.length, 1);
+    assert.deepEqual(dispatched[0], { kind: "internal:set-window-sync", windowId: wid, on: true });
+
+    // tmux rejects.
+    d.resolve({ ok: false });
+    // Allow microtask queue to drain.
+    await Promise.resolve();
+
+    // A compensating event is dispatched carrying the before-value (off).
+    assert.equal(dispatched.length, 2);
+    assert.deepEqual(dispatched[1], { kind: "internal:set-window-sync", windowId: wid, on: false });
+  });
+
+  it("on %end does NOT dispatch a compensating event (tmux accepted)", async () => {
+    const host = makeFakeHost();
+    const dispatched: NotificationEvent[] = [];
+    const wid = windowId("w7");
+
+    const before = makeReversalModel({
+      windowSuffix: "7",
+      synchronizePanes: false,
+      monitorActivity: true,
+      monitorSilence: 0,
+    });
+
+    const d = defer<InputPathCommandResult>();
+    const path = createInputPath(host, {
+      dispatchSynthetic: (ev) => { dispatched.push(ev); },
+      expectCommand: () => d.promise,
+      getModel: () => before,
+    });
+
+    path.handleClientMessage({
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "sync-ok-1",
+      command: { kind: "set-synchronize-panes", windowId: wid, on: true },
+    });
+
+    assert.equal(dispatched.length, 1);
+
+    d.resolve({ ok: true });
+    await Promise.resolve();
+
+    // Only the optimistic dispatch — no reversal.
+    assert.equal(dispatched.length, 1);
+  });
+
+  it("reversal is skipped when window has vanished from the before-snapshot", async () => {
+    const host = makeFakeHost();
+    const dispatched: NotificationEvent[] = [];
+    const wid = windowId("w99");
+
+    // Snapshot does NOT include w99.
+    const before = makeReversalModel({
+      windowSuffix: "1",
+      synchronizePanes: false,
+      monitorActivity: true,
+      monitorSilence: 0,
+    });
+
+    const d = defer<InputPathCommandResult>();
+    const path = createInputPath(host, {
+      dispatchSynthetic: (ev) => { dispatched.push(ev); },
+      expectCommand: () => d.promise,
+      getModel: () => before,
+    });
+
+    path.handleClientMessage({
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "sync-vanish-1",
+      command: { kind: "set-synchronize-panes", windowId: wid, on: true },
+    });
+
+    d.resolve({ ok: false });
+    await Promise.resolve();
+
+    // The optimistic event still fired, but no compensating event because the
+    // window isn't in the captured before-snapshot (reducer would no-op anyway).
+    assert.equal(dispatched.length, 1);
+    assert.deepEqual(dispatched[0], { kind: "internal:set-window-sync", windowId: wid, on: true });
+  });
+
+  it("no expectCommand → fire-and-forget (no reversal even on tmux error)", () => {
+    const host = makeFakeHost();
+    const dispatched: NotificationEvent[] = [];
+    const wid = windowId("w3");
+
+    // expectCommand is omitted; behaviour should match pre-tc-7xv.37: optimistic
+    // update fires, no observation of tmux %end/%error.
+    const path = createInputPath(host, {
+      dispatchSynthetic: (ev) => { dispatched.push(ev); },
+    });
+
+    path.handleClientMessage({
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "sync-fnf-1",
+      command: { kind: "set-synchronize-panes", windowId: wid, on: true },
+    });
+
+    assert.equal(dispatched.length, 1);
+    assert.deepEqual(dispatched[0], { kind: "internal:set-window-sync", windowId: wid, on: true });
+  });
+});
+
+describe("createInputPath — tc-7xv.37 reversal: set-monitor-activity", () => {
+  it("on %error reverts to captured before-value (was on, requested off, tmux rejected)", async () => {
+    const host = makeFakeHost();
+    const dispatched: NotificationEvent[] = [];
+    const wid = windowId("w11");
+
+    const before = makeReversalModel({
+      windowSuffix: "11",
+      synchronizePanes: false,
+      monitorActivity: true,
+      monitorSilence: 0,
+    });
+
+    const d = defer<InputPathCommandResult>();
+    const path = createInputPath(host, {
+      dispatchSynthetic: (ev) => { dispatched.push(ev); },
+      expectCommand: () => d.promise,
+      getModel: () => before,
+    });
+
+    path.handleClientMessage({
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "ma-revert-1",
+      command: { kind: "set-monitor-activity", windowId: wid, on: false },
+    });
+
+    assert.equal(host.lastWrite, "set-option -wt @11 monitor-activity off\n");
+    assert.equal(dispatched.length, 1);
+    assert.deepEqual(dispatched[0], {
+      kind: "internal:set-window-monitor-activity",
+      windowId: wid,
+      on: false,
+    });
+
+    d.resolve({ ok: false });
+    await Promise.resolve();
+
+    // Reversal: monitor-activity restored to its before-value (true).
+    assert.equal(dispatched.length, 2);
+    assert.deepEqual(dispatched[1], {
+      kind: "internal:set-window-monitor-activity",
+      windowId: wid,
+      on: true,
+    });
+  });
+
+  it("on %end does NOT dispatch a compensating event", async () => {
+    const host = makeFakeHost();
+    const dispatched: NotificationEvent[] = [];
+    const wid = windowId("w12");
+
+    const before = makeReversalModel({
+      windowSuffix: "12",
+      synchronizePanes: false,
+      monitorActivity: true,
+      monitorSilence: 0,
+    });
+
+    const d = defer<InputPathCommandResult>();
+    const path = createInputPath(host, {
+      dispatchSynthetic: (ev) => { dispatched.push(ev); },
+      expectCommand: () => d.promise,
+      getModel: () => before,
+    });
+
+    path.handleClientMessage({
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "ma-ok-1",
+      command: { kind: "set-monitor-activity", windowId: wid, on: false },
+    });
+
+    d.resolve({ ok: true });
+    await Promise.resolve();
+
+    assert.equal(dispatched.length, 1);
+  });
+});
+
+describe("createInputPath — tc-7xv.37 reversal: set-monitor-silence", () => {
+  it("on %error reverts to captured before-value (was 0, requested 30, tmux rejected)", async () => {
+    const host = makeFakeHost();
+    const dispatched: NotificationEvent[] = [];
+    const wid = windowId("w20");
+
+    // Initial model: monitor-silence = 0 (disabled).
+    const before = makeReversalModel({
+      windowSuffix: "20",
+      synchronizePanes: false,
+      monitorActivity: true,
+      monitorSilence: 0,
+    });
+
+    const d = defer<InputPathCommandResult>();
+    const path = createInputPath(host, {
+      dispatchSynthetic: (ev) => { dispatched.push(ev); },
+      expectCommand: () => d.promise,
+      getModel: () => before,
+    });
+
+    path.handleClientMessage({
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "ms-revert-1",
+      command: { kind: "set-monitor-silence", windowId: wid, seconds: 30 },
+    });
+
+    assert.equal(host.lastWrite, "set-option -wt @20 monitor-silence 30\n");
+    assert.equal(dispatched.length, 1);
+    assert.deepEqual(dispatched[0], {
+      kind: "internal:set-window-monitor-silence",
+      windowId: wid,
+      seconds: 30,
+    });
+
+    d.resolve({ ok: false });
+    await Promise.resolve();
+
+    // Reversal: silence restored to 0.
+    assert.equal(dispatched.length, 2);
+    assert.deepEqual(dispatched[1], {
+      kind: "internal:set-window-monitor-silence",
+      windowId: wid,
+      seconds: 0,
+    });
+  });
+
+  it("on %error reverts to captured before-value (was 60, requested null/0, tmux rejected)", async () => {
+    const host = makeFakeHost();
+    const dispatched: NotificationEvent[] = [];
+    const wid = windowId("w21");
+
+    // Initial model: monitor-silence = 60 (enabled with 60s threshold).
+    const before = makeReversalModel({
+      windowSuffix: "21",
+      synchronizePanes: false,
+      monitorActivity: true,
+      monitorSilence: 60,
+    });
+
+    const d = defer<InputPathCommandResult>();
+    const path = createInputPath(host, {
+      dispatchSynthetic: (ev) => { dispatched.push(ev); },
+      expectCommand: () => d.promise,
+      getModel: () => before,
+    });
+
+    // Client asks to disable (seconds: null normalises to 0).
+    path.handleClientMessage({
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "ms-revert-2",
+      command: { kind: "set-monitor-silence", windowId: wid, seconds: null },
+    });
+
+    assert.equal(host.lastWrite, "set-option -wt @21 monitor-silence 0\n");
+    assert.equal(dispatched.length, 1);
+    assert.deepEqual(dispatched[0], {
+      kind: "internal:set-window-monitor-silence",
+      windowId: wid,
+      seconds: 0,
+    });
+
+    d.resolve({ ok: false });
+    await Promise.resolve();
+
+    // Reversal: restored to 60.
+    assert.equal(dispatched.length, 2);
+    assert.deepEqual(dispatched[1], {
+      kind: "internal:set-window-monitor-silence",
+      windowId: wid,
+      seconds: 60,
+    });
+  });
+
+  it("on %end does NOT dispatch a compensating event", async () => {
+    const host = makeFakeHost();
+    const dispatched: NotificationEvent[] = [];
+    const wid = windowId("w22");
+
+    const before = makeReversalModel({
+      windowSuffix: "22",
+      synchronizePanes: false,
+      monitorActivity: true,
+      monitorSilence: 0,
+    });
+
+    const d = defer<InputPathCommandResult>();
+    const path = createInputPath(host, {
+      dispatchSynthetic: (ev) => { dispatched.push(ev); },
+      expectCommand: () => d.promise,
+      getModel: () => before,
+    });
+
+    path.handleClientMessage({
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "ms-ok-1",
+      command: { kind: "set-monitor-silence", windowId: wid, seconds: 45 },
+    });
+
+    d.resolve({ ok: true });
+    await Promise.resolve();
+
+    assert.equal(dispatched.length, 1);
+  });
+});
+
+describe("createInputPath — tc-7xv.37 expectCommand registration order", () => {
+  it("expectCommand is called BEFORE host.write so the correlator FIFO stays in sync", () => {
+    const host = makeFakeHost();
+    const events: string[] = [];
+
+    // Wrap host.write to record ordering.
+    const origWrite = host.write.bind(host);
+    (host as { write: (d: string | Uint8Array | Buffer) => void }).write = (data) => {
+      events.push("write");
+      origWrite(data);
+    };
+
+    const before = makeReversalModel({
+      windowSuffix: "30",
+      synchronizePanes: false,
+      monitorActivity: true,
+      monitorSilence: 0,
+    });
+
+    const d = defer<InputPathCommandResult>();
+    const path = createInputPath(host, {
+      dispatchSynthetic: () => {},
+      expectCommand: () => {
+        events.push("expectCommand");
+        return d.promise;
+      },
+      getModel: () => before,
+    });
+
+    path.handleClientMessage({
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "order-1",
+      command: { kind: "set-synchronize-panes", windowId: windowId("w30"), on: true },
+    });
+
+    assert.deepEqual(events, ["expectCommand", "write"], "expectCommand fires before host.write");
+  });
+});

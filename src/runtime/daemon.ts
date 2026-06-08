@@ -220,9 +220,16 @@ export function createDaemon(opts: DaemonOptions): Daemon {
   // 7. Input path — with synthetic-dispatch wired to the pipeline so that
   //    optimistic model updates (e.g. set-synchronize-panes, tc-7xv.12) are
   //    applied immediately without waiting for a tmux notification.
+  //
+  //    expectCommand + getModel are also wired so that tc-7xv.37 error
+  //    reversal can observe %error replies from tmux and roll the model back
+  //    to the captured before-value when the underlying set-option command
+  //    is rejected (e.g. window vanished between dispatch and tmux apply).
   const inputPath = createInputPath(host, {
     ...opts.input,
     dispatchSynthetic: (event) => pipeline.injectNotification(event),
+    expectCommand: () => pipeline.expectCommand(),
+    getModel: () => pipeline.getModel(),
   });
 
   // 8. Route %pause / %continue notifications from the pipeline to the

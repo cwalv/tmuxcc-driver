@@ -277,15 +277,15 @@ export interface UnknownNotification {
 
 /**
  * Synthetic internal event: the daemon applied a set-synchronize-panes command
- * and assumes tmux accepted it.
+ * (optimistic) and is now updating the model.
  *
  * This event is NEVER parsed from tmux control-mode output — it is injected by
- * input-path.ts after sending `set-option -wt @N synchronize-panes on|off` to
- * tmux (tc-7xv.12 optimistic-update pattern).
+ * input-path.ts (tc-7xv.12) on two occasions:
  *
- * Assumption: tmux applied the option. If tmux rejects it (e.g. no such
- * window), the model will be stale until the next bootstrap. Error reversal
- * is out of scope — document this as a known limitation.
+ *   1. After sending `set-option -wt @N synchronize-panes on|off`, with the
+ *      newly requested value (optimistic apply).
+ *   2. If tmux subsequently replies with %error, with the captured before-value
+ *      (compensating reversal — tc-7xv.37).
  */
 export interface InternalWindowSyncSetNotification {
   readonly kind: "internal:set-window-sync";
@@ -297,15 +297,15 @@ export interface InternalWindowSyncSetNotification {
 
 /**
  * Synthetic internal event: the daemon applied a set-monitor-activity command
- * and assumes tmux accepted it.
+ * (optimistic) and is now updating the model.
  *
  * This event is NEVER parsed from tmux control-mode output — it is injected by
- * input-path.ts after sending `set-option -wt @N monitor-activity on|off` to
- * tmux (tc-7xv.15 optimistic-update pattern).
+ * input-path.ts (tc-7xv.15) on two occasions:
  *
- * Assumption: tmux applied the option. If tmux rejects it (e.g. no such
- * window), the model will be stale until the next bootstrap. Error reversal
- * is out of scope — documented as a known limitation.
+ *   1. After sending `set-option -wt @N monitor-activity on|off` with the new
+ *      value (optimistic apply).
+ *   2. If tmux subsequently replies with %error, with the captured before-value
+ *      (compensating reversal — tc-7xv.37).
  */
 export interface InternalWindowMonitorActivitySetNotification {
   readonly kind: "internal:set-window-monitor-activity";
@@ -315,16 +315,16 @@ export interface InternalWindowMonitorActivitySetNotification {
 
 /**
  * Synthetic internal event: the daemon applied a set-monitor-silence command
- * and assumes tmux accepted it.
+ * (optimistic) and is now updating the model.
  *
  * This event is NEVER parsed from tmux control-mode output — it is injected by
- * input-path.ts after sending `set-option -wt @N monitor-silence <seconds|0>`
- * to tmux (tc-7xv.15 optimistic-update pattern).
+ * input-path.ts (tc-7xv.15) on two occasions:
  *
- * `seconds === 0` means disabled (tmux `monitor-silence 0` = off).
- *
- * Assumption: tmux applied the option. If tmux rejects it, the model will be
- * stale. Error reversal is out of scope.
+ *   1. After sending `set-option -wt @N monitor-silence <seconds|0>` with the
+ *      new value (optimistic apply).  `seconds === 0` means disabled (tmux
+ *      `monitor-silence 0` = off).
+ *   2. If tmux subsequently replies with %error, with the captured before-value
+ *      (compensating reversal — tc-7xv.37).
  */
 export interface InternalWindowMonitorSilenceSetNotification {
   readonly kind: "internal:set-window-monitor-silence";

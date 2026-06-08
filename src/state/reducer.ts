@@ -711,8 +711,9 @@ export function reduce(
     // Synthetic event injected by input-path.ts after sending
     // `set-option -wt @N synchronize-panes on|off` to tmux (tc-7xv.12).
     //
-    // Assumption: tmux applied the option. If tmux rejects it (e.g. no such
-    // window), the model will be stale. Error reversal is out of scope.
+    // If tmux rejects the command, input-path observes the %error via the
+    // correlator and dispatches a compensating `internal:set-window-sync`
+    // with the captured before-value to roll the model back (tc-7xv.37).
     // -------------------------------------------------------------------------
     case "internal:set-window-sync": {
       const win = model.windows.get(event.windowId);
@@ -727,9 +728,9 @@ export function reduce(
     // internal:set-window-monitor-activity — optimistic model update (tc-7xv.15)
     //
     // Synthetic event injected by input-path.ts after sending
-    // `set-option -wt @N monitor-activity on|off` to tmux.
-    //
-    // Assumption: tmux applied the option. Error reversal is out of scope.
+    // `set-option -wt @N monitor-activity on|off` to tmux.  On tmux %error,
+    // input-path dispatches a compensating event with the captured before-value
+    // to roll the model back (tc-7xv.37).
     // -------------------------------------------------------------------------
     case "internal:set-window-monitor-activity": {
       const win = model.windows.get(event.windowId);
@@ -746,7 +747,8 @@ export function reduce(
     //
     // `seconds === 0` means disabled (tmux interprets `monitor-silence 0` as off).
     //
-    // Assumption: tmux applied the option. Error reversal is out of scope.
+    // On tmux %error, input-path dispatches a compensating event with the
+    // captured before-value to roll the model back (tc-7xv.37).
     // -------------------------------------------------------------------------
     case "internal:set-window-monitor-silence": {
       const win = model.windows.get(event.windowId);

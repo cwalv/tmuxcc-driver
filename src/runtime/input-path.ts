@@ -70,6 +70,7 @@ import {
   setOptionForWindow,
 } from "../parser/commands.js";
 import type { NotificationEvent } from "../parser/notifications.js";
+import type { SessionModel } from "../state/model.js";
 
 // ---------------------------------------------------------------------------
 // Id-mapping helpers
@@ -108,6 +109,17 @@ function defaultWindowIdToTmux(id: WindowId): number {
 // Public types
 // ---------------------------------------------------------------------------
 
+/**
+ * Minimal shape of a CommandCorrelator result that input-path observes.
+ *
+ * Only `ok` is read here; the body/commandNumber fields are unused at this
+ * layer.  The full type lives in `parser/correlator.ts` (`CommandResult`).
+ */
+export interface InputPathCommandResult {
+  /** True on `%end` (tmux accepted); false on `%error` (tmux rejected). */
+  readonly ok: boolean;
+}
+
 /** Options for createInputPath. */
 export interface InputPathOptions {
   /**
@@ -141,6 +153,41 @@ export interface InputPathOptions {
    * without a real pipeline.
    */
   dispatchSynthetic?: (event: NotificationEvent) => void;
+
+  /**
+   * Register a pending tmux command slot on the correlator (tc-7xv.37).
+   *
+   * Called by input-path BEFORE sending an optimistic-update command (set
+   * synchronize-panes / monitor-activity / monitor-silence) so that the
+   * matching %end/%error block can be observed.  The returned Promise resolves
+   * with `{ ok }` once tmux's reply block completes: `ok=true` on `%end`
+   * (accepted) and `ok=false` on `%error` (rejected — e.g. no such window).
+   *
+   * On rejection, input-path dispatches a compensating synthetic event via
+   * `dispatchSynthetic` to roll the model back to the captured before-value,
+   * keeping the model and tmux's truth in sync.
+   *
+   * Omitting this option disables error reversal: the optimistic update is
+   * applied without observation (legacy fire-and-forget behaviour, safe for
+   * tests that mock the host without a real pipeline).
+   */
+  expectCommand?: () => Promise<InputPathCommandResult>;
+
+  /**
+   * Snapshot the current SessionModel (tc-7xv.37).
+   *
+   * Called by input-path immediately BEFORE an optimistic-update command is
+   * sent, so the before-value of the window option can be captured.  If tmux
+   * later rejects the command, input-path dispatches a compensating synthetic
+   * event with the captured before-value to restore the prior model state.
+   *
+   * The returned model must reflect the live pipeline's current state at the
+   * moment of the call (i.e. `pipeline.getModel()`).
+   *
+   * Omitting this option disables reversal capture (same effect as omitting
+   * `expectCommand`).  Both options should be supplied together.
+   */
+  getModel?: () => SessionModel;
 }
 
 /** The input path handle returned by createInputPath. */
@@ -183,10 +230,84 @@ export function createInputPath(
   const toTmuxPane = opts.paneIdToTmux ?? defaultPaneIdToTmux;
   const toTmuxWindow = opts.windowIdToTmux ?? defaultWindowIdToTmux;
   const dispatchSynthetic = opts.dispatchSynthetic;
+  const expectCommand = opts.expectCommand;
+  const getModel = opts.getModel;
 
   /** Write a tmux command line (appends \n). */
   function sendCommand(cmd: string): void {
     host.write(cmd + "\n");
+  }
+
+  /**
+   * Send an optimistic window-option update with error reversal (tc-7xv.37).
+   *
+   * Pattern:
+   *   1. Capture the before-value from the current model.
+   *   2. Register an `expectCommand()` slot BEFORE writing (matches correlator
+   *      FIFO ordering so the next %begin/%end binds to our slot).
+   *   3. Write the tmux command.
+   *   4. Dispatch the optimistic synthetic event immediately so downstream
+   *      clients see the change without waiting for tmux confirmation.
+   *   5. Await the correlator result.  On `%error` (ok=false), dispatch a
+   *      compensating synthetic event built from the captured before-value to
+   *      restore the model to its prior state.
+   *
+   * If `expectCommand`, `dispatchSynthetic`, or `getModel` is not wired (e.g.
+   * tests without a real pipeline), this degrades gracefully: optimistic update
+   * still fires but reversal is skipped.  This preserves the no-pipeline test
+   * path and matches the pre-tc-7xv.37 fire-and-forget behaviour.
+   *
+   * @param cmd       The full tmux command line to send (without trailing \n).
+   * @param optimistic The optimistic synthetic event to dispatch immediately
+   *                  (e.g. `internal:set-window-sync` with the desired value).
+   * @param reverse   Builder that, given the captured before-model, returns
+   *                  the compensating synthetic event used on tmux %error
+   *                  (e.g. `internal:set-window-sync` with the previous value),
+   *                  or `null` if no compensating event is needed (e.g. window
+   *                  no longer in model — reducer would no-op anyway).
+   */
+  function sendCommandWithReversal(
+    cmd: string,
+    optimistic: NotificationEvent,
+    reverse: (before: SessionModel) => NotificationEvent | null,
+  ): void {
+    // Capture before-model BEFORE write (sync) so we have the pre-update state
+    // even if onModelChange handlers mutate downstream views inline.
+    const before = getModel?.();
+
+    // Register expectCommand BEFORE the host.write so the correlator's FIFO
+    // queue is in sync: the next %begin tmux emits will bind to our slot.
+    // (The correlator's docs note either order is safe in practice, but
+    // before-write is the documented best practice.)
+    const resultPromise = expectCommand?.();
+
+    sendCommand(cmd);
+
+    // Optimistic apply: the model updates immediately so deltas flow to clients
+    // without waiting for tmux confirmation.
+    dispatchSynthetic?.(optimistic);
+
+    // Error reversal: if any wiring is missing we fall back to fire-and-forget.
+    if (resultPromise === undefined || dispatchSynthetic === undefined || before === undefined) {
+      return;
+    }
+
+    void resultPromise.then(
+      (result) => {
+        if (result.ok) return; // tmux accepted — optimistic update was correct.
+        // tmux rejected: restore the model to its captured before-state.
+        const compensating = reverse(before);
+        if (compensating !== null) {
+          dispatchSynthetic(compensating);
+        }
+      },
+      (err) => {
+        // Protocol error (e.g. cmdnum mismatch) — log and leave the model in
+        // its optimistic state.  This is rare and not a tmux rejection; the
+        // next bootstrap or external event will eventually correct the model.
+        console.warn("[input-path] expectCommand rejected for optimistic update:", err);
+      },
+    );
   }
 
   /** Guard: log and return false if tmuxId is NaN. */
@@ -362,27 +483,28 @@ export function createInputPath(
             // When on, tmux broadcasts every send-keys to ALL panes in the
             // window natively — no extension-side fan-out needed (§4.5 VERIFIED).
             //
-            // Optimistic model update: after sending the tmux command we
-            // immediately inject a synthetic NotificationEvent to update the
-            // model without waiting for a tmux notification.  tmux 3.4 does NOT
-            // emit %window-option-changed for synchronize-panes (verified
-            // empirically; the string "window-option-changed" does not appear in
-            // tmux source).  The optimistic-update pattern is correct here:
-            // the daemon sent the command and assumes tmux accepted it.  If tmux
-            // rejects the command (e.g. no such window), the model will be
-            // stale; error reversal is out of scope (tc-7xv follow-up bead).
+            // Optimistic model update with error reversal (tc-7xv.37): after
+            // sending the tmux command we immediately inject a synthetic
+            // NotificationEvent to update the model without waiting for a tmux
+            // notification (tmux 3.4 does NOT emit %window-option-changed for
+            // synchronize-panes — verified empirically).  If tmux rejects the
+            // command (e.g. no such window), `sendCommandWithReversal` observes
+            // the %error via the correlator and dispatches a compensating
+            // synthetic with the captured before-value, restoring the model.
             const tmuxWinNum = toTmuxWindow(command.windowId);
             if (!validWindowId(tmuxWinNum, command.windowId as string)) return;
 
-            sendCommand(setOptionForWindow(tmuxWinNum, "synchronize-panes", command.on ? "on" : "off"));
-
-            // Inject the synthetic model update so diffModel emits
-            // window.sync.changed and downstream clients see the change.
-            dispatchSynthetic?.({
-              kind: "internal:set-window-sync",
-              windowId: command.windowId,
-              on: command.on,
-            });
+            const wid = command.windowId;
+            const on = command.on;
+            sendCommandWithReversal(
+              setOptionForWindow(tmuxWinNum, "synchronize-panes", on ? "on" : "off"),
+              { kind: "internal:set-window-sync", windowId: wid, on },
+              (before) => {
+                const prev = before.windows.get(wid);
+                if (prev === undefined) return null; // window gone — nothing to revert.
+                return { kind: "internal:set-window-sync", windowId: wid, on: prev.synchronizePanes };
+              },
+            );
             break;
           }
 
@@ -395,23 +517,22 @@ export function createInputPath(
             // When on, tmux flags this window in status-bar when panes produce
             // output while the window is in the background.
             //
-            // Optimistic model update: after sending the tmux command we
-            // immediately inject a synthetic NotificationEvent to update the
-            // model without waiting for a tmux notification.  tmux 3.4 does NOT
-            // emit %window-option-changed for monitor-activity.  Same pattern
-            // as set-synchronize-panes (tc-7xv.12).
+            // Optimistic model update with error reversal (tc-7xv.37) — same
+            // pattern as set-synchronize-panes above.
             const tmuxWinNum = toTmuxWindow(command.windowId);
             if (!validWindowId(tmuxWinNum, command.windowId as string)) return;
 
-            sendCommand(setOptionForWindow(tmuxWinNum, "monitor-activity", command.on ? "on" : "off"));
-
-            // Inject the synthetic model update so diffModel emits
-            // window.monitor.activity.changed and downstream clients see the change.
-            dispatchSynthetic?.({
-              kind: "internal:set-window-monitor-activity",
-              windowId: command.windowId,
-              on: command.on,
-            });
+            const wid = command.windowId;
+            const on = command.on;
+            sendCommandWithReversal(
+              setOptionForWindow(tmuxWinNum, "monitor-activity", on ? "on" : "off"),
+              { kind: "internal:set-window-monitor-activity", windowId: wid, on },
+              (before) => {
+                const prev = before.windows.get(wid);
+                if (prev === undefined) return null;
+                return { kind: "internal:set-window-monitor-activity", windowId: wid, on: prev.monitorActivity };
+              },
+            );
             break;
           }
 
@@ -425,21 +546,23 @@ export function createInputPath(
             // tmux interprets `monitor-silence 0` as disabled; any positive
             // integer is the threshold in seconds.
             //
-            // Optimistic model update: same pattern as set-synchronize-panes
-            // (tc-7xv.12).  We do NOT emit %window-option-changed.
+            // Optimistic model update with error reversal (tc-7xv.37) — same
+            // pattern as set-synchronize-panes above.  tmux 3.4 does NOT emit
+            // %window-option-changed for monitor-silence.
             const tmuxWinNum = toTmuxWindow(command.windowId);
             if (!validWindowId(tmuxWinNum, command.windowId as string)) return;
 
+            const wid = command.windowId;
             const secondsVal = command.seconds !== null && command.seconds > 0 ? command.seconds : 0;
-            sendCommand(setOptionForWindow(tmuxWinNum, "monitor-silence", String(secondsVal)));
-
-            // Inject the synthetic model update so diffModel emits
-            // window.monitor.silence.changed and downstream clients see the change.
-            dispatchSynthetic?.({
-              kind: "internal:set-window-monitor-silence",
-              windowId: command.windowId,
-              seconds: secondsVal,
-            });
+            sendCommandWithReversal(
+              setOptionForWindow(tmuxWinNum, "monitor-silence", String(secondsVal)),
+              { kind: "internal:set-window-monitor-silence", windowId: wid, seconds: secondsVal },
+              (before) => {
+                const prev = before.windows.get(wid);
+                if (prev === undefined) return null;
+                return { kind: "internal:set-window-monitor-silence", windowId: wid, seconds: prev.monitorSilence };
+              },
+            );
             break;
           }
 
