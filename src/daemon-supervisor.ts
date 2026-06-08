@@ -247,11 +247,23 @@ class DaemonSupervisorImpl implements DaemonSupervisor {
       },
     );
 
+    // Capture stderr so failures aren't opaque. The daemon prints actionable
+    // diagnostics (e.g. "Daemon start failed: …") to stderr before exit;
+    // without surfacing it, the supervisor's error is unactionable.
+    let stderrBuf = "";
+    proc.stderr?.on("data", (chunk: Buffer) => {
+      stderrBuf += chunk.toString("utf8");
+    });
+
     // Wait for "READY\n" on stdout with a 30-second timeout
     const readyPromise = new Promise<void>((resolve, reject) => {
       let buf = "";
       const timeout = setTimeout(() => {
-        reject(new Error(`Daemon for session '${sessionName}' did not signal READY within 30s`));
+        const stderrTail = stderrBuf.trim();
+        reject(new Error(
+          `Daemon for session '${sessionName}' did not signal READY within 30s` +
+          (stderrTail ? `. stderr: ${stderrTail}` : ""),
+        ));
       }, 30_000);
 
       proc.stdout?.on("data", (chunk: Buffer) => {
@@ -264,7 +276,11 @@ class DaemonSupervisorImpl implements DaemonSupervisor {
 
       proc.once("exit", (code) => {
         clearTimeout(timeout);
-        reject(new Error(`Daemon for session '${sessionName}' exited before READY (code=${code})`));
+        const stderrTail = stderrBuf.trim();
+        reject(new Error(
+          `Daemon for session '${sessionName}' exited before READY (code=${code})` +
+          (stderrTail ? `. stderr: ${stderrTail}` : ""),
+        ));
       });
 
       proc.once("error", (err) => {
