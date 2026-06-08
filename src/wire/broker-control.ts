@@ -36,7 +36,7 @@
  */
 
 import type { MessageBase, Capabilities } from "./envelope.js";
-import type { SessionId } from "./ids.js";
+import type { PaneId, SessionId } from "./ids.js";
 
 // ---------------------------------------------------------------------------
 // Broker → Client: capabilities handshake
@@ -177,13 +177,59 @@ export interface SessionDestroyCommand {
 }
 
 /**
+ * Attach a new client to a specific pane within a session (tc-7xv.36).
+ *
+ * Semantics:
+ *   - Same daemon endpoint as `session.claim` is returned — the broker does NOT
+ *     spawn per-pane daemons, and the data plane is unchanged.
+ *   - `paneId` is an opaque hint that the broker echoes back in the response
+ *     payload.  The client uses it to drive its render-level decision of
+ *     "which pane should the host pty bind to" (vs. the default first-pane-wins).
+ *   - The broker does NOT validate that the pane exists.  Pane-level state is
+ *     a daemon concern (see WIRE CONTRACT INVARIANT above) — the broker only
+ *     knows about sessions.  If the pane has disappeared by the time the
+ *     client connects to the daemon, the snapshot will simply not contain it
+ *     and the client must surface that to the user.
+ *
+ * Use cases (tc-7xv.36):
+ *   - `tmuxcc.detached.bindNew`: user picked a detached pane in the side view;
+ *     bind a new VS Code terminal to that specific pane rather than to the
+ *     first one reported by the snapshot.
+ *   - `tmuxcc.dead.restart`: the dead pane's binding metadata identifies which
+ *     session to attach; the new host pane will be created in that session by
+ *     a subsequent split/open-window command — `pane.attach` carries the
+ *     original paneId only to disambiguate the attach intent (the client may
+ *     then issue a follow-up `split-pane` to materialise a fresh pane).
+ *
+ * Why this lives on the broker wire and not the daemon wire:
+ *   - The same daemon process can serve multiple clients with disjoint host-
+ *     pane targets — declaring the intent at attach time keeps the broker as
+ *     the single discovery entry-point for both session-wide and per-pane
+ *     attaches.
+ *   - The broker does not pump pane bytes — `paneId` is an identifier, not
+ *     pane-level data — so the wire contract invariant is preserved.
+ *
+ * Additive addition — non-breaking per the versioning policy.  Older brokers
+ * will respond with `protocol.unknown-message`; clients fall back to
+ * `session.claim` in that case.
+ */
+export interface PaneAttachCommand {
+  readonly kind: "pane.attach";
+  /** Session containing the target pane (broker-minted SessionId). */
+  readonly sessionId: SessionId;
+  /** Target pane on the daemon side; echoed back in the response payload. */
+  readonly paneId: PaneId;
+}
+
+/**
  * Discriminated union of all broker commands a client may issue.
  * Narrow with `cmd.kind`.
  */
 export type BrokerCommand =
   | SessionClaimCommand
   | SessionCreateCommand
-  | SessionDestroyCommand;
+  | SessionDestroyCommand
+  | PaneAttachCommand;
 
 /**
  * Client issues a broker-level command.
@@ -206,6 +252,7 @@ export interface BrokerCommandRequestMessage extends MessageBase {
  * Per-kind payloads:
  *   session.claim / session.create → { sessionId, endpoint }
  *   session.destroy                → { ok: true }
+ *   pane.attach                    → { sessionId, endpoint, paneId }
  */
 export interface BrokerCommandOkPayload {
   readonly sessionId?: SessionId;
@@ -214,6 +261,14 @@ export interface BrokerCommandOkPayload {
    * Clients pass it to `createDaemonTransport(endpoint)`.
    */
   readonly endpoint?: string;
+  /**
+   * Echoed target paneId for a `pane.attach` response (tc-7xv.36).
+   *
+   * Carried solely so the client has the broker's confirmation that the
+   * attach intent referenced this pane.  The broker does not validate
+   * existence — see `PaneAttachCommand` notes.
+   */
+  readonly paneId?: PaneId;
 }
 
 /**
@@ -244,7 +299,8 @@ export interface BrokerCommandResponseMessage extends MessageBase {
  * "protocol.unknown-message"  — unknown message type received; message dropped.
  * "protocol.malformed"        — parse failure.
  * "protocol.version-mismatch" — handshake version mismatch.
- * "session.not-found"         — session.claim or session.destroy named an unknown session.
+ * "session.not-found"         — session.claim, session.destroy, or pane.attach
+ *                               named an unknown session.
  * "session.name-taken"        — session.create requested a name already in use.
  * "tmux.unavailable"          — underlying tmux server is gone or refusing commands.
  * "internal"                  — unexpected broker-side error.

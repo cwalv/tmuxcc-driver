@@ -106,6 +106,7 @@ export type WireFeature =
   | "session-create"   // broker wire: client may request a new session
   | "session-destroy"  // broker wire: client may request a session be killed
   | "session-claim"    // broker wire: client may obtain a daemon endpoint by session
+  | "pane-attach"      // broker wire: client may attach to a specific pane (tc-7xv.36)
   | (string & Record<never, never>); // open-ended for future features
 
 // ---------------------------------------------------------------------------

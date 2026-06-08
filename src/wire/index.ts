@@ -52,6 +52,8 @@ export type {
   SessionClaimCommand,
   SessionCreateCommand,
   SessionDestroyCommand,
+  // tc-7xv.36: targeted-pane attach
+  PaneAttachCommand,
   BrokerCommandRequestMessage,
   BrokerCommandOkPayload,
   BrokerCommandResponseMessage,
