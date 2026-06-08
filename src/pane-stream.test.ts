@@ -15,6 +15,8 @@
  *   8. getBuffered(): returns concatenated pre-subscription bytes.
  *   9. End-to-end via DaemonConnection + createInMemoryTransportPair:
  *      daemon.sendData → consumer delivers to pane handler.
+ *  10. Pre-subscription buffer cap (overflow):
+ *      drop-oldest policy evicts front chunks when byte budget is exceeded.
  */
 
 import { describe, it } from "node:test";
@@ -30,6 +32,7 @@ import type { PaneId } from "@tmuxcc/daemon";
 
 import { DaemonConnection } from "./connection.js";
 import { PaneStreamConsumer, connectPaneStream } from "./pane-stream.js";
+import type { PaneStreamConsumerOptions } from "./pane-stream.js";
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -419,6 +422,122 @@ describe("PaneStreamConsumer — getBuffered", () => {
 
     const copy2 = consumer.getBuffered(PA)!;
     assert.equal(copy2[0], 10); // internal buffer is unchanged
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 10. Pre-subscription buffer cap — overflow and drop-oldest policy
+// ---------------------------------------------------------------------------
+
+describe("PaneStreamConsumer — pre-subscription buffer cap (overflow)", () => {
+  /** Build a consumer with a small cap for overflow testing. */
+  function cappedConsumer(capBytes: number): PaneStreamConsumer {
+    const opts: PaneStreamConsumerOptions = { preSubBufferCapBytes: capBytes };
+    return new PaneStreamConsumer(opts);
+  }
+
+  it("buffers up to the cap without dropping anything", () => {
+    // Cap = 10 bytes; push exactly 10 bytes in two chunks.
+    const consumer = cappedConsumer(10);
+
+    consumer.push(PA, Uint8Array.from([1, 2, 3, 4, 5]));    // 5 bytes
+    consumer.push(PA, Uint8Array.from([6, 7, 8, 9, 10]));   // 5 bytes → total 10
+
+    const buf = consumer.getBuffered(PA);
+    assert.ok(buf !== undefined);
+    assert.equal(buf.length, 10);
+    assert.deepEqual(buf, Uint8Array.from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]));
+  });
+
+  it("drop-oldest: when cap is exceeded, oldest chunks are evicted", () => {
+    // Cap = 10 bytes; push three 5-byte chunks (total 15 bytes).
+    // After overflow: chunk 1 (oldest) should be dropped; chunks 2 + 3 survive.
+    const consumer = cappedConsumer(10);
+
+    const chunk1 = Uint8Array.from([1, 1, 1, 1, 1]);
+    const chunk2 = Uint8Array.from([2, 2, 2, 2, 2]);
+    const chunk3 = Uint8Array.from([3, 3, 3, 3, 3]);
+
+    consumer.push(PA, chunk1); // 5 bytes in buffer
+    consumer.push(PA, chunk2); // 10 bytes in buffer (at cap)
+    consumer.push(PA, chunk3); // 15 bytes would exceed cap → chunk1 evicted
+
+    const received: Uint8Array[] = [];
+    consumer.onPaneOutput(PA, (b) => received.push(b));
+
+    // Should have received only chunk2 and chunk3 (chunk1 was dropped).
+    assert.equal(received.length, 2);
+    assert.deepEqual(received[0], chunk2);
+    assert.deepEqual(received[1], chunk3);
+  });
+
+  it("drop-oldest: multiple oldest chunks evicted when needed to make room", () => {
+    // Cap = 6 bytes; fill with 2-byte chunks, then push a 6-byte chunk.
+    // All previously buffered chunks should be evicted to make room.
+    const consumer = cappedConsumer(6);
+
+    consumer.push(PA, Uint8Array.from([1, 2])); // 2 bytes
+    consumer.push(PA, Uint8Array.from([3, 4])); // 4 bytes
+    consumer.push(PA, Uint8Array.from([5, 6])); // 6 bytes (at cap)
+    // Now push 6 bytes: must evict all three prior 2-byte chunks.
+    const big = Uint8Array.from([7, 8, 9, 10, 11, 12]);
+    consumer.push(PA, big);
+
+    const buf = consumer.getBuffered(PA);
+    assert.ok(buf !== undefined);
+    assert.deepEqual(buf, big);
+  });
+
+  it("drop-oldest: a single chunk larger than the cap stores only its tail", () => {
+    // Cap = 4 bytes; push a single 10-byte chunk.
+    // The last 4 bytes of the chunk should be retained.
+    const consumer = cappedConsumer(4);
+
+    const oversized = Uint8Array.from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    consumer.push(PA, oversized);
+
+    const buf = consumer.getBuffered(PA);
+    assert.ok(buf !== undefined);
+    assert.equal(buf.length, 4);
+    // Should be the trailing 4 bytes of the chunk.
+    assert.deepEqual(buf, Uint8Array.from([7, 8, 9, 10]));
+  });
+
+  it("cap is per-pane: overflowing pane A does not affect pane B's buffer", () => {
+    const consumer = cappedConsumer(5);
+
+    consumer.push(PA, Uint8Array.from([1, 2, 3]));  // 3 bytes in A
+    consumer.push(PB, Uint8Array.from([10, 20]));   // 2 bytes in B
+    // Push to A to exceed cap: eviction happens only in A.
+    consumer.push(PA, Uint8Array.from([4, 5, 6]));  // 6 bytes total for A → evict [1,2,3]
+
+    const aBuf = consumer.getBuffered(PA);
+    assert.ok(aBuf !== undefined);
+    assert.deepEqual(aBuf, Uint8Array.from([4, 5, 6]));
+
+    const bBuf = consumer.getBuffered(PB);
+    assert.ok(bBuf !== undefined);
+    assert.deepEqual(bBuf, Uint8Array.from([10, 20]));
+  });
+
+  it("live frames after handler registration are not affected by the cap", () => {
+    // After handler registers and buffer flushes, live frames bypass the cap.
+    const consumer = cappedConsumer(3);
+
+    // Fill buffer to cap.
+    consumer.push(PA, Uint8Array.from([1, 2, 3]));
+
+    // Register handler — flushes.
+    const received: Uint8Array[] = [];
+    consumer.onPaneOutput(PA, (b) => received.push(b));
+
+    // Push more than cap as a live frame — should be delivered in full.
+    const large = Uint8Array.from([10, 20, 30, 40, 50]);
+    consumer.push(PA, large);
+
+    assert.equal(received.length, 2);
+    assert.deepEqual(received[0], Uint8Array.from([1, 2, 3])); // flushed pre-sub
+    assert.deepEqual(received[1], large);                        // live, no cap
   });
 });
 

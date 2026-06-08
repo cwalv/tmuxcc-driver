@@ -53,9 +53,22 @@
  * registered, all buffered chunks are flushed synchronously to it before any
  * future live frames arrive, preserving FIFO order.
  *
- * Buffer bounds: the buffer grows without bound until a handler is registered
- * (matching the daemon's scrollback model: "don't drop").  For production use,
- * callers should register handlers promptly.  A future bead may add a cap.
+ * ## Buffer bound and overflow policy
+ *
+ * Each per-pane pre-subscription buffer is bounded by a configurable byte
+ * budget (default: `PRE_SUB_BUFFER_CAP_BYTES` = 4 MiB per pane).  The cap
+ * exists to prevent a runaway producer from exhausting process memory while no
+ * handler is registered.
+ *
+ * Overflow policy: **drop-oldest** (FIFO eviction from the front of the
+ * chunk queue).  When a new chunk would push the accumulated byte total above
+ * the cap, the oldest chunks are discarded one by one until there is room for
+ * the new chunk.  Rationale: a renderer that subscribes late is best served by
+ * the most-recent output (the current screen state), not by the oldest
+ * scrollback.  This mirrors the semantics of a fixed-size terminal scrollback
+ * buffer.  Dropped bytes are gone; the handler will see a contiguous suffix of
+ * the pre-subscription output.  A custom cap can be supplied via
+ * `PaneStreamConsumer` constructor options.
  *
  * The global handler (onOutput) does NOT trigger buffered-flush behaviour: it
  * receives only live frames delivered after it is registered.  Pre-subscription
@@ -81,6 +94,40 @@
 
 import type { PaneId } from "@tmuxcc/daemon";
 import type { DaemonConnection } from "./connection.js";
+
+// ---------------------------------------------------------------------------
+// Buffer cap
+// ---------------------------------------------------------------------------
+
+/**
+ * Default per-pane pre-subscription buffer cap: 4 MiB.
+ *
+ * Chosen to comfortably hold several screens of terminal output (a typical
+ * 80×24 terminal at ~4 bytes/char is ~7 KiB per full screen) while remaining
+ * well under any reasonable per-process memory budget.  Applications that
+ * attach renderers promptly (the normal case) will never come close to this
+ * limit.
+ */
+export const PRE_SUB_BUFFER_CAP_BYTES = 4 * 1024 * 1024; // 4 MiB
+
+// ---------------------------------------------------------------------------
+// Constructor options
+// ---------------------------------------------------------------------------
+
+/**
+ * Options for `PaneStreamConsumer`.
+ */
+export interface PaneStreamConsumerOptions {
+  /**
+   * Maximum total byte size of the pre-subscription buffer per pane.
+   *
+   * When the buffer would exceed this limit, the oldest chunks are evicted
+   * (drop-oldest policy) until there is room for the incoming chunk.
+   *
+   * @default PRE_SUB_BUFFER_CAP_BYTES (4 MiB)
+   */
+  preSubBufferCapBytes?: number;
+}
 
 // ---------------------------------------------------------------------------
 // Handler types
@@ -122,6 +169,11 @@ export type GlobalOutputHandler = (paneId: PaneId, bytes: Uint8Array) => void;
  * the same event-loop tick as the underlying transport.
  */
 export class PaneStreamConsumer {
+  // ── Configuration ──────────────────────────────────────────────────────────
+
+  /** Maximum total bytes held per pane in the pre-subscription buffer. */
+  readonly #capBytes: number;
+
   // ── Per-pane handler table ─────────────────────────────────────────────────
 
   /** Map of paneId → list of handlers registered for that pane. */
@@ -136,10 +188,27 @@ export class PaneStreamConsumer {
    */
   readonly #preSub: Map<PaneId, Uint8Array[]> = new Map();
 
+  /**
+   * Map of paneId → current total byte count in `#preSub` for that pane.
+   * Maintained in sync with `#preSub` to avoid recomputing on every push.
+   */
+  readonly #preSubBytes: Map<PaneId, number> = new Map();
+
   // ── Global handler ─────────────────────────────────────────────────────────
 
   /** List of global handlers (receive all pane output, live frames only). */
   readonly #globalHandlers: GlobalOutputHandler[] = [];
+
+  // ── Constructor ───────────────────────────────────────────────────────────
+
+  /**
+   * Create a PaneStreamConsumer.
+   *
+   * @param opts - Optional tuning.  See {@link PaneStreamConsumerOptions}.
+   */
+  constructor(opts?: PaneStreamConsumerOptions) {
+    this.#capBytes = opts?.preSubBufferCapBytes ?? PRE_SUB_BUFFER_CAP_BYTES;
+  }
 
   // ── Core delivery ──────────────────────────────────────────────────────────
 
@@ -159,13 +228,27 @@ export class PaneStreamConsumer {
     const handlers = this.#paneHandlers.get(paneId);
 
     if (handlers === undefined || handlers.length === 0) {
-      // No per-pane handler yet — buffer the chunk.
+      // No per-pane handler yet — buffer the chunk, enforcing the byte cap.
       let buf = this.#preSub.get(paneId);
       if (buf === undefined) {
         buf = [];
         this.#preSub.set(paneId, buf);
+        this.#preSubBytes.set(paneId, 0);
       }
-      buf.push(bytes);
+
+      // If the incoming chunk alone exceeds the cap, keep only its tail so we
+      // store exactly capBytes of the most-recent data.
+      const incomingBytes = bytes.length > this.#capBytes
+        ? bytes.subarray(bytes.length - this.#capBytes)
+        : bytes;
+
+      // Evict oldest chunks until there is room for the incoming chunk.
+      let total = this.#preSubBytes.get(paneId)!;
+      while (buf.length > 0 && total + incomingBytes.length > this.#capBytes) {
+        total -= buf.shift()!.length;
+      }
+      buf.push(incomingBytes);
+      this.#preSubBytes.set(paneId, total + incomingBytes.length);
     } else {
       // Deliver to all per-pane handlers in registration order.
       for (const h of handlers) {
@@ -227,8 +310,9 @@ export class PaneStreamConsumer {
       for (const chunk of toDeliver) {
         handler(chunk);
       }
-      // Buffer is now empty; remove the entry so future frames go live.
+      // Buffer is now empty; remove the entries so future frames go live.
       this.#preSub.delete(paneId);
+      this.#preSubBytes.delete(paneId);
     }
 
     return () => {
