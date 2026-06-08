@@ -229,6 +229,7 @@ describe("tc-1elae: ControlServer stamps attachedClientCount in snapshots", () =
       },
       onNotification() { return () => {}; },
       injectNotification() {},
+      expectCommand() { return new Promise<never>(() => {}); },
       get buffers(): never { throw new Error("no buffers"); },
     };
 
@@ -260,6 +261,7 @@ describe("tc-1elae: ControlServer stamps attachedClientCount in snapshots", () =
       },
       onNotification() { return () => {}; },
       injectNotification() {},
+      expectCommand() { return new Promise<never>(() => {}); },
       get buffers(): never { throw new Error("no buffers"); },
     };
 
@@ -300,6 +302,7 @@ describe("tc-1elae: ControlServer stamps attachedClientCount in snapshots", () =
       },
       onNotification() { return () => {}; },
       injectNotification() {},
+      expectCommand() { return new Promise<never>(() => {}); },
       get buffers(): never { throw new Error("no buffers"); },
     };
     const server = createControlServer(pipeline);
@@ -394,6 +397,7 @@ describe("tc-1elae: end-to-end via connectClient", () => {
       },
       onNotification() { return () => {}; },
       injectNotification() {},
+      expectCommand() { return new Promise<never>(() => {}); },
       get buffers(): never { throw new Error("no buffers"); },
     };
     const server = createControlServer(pipeline);
@@ -464,6 +468,7 @@ function buildLivePipeline() {
       },
       onNotification() { return () => {}; },
       injectNotification() {},
+      expectCommand() { return new Promise<never>(() => {}); },
       get buffers(): never { throw new Error("no buffers"); },
     },
     setModel: (m: typeof model) => { current = m; },
