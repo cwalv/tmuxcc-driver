@@ -217,7 +217,26 @@ export const BOOTSTRAP_PANES_FORMAT =
  *
  * Returns: `[listWindowsCommand, listPanesCommand]`
  */
-export function bootstrapCommands(): [string, string] {
+/**
+ * Return the two tmux commands to issue on attach.
+ *
+ * When `sessionName` is provided, commands are scoped to that session only
+ * (avoiding cross-session contamination in multi-session environments).
+ * When absent, falls back to `-a` (all sessions) for backward compatibility.
+ *
+ * Returns: `[listWindowsCommand, listPanesCommand]`
+ */
+export function bootstrapCommands(sessionName?: string): [string, string] {
+  if (sessionName !== undefined && sessionName.length > 0) {
+    // Scope bootstrap to this session only (tc-tfv.3: avoid cross-session
+    // pane/focus contamination when multiple sessions share a tmux server).
+    const target = `=${sessionName}`;
+    const winCmd = listWindows(BOOTSTRAP_WINDOWS_FORMAT) + ` -t ${target}`;
+    // list-panes -s scopes to all panes in the session; -t targets the session.
+    const paneCmd = listPanes(undefined, BOOTSTRAP_PANES_FORMAT) + ` -s -t ${target}`;
+    return [winCmd, paneCmd];
+  }
+  // Fallback: all sessions (legacy behaviour).
   const winCmd = listWindows(BOOTSTRAP_WINDOWS_FORMAT) + " -a";
   const paneCmd = listPanes(undefined, BOOTSTRAP_PANES_FORMAT) + " -a";
   return [winCmd, paneCmd];
@@ -675,7 +694,7 @@ export class BootstrapCoordinator {
    * Returns: `[listWindowsCmd, listPanesCmd]`
    */
   bootstrapCommands(): [string, string] {
-    return bootstrapCommands();
+    return bootstrapCommands(this._sessionName);
   }
 
   // ---- Event ingestion -----------------------------------------------------
