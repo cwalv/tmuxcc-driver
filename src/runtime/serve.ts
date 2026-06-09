@@ -203,6 +203,22 @@ export interface ControlServer {
    * @internal — not part of the external daemon API; exposed only for testing.
    */
   broadcastClientCount(): void;
+
+  /**
+   * Handle a `resync.request` message from a specific client transport.
+   *
+   * Re-sends the full snapshot at the next per-connection seq without resetting
+   * the counter.  Subsequent deltas continue from there.  Only the given client
+   * is affected; the pipeline and other clients are untouched.
+   *
+   * Exposed so that integration layers (e.g. daemon.ts) that ALSO install a
+   * `transport.onControl` handler (replacing the one installed by `addClient`)
+   * can proxy `resync.request` messages through here rather than silently
+   * dropping them.
+   *
+   * @param transport - The daemon-side transport of the requesting client.
+   */
+  handleResyncRequest(transport: Transport): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -322,7 +338,7 @@ class ControlServerImpl implements ControlServer {
     // this constraint.
     transport.onControl((msg: ControlMessage) => {
       if (msg.type === "resync.request") {
-        this._handleResyncRequest(transport);
+        this.handleResyncRequest(transport);
       }
       // All other inbound messages: silently pass through (handled by tc-93a).
     });
@@ -440,7 +456,7 @@ class ControlServerImpl implements ControlServer {
    * the counter.  Subsequent deltas continue from there.  Only this one client
    * is affected; the pipeline and other clients are untouched.
    */
-  private _handleResyncRequest(transport: Transport): void {
+  handleResyncRequest(transport: Transport): void {
     const state = this._clients.get(transport);
     if (!state) return; // client may have been removed already (race with close)
 

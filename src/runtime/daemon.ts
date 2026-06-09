@@ -348,7 +348,17 @@ export function createDaemon(opts: DaemonOptions): Daemon {
       const detach = demux.attachTransport(drainingTransport);
 
       // 3. Wire input path: forward client control messages to tmux.
+      //
+      //    NOTE: transport.onControl is single-slot (replace semantics), so this
+      //    overwrites the handler installed by server.addClient in step 1.  The
+      //    serve layer's handler handled resync.request; we must proxy it here to
+      //    avoid silently dropping resync requests and permanently stalling the
+      //    mirror's seq-gap recovery (tc-tfv.11).
       transport.onControl((msg) => {
+        if (msg.type === "resync.request") {
+          server.handleResyncRequest(transport);
+          return;
+        }
         inputPath.handleClientMessage(msg as import("../wire/daemon-control.js").ClientMessage);
       });
 
