@@ -107,9 +107,26 @@ describe("defaultPaneIdToTmux", () => {
     assert.equal(defaultPaneIdToTmux(paneId("p42")), 42);
   });
 
-  it("returns NaN for non-'p' prefix ids", () => {
-    assert.ok(Number.isNaN(defaultPaneIdToTmux(paneId("x5"))));
-    assert.ok(Number.isNaN(defaultPaneIdToTmux(paneId(""))));
+  it("throws TypeError for non-'p' prefix ids", () => {
+    assert.throws(
+      () => defaultPaneIdToTmux(paneId("x5")),
+      (err: unknown) => err instanceof TypeError && /p<N>/.test((err as TypeError).message),
+    );
+    assert.throws(
+      () => defaultPaneIdToTmux(paneId("")),
+      TypeError,
+    );
+  });
+
+  it("throws TypeError for tmux-format pane id '%1' (wrong format)", () => {
+    // The tmux wire format uses "%N" prefixes; the internal model format uses "p<N>".
+    // Passing a tmux-format id is a programming error that should surface loudly.
+    assert.throws(
+      () => defaultPaneIdToTmux(paneId("%1")),
+      (err: unknown) =>
+        err instanceof TypeError &&
+        /%1/.test((err as TypeError).message),
+    );
   });
 });
 
@@ -120,8 +137,22 @@ describe("defaultWindowIdToTmux", () => {
     assert.equal(defaultWindowIdToTmux(windowId("w99")), 99);
   });
 
-  it("returns NaN for non-'w' prefix ids", () => {
-    assert.ok(Number.isNaN(defaultWindowIdToTmux(windowId("p3"))));
+  it("throws TypeError for non-'w' prefix ids", () => {
+    assert.throws(
+      () => defaultWindowIdToTmux(windowId("p3")),
+      (err: unknown) => err instanceof TypeError && /w<N>/.test((err as TypeError).message),
+    );
+  });
+
+  it("throws TypeError for tmux-format window id '@9' (wrong format)", () => {
+    // The tmux wire format uses "@N" prefixes; the internal model format uses "w<N>".
+    // Passing a tmux-format id is a programming error that should surface loudly.
+    assert.throws(
+      () => defaultWindowIdToTmux(windowId("@9")),
+      (err: unknown) =>
+        err instanceof TypeError &&
+        /@9/.test((err as TypeError).message),
+    );
   });
 });
 
@@ -246,7 +277,7 @@ describe("createInputPath — InputMessage", () => {
     assert.ok(host.writes[1]?.includes("-t %2"));
   });
 
-  it("invalid pane id drops the message (no write)", () => {
+  it("invalid pane id throws TypeError", () => {
     const host = makeFakeHost();
     const path = createInputPath(host);
 
@@ -256,9 +287,11 @@ describe("createInputPath — InputMessage", () => {
       paneId: paneId("BADID"),
       data: "hello",
     };
-    path.handleClientMessage(badMsg);
-
-    assert.equal(host.writes.length, 0);
+    assert.throws(
+      () => path.handleClientMessage(badMsg),
+      (err: unknown) => err instanceof TypeError && /p<N>/.test((err as TypeError).message),
+    );
+    assert.equal(host.writes.length, 0, "no partial write on bad pane id");
   });
 });
 
@@ -496,7 +529,10 @@ describe("createInputPath — custom paneIdToTmux option", () => {
     const host = makeFakeHost();
     // Registry-style: "p1" → tmux pane 100
     const path = createInputPath(host, {
-      paneIdToTmux: (id) => (id === paneId("p1") ? 100 : NaN),
+      paneIdToTmux: (id) => {
+        if (id === paneId("p1")) return 100;
+        throw new TypeError(`custom mapper: unrecognized pane id "${id as string}"`);
+      },
     });
 
     path.handleClientMessage(makeInput("1", "x"));
@@ -504,15 +540,17 @@ describe("createInputPath — custom paneIdToTmux option", () => {
     assert.ok(host.lastWrite?.includes("-t %100"), `expected -t %100, got: ${host.lastWrite}`);
   });
 
-  it("drops message when custom mapping returns NaN", () => {
+  it("throws when custom mapping throws for unrecognized id", () => {
     const host = makeFakeHost();
     const path = createInputPath(host, {
-      paneIdToTmux: () => NaN,
+      paneIdToTmux: () => { throw new TypeError("custom mapper: unknown id"); },
     });
 
-    path.handleClientMessage(makeInput("1", "x"));
-
-    assert.equal(host.writes.length, 0);
+    assert.throws(
+      () => path.handleClientMessage(makeInput("1", "x")),
+      TypeError,
+    );
+    assert.equal(host.writes.length, 0, "no partial write on bad pane id");
   });
 });
 
@@ -598,7 +636,7 @@ describe("createInputPath — break-pane command (tc-7xv.9)", () => {
     assert.equal(host.lastWrite, "break-pane -d -t %3\n");
   });
 
-  it("invalid pane id drops the message (no write)", () => {
+  it("invalid pane id throws TypeError", () => {
     const host = makeFakeHost();
     const path = createInputPath(host);
 
@@ -608,9 +646,11 @@ describe("createInputPath — break-pane command (tc-7xv.9)", () => {
       correlationId: "bp-bad",
       command: { kind: "break-pane", paneId: paneId("INVALID") },
     };
-    path.handleClientMessage(msg);
-
-    assert.equal(host.writes.length, 0);
+    assert.throws(
+      () => path.handleClientMessage(msg),
+      (err: unknown) => err instanceof TypeError && /p<N>/.test((err as TypeError).message),
+    );
+    assert.equal(host.writes.length, 0, "no partial write on bad pane id");
   });
 });
 
@@ -649,7 +689,7 @@ describe("createInputPath — swap-pane command (tc-7xv.9)", () => {
     assert.equal(host.lastWrite, "swap-pane -s %1 -t %4\n");
   });
 
-  it("swap-pane with invalid source drops the message", () => {
+  it("swap-pane with invalid source throws TypeError", () => {
     const host = makeFakeHost();
     const path = createInputPath(host);
 
@@ -659,12 +699,14 @@ describe("createInputPath — swap-pane command (tc-7xv.9)", () => {
       correlationId: "sp-bad",
       command: { kind: "swap-pane", paneId: paneId("BAD") },
     };
-    path.handleClientMessage(msg);
-
-    assert.equal(host.writes.length, 0);
+    assert.throws(
+      () => path.handleClientMessage(msg),
+      (err: unknown) => err instanceof TypeError && /p<N>/.test((err as TypeError).message),
+    );
+    assert.equal(host.writes.length, 0, "no partial write on bad pane id");
   });
 
-  it("swap-pane with invalid target drops the message", () => {
+  it("swap-pane with invalid target throws TypeError", () => {
     const host = makeFakeHost();
     const path = createInputPath(host);
 
@@ -678,9 +720,11 @@ describe("createInputPath — swap-pane command (tc-7xv.9)", () => {
         targetPaneId: paneId("BAD"),
       },
     };
-    path.handleClientMessage(msg);
-
-    assert.equal(host.writes.length, 0);
+    assert.throws(
+      () => path.handleClientMessage(msg),
+      (err: unknown) => err instanceof TypeError && /p<N>/.test((err as TypeError).message),
+    );
+    assert.equal(host.writes.length, 0, "no partial write on bad target pane id");
   });
 });
 
@@ -745,7 +789,7 @@ describe("createInputPath — rename-pane command (tc-7xv.9)", () => {
     assert.equal(host.lastWrite, "select-pane -T 'my server' -t %3\n");
   });
 
-  it("rename-pane with invalid pane id drops the message", () => {
+  it("rename-pane with invalid pane id throws TypeError", () => {
     const host = makeFakeHost();
     const path = createInputPath(host);
 
@@ -755,9 +799,11 @@ describe("createInputPath — rename-pane command (tc-7xv.9)", () => {
       correlationId: "rp-bad",
       command: { kind: "rename-pane", paneId: paneId("BAD"), title: "test" },
     };
-    path.handleClientMessage(msg);
-
-    assert.equal(host.writes.length, 0);
+    assert.throws(
+      () => path.handleClientMessage(msg),
+      (err: unknown) => err instanceof TypeError && /p<N>/.test((err as TypeError).message),
+    );
+    assert.equal(host.writes.length, 0, "no partial write on bad pane id");
   });
 });
 
@@ -821,7 +867,7 @@ describe("createInputPath — set-monitor-activity (tc-7xv.15)", () => {
     });
   });
 
-  it("set-monitor-activity with invalid window id drops the message", () => {
+  it("set-monitor-activity with invalid window id throws TypeError", () => {
     const host = makeFakeHost();
     const dispatched: NotificationEvent[] = [];
     const path = createInputPath(host, {
@@ -834,10 +880,12 @@ describe("createInputPath — set-monitor-activity (tc-7xv.15)", () => {
       correlationId: "ma-bad",
       command: { kind: "set-monitor-activity", windowId: windowId("BAD"), on: true },
     };
-    path.handleClientMessage(msg);
-
-    assert.equal(host.writes.length, 0);
-    assert.equal(dispatched.length, 0);
+    assert.throws(
+      () => path.handleClientMessage(msg),
+      (err: unknown) => err instanceof TypeError && /w<N>/.test((err as TypeError).message),
+    );
+    assert.equal(host.writes.length, 0, "no partial write on bad window id");
+    assert.equal(dispatched.length, 0, "no optimistic dispatch on bad window id");
   });
 });
 
@@ -933,7 +981,7 @@ describe("createInputPath — set-monitor-silence (tc-7xv.15)", () => {
     });
   });
 
-  it("set-monitor-silence with invalid window id drops the message", () => {
+  it("set-monitor-silence with invalid window id throws TypeError", () => {
     const host = makeFakeHost();
     const dispatched: NotificationEvent[] = [];
     const path = createInputPath(host, {
@@ -946,10 +994,12 @@ describe("createInputPath — set-monitor-silence (tc-7xv.15)", () => {
       correlationId: "ms-bad",
       command: { kind: "set-monitor-silence", windowId: windowId("BAD"), seconds: 30 },
     };
-    path.handleClientMessage(msg);
-
-    assert.equal(host.writes.length, 0);
-    assert.equal(dispatched.length, 0);
+    assert.throws(
+      () => path.handleClientMessage(msg),
+      (err: unknown) => err instanceof TypeError && /w<N>/.test((err as TypeError).message),
+    );
+    assert.equal(host.writes.length, 0, "no partial write on bad window id");
+    assert.equal(dispatched.length, 0, "no optimistic dispatch on bad window id");
   });
 });
 

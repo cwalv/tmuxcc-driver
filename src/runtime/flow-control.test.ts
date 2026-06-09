@@ -314,17 +314,20 @@ describe("createFlowController — pane id mapping", () => {
     assert.ok(cmds[0]?.includes("%5:continue"), `got: ${cmds[0]}`);
   });
 
-  it("rejects bad pane id gracefully (no throw, no command)", () => {
-    const { writes, host } = makeFakeHost();
+  it("throws TypeError for bad pane id rather than silently dropping", () => {
+    const { host } = makeFakeHost();
     const demux = createOutputDemux();
     const fc = createFlowController(host, demux, {
       highWaterBytes: 10,
       lowWaterBytes: 2,
     });
 
-    // "x99" doesn't start with "p" — defaultPaneIdToTmux returns NaN
-    fc.onPaneBytes(paneId("x99"), 9999);
-    assert.equal(writes.length, 0, "no command written for unparseable pane id");
+    // "x99" doesn't start with "p" — defaultPaneIdToTmux now throws TypeError
+    // rather than returning NaN and silently dropping the command.
+    assert.throws(
+      () => fc.onPaneBytes(paneId("x99"), 9999),
+      (err: unknown) => err instanceof TypeError && /p<N>/.test((err as TypeError).message),
+    );
   });
 });
 

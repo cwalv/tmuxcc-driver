@@ -297,10 +297,6 @@ class FlowControllerImpl implements FlowController {
 
   private _pause(paneId: PaneId): void {
     const tmuxN = this._toTmux(paneId);
-    if (Number.isNaN(tmuxN)) {
-      console.warn(`[flow-control] cannot map pane id "${paneId}" to tmux number — skipping pause`);
-      return;
-    }
     // Gate the demux fan-out immediately (before tmux acknowledges with %pause).
     this._paused.add(paneId);
     this._demux.pausePane(paneId);
@@ -310,10 +306,6 @@ class FlowControllerImpl implements FlowController {
 
   private _resume(paneId: PaneId): void {
     const tmuxN = this._toTmux(paneId);
-    if (Number.isNaN(tmuxN)) {
-      console.warn(`[flow-control] cannot map pane id "${paneId}" to tmux number — skipping resume`);
-      return;
-    }
     // Open the demux gate.
     this._paused.delete(paneId);
     this._demux.resumePane(paneId);

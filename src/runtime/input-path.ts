@@ -80,15 +80,29 @@ import type { SessionModel } from "../state/model.js";
  * Default PaneId→tmux-numeric inversion.
  *
  * Strips the leading "p" prefix and parses the remainder as a decimal integer.
- * Returns NaN if the id does not match the expected format; callers should
- * guard against NaN before issuing commands.
+ * Throws a TypeError if the id does not match the expected "p<N>" format.
  *
  * Convention source: src/state/reducer.ts `mintPaneId("p" + tmuxId)`.
+ *
+ * If you have a raw tmux pane id (e.g. "%1" from a tmux query), convert it to
+ * the internal model format first: the model mints PaneIds as "p" + tmuxPaneNum,
+ * so "%1" becomes "p1".
  */
 function defaultPaneIdToTmux(id: PaneId): number {
   const s = id as string;
-  if (!s.startsWith("p")) return NaN;
+  if (!s.startsWith("p")) {
+    throw new TypeError(
+      `defaultPaneIdToTmux: expected internal model PaneId format "p<N>" (e.g. "p1"); ` +
+      `got "${s}". If you have a tmux-format id (e.g. "%1"), ` +
+      `use the model's PaneId directly (the daemon mints them as "p" + tmuxPaneNum).`,
+    );
+  }
   const n = parseInt(s.slice(1), 10);
+  if (Number.isNaN(n)) {
+    throw new TypeError(
+      `defaultPaneIdToTmux: could not parse numeric suffix from PaneId "${s}".`,
+    );
+  }
   return n;
 }
 
@@ -96,13 +110,30 @@ function defaultPaneIdToTmux(id: PaneId): number {
  * Default WindowId→tmux-numeric inversion.
  *
  * Strips the leading "w" prefix and parses the remainder as a decimal integer.
+ * Throws a TypeError if the id does not match the expected "w<N>" format.
  *
  * Convention source: src/state/reducer.ts `mintWindowId("w" + tmuxId)`.
+ *
+ * If you have a raw tmux window id (e.g. "@9" from a tmux query), convert it to
+ * the internal model format first: the model mints WindowIds as "w" + tmuxWindowNum,
+ * so "@9" becomes "w9".
  */
 function defaultWindowIdToTmux(id: WindowId): number {
   const s = id as string;
-  if (!s.startsWith("w")) return NaN;
-  return parseInt(s.slice(1), 10);
+  if (!s.startsWith("w")) {
+    throw new TypeError(
+      `defaultWindowIdToTmux: expected internal model WindowId format "w<N>" (e.g. "w3"); ` +
+      `got "${s}". If you have a tmux-format id (e.g. "@9"), ` +
+      `use the model's WindowId directly (the daemon mints them as "w" + tmuxWindowNum).`,
+    );
+  }
+  const n = parseInt(s.slice(1), 10);
+  if (Number.isNaN(n)) {
+    throw new TypeError(
+      `defaultWindowIdToTmux: could not parse numeric suffix from WindowId "${s}".`,
+    );
+  }
+  return n;
 }
 
 // ---------------------------------------------------------------------------
@@ -196,8 +227,10 @@ export interface InputPath {
    * Route a ClientMessage to the appropriate tmux command and write it to the
    * host's stdin.  Unrecognised or handshake-only messages are silently ignored.
    *
-   * Guaranteed not to throw for well-formed messages with valid ids.  If an id
-   * does not parse (NaN), the message is dropped and a warning is logged.
+   * Throws a TypeError if a message carries an id that the id-mapping function
+   * cannot convert (e.g. a tmux-format id like "%1" or "@9" passed where the
+   * internal model format "p1" / "w9" is expected).  Callers should ensure they
+   * pass model-format ids; catching the TypeError surfaces a programming error.
    */
   handleClientMessage(msg: ClientMessage): void;
 }
@@ -310,23 +343,6 @@ export function createInputPath(
     );
   }
 
-  /** Guard: log and return false if tmuxId is NaN. */
-  function validPaneId(tmuxId: number, wireId: string): boolean {
-    if (Number.isNaN(tmuxId)) {
-      console.warn(`[input-path] cannot map pane id "${wireId}" to tmux numeric id — dropping message`);
-      return false;
-    }
-    return true;
-  }
-
-  function validWindowId(tmuxId: number, wireId: string): boolean {
-    if (Number.isNaN(tmuxId)) {
-      console.warn(`[input-path] cannot map window id "${wireId}" to tmux numeric id — dropping message`);
-      return false;
-    }
-    return true;
-  }
-
   function handleClientMessage(msg: ClientMessage): void {
     switch (msg.type) {
       // -----------------------------------------------------------------------
@@ -341,8 +357,6 @@ export function createInputPath(
       // -----------------------------------------------------------------------
       case "input": {
         const tmuxPaneNum = toTmuxPane(msg.paneId);
-        if (!validPaneId(tmuxPaneNum, msg.paneId as string)) return;
-
         const bytes = new TextEncoder().encode(msg.data);
         const cmd = sendKeysHex(tmuxPaneNum, bytes);
         sendCommand(cmd);
@@ -407,7 +421,6 @@ export function createInputPath(
             let tmuxPaneNum: number | undefined;
             if (command.paneId !== undefined) {
               tmuxPaneNum = toTmuxPane(command.paneId);
-              if (!validPaneId(tmuxPaneNum, command.paneId as string)) return;
             }
             const hasSplitOpts =
               command.cwd !== undefined || command.shellCommand !== undefined;
@@ -424,8 +437,6 @@ export function createInputPath(
           case "close-pane": {
             // kill-pane -t %<N>
             const tmuxPaneNum = toTmuxPane(command.paneId);
-            if (!validPaneId(tmuxPaneNum, command.paneId as string)) return;
-
             sendCommand(`kill-pane -t %${tmuxPaneNum}`);
             break;
           }
@@ -433,8 +444,6 @@ export function createInputPath(
           case "rename-window": {
             // rename-window -t @<N> <name>
             const tmuxWinNum = toTmuxWindow(command.windowId);
-            if (!validWindowId(tmuxWinNum, command.windowId as string)) return;
-
             // Single-quote the name to handle spaces / special chars.
             const quotedName = "'" + command.name.replace(/'/g, "'\\''") + "'";
             sendCommand(`rename-window -t @${tmuxWinNum} ${quotedName}`);
@@ -444,8 +453,6 @@ export function createInputPath(
           case "select-pane": {
             // select-pane -t %<N>
             const tmuxPaneNum = toTmuxPane(command.paneId);
-            if (!validPaneId(tmuxPaneNum, command.paneId as string)) return;
-
             sendCommand(`select-pane -t %${tmuxPaneNum}`);
             break;
           }
@@ -492,8 +499,6 @@ export function createInputPath(
             // the %error via the correlator and dispatches a compensating
             // synthetic with the captured before-value, restoring the model.
             const tmuxWinNum = toTmuxWindow(command.windowId);
-            if (!validWindowId(tmuxWinNum, command.windowId as string)) return;
-
             const wid = command.windowId;
             const on = command.on;
             sendCommandWithReversal(
@@ -520,8 +525,6 @@ export function createInputPath(
             // Optimistic model update with error reversal (tc-7xv.37) — same
             // pattern as set-synchronize-panes above.
             const tmuxWinNum = toTmuxWindow(command.windowId);
-            if (!validWindowId(tmuxWinNum, command.windowId as string)) return;
-
             const wid = command.windowId;
             const on = command.on;
             sendCommandWithReversal(
@@ -550,8 +553,6 @@ export function createInputPath(
             // pattern as set-synchronize-panes above.  tmux 3.4 does NOT emit
             // %window-option-changed for monitor-silence.
             const tmuxWinNum = toTmuxWindow(command.windowId);
-            if (!validWindowId(tmuxWinNum, command.windowId as string)) return;
-
             const wid = command.windowId;
             const secondsVal = command.seconds !== null && command.seconds > 0 ? command.seconds : 0;
             sendCommandWithReversal(
@@ -576,8 +577,6 @@ export function createInputPath(
             // -P would print the new window ID but control-mode captures it
             // as a command response; we don't parse the response here.
             const tmuxPaneNum = toTmuxPane(command.paneId);
-            if (!validPaneId(tmuxPaneNum, command.paneId as string)) return;
-
             sendCommand(`break-pane -d -t %${tmuxPaneNum}`);
             break;
           }
@@ -586,11 +585,8 @@ export function createInputPath(
             // swap-pane: without target uses -D to rotate with next pane;
             // with explicit target uses -s <src> -t <tgt>.
             const tmuxPaneNum = toTmuxPane(command.paneId);
-            if (!validPaneId(tmuxPaneNum, command.paneId as string)) return;
-
             if (command.targetPaneId !== undefined) {
               const tmuxTargetNum = toTmuxPane(command.targetPaneId);
-              if (!validPaneId(tmuxTargetNum, command.targetPaneId as string)) return;
               sendCommand(`swap-pane -s %${tmuxPaneNum} -t %${tmuxTargetNum}`);
             } else {
               // No explicit target: rotate the pane down (-D) within its window.
@@ -604,8 +600,6 @@ export function createInputPath(
             // Sets the pane's display title (#{pane_title}).
             // An empty title resets to the default (process name).
             const tmuxPaneNum = toTmuxPane(command.paneId);
-            if (!validPaneId(tmuxPaneNum, command.paneId as string)) return;
-
             // Single-quote the title to handle spaces / special chars.
             const quotedTitle = "'" + command.title.replace(/'/g, "'\\''") + "'";
             sendCommand(`select-pane -T ${quotedTitle} -t %${tmuxPaneNum}`);
@@ -620,7 +614,6 @@ export function createInputPath(
             // and window-close notifications which flow back through the daemon
             // mirror as pane.closed + window.removed deltas.
             const tmuxWinNum = toTmuxWindow(command.windowId);
-            if (!validWindowId(tmuxWinNum, command.windowId as string)) return;
             sendCommand(`kill-window -t @${tmuxWinNum}`);
             break;
           }
@@ -632,8 +625,6 @@ export function createInputPath(
             // No panes are created or destroyed; tmux reorders the window list.
             const srcNum = toTmuxWindow(command.sourceWindowId);
             const tgtNum = toTmuxWindow(command.targetWindowId);
-            if (!validWindowId(srcNum, command.sourceWindowId as string)) return;
-            if (!validWindowId(tgtNum, command.targetWindowId as string)) return;
             sendCommand(`swap-window -s @${srcNum} -t @${tgtNum}`);
             break;
           }
