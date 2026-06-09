@@ -197,7 +197,28 @@ class SocketTransport implements Transport {
       [this._buf, chunk],
       this._buf.length + chunk.length,
     );
+    this._processBuffer();
+  }
 
+  /**
+   * Drain `_buf` one message at a time.
+   *
+   * After dispatching each control-plane message, check whether `_controlHandler`
+   * changed as a side-effect of the dispatch (e.g. `runServerHandshake`'s
+   * `settle()` replaces the handler with a no-op after receiving
+   * `client.capabilities`).  When the handler has changed, stop processing and
+   * reschedule via `process.nextTick`.
+   *
+   * Why: when `client.capabilities` and `command.request` arrive in the same
+   * socket data chunk (OS batching under load), the naive while-loop would
+   * dispatch `command.request` using the no-op handler installed by `settle()`,
+   * silently dropping the command before `_handleConnection` can install its
+   * real command handler.  The `process.nextTick` reschedule gives the
+   * microtask queue — including `_handleConnection`'s async continuation that
+   * calls `transport.onControl(commandHandler)` — a chance to run before the
+   * next buffered message is dispatched.
+   */
+  private _processBuffer(): void {
     while (this._buf.length > 0) {
       const firstByte = this._buf[0] as number;
 
@@ -248,12 +269,22 @@ class SocketTransport implements Transport {
         const payload = this._buf.subarray(CTRL_LEN_SIZE, totalLen);
         this._buf = this._buf.subarray(totalLen);
 
+        const prevHandler = this._controlHandler;
         try {
           const jsonStr = payload.toString("utf8").trim();
           const msg = JSON.parse(jsonStr) as Parameters<ControlHandler>[0];
           this._controlHandler?.(msg);
         } catch {
           // Malformed JSON — discard
+        }
+
+        // If the handler changed as a side-effect of dispatch (e.g. settle()
+        // installed a no-op), stop processing here and reschedule the remainder
+        // so that microtasks (including async continuations that install the real
+        // command handler) can run before the next buffered message is dispatched.
+        if (this._controlHandler !== prevHandler && this._buf.length > 0) {
+          process.nextTick(() => { this._processBuffer(); });
+          return;
         }
       }
     }

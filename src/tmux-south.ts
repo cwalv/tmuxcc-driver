@@ -263,12 +263,15 @@ export function createTmuxWatcher(
     // doesn't try to attach to the most-recently-used session interactively.
     const target = rows[0]?.name ?? "";
 
-    // Spawn `tmux -L <socketName> -CC attach -t <name>` with stdio as pipes
-    // (we need stdout for control-mode output).
-    // We pass -d so we don't steal focus from the terminal.
+    // Spawn `tmux -L <socketName> -CC attach-session -t <name>` with stdio as
+    // pipes (we need stdout for control-mode output).
+    // Do NOT pass `-d` here: the `-d` flag causes tmux to detach ALL OTHER
+    // clients from the session, including any daemon's own `-CC attach-session`
+    // connection.  The watcher only needs to receive `%sessions-changed`
+    // notifications; it must not disrupt other attached clients.
     const proc = spawn(
       "tmux",
-      ["-L", socketName, "-CC", "attach-session", "-t", target, "-d"],
+      ["-L", socketName, "-CC", "attach-session", "-t", target],
       {
         stdio: ["ignore", "pipe", "ignore"],
         detached: false,
