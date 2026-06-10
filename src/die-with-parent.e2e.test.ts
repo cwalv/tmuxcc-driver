@@ -27,7 +27,7 @@
  * # Cleanup
  *
  * Unique tmux socket name (tmuxcc-test-dwp-…) and a unique runtime dir per
- * run.  The finally block SIGKILLs both brokers and any surviving session-proxy /
+ * run.  The finally block SIGKILLs both server-proxies and any surviving session-proxy /
  * bridge pids, kills the tmux test server, and removes the runtime dir —
  * even on assertion failure.
  *

@@ -475,7 +475,7 @@ export function createTmuxWatcher(
     //   no-output   — suppress %output blocks; the watcher only consumes
     //                 session-lifecycle notifications (§6.2)
     //   ignore-size — a thin 220x50 watcher must not drive session resizing
-    //                 for daemons / real clients attached to the same session
+    //                 for session-proxies / real clients attached to the same session
     // Note: no `-d` — detaching other clients would disrupt session-proxy attaches.
     const host = createTmuxHost({
       socketName,

@@ -104,7 +104,7 @@ export interface ServerProxyOptions {
    * Absolute path of this server-proxy process's log file, when the entry point
    * has installed stderr→file mirroring (tc-k6v).  Reported verbatim in
    * `server-proxy.info` responses so debug clients can locate the log without
-   * out-of-band knowledge.  Omit for in-process/programmatic brokers
+   * out-of-band knowledge.  Omit for in-process/programmatic server-proxies
    * (`server-proxy.info` then reports `logPath: null`).
    */
   logPath?: string;
@@ -128,7 +128,7 @@ export interface ServerProxyHandle {
 
   /**
    * Gracefully shut down: stop accepting connections, disconnect all clients,
-   * reap all daemons, and remove the server-proxy socket file.
+   * reap all session-proxies, and remove the server-proxy socket file.
    */
   shutdown(): Promise<void>;
 
@@ -480,7 +480,7 @@ class ServerProxyImpl implements ServerProxyHandle {
     }
     this._clients.clear();
 
-    // Reap all daemons
+    // Reap all session-proxies
     this._supervisor.reapAll();
 
     // Stop the server
@@ -638,7 +638,7 @@ class ServerProxyImpl implements ServerProxyHandle {
    * kernel closed when the process died.  Per SCHEMA.md ("SessionProxy errors"):
    * after a session-proxy connection dies the client must consider it dead and
    * reconnect through the server-proxy — the connection close IS the wire-level
-   * signal.  No server-proxy-wide message is sent; sibling sessions' daemons and
+   * signal.  No server-proxy-wide message is sent; sibling sessions' session-proxies and
    * clients are untouched.
    *
    * The same supervisor exit event also fires when the session-proxy exited because
@@ -1196,10 +1196,10 @@ function errorCode(err: unknown): string {
  * Register `onSelfExit` to observe; both paths complete shutdown() — which
  * unlinks the server-proxy socket file — before listeners run.  There is no
  * auto-restart layer: server-proxy crashes are bugs to fix, not UX to smooth over.
- * Nor are there orphaned daemons to reap after a server-proxy crash: daemons are
+ * Nor are there orphaned session-proxies to reap after a server-proxy crash: session-proxies are
  * non-detached children that enforce die-with-parent themselves (tc-2c5 —
  * getppid watchdog installed in session-proxy-entry.ts).  Recovery is launcher →
- * fresh server-proxy → fresh daemons on next session.claim → fresh `-CC attach`
+ * fresh server-proxy → fresh session-proxies on next session.claim → fresh `-CC attach`
  * to the surviving tmux sessions.
  */
 export function createServerProxy(opts: ServerProxyOptions): ServerProxyHandle {

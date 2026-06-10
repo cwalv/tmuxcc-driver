@@ -5,7 +5,7 @@
  *
  * # Scenario (C1, two sessions)
  *
- * In-process serverProxy (so the daemons are direct children of THIS test
+ * In-process serverProxy (so the session-proxies are direct children of THIS test
  * process and can be located + SIGKILLed), two claimed sessions A and B,
  * one session-proxy-wire client attached to each.  SIGKILL session-proxy A:
  *
@@ -420,7 +420,7 @@ describe(
           killQuiet(pidB);
           spawnSync("tmux", ["-L", socketName, "kill-server"], { stdio: "ignore", timeout: 5_000 });
           // Backstop: anything still holding the unique socket name in argv
-          // (daemons, PTY bridges).
+          // (session-proxies, PTY bridges).
           spawnSync("pkill", ["-KILL", "-f", socketName], { stdio: "ignore", timeout: 5_000 });
           fs.rmSync(runtimeDir, { recursive: true, force: true });
         }

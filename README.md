@@ -72,7 +72,7 @@ await server-proxy.shutdown();
 | Method     | Signature             | Description                                                                              |
 |------------|-----------------------|------------------------------------------------------------------------------------------|
 | `start`    | `() => Promise<void>` | Create the unix socket, begin accepting connections, start the tmux watcher.             |
-| `shutdown` | `() => Promise<void>` | Stop accepting, disconnect all clients, reap all daemons, remove the server-proxy socket file. |
+| `shutdown` | `() => Promise<void>` | Stop accepting, disconnect all clients, reap all session-proxies, remove the server-proxy socket file. |
 | `endpoint` | `() => string`        | The server-proxy's unix socket path. Valid only after `start()` resolves.                      |
 
 ### Socket-path utilities (re-exported for test harnesses)
@@ -167,13 +167,13 @@ client launcher spawns a fresh server-proxy against the surviving tmux state.
 
 Tests call `server-proxy.shutdown()` explicitly (see "Embedding in a test
 harness" above).  Shutdown is synchronous-with-respect-to-children: it
-reaps daemons, removes the socket, and resolves once cleanup is done.
+reaps session-proxies, removes the socket, and resolves once cleanup is done.
 Test runners should always own a `shutdown()` in a `finally` block to
 guarantee no leak even on assertion failure or crash.
 
 ### SessionProxy parent semantics
 
-Per-session daemons are spawned as regular (non-detached) child processes
+Per-session session-proxies are spawned as regular (non-detached) child processes
 of the server-proxy and **explicitly enforce** die-with-parent — process-group
 mechanics alone do not deliver it (a SIGKILLed parent's children are
 reparented to init, not signalled).  On Linux the session-proxy installs
@@ -182,8 +182,8 @@ reparented to init, not signalled).  On Linux the session-proxy installs
 
 There is no orphan-and-reclaim path — recovery is "server-proxy re-spawn +
 fresh `-CC attach` to surviving tmux sessions," not "find my orphaned
-daemons and adopt them."  This is correct because tmux is the only
-persistence layer; daemons hold no state worth preserving across server-proxy
+session-proxies and adopt them."  This is correct because tmux is the only
+persistence layer; session-proxies hold no state worth preserving across server-proxy
 death.
 
 If a session-proxy dies while the server-proxy survives (parser fault, OOM), the

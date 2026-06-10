@@ -18,7 +18,7 @@
  * server-proxy socket file before `onSelfExit` listeners run.  SessionProxys need no
  * external supervision either: they are non-detached children that enforce
  * die-with-parent themselves (tc-2c5), so a dead server-proxy leaves no orphans;
- * a fresh server-proxy simply spawns fresh daemons against the surviving tmux state.
+ * a fresh server-proxy simply spawns fresh session-proxies against the surviving tmux state.
  */
 
 export { createServerProxy } from "./server-proxy.js";

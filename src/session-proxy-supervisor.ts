@@ -6,7 +6,7 @@
  * The supervisor owns the lifecycle of per-session session-proxy processes:
  *   - Spawning a session-proxy for a session (if one is not already running)
  *   - Waiting for the session-proxy to signal readiness
- *   - Reaping daemons on session removal or unexpected exit
+ *   - Reaping session-proxies on session removal or unexpected exit
  *   - Per-name atomicity: concurrent claim requests for the same session name
  *     are serialized so only one session-proxy process is ever spawned
  *
@@ -163,7 +163,7 @@ export interface SessionProxySupervisor {
   reapSessionProxy(sessionId: string): void;
 
   /**
-   * Kill all running daemons. Called on server-proxy shutdown.
+   * Kill all running session-proxies. Called on server-proxy shutdown.
    */
   reapAll(): void;
 
@@ -183,7 +183,7 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
    * The value is the entry OR a Promise for the in-flight spawn, allowing
    * per-name serialization.
    */
-  private _daemons = new Map<string, SessionProxyEntry | Promise<SessionProxyEntry>>();
+  private _sessionProxies = new Map<string, SessionProxyEntry | Promise<SessionProxyEntry>>();
   private _crashHandler: SessionProxyCrashHandler | null = null;
 
   onCrash(handler: SessionProxyCrashHandler): void {
@@ -197,7 +197,7 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
     sessionProxySockPath: string,
   ): Promise<string> {
     // Fast path: session-proxy already running
-    const existing = this._daemons.get(sessionId);
+    const existing = this._sessionProxies.get(sessionId);
     if (existing !== undefined) {
       if (existing instanceof Promise) {
         // In-flight spawn — wait for it
@@ -216,33 +216,33 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
     );
 
     // Register the promise immediately so concurrent callers share it
-    this._daemons.set(sessionId, spawnPromise);
+    this._sessionProxies.set(sessionId, spawnPromise);
 
     let entry: SessionProxyEntry;
     try {
       entry = await spawnPromise;
     } catch (err) {
       // Spawn failed — remove the stale promise
-      this._daemons.delete(sessionId);
+      this._sessionProxies.delete(sessionId);
       throw err;
     }
 
     // Replace promise with resolved entry
-    this._daemons.set(sessionId, entry);
+    this._sessionProxies.set(sessionId, entry);
     return entry.socketPath;
   }
 
   sessionProxyPid(sessionId: string): number | null {
-    const entry = this._daemons.get(sessionId);
+    const entry = this._sessionProxies.get(sessionId);
     if (entry === undefined || entry instanceof Promise) return null;
     return entry.proc.pid ?? null;
   }
 
   reapSessionProxy(sessionId: string): void {
-    const entry = this._daemons.get(sessionId);
+    const entry = this._sessionProxies.get(sessionId);
     if (!entry) return;
 
-    this._daemons.delete(sessionId);
+    this._sessionProxies.delete(sessionId);
 
     if (entry instanceof Promise) {
       // In-flight spawn — kill after it resolves
@@ -253,7 +253,7 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
   }
 
   reapAll(): void {
-    for (const sessionId of this._daemons.keys()) {
+    for (const sessionId of this._sessionProxies.keys()) {
       this.reapSessionProxy(sessionId);
     }
   }
@@ -275,11 +275,11 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
       sessionProxySpawnArgs(script, socketName, sessionName, sessionProxySockPath),
       {
         stdio: ["ignore", "pipe", "pipe"],
-        // tc-2c5 / ext-a §6.3 invariant: daemons are REGULAR children — never
-        // `detached: true`, no PID file, no "find my old daemons" on startup.
+        // tc-2c5 / ext-a §6.3 invariant: session-proxies are REGULAR children — never
+        // `detached: true`, no PID file, no "find my old session-proxies" on startup.
         // Die-with-parent is enforced inside the session-proxy itself (getppid
         // watchdog in session-proxy-entry.ts); recovery from server-proxy death is a fresh
-        // server-proxy spawning fresh daemons, never reclaiming old ones.
+        // server-proxy spawning fresh session-proxies, never reclaiming old ones.
         detached: false,
         env: { ...process.env },
       },
@@ -343,18 +343,18 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
     // LAZY (§6.2): nothing is spawned until the next claim.
     proc.once("exit", (code, signal) => {
       const fire = () => {
-        const current = this._daemons.get(sessionId);
+        const current = this._sessionProxies.get(sessionId);
         // Only treat as a crash if THIS process is still the registered
         // session-proxy.  The proc identity check guards the ABA case: an old
         // session-proxy's late exit event (delivered after reapSessionProxy() + a fresh
         // spawn under the same sessionId) must not reap the healthy
         // replacement entry.
         if (current !== undefined && !(current instanceof Promise) && current.proc === proc) {
-          this._daemons.delete(sessionId);
+          this._sessionProxies.delete(sessionId);
           this._crashHandler?.(sessionId, { sessionName, code, signal });
         }
       };
-      const current = this._daemons.get(sessionId);
+      const current = this._sessionProxies.get(sessionId);
       if (current instanceof Promise) {
         // The exit raced ensureSessionProxy()'s `await spawnPromise` continuation:
         // the map still holds the in-flight promise this entry will be

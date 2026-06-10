@@ -21,7 +21,7 @@
  * (1 s cadence) and self-SIGTERMs on reparenting, which lands in the graceful
  * SIGTERM path below (detach the -CC client, close + remove the unix socket).
  * There is NO orphan-and-reclaim: recovery from server-proxy death is launcher →
- * fresh server-proxy → fresh daemons on next session.claim → fresh `-CC attach` to
+ * fresh server-proxy → fresh session-proxies on next session.claim → fresh `-CC attach` to
  * the surviving tmux sessions (tmux is the only persistence layer).
  *
  * This is the multiplexed-socket endpoint described in SCHEMA.md §"Data plane":
