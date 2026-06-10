@@ -1,5 +1,5 @@
 /**
- * Canonical in-daemon session model.
+ * Canonical in-session-proxy session model.
  *
  * @module state/model
  *

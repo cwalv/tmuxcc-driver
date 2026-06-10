@@ -48,7 +48,7 @@ The system has **two distinct wires** plus a **shared data plane**:
 | Wire            | Scope            | Transport         | Carries                                              |
 |-----------------|------------------|-------------------|------------------------------------------------------|
 | **ServerProxy wire** | One tmux socket  | server-proxy socket     | session discovery + lifecycle + endpoint claim       |
-| **SessionProxy wire** | One tmux session | per-daemon socket | pane/window/layout/focus model + commands            |
+| **SessionProxy wire** | One tmux session | per-session-proxy socket | pane/window/layout/focus model + commands            |
 | **Data plane**  | One pane         | session-proxy socket     | raw pane output bytes (binary framing)               |
 
 A client always talks to the server-proxy first ("give me session X" → endpoint),
@@ -898,7 +898,7 @@ Unchanged from v2. The data plane carries raw terminal output bytes per
 pane. Binary framing — not JSON or base64 — because hot-path volumes make
 escaping or inflation material.
 
-The data-plane transport is the same per-daemon socket as the session-proxy
+The data-plane transport is the same per-session-proxy socket as the session-proxy
 control wire. Control-plane and data-plane traffic are multiplexed on
 the same connection via a leading magic byte (data plane: `0xCC`;
 control plane: JSON, never starts with `0xCC`).

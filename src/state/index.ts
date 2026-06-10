@@ -1,5 +1,5 @@
 /**
- * State module — canonical in-daemon session model.
+ * State module — canonical in-session-proxy session model.
  *
  * Public surface:
  *   - Model types: SessionModel, Session, Window, Pane, FocusState
