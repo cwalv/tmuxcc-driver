@@ -118,6 +118,50 @@ export function listSessions(socketName: string): TmuxSessionRow[] {
 }
 
 /**
+ * PID of the tmux server on `socketName`, or `null` when the server is not
+ * running (tc-k6v `broker.info`).
+ *
+ * Uses `list-sessions -F '#{pid}'` rather than `display-message -p`: the
+ * format variable `#{pid}` is the server pid in any format context, and
+ * `list-sessions` needs no attached client or target.  A server with zero
+ * sessions effectively does not exist under the modern `exit-empty on`
+ * default, so "no rows" ⇒ `null` is the right degradation.
+ */
+export function getTmuxServerPid(socketName: string): number | null {
+  const result = spawnSync(
+    "tmux",
+    ["-L", socketName, "list-sessions", "-F", "#{pid}"],
+    { encoding: "utf8", timeout: 5_000 },
+  );
+  if (result.status !== 0 || result.error) return null;
+  const first = (result.stdout ?? "").trim().split("\n")[0] ?? "";
+  const pid = parseInt(first, 10);
+  return Number.isNaN(pid) ? null : pid;
+}
+
+/**
+ * Pane counts per session (tc-k6v `broker.info`): maps tmux session id
+ * (e.g. `"$1"`) → number of panes across all of the session's windows.
+ *
+ * Runs `tmux -L <socketName> list-panes -a -F '#{session_id}'` and tallies
+ * rows.  Returns an empty map when the server is not running.
+ */
+export function countPanesBySession(socketName: string): Map<string, number> {
+  const counts = new Map<string, number>();
+  const result = spawnSync(
+    "tmux",
+    ["-L", socketName, "list-panes", "-a", "-F", "#{session_id}"],
+    { encoding: "utf8", timeout: 5_000 },
+  );
+  if (result.status !== 0 || result.error) return counts;
+  for (const line of (result.stdout ?? "").trim().split("\n")) {
+    if (!line) continue;
+    counts.set(line, (counts.get(line) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/**
  * Run `tmux -L <socketName> new-session -d -s <name>` to create a detached
  * session.  Throws if the command fails (including name-already-taken).
  *

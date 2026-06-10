@@ -151,6 +151,13 @@ export interface DaemonSupervisor {
   ): Promise<string>;
 
   /**
+   * PID of the running daemon for `sessionId`, or `null` when no daemon is
+   * running (never claimed, reaped, or crashed) or its spawn is still
+   * in-flight (tc-k6v `broker.info`).  Read-only; never blocks on a spawn.
+   */
+  daemonPid(sessionId: string): number | null;
+
+  /**
    * Kill the daemon for a session (if running). Called on session removal.
    */
   reapDaemon(sessionId: string): void;
@@ -223,6 +230,12 @@ class DaemonSupervisorImpl implements DaemonSupervisor {
     // Replace promise with resolved entry
     this._daemons.set(sessionId, entry);
     return entry.socketPath;
+  }
+
+  daemonPid(sessionId: string): number | null {
+    const entry = this._daemons.get(sessionId);
+    if (entry === undefined || entry instanceof Promise) return null;
+    return entry.proc.pid ?? null;
   }
 
   reapDaemon(sessionId: string): void {

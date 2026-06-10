@@ -58,6 +58,8 @@ import type {
   BrokerSessionRenamedMessage,
   BrokerCommandRequestMessage,
   BrokerCommandResponseMessage,
+  BrokerInfoPayload,
+  BrokerInfoSession,
   ErrorMessage,
   MessageBase,
   PaneId,
@@ -66,7 +68,7 @@ import type {
 
 import { createSocketServer, createSocketTransport } from "./socket-transport.js";
 import { brokerSocketPath, daemonSocketPath, removeSocket, restrictSocket } from "./runtime-dir.js";
-import { listSessions, createSession, killSession, createTmuxWatcher, probeTmuxAlive, setWindowSynchronizePanes, setWindowMonitorActivity, setWindowMonitorSilence, setSessionMarker } from "./tmux-south.js";
+import { listSessions, createSession, killSession, createTmuxWatcher, probeTmuxAlive, setWindowSynchronizePanes, setWindowMonitorActivity, setWindowMonitorSilence, setSessionMarker, getTmuxServerPid, countPanesBySession } from "./tmux-south.js";
 import type { TmuxWatcher } from "./tmux-south.js";
 import { createDaemonSupervisor } from "./daemon-supervisor.js";
 import type { DaemonSupervisor, DaemonExitInfo } from "./daemon-supervisor.js";
@@ -97,6 +99,15 @@ export interface BrokerOptions {
    * Tests inject a short value instead of literally waiting 5 minutes.
    */
   idleExitMs?: number;
+
+  /**
+   * Absolute path of this broker process's log file, when the entry point
+   * has installed stderr→file mirroring (tc-k6v).  Reported verbatim in
+   * `broker.info` responses so debug clients can locate the log without
+   * out-of-band knowledge.  Omit for in-process/programmatic brokers
+   * (`broker.info` then reports `logPath: null`).
+   */
+  logPath?: string;
 }
 
 /**
@@ -235,6 +246,7 @@ const BROKER_CAPABILITIES: Capabilities = {
     "session-destroy",
     "session-claim",
     "pane-attach", // tc-7xv.36
+    "broker-info", // tc-k6v
   ],
 };
 
@@ -285,6 +297,15 @@ class BrokerImpl implements BrokerHandle {
   private _server: { close(): Promise<void> } | null = null;
   private _socketPath: string = "";
   private _started = false;
+
+  // ── tc-k6v broker.info state ────────────────────────────────────────────────
+  /** Date.now() when start() completed; drives `broker.info` uptimeMs. */
+  private _startedAtMs = 0;
+  /**
+   * Whether sessions already existed on the tmux socket when this broker
+   * started (ext-a §6.2 "adopted server").  Reported in `broker.info`.
+   */
+  private _adoptedExistingServer = false;
 
   // ── tc-3iv self-exit state ──────────────────────────────────────────────────
   /** Idle hysteresis window (ms) before self-exit at zero IPC clients. */
@@ -422,6 +443,10 @@ class BrokerImpl implements BrokerHandle {
     // Initial session load
     this._refreshSessions();
 
+    // tc-k6v: sessions present at start ⇒ the tmux server pre-existed this
+    // broker — it was "adopted", not minted by a later session.claim (§6.2).
+    this._adoptedExistingServer = this._sessions.size > 0;
+
     // Start tmux watcher for %sessions-changed notifications
     this._watcher = this._spawnWatcher();
 
@@ -432,6 +457,7 @@ class BrokerImpl implements BrokerHandle {
     });
 
     this._started = true;
+    this._startedAtMs = Date.now();
 
     // Arm the idle-exit hysteresis: the broker starts with zero clients, and
     // a launcher that crashes before connecting must not leak a broker.
@@ -748,6 +774,48 @@ class BrokerImpl implements BrokerHandle {
   }
 
   // ---------------------------------------------------------------------------
+  // broker.info (tc-k6v)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Build the read-only diagnostics snapshot for a `broker.info` command.
+   *
+   * Refreshes the session table first so counts are current, then augments
+   * each session row with the daemon PID (from the supervisor) and the pane
+   * count (one `tmux list-panes -a` shell-out, tallied per session).  All
+   * queries are cheap and synchronous; nothing is mutated beyond the routine
+   * session-table refresh.
+   */
+  private _buildInfo(): BrokerInfoPayload {
+    this._refreshSessions();
+
+    const paneCounts = countPanesBySession(this._opts.socketName);
+    const sessions: BrokerInfoSession[] = [];
+    for (const entry of this._sessions.values()) {
+      sessions.push({
+        sessionId: entry.sessionId,
+        name: entry.name,
+        daemonPid: this._supervisor.daemonPid(entry.sessionId),
+        windowCount: entry.windowCount,
+        paneCount: paneCounts.get(entry.tmuxId) ?? 0,
+        attachedClientCount: entry.attachedClientCount,
+      });
+    }
+
+    return {
+      socketName: this._opts.socketName,
+      brokerSocketPath: this._socketPath,
+      brokerPid: process.pid,
+      uptimeMs: Math.max(0, Date.now() - this._startedAtMs),
+      tmuxServerPid: getTmuxServerPid(this._opts.socketName),
+      adoptedExistingServer: this._adoptedExistingServer,
+      connectedClientCount: this._ipcClientCount,
+      logPath: this._opts.logPath ?? null,
+      sessions,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
   // Command dispatch
   // ---------------------------------------------------------------------------
 
@@ -758,7 +826,7 @@ class BrokerImpl implements BrokerHandle {
     const { correlationId, command } = req;
 
     try {
-      let payload: { sessionId?: SessionId; endpoint?: string; paneId?: PaneId; created?: boolean; ok?: true };
+      let payload: { sessionId?: SessionId; endpoint?: string; paneId?: PaneId; created?: boolean; ok?: true; info?: BrokerInfoPayload };
 
       switch (command.kind) {
         case "session.claim":
@@ -769,6 +837,10 @@ class BrokerImpl implements BrokerHandle {
           break;
         case "session.destroy":
           payload = await this._destroySession(command.sessionId);
+          break;
+        case "broker.info":
+          // tc-k6v: read-only diagnostics snapshot for debug surfaces.
+          payload = { info: this._buildInfo() };
           break;
         case "pane.attach":
           // tc-7xv.36: attach intent for a specific pane.  The broker doesn't

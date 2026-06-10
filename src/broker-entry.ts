@@ -12,10 +12,14 @@
  *
  * Protocol:
  *   1. Parse arguments.
- *   2. Create and start a broker (createBroker from ./broker.js).
- *   3. Write "READY\n" to stdout so the launcher knows we are listening.
- *   4. On SIGTERM: call broker.shutdown() and exit cleanly.
- *   5. On broker self-exit (tc-3iv, §6.2 — tmux gone, or idle past the
+ *   2. Mirror stderr into the append-only broker log file at
+ *      `<runtime>/<socketName>/broker.log` (tc-k6v) — launchers destroy the
+ *      stderr pipe post-READY, so without the log the broker's diagnostics
+ *      (daemon crashes, self-exit reasons) would vanish.
+ *   3. Create and start a broker (createBroker from ./broker.js).
+ *   4. Write "READY\n" to stdout so the launcher knows we are listening.
+ *   5. On SIGTERM: call broker.shutdown() and exit cleanly.
+ *   6. On broker self-exit (tc-3iv, §6.2 — tmux gone, or idle past the
  *      hysteresis window): exit 0.  The broker has already unlinked its
  *      socket file by the time the self-exit callback fires.
  *
@@ -27,6 +31,8 @@
 
 import { createBroker } from "./broker.js";
 import type { BrokerOptions } from "./broker.js";
+import { brokerLogPath } from "./runtime-dir.js";
+import { openBrokerLog, installStderrMirror } from "./broker-log.js";
 
 // ---------------------------------------------------------------------------
 // Argument parsing
@@ -75,10 +81,22 @@ function parseArgs(): { socketName: string; runtimeDir?: string; idleExitMs?: nu
 async function main(): Promise<void> {
   const { socketName, runtimeDir, idleExitMs } = parseArgs();
 
+  // tc-k6v: mirror stderr into the append-only broker log file.  Best-effort:
+  // a failed open (unwritable runtime dir) leaves the broker running without
+  // a log — `broker.info` then reports `logPath: null`.
+  const log = openBrokerLog(
+    brokerLogPath(socketName, runtimeDir !== undefined ? { runtimeDir } : {}),
+  );
+  if (log !== null) {
+    installStderrMirror(log);
+    process.stderr.write(`broker: starting pid=${process.pid} socket=${socketName} log=${log.path}\n`);
+  }
+
   const brokerOpts: BrokerOptions = {
     socketName,
     ...(runtimeDir !== undefined ? { runtimeDir } : {}),
     ...(idleExitMs !== undefined ? { idleExitMs } : {}),
+    ...(log !== null ? { logPath: log.path } : {}),
   };
   const broker = createBroker(brokerOpts);
 
@@ -98,6 +116,7 @@ async function main(): Promise<void> {
 
   // Handle SIGTERM gracefully
   process.once("SIGTERM", () => {
+    process.stderr.write("broker: SIGTERM received, shutting down\n");
     void broker.shutdown().finally(() => {
       process.exit(0);
     });

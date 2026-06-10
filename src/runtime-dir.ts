@@ -62,6 +62,26 @@ export function brokerSocketPath(
 }
 
 /**
+ * Resolve the broker log file path: `<runtimeDir>/<socketName>/broker.log`
+ * (tc-k6v).  Creates the socket-name sub-directory at mode 0700 (same as
+ * `brokerSocketPath`) but does NOT create the file — the broker entry point
+ * opens it append-only; readers (the VS Code `tmuxcc.showBrokerLogs` tail)
+ * tolerate a missing file.
+ *
+ * Like the broker socket, the path is well-known and derivable by clients
+ * without out-of-band communication.
+ */
+export function brokerLogPath(
+  socketName: string,
+  opts: RuntimeDirOptions = {},
+): string {
+  const base = resolveBaseRuntimeDir(opts);
+  const dir = path.join(base, socketName);
+  ensureDir(dir, 0o700);
+  return path.join(dir, "broker.log");
+}
+
+/**
  * Resolve a daemon socket path:
  * `<runtimeDir>/<socketName>/<sessionId>.sock`.
  * Re-uses the already-created socket-name sub-directory.

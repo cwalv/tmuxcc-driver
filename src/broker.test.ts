@@ -262,6 +262,66 @@ describe("broker – unit (no tmux)", () => {
     }
   });
 
+  it("U3 (tc-k6v): broker.info returns identity fields without tmux", async () => {
+    const socketName = nextSocketName();
+    const broker = createBroker({ socketName });
+    await broker.start();
+
+    try {
+      const { mux } = await connectToBroker(broker.endpoint());
+      const seq = { value: 1 };
+
+      const resp = await sendBrokerCommand(mux, { kind: "broker.info" }, seq);
+      assert.ok(resp.result.ok, `Expected ok=true, got: ${JSON.stringify(resp.result)}`);
+      const info = (resp.result as {
+        ok: true;
+        payload: { info: import("@tmuxcc/daemon").BrokerInfoPayload };
+      }).payload.info;
+
+      assert.equal(info.socketName, socketName);
+      assert.equal(info.brokerSocketPath, broker.endpoint());
+      // In-process broker → its pid is this test process's pid.
+      assert.equal(info.brokerPid, process.pid);
+      assert.ok(info.uptimeMs >= 0, `uptimeMs must be >= 0, got ${info.uptimeMs}`);
+      // No tmux server on this unique socket → null pid, no sessions, not adopted.
+      assert.equal(info.tmuxServerPid, null);
+      assert.equal(info.adoptedExistingServer, false);
+      assert.deepEqual(info.sessions, []);
+      // The connection carrying this very request counts.
+      assert.ok(
+        info.connectedClientCount >= 1,
+        `connectedClientCount must include the requesting client, got ${info.connectedClientCount}`,
+      );
+      // Programmatic broker (no entry point) → no log file.
+      assert.equal(info.logPath, null);
+
+      mux.transport.close();
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
+  it("U4 (tc-k6v): broker.info reports logPath verbatim when configured", async () => {
+    const socketName = nextSocketName();
+    const broker = createBroker({ socketName, logPath: "/tmp/some-broker.log" });
+    await broker.start();
+
+    try {
+      const { mux } = await connectToBroker(broker.endpoint());
+      const seq = { value: 1 };
+      const resp = await sendBrokerCommand(mux, { kind: "broker.info" }, seq);
+      assert.ok(resp.result.ok);
+      const info = (resp.result as {
+        ok: true;
+        payload: { info: import("@tmuxcc/daemon").BrokerInfoPayload };
+      }).payload.info;
+      assert.equal(info.logPath, "/tmp/some-broker.log");
+      mux.transport.close();
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
   it("U2: broker.endpoint() equals brokerSocketPath(socketName) — well-known path", async () => {
     // This is the core regression guard for tc-j9c.8:
     // broker.endpoint() must equal the path that vscode computes via
@@ -466,6 +526,46 @@ describe("broker – integration (requires tmux)", { skip: !TMUX_AVAILABLE }, ()
     assert.equal(resp.result.ok, false);
     const r = resp.result as { ok: false; code: string; message: string };
     assert.equal(r.code, "session.not-found", `code should be session.not-found, got ${r.code}`);
+
+    mux.transport.close();
+  });
+
+  it("I10 (tc-k6v): broker.info reports tmux server pid + per-session daemon pid and pane count", async () => {
+    const { mux } = await connectToBroker(broker.endpoint());
+    const seq = { value: 1 };
+
+    // Claim a session so a tmux server, session, and daemon all exist.
+    const claimResp = await sendBrokerCommand(mux, { kind: "session.claim", name: "info-target" }, seq);
+    assert.ok(claimResp.result.ok, `Claim failed: ${JSON.stringify(claimResp.result)}`);
+
+    const resp = await sendBrokerCommand(mux, { kind: "broker.info" }, seq);
+    assert.ok(resp.result.ok, `broker.info failed: ${JSON.stringify(resp.result)}`);
+    const info = (resp.result as {
+      ok: true;
+      payload: { info: import("@tmuxcc/daemon").BrokerInfoPayload };
+    }).payload.info;
+
+    // tmux server pid is live.
+    assert.ok(
+      typeof info.tmuxServerPid === "number" && info.tmuxServerPid > 0,
+      `tmuxServerPid must be a live pid, got ${String(info.tmuxServerPid)}`,
+    );
+
+    // The claimed session appears with a live daemon pid and ≥1 window/pane.
+    const row = info.sessions.find((s) => s.name === "info-target");
+    assert.ok(row, `broker.info sessions must include 'info-target': ${JSON.stringify(info.sessions)}`);
+    assert.ok(
+      typeof row.daemonPid === "number" && row.daemonPid > 0,
+      `daemonPid must be a live pid, got ${String(row.daemonPid)}`,
+    );
+    // kill -0 probes liveness without sending a signal.
+    assert.doesNotThrow(() => process.kill(row.daemonPid as number, 0), "daemonPid must be running");
+    assert.ok(row.windowCount >= 1, `windowCount must be >= 1, got ${row.windowCount}`);
+    assert.ok(row.paneCount >= 1, `paneCount must be >= 1, got ${row.paneCount}`);
+    assert.ok(
+      typeof row.attachedClientCount === "number" && row.attachedClientCount >= 0,
+      `attachedClientCount must be a number, got ${String(row.attachedClientCount)}`,
+    );
 
     mux.transport.close();
   });

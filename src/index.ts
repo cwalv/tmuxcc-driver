@@ -28,4 +28,4 @@ export type { BrokerHandle, BrokerOptions, BrokerSelfExitReason } from "./broker
 export { createSocketTransport, connectSocketTransport, createSocketServer } from "./socket-transport.js";
 
 // Runtime directory helpers (useful for clients that need to compute socket paths)
-export { brokerSocketPath, daemonSocketPath } from "./runtime-dir.js";
+export { brokerSocketPath, daemonSocketPath, brokerLogPath } from "./runtime-dir.js";
