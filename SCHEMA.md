@@ -272,7 +272,27 @@ interface BrokerSnapshotMessage extends MessageBase {
 | `sessionId`          | `SessionId` | Broker-assigned id (stable across reconnect).  |
 | `name`               | `string`    | tmux session name.                             |
 | `windowCount`        | `number`    | Number of windows currently in this session.   |
-| `attachedClientCount`| `number`    | Number of tmuxcc clients currently attached.   |
+| `attachedClientCount`| `number`    | Number of **external** (non-tmuxcc) clients attached. |
+
+**`attachedClientCount` semantics (tc-3y8.7):** this is an *external-only*
+count — it reports real human clients, not tmuxcc's own infrastructure.
+
+tmux's raw `session_attached` includes tmuxcc's own `-CC` control-mode
+clients: every claimed session has +1 (its daemon's `-CC attach`) and one
+session has +2 (daemon + watcher, which attaches with
+`-f no-output,ignore-size`).  The broker subtracts these at the snapshot
+layer so that `attachedClientCount` answers the question a UI cares about
+("how many real users are in this session?").
+
+Discrimination method: clients are identified as tmuxcc-owned when their
+`client_flags` (from `tmux list-clients -F '#{client_flags}'`) contain
+`control-mode` — a flag set exclusively on `-CC` (control-mode) attach
+connections.  Regular terminal emulators never open a `-CC` connection.
+Empirically verified on tmux 3.4:
+  - daemon client:  `attached,focused,control-mode,UTF-8`
+  - watcher client: `attached,focused,control-mode,ignore-size,no-output,UTF-8`
+
+The value is never negative; `Math.max(0, raw − own)` is applied.
 
 `windowCount` and `attachedClientCount` are static at snapshot time and
 are not live-broadcast as they change. Clients that need live counts
@@ -408,10 +428,10 @@ brokers respond `protocol.unknown-message`.
 **`BrokerInfoSession`:** `{ sessionId, name, daemonPid, windowCount,
 paneCount, attachedClientCount }`. `daemonPid` is `null` when no daemon
 is currently running for the session (unclaimed, or crashed pending lazy
-respawn). `attachedClientCount` is the raw tmux `session_attached`
-value, which includes tmuxcc's own `-CC` clients (daemon + watcher) —
-display surfaces must label it as raw; fixing the semantics is owned by
-tc-3y8.7.
+respawn). `attachedClientCount` is the **external-only** count: tmuxcc's
+own `-CC` control-mode clients (daemon + watcher) are subtracted from
+tmux's raw `session_attached` value at the broker snapshot layer (tc-3y8.7).
+See `BrokerSessionInfo.attachedClientCount` above for full semantics.
 
 **Broker log file:** the broker entry point (`broker-entry.ts`) mirrors
 the process's stderr into an append-only log file at
