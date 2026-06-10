@@ -551,6 +551,48 @@ export interface ResizePaneCommand {
 }
 
 /**
+ * tc-zna.3: Atomic per-window resize transaction for VS-Code-managed strips.
+ *
+ * The VS Code factory is the authoritative geometry source for "managed"
+ * windows (windows whose tmux panes are mirrored 1:1 onto VS Code terminal
+ * tabs in a single split group / strip).  When the strip changes — split
+ * arrives, sash drag re-tiles, member promoted out — the factory aggregates
+ * the new geometry and emits ONE ResizeManagedWindow transaction per window.
+ *
+ * The session-proxy translates this to a deterministic tmux command batch:
+ *
+ *   1. `set-window-option -t @<wid> window-size manual`
+ *      (idempotent; switches the window out of "follow the smallest client"
+ *       sizing into client-authoritative mode)
+ *   2. `resize-window -t @<wid> -x <cols> -y <rows>`
+ *   3. `resize-pane -t %<paneId> -x <cols> -y <rows>` for each pane in `panes`
+ *
+ * Batching is required: tmux processes each command independently, and a
+ * naive sequence of per-pane refresh-client calls causes the geometry storm
+ * the bead describes.  Issuing the window+pane resizes as one block bounds
+ * the work tmux has to do per VS-Code-side dim change.
+ *
+ * The blanket `resize.request` (→ `refresh-client -C`) wire message remains
+ * available for unmanaged paths (single-pane tabs, the editor-area / panel
+ * viewport).  Managed windows use this command instead.
+ *
+ * Additive addition — non-breaking per the versioning policy.
+ */
+export interface ResizeManagedWindowCommand {
+  readonly kind: "resize-managed-window";
+  readonly windowId: WindowId;
+  /** Authoritative window dims (strip sum, separator-inclusive). */
+  readonly cols: number;
+  readonly rows: number;
+  /** Per-pane dims for every pane in the strip. */
+  readonly panes: ReadonlyArray<{
+    readonly paneId: PaneId;
+    readonly cols: number;
+    readonly rows: number;
+  }>;
+}
+
+/**
  * Kill the tmux session entirely.
  *
  * Used when `tmuxcc.killSessionOnLastWindowClose: true` (ux-design.md [deleted; map: ux-design-v2 §8] §13)
@@ -759,7 +801,9 @@ export type WireCommand =
   | RenamePaneCommand
   // tc-7xv.18: window verbs
   | KillWindowCommand
-  | SwapWindowCommand;
+  | SwapWindowCommand
+  // tc-zna.3: VS-Code-authoritative managed-window resize transaction
+  | ResizeManagedWindowCommand;
 
 /**
  * Client issues a model-level command to the session-proxy.

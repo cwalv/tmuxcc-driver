@@ -29,6 +29,10 @@ import {
   setOption,
   setOptionForWindow,
   showOptionsForWindow,
+  // tc-zna.3: managed-window resize builders.
+  setWindowSizeManual,
+  resizeWindow,
+  resizePane,
   LIST_WINDOWS_DEFAULT_FORMAT,
   LIST_PANES_DEFAULT_FORMAT,
   type PaneFlowState,
@@ -545,5 +549,39 @@ describe("refreshClientSubscribeWindows", () => {
       refreshClientSubscribeWindows("it's", "#{window_name}"),
       "refresh-client -B 'it'\\''s:@*:#{window_name}'",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// tc-zna.3: managed-window resize builders
+// ---------------------------------------------------------------------------
+
+describe("setWindowSizeManual", () => {
+  it("emits set-window-option -t @<N> window-size manual", () => {
+    assert.equal(setWindowSizeManual(3), "set-window-option -t @3 window-size manual");
+  });
+
+  it("works for window @0", () => {
+    assert.equal(setWindowSizeManual(0), "set-window-option -t @0 window-size manual");
+  });
+});
+
+describe("resizeWindow", () => {
+  it("emits resize-window -t @<N> -x <cols> -y <rows>", () => {
+    assert.equal(resizeWindow(3, 220, 50), "resize-window -t @3 -x 220 -y 50");
+  });
+
+  it("handles small dimensions", () => {
+    assert.equal(resizeWindow(7, 1, 1), "resize-window -t @7 -x 1 -y 1");
+  });
+});
+
+describe("resizePane", () => {
+  it("emits resize-pane -t %<N> -x <cols> -y <rows>", () => {
+    assert.equal(resizePane(1, 100, 50), "resize-pane -t %1 -x 100 -y 50");
+  });
+
+  it("works for pane %0", () => {
+    assert.equal(resizePane(0, 80, 24), "resize-pane -t %0 -x 80 -y 24");
   });
 });

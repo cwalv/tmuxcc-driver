@@ -488,6 +488,78 @@ export function splitWindow(
 }
 
 // ---------------------------------------------------------------------------
+// resize-window / resize-pane / window-size manual — managed-window sizing
+//
+// tc-zna.3: the VS Code factory is authoritative for the geometry of "managed"
+// windows (the panes form a 1-D split strip mirrored 1:1 onto VS Code tabs).
+// The managed-window resize transaction is a batch of three command families:
+//
+//   1. `set-window-option -t @<wid> window-size manual`
+//      Switches the window out of "follow the smallest client" sizing into
+//      client-authoritative mode.  tmux's default `window-size` is `latest`
+//      (or `largest` historically); under those modes any control-mode client
+//      with smaller dimensions will clamp the window down.  `manual` lets
+//      `resize-window` actually stick.  Idempotent — safe to send every time.
+//
+//   2. `resize-window -t @<wid> -x <cols> -y <rows>`
+//      Sets the window's overall dimensions to the strip total (sum of pane
+//      dims on the shared axis, plus N-1 separators).
+//
+//   3. `resize-pane -t %<paneId> -x <cols> -y <rows>` (per pane)
+//      Pins each pane's dimensions exactly.  Without this tmux distributes
+//      the new window dims proportionally — close enough most of the time,
+//      but the VS Code sash positions are pixel-exact and we want pane dims
+//      to match the VS Code group split precisely.
+//
+// Available since tmux 3.0 (window-size option, resize-window -x/-y);
+// resize-pane -x/-y available since tmux 2.1.  All within the bead's
+// supported-tmux floor.
+// ---------------------------------------------------------------------------
+
+/**
+ * Serialize `set-window-option -t @<windowId> window-size manual`.
+ *
+ * Switches the window's sizing policy to manual (VS-Code-authoritative),
+ * which is the prerequisite for `resize-window -x -y` to actually stick under
+ * tmux's default `window-size latest` policy.
+ *
+ * Idempotent: setting `window-size manual` on a manual window is a no-op.
+ */
+export function setWindowSizeManual(windowId: number): string {
+  return `set-window-option -t @${windowId} window-size manual`;
+}
+
+/**
+ * Serialize `resize-window -t @<windowId> -x <cols> -y <rows>`.
+ *
+ * Sets the window's overall dimensions.  Pairs with `setWindowSizeManual`
+ * (which must be applied at least once so tmux honors the explicit size).
+ */
+export function resizeWindow(
+  windowId: number,
+  cols: number,
+  rows: number,
+): string {
+  return `resize-window -t @${windowId} -x ${cols} -y ${rows}`;
+}
+
+/**
+ * Serialize `resize-pane -t %<paneId> -x <cols> -y <rows>`.
+ *
+ * Pins one pane's dimensions exactly.  Used inside the managed-window
+ * transaction after `resizeWindow` to make tmux's per-pane geometry match
+ * the VS Code group split precisely (rather than tmux's default proportional
+ * distribution).
+ */
+export function resizePane(
+  paneId: number,
+  cols: number,
+  rows: number,
+): string {
+  return `resize-pane -t %${paneId} -x ${cols} -y ${rows}`;
+}
+
+// ---------------------------------------------------------------------------
 // refresh-client -B (subscription)
 // ---------------------------------------------------------------------------
 

@@ -495,6 +495,95 @@ describe("createInputPath — CommandRequestMessage", () => {
 
     assert.equal(host.lastWrite, "refresh-client -C 100x30\n");
   });
+
+  // tc-zna.3: managed-window resize transaction.
+  it("resize-managed-window → set-window-option manual + resize-window + per-pane resize-pane (batched)", () => {
+    const host = makeFakeHost();
+    const path = createInputPath(host);
+
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "c-mw1",
+      command: {
+        kind: "resize-managed-window",
+        windowId: windowId("w3"),
+        cols: 201,
+        rows: 50,
+        panes: [
+          { paneId: paneId("p1"), cols: 100, rows: 50 },
+          { paneId: paneId("p2"), cols: 100, rows: 50 },
+        ],
+      },
+    };
+    path.handleClientMessage(msg);
+
+    // Single host.write batch — assertion on contents in order.
+    assert.equal(host.writes.length, 1, "managed-window resize must be one batched write");
+    const lines = host.writes[0]!.split("\n").filter((l) => l.length > 0);
+    assert.deepEqual(lines, [
+      "set-window-option -t @3 window-size manual",
+      "resize-window -t @3 -x 201 -y 50",
+      "resize-pane -t %1 -x 100 -y 50",
+      "resize-pane -t %2 -x 100 -y 50",
+    ]);
+  });
+
+  it("resize-managed-window with one pane emits the single resize-pane line", () => {
+    const host = makeFakeHost();
+    const path = createInputPath(host);
+
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "c-mw2",
+      command: {
+        kind: "resize-managed-window",
+        windowId: windowId("w7"),
+        cols: 120,
+        rows: 40,
+        panes: [{ paneId: paneId("p9"), cols: 120, rows: 40 }],
+      },
+    };
+    path.handleClientMessage(msg);
+
+    assert.equal(host.writes.length, 1);
+    const lines = host.writes[0]!.split("\n").filter((l) => l.length > 0);
+    assert.deepEqual(lines, [
+      "set-window-option -t @7 window-size manual",
+      "resize-window -t @7 -x 120 -y 40",
+      "resize-pane -t %9 -x 120 -y 40",
+    ]);
+  });
+
+  it("resize-managed-window with zero panes still emits manual + resize-window", () => {
+    // Defensive: factory should never send an empty pane list, but the
+    // protocol should not blow up if it happens (e.g. race where panes were
+    // all closed between aggregation and dispatch).
+    const host = makeFakeHost();
+    const path = createInputPath(host);
+
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "c-mw3",
+      command: {
+        kind: "resize-managed-window",
+        windowId: windowId("w0"),
+        cols: 80,
+        rows: 24,
+        panes: [],
+      },
+    };
+    path.handleClientMessage(msg);
+
+    assert.equal(host.writes.length, 1);
+    const lines = host.writes[0]!.split("\n").filter((l) => l.length > 0);
+    assert.deepEqual(lines, [
+      "set-window-option -t @0 window-size manual",
+      "resize-window -t @0 -x 80 -y 24",
+    ]);
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -114,6 +114,8 @@ export type {
   RenameWindowCommand,
   SelectPaneCommand,
   ResizePaneCommand,
+  // tc-zna.3: managed-window resize transaction
+  ResizeManagedWindowCommand,
   KillSessionCommand,
   SetSynchronizePanesCommand,
   KillWindowCommand,

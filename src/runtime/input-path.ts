@@ -68,6 +68,9 @@ import {
   splitWindow,
   newWindow,
   setOptionForWindow,
+  setWindowSizeManual,
+  resizeWindow,
+  resizePane as resizePaneCmd,
 } from "../parser/commands.js";
 import type { NotificationEvent } from "../parser/notifications.js";
 import type { SessionModel } from "../state/model.js";
@@ -465,6 +468,40 @@ export function createInputPath(
             // for per-pane control, which requires tmux layout awareness.
             const cmd = refreshClientSize(command.cols, command.rows);
             sendCommand(cmd);
+            break;
+          }
+
+          case "resize-managed-window": {
+            // tc-zna.3: VS-Code-authoritative managed-window resize transaction.
+            //
+            // The VS Code factory owns the truth for windows whose panes form
+            // a single split group; when that geometry changes the factory
+            // emits ONE of these per window with the strip totals + per-pane
+            // dims.  We translate to a deterministic batch:
+            //
+            //   1. set-window-option -t @<wid> window-size manual  (idempotent;
+            //      required so resize-window actually sticks under tmux's
+            //      default window-size=latest policy)
+            //   2. resize-window -t @<wid> -x <cols> -y <rows>
+            //   3. resize-pane  -t %<pid> -x <c> -y <r>  for each pane
+            //
+            // All three are issued in one host.write batch so tmux processes
+            // the transaction atomically (no intermediate %layout-change
+            // notifications between the window resize and the pane resizes).
+            //
+            // The blanket resize.request → refresh-client -C path remains
+            // available for unmanaged windows (single-pane tabs, editor-area).
+            const tmuxWinNum = toTmuxWindow(command.windowId);
+            const lines: string[] = [];
+            lines.push(setWindowSizeManual(tmuxWinNum));
+            lines.push(resizeWindow(tmuxWinNum, command.cols, command.rows));
+            for (const pane of command.panes) {
+              const tmuxPaneNum = toTmuxPane(pane.paneId);
+              lines.push(resizePaneCmd(tmuxPaneNum, pane.cols, pane.rows));
+            }
+            // Single host.write so tmux receives one contiguous chunk.  Each
+            // line is its own command; tmux executes them in order.
+            host.write(lines.map((l) => l + "\n").join(""));
             break;
           }
 
