@@ -397,8 +397,19 @@ export function reduce(
     //
     // Create a new Window under the active session (or a synthetic one if no
     // sessions exist yet). Layout and panes arrive via layout-change.
+    //
+    // tc-3y8.9: %unlinked-window-add means the window is NOT linked to OUR
+    // client's session (tmux control-notify.c, control_notify_window_linked:
+    // `winlink_find_by_window_id(&cs->windows, …)` decides linked vs
+    // unlinked PER RECEIVING CLIENT).  It announces another session's window
+    // — e.g. a sibling daemon's `new-session` on the same tmux server.
+    // Adding it here grafted a phantom window onto OUR bound session; the
+    // tc-fx4 layout reconcile then fetched its layout (`list-windows -a` is
+    // server-wide) and surfaced the OTHER session's pane as a pane.opened
+    // delta — a phantom terminal tab in every connected client.
     // -------------------------------------------------------------------------
     case "window-add": {
+      if (event.unlinked) return model; // another session's window — not ours
       const wid = mintWindowId(event.windowId);
       if (model.windows.has(wid)) return model; // idempotent
 

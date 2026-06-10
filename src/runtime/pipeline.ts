@@ -515,7 +515,12 @@ class RuntimePipelineImpl implements RuntimePipeline {
     //
     // Live phase only: during bootstrap the list-windows/list-panes replies
     // carry the layout for every existing window.
-    if (coordinator.isLive() && event.kind === "window-add") {
+    //
+    // tc-3y8.9: NEVER reconcile %unlinked-window-add — it announces a window
+    // of ANOTHER session on the same tmux server (the reducer ignores it).
+    // Reconciling it would graft the other session's layout/panes onto our
+    // model (`list-windows -a` is server-wide), surfacing phantom panes.
+    if (coordinator.isLive() && event.kind === "window-add" && !event.unlinked) {
       this._reconcileNewWindowLayout(event.windowId);
     }
   }

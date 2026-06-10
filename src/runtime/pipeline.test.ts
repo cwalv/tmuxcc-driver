@@ -469,6 +469,37 @@ describe("Pipeline: bootstrap path (canned list-windows + list-panes replies)", 
     pipeline.stop();
   });
 
+  it("tc-3y8.9: %unlinked-window-add is ignored — no model window, no reconcile query", async () => {
+    const host = new FakeTmuxHost();
+    const pipeline = createRuntimePipeline(host);
+
+    const startPromise = pipeline.start();
+    host.pushData(buildBootstrapStream());
+    await startPromise;
+    host.popWritten(); // discard bootstrap queries
+
+    // Another session's window on the same tmux server (tmux control-notify.c
+    // sends %unlinked-window-add to clients whose session does NOT contain
+    // the window).  It must neither enter the model nor trigger the tc-fx4
+    // layout reconcile — reconciling would graft the other session's panes
+    // onto our model (phantom pane.opened deltas → phantom terminal tabs).
+    host.pushData(bytes("%unlinked-window-add @9\r\n"));
+
+    const written = host.popWritten().join("");
+    assert.equal(
+      written,
+      "",
+      `no reconcile query expected for an unlinked window, got: ${JSON.stringify(written)}`,
+    );
+    assert.equal(
+      pipeline.getModel().windows.has(windowId("w9")),
+      false,
+      "an unlinked window must not be added to the model",
+    );
+
+    pipeline.stop();
+  });
+
   it("tc-fx4/tc-3y8.9: %window-add reconcile injects the window NAME and layout from the list-windows reply", async () => {
     const host = new FakeTmuxHost();
     const pipeline = createRuntimePipeline(host);

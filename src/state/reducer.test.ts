@@ -249,6 +249,27 @@ describe("reducer: window-add", () => {
     assert.equal(after.windows.size, model.windows.size, "no duplicate window created");
     assert.deepEqual(checkInvariants(after), []);
   });
+
+  // tc-3y8.9: %unlinked-window-add announces a window that is NOT linked to
+  // our client's session (tmux control-notify.c sends the unlinked variant to
+  // clients whose session does not contain the window) — i.e. another
+  // session's window on the same server.  Adding it grafted phantom windows
+  // (and, via the tc-fx4 layout reconcile, phantom panes/terminal tabs) onto
+  // every connected client's view.
+  it("%unlinked-window-add: ignored — model unchanged", () => {
+    let model = emptyModel();
+    model = addSession(model, makeSession(S0, [], null));
+    const { ctx } = makeCtx();
+    const event: NotificationEvent = {
+      kind: "window-add",
+      windowId: 9,
+      unlinked: true,
+    };
+    const after = reduce(model, event, ctx);
+    assert.equal(after, model, "unlinked window-add must not touch the model");
+    assert.equal(after.windows.has(windowId("w9")), false);
+    assert.deepEqual(checkInvariants(after), []);
+  });
 });
 
 describe("reducer: window-close", () => {
