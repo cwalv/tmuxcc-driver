@@ -22,7 +22,7 @@
  *     non-UTF-8 payloads.
  *
  * The `buildRepresentativeMessages()` export is intended as the starting point
- * for mock-daemon setups in later epics — import it to get a ready-made set of
+ * for mock-session-proxy setups in later epics — import it to get a ready-made set of
  * one instance of each message kind.
  */
 
@@ -351,7 +351,7 @@ function buildClientMessages(): ClientMessage[] {
 
 /**
  * Build one instance of every ControlMessage variant (session-proxy + client).
- * Exported for reuse in mock-daemon setups in later epics.
+ * Exported for reuse in mock-session-proxy setups in later epics.
  */
 export function buildRepresentativeMessages(): ControlMessage[] {
   return [...buildSessionProxyMessages(), ...buildClientMessages()];
