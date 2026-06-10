@@ -533,35 +533,40 @@ export function reduce(
     // -------------------------------------------------------------------------
     // %client-session-changed <client> $<sess> <name>
     //
-    // Applies the same switch-client narrowing as %session-changed (tc-j9c.2).
-    // See session-changed case for the full logic description.
+    // Fired when ANOTHER client's session assignment changes. tmux delivers
+    // this variant only to clients OTHER than the affected one — the affected
+    // client itself receives %session-changed instead (control-notify.c,
+    // control_notify_client_session_changed). It therefore says NOTHING about
+    // where OUR -CC client is attached and MUST NOT trigger switch-client
+    // narrowing.
+    //
+    // tc-3y8.8: the old handler applied the same narrowing as
+    // %session-changed, treating any other client's attach to a foreign
+    // session as our own drift → onSwitchClientDetected("reattach") → a
+    // silent `attach-session -t <bound>`. tmux broadcasts
+    // %client-session-changed on EVERY attach-session — including a
+    // same-session re-attach (server-client.c server_client_set_session calls
+    // notify_client unconditionally, plus recalculate_sizes + redraw). With
+    // N≥2 daemons on one socket each daemon's "reattach" re-triggered every
+    // other daemon's, a mutual notification storm (~8000 notifications/s at
+    // N=3) that drove the tmux server CPU-bound: ~350-400 ms per command,
+    // the epic's headline latency bug. N=1 was stable only because there was
+    // no other client to misinterpret.
+    //
+    // Model effect: if the event names our bound session, refresh its name
+    // (the payload is current truth about that session). No focus update —
+    // another client's attach does not move our focus. Foreign sessions are
+    // a no-op: a single-session daemon does not track other clients.
     // -------------------------------------------------------------------------
     case "client-session-changed": {
       const sid = mintSessionId(event.sessionId);
 
-      if (ctx.boundSessionId !== undefined) {
-        if (sid === ctx.boundSessionId) {
-          model = ensureSession(model, event.sessionId, event.name);
-          model = updateSession(model, sid, { name: event.name });
-          const sess = model.sessions.get(sid)!;
-          const activeWid = sess.activeWindowId;
-          if (activeWid !== null) {
-            const win = model.windows.get(activeWid);
-            const activePid = win?.activePaneId ?? null;
-            if (activePid !== null) {
-              model = setFocus(model, { paneId: activePid, windowId: activeWid, sessionId: sid });
-            }
-          }
-          return model;
-        }
-        const outcome: SwitchClientOutcome = model.sessions.has(ctx.boundSessionId)
-          ? "reattach"
-          : "unavailable";
-        ctx.onSwitchClientDetected?.(outcome);
-        return model;
+      if (ctx.boundSessionId !== undefined && sid === ctx.boundSessionId) {
+        model = ensureSession(model, event.sessionId, event.name);
+        return updateSession(model, sid, { name: event.name });
       }
 
-      // boundSessionId absent: safe no-op.
+      // Another client on another session — not our concern.
       return model;
     }
 

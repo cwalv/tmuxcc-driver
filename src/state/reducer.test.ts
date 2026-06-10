@@ -472,8 +472,16 @@ describe("reducer: switch-client narrowing (tc-j9c.7)", () => {
     assert.deepEqual(checkInvariants(after), []);
   });
 
-  it("client-session-changed: bound session present → 'reattach', model unchanged", () => {
-    // Same scenario as above but via %client-session-changed.
+  // tc-3y8.8: %client-session-changed is delivered only to clients OTHER than
+  // the one whose session changed (tmux control-notify.c) — it says nothing
+  // about OUR client and must NEVER trigger switch-client narrowing.  The old
+  // behavior (treating it like %session-changed) made N≥2 daemons on one
+  // socket reattach in response to each other's reattach notifications — a
+  // mutual storm that drove the tmux server CPU-bound (~350-400 ms/command).
+  it("client-session-changed: foreign session → NO narrowing callback, model unchanged (tc-3y8.8)", () => {
+    // Another client (e.g. a sibling daemon's -CC client) attached to its own
+    // session s2.  Our bound session s0 is alive.  This must NOT be read as
+    // our own drift.
     let model = emptyModel();
     model = addSession(model, makeSession(S0, [], null));
     model = addSession(model, makeSession(sessionId("s2"), [], null, "s2"));
@@ -493,14 +501,15 @@ describe("reducer: switch-client narrowing (tc-j9c.7)", () => {
 
     const after = reduce(model, event, ctx);
 
-    assert.deepEqual(outcomes, ["reattach"]);
-    assertModelUnchanged(model, after, "client-session-changed reattach");
+    assert.deepEqual(outcomes, [], "no switch-client narrowing for another client's event");
+    assertModelUnchanged(model, after, "client-session-changed foreign session");
     assert.deepEqual(checkInvariants(after), []);
   });
 
-  it("client-session-changed: bound session gone → 'unavailable', model unchanged", () => {
+  it("client-session-changed: foreign session, bound gone → still NO callback (tc-3y8.8)", () => {
     let model = emptyModel();
-    // Bound session s0 is not in the model.
+    // Bound session s0 is not in the model — even so, another client's
+    // session change carries no information about OUR attachment.
     model = addSession(model, makeSession(sessionId("s2"), [], null, "s2"));
 
     const outcomes: string[] = [];
@@ -518,8 +527,37 @@ describe("reducer: switch-client narrowing (tc-j9c.7)", () => {
 
     const after = reduce(model, event, ctx);
 
-    assert.deepEqual(outcomes, ["unavailable"]);
-    assertModelUnchanged(model, after, "client-session-changed unavailable");
+    assert.deepEqual(outcomes, [], "no callback — bound-session loss is detected elsewhere");
+    assertModelUnchanged(model, after, "client-session-changed unavailable-bound");
+    assert.deepEqual(checkInvariants(after), []);
+  });
+
+  it("client-session-changed: bound session → name refresh only, NO callback (tc-3y8.8 storm shape)", () => {
+    // The exact storm ingredient: another client (re-)attaches to a session —
+    // tmux broadcasts %client-session-changed for it even when that client's
+    // session did not actually change.  When the event names our bound
+    // session (e.g. the broker watcher re-attaching to s0), we may refresh
+    // the name but must not fire the narrowing callback.
+    let model = emptyModel();
+    model = addSession(model, makeSession(S0, [], null));
+
+    const outcomes: string[] = [];
+    const { ctx } = makeCtx({
+      boundSessionId: S0,
+      onSwitchClientDetected: (outcome) => outcomes.push(outcome),
+    });
+
+    const event: NotificationEvent = {
+      kind: "client-session-changed",
+      clientName: "/dev/pts/41",
+      sessionId: 0,
+      name: "renamed-s0",
+    };
+
+    const after = reduce(model, event, ctx);
+
+    assert.deepEqual(outcomes, [], "no narrowing callback for bound-session event");
+    assert.equal(after.sessions.get(S0)!.name, "renamed-s0", "name refreshed");
     assert.deepEqual(checkInvariants(after), []);
   });
 
