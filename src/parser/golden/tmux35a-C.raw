@@ -1,0 +1,39 @@
+%begin 1781109143 273 0
+%end 1781109143 273 0
+%session-changed $0 s0
+%begin 1781109143 278 1
+0: PS1=\* (1 panes) [80x24] [layout b25d,80x24,0,0,0] @0 (active)
+%end 1781109143 278 1
+%window-renamed @0 bash
+%begin 1781109143 280 1
+%end 1781109143 280 1
+%session-window-changed $0 @1
+%window-add @1
+%window-renamed @1 tmux
+%output %1 \033[?2004hroot@4897ba4120a3:/work# 
+%begin 1781109144 284 1
+%end 1781109144 284 1
+%window-pane-changed @1 %2
+%layout-change @1 020a,80x24,0,0{40x24,0,0,1,39x24,41,0,2} 020a,80x24,0,0{40x24,0,0,1,39x24,41,0,2} *
+%output %1 \015\033[K\015root@4897ba4120a3:/work# 
+%output %2 \033[?2004hroot@4897ba4120a3:/work# 
+%window-renamed @1 bash
+%begin 1781109144 288 1
+0: [40x24] [history 0/2000, 1160 bytes] %1
+1: [39x24] [history 0/2000, 1155 bytes] %2 (active)
+%end 1781109144 288 1
+%begin 1781109145 289 1
+s0: 2 windows (created Wed Jun 10 16:32:23 2026) (attached)
+%end 1781109145 289 1
+%begin 1781109145 290 1
+%end 1781109145 290 1
+%output %0 printf '\134xc0\134xfe\134xff test bytes\134n'\015\012\033[?2004l\015Àþÿ test bytes\015\012\033[?2004h$ 
+%begin 1781109145 291 1
+%end 1781109145 291 1
+%layout-change @1 09fa,80x24,0,0{39x24,0,0,1,40x24,40,0,2} 09fa,80x24,0,0{39x24,0,0,1,40x24,40,0,2} *
+%layout-change @1 09fa,80x24,0,0{39x24,0,0,1,40x24,40,0,2} 09fa,80x24,0,0{39x24,0,0,1,40x24,40,0,2} *
+%output %1 \015\033[K\015root@4897ba4120a3:/work# 
+%output %2 \015\033[K\015root@4897ba4120a3:/work# 
+%begin 1781109146 294 1
+%end 1781109146 294 1
+%exit

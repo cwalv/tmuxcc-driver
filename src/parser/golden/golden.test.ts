@@ -19,7 +19,30 @@
  *         contains real non-UTF-8 bytes (\xc0\xfe\xff) — passes through the
  *         octal codec without round-tripping through a string.
  *     NOTE: no DCS wrapper emitted by -C (single dash); for DCS wrapper
- *     coverage see the hand-authored DCS fixture below.
+ *     coverage see the real -CC capture below.
+ *
+ * ## Cross-version real captures (added under tc-3y8.5, 2026-06-10)
+ *   tmux32a-C.raw  — tmux 3.2a (pre-3.4) captured inside ubuntu:22.04 docker
+ *     image.  Same script as tmux34-session.raw (list-windows, new-window,
+ *     split-window, list-panes, list-sessions, printf non-UTF-8 bytes,
+ *     select-layout, detach).
+ *     Verified divergences vs. tmux 3.4: NONE.  %layout-change carries the
+ *     visible/full/flags 4-token form, same as 3.4 and 3.5a.  All notification
+ *     keywords are the same.
+ *
+ *   tmux35a-C.raw  — tmux 3.5a (post-3.4) captured inside debian:trixie docker
+ *     image.  Same script.
+ *     Verified divergences vs. tmux 3.4: 3.5a additionally emits
+ *     %window-renamed events when shells inside a freshly-spawned window/pane
+ *     set their automatic-rename title.  Parser already handles
+ *     %window-renamed (parsed by notifications.ts).  %layout-change format is
+ *     unchanged (still visible/full/flags).
+ *
+ *   tmux34-CC.raw  — tmux 3.4 with `-CC` (double dash, DCS-wrapped) captured
+ *     on the host.  This is the mode the product actually uses in
+ *     production.  Starts with `\x1bP1000p`, ends with `\x1b\` (ST).
+ *     All inner lines terminated `\r\n`.  Closes the previously-zero
+ *     real-capture coverage on the DCS-wrapped path.
  *
  * ## Hand-authored fixtures (realistic, based on tmux protocol documentation)
  *   dcs-wrapper — minimal DCS-wrapped session with one command block and exit.
@@ -27,15 +50,44 @@
  *   non-utf8-output — %output line whose decoded payload is NOT valid UTF-8.
  *   block-error — command block that terminates with %error (not %end).
  *
+ * ## Capture provenance / reproduction
+ *   Capture driver: bin/golden-capture.py inside this directory's sibling
+ *   tooling (kept off-tree; transient docker run).  Each capture used a
+ *   per-run socket `tmuxcc-test-3y85-<n>` and the following script:
+ *     1. `list-windows`           → response data, no notifications
+ *     2. `new-window`             → %session-window-changed, %window-add
+ *     3. `split-window -h`        → %window-pane-changed, %layout-change
+ *     4. `list-panes`             → response data
+ *     5. `list-sessions`          → response data
+ *     6. `send-keys ... printf '\xc0\xfe\xff test bytes\n' Enter`
+ *                                  → %output containing raw non-UTF-8 bytes
+ *     7. `select-layout even-horizontal` → second %layout-change
+ *     8. `detach-client`          → %exit and end of stream
+ *
+ *   Reproduction (in throwaway docker):
+ *     docker run --rm -v <work>:/work -w /work <image> bash -c '
+ *       apt-get update && apt-get install -y tmux python3
+ *       python3 capture.py tmuxcc-test-3y85-<n> <C|CC> /work/<out>.raw
+ *       tmux -L tmuxcc-test-3y85-<n> kill-server'
+ *
+ *   Images used:
+ *     tmux32a-C.raw         : ubuntu:22.04  → tmux 3.2a-4ubuntu0.2
+ *     tmux35a-C.raw         : debian:trixie → tmux 3.5a-3
+ *     tmux34-C.raw          : host (Ubuntu 24.04) → tmux 3.4-1ubuntu0.1
+ *     tmux34-CC.raw         : host (Ubuntu 24.04) → tmux 3.4-1ubuntu0.1
+ *
  * # Cross-version notes
- * Real capture is from tmux 3.4 only (that's what is installed here). Older-
- * format variants (%session-renamed without $id, etc.) are covered by the
- * hand-authored fixtures; see notifications.ts for the older-format spec.
+ * Older-format variants (%session-renamed without $id, etc.) are covered by
+ * the hand-authored fixtures; see notifications.ts for the older-format
+ * spec.  No version we captured emitted that older form (3.2a through 3.5a
+ * all use `$<id>`-prefixed %session-renamed).
  *
  * # Acceptance criteria verified here
  * ✓ Parser output matches expected for each corpus sample.
  * ✓ Non-UTF-8 bytes preserved byte-exact (never round-tripped through a string).
  * ✓ Streaming invariance: byte-by-byte feed produces the same tokens as one-shot.
+ * ✓ Real captures for pre-3.4 (tmux 3.2a), post-3.4 (tmux 3.5a), and
+ *   `-CC` DCS-wrapped (tmux 3.4) modes — closes hand-authored-only coverage.
  * ✓ Golden corpus runs in CI under `npm test -w @tmuxcc/daemon`.
  *
  * @module parser/golden/golden.test.ts
@@ -759,6 +811,289 @@ describe("golden: sequential command blocks (realistic pipeline)", () => {
     assert.equal(streamedTokens.length, oneShotTokens.length, "token count must match");
     for (let i = 0; i < oneShotTokens.length; i++) {
       assert.equal(streamedTokens[i]!.kind, oneShotTokens[i]!.kind, `kind mismatch at ${i}`);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SAMPLE 8 — cross-version real captures (tc-3y8.5)
+// ---------------------------------------------------------------------------
+// Each capture exercises the same script in -C mode (no DCS wrapper):
+//   list-windows, new-window, split-window, list-panes, list-sessions,
+//   printf '\xc0\xfe\xff test bytes\n', select-layout, detach.
+// We run the same shape of assertions on every capture so a regression in
+// any tmux-version-specific format would surface as a concrete diff.
+//
+// Implementation note (tc-3y8.5): each real capture is asserted via a
+// shared helper rather than copy-pasting test bodies; the helper covers:
+//   - non-empty token stream
+//   - %session-changed parses with sessionId 0, name "s0"
+//   - %window-add parses with windowId 1, unlinked false
+//   - %window-pane-changed parses with windowId 1, paneId 2
+//   - %layout-change emits as an unknown notification (no version yet
+//     promotes it to a typed event), and its rawLine starts "@1 "
+//   - %exit parses with reason null
+//   - %output for pane 0 contains the raw bytes 0xc0 0xfe 0xff
+//   - byte-by-byte streaming equals one-shot tokenization
+//   - CommandCorrelator resolves every user-command (flags!=0) block as ok
+
+interface RealCaptureExpectations {
+  /** Lower bound on user-command (flags!=0) %begin/%end pairs. */
+  readonly minBeginCount: number;
+  /** Whether the capture is DCS-wrapped (-CC vs -C). */
+  readonly dcs: boolean;
+}
+
+function assertRealCapture(
+  rawBuf: Uint8Array,
+  exp: RealCaptureExpectations,
+): { tokens: ControlToken[] } {
+  const tokens = tokenizeBuffer(rawBuf);
+  assert.ok(tokens.length > 0, "expected at least one token");
+
+  // DCS framing matches the mode.
+  const dcsOpens = countKind(tokens, "dcs-open");
+  const dcsCloses = countKind(tokens, "dcs-close");
+  if (exp.dcs) {
+    assert.equal(dcsOpens, 1, "expected exactly one dcs-open in -CC capture");
+    assert.equal(dcsCloses, 1, "expected exactly one dcs-close in -CC capture");
+    // dcs-open must be the first token, dcs-close the last.
+    assert.equal(tokens[0]!.kind, "dcs-open", "first token must be dcs-open");
+    assert.equal(
+      tokens[tokens.length - 1]!.kind,
+      "dcs-close",
+      "last token must be dcs-close",
+    );
+  } else {
+    assert.equal(dcsOpens, 0, "no dcs-open in -C capture");
+    assert.equal(dcsCloses, 0, "no dcs-close in -C capture");
+  }
+
+  // Block framing: equal counts, lower-bounded for user commands.
+  const beginCount = countKind(tokens, "block-begin");
+  const endCount = countKind(tokens, "block-end");
+  assert.equal(beginCount, endCount, "block-begin/end counts must match");
+  // Every block in our scripts succeeds; we should never see %error.
+  assert.equal(countKind(tokens, "block-error"), 0, "no block-error expected");
+  // User-command blocks (flags != 0).  The first block flags=0 is the
+  // implicit startup block and is not counted toward the user-command quota.
+  const userBlocks = tokens.filter(
+    (t) => t.kind === "block-begin" && t.flags !== 0,
+  ).length;
+  assert.ok(
+    userBlocks >= exp.minBeginCount,
+    `expected ≥${exp.minBeginCount} user-command blocks, got ${userBlocks}`,
+  );
+
+  // Required notifications, parsed with expected fields.
+  const findNotif = (kw: string): ControlToken | undefined =>
+    tokens.find((t) => t.kind === "notification" && t.keyword === kw);
+
+  const scTok = findNotif("session-changed");
+  assert.ok(scTok !== undefined, "%session-changed missing");
+  if (scTok!.kind === "notification") {
+    const ev = parseNotification(scTok!);
+    assert.equal(ev.kind, "session-changed");
+    if (ev.kind === "session-changed") {
+      assert.equal(ev.sessionId, 0);
+      assert.equal(ev.name, "s0");
+    }
+  }
+
+  const waTok = findNotif("window-add");
+  assert.ok(waTok !== undefined, "%window-add missing");
+  if (waTok!.kind === "notification") {
+    const ev = parseNotification(waTok!);
+    assert.equal(ev.kind, "window-add");
+    if (ev.kind === "window-add") {
+      assert.equal(ev.windowId, 1);
+      assert.equal(ev.unlinked, false);
+    }
+  }
+
+  const wpcTok = findNotif("window-pane-changed");
+  assert.ok(wpcTok !== undefined, "%window-pane-changed missing");
+  if (wpcTok!.kind === "notification") {
+    const ev = parseNotification(wpcTok!);
+    assert.equal(ev.kind, "window-pane-changed");
+    if (ev.kind === "window-pane-changed") {
+      assert.equal(ev.windowId, 1);
+      assert.equal(ev.paneId, 2);
+    }
+  }
+
+  const lcTok = findNotif("layout-change");
+  assert.ok(lcTok !== undefined, "%layout-change missing");
+  if (lcTok!.kind === "notification") {
+    const ev = parseNotification(lcTok!);
+    assert.equal(
+      ev.kind,
+      "unknown",
+      "%layout-change should be parsed as unknown",
+    );
+    // The rawLine includes the `%keyword` prefix; after that it's the
+    // window id followed by a layout string.
+    const rl = new TextDecoder().decode(lcTok!.rawLine);
+    assert.ok(
+      rl.startsWith("%layout-change @1 "),
+      `%layout-change rawLine should start with "%layout-change @1 ", got ${JSON.stringify(rl.slice(0, 32))}`,
+    );
+  }
+
+  const exitTok = findNotif("exit");
+  assert.ok(exitTok !== undefined, "%exit missing");
+  if (exitTok!.kind === "notification") {
+    const ev = parseNotification(exitTok!);
+    assert.equal(ev.kind, "exit");
+    if (ev.kind === "exit") {
+      assert.equal(ev.reason, null);
+    }
+  }
+
+  // Non-UTF-8 byte preservation: the printf injected 0xc0 0xfe 0xff into
+  // pane 0; tmux emits %output %0 with the bytes literally (>= 0x80 isn't
+  // octal-escaped).  We look across every %output token's decoded payload.
+  let nonUtf8Found = false;
+  for (const tok of tokens) {
+    if (tok.kind !== "notification" || tok.keyword !== "output") continue;
+    const parsed = parseOutputNotification(tok);
+    if (parsed === null) continue;
+    const b = parsed.bytes;
+    for (let i = 0; i <= b.length - 3; i++) {
+      if (b[i] === 0xc0 && b[i + 1] === 0xfe && b[i + 2] === 0xff) {
+        nonUtf8Found = true;
+        assert.ok(b instanceof Uint8Array, "decoded must be Uint8Array");
+        break;
+      }
+    }
+    if (nonUtf8Found) break;
+  }
+  assert.ok(
+    nonUtf8Found,
+    "expected one %output token to contain raw bytes 0xc0 0xfe 0xff",
+  );
+
+  // Streaming invariance.
+  const streamedTokens = byteByByte(rawBuf);
+  assert.equal(
+    streamedTokens.length,
+    tokens.length,
+    "byte-by-byte must yield same token count as one-shot",
+  );
+  for (let i = 0; i < tokens.length; i++) {
+    const a = tokens[i]!;
+    const b = streamedTokens[i]!;
+    assert.equal(b.kind, a.kind, `token[${i}] kind mismatch`);
+    if (a.kind === "notification" && b.kind === "notification") {
+      assert.equal(b.keyword, a.keyword, `token[${i}] keyword mismatch`);
+      assert.deepEqual(
+        Array.from(b.rawLine),
+        Array.from(a.rawLine),
+        `token[${i}] rawLine mismatch`,
+      );
+    }
+    if (a.kind === "block-begin" && b.kind === "block-begin") {
+      assert.equal(b.commandNumber, a.commandNumber);
+      assert.equal(b.flags, a.flags);
+    }
+    if (a.kind === "block-body" && b.kind === "block-body") {
+      assert.deepEqual(Array.from(b.bytes), Array.from(a.bytes));
+    }
+  }
+
+  return { tokens };
+}
+
+async function assertCorrelatorResolvesAll(tokens: ControlToken[]): Promise<void> {
+  const corr = new CommandCorrelator({ onNotification: () => {} });
+  const beginCount = tokens.filter(
+    (t) => t.kind === "block-begin" && t.flags !== 0,
+  ).length;
+  const promises: Promise<CommandResult>[] = [];
+  for (let i = 0; i < beginCount; i++) promises.push(corr.expectCommand());
+  for (const tok of tokens) corr.push(tok);
+  const results = await Promise.all(promises);
+  for (const r of results) {
+    assert.equal(r.ok, true, `command ${r.commandNumber} should be ok`);
+  }
+}
+
+describe("golden: tmux32a-C.raw (real tmux 3.2a, pre-3.4, -C, ubuntu:22.04)", () => {
+  const rawBuf = fixtureBytes("tmux32a-C.raw");
+  let tokens: ControlToken[] | undefined;
+
+  it("parser stack accepts the capture and parses expected events", () => {
+    tokens = assertRealCapture(rawBuf, { minBeginCount: 5, dcs: false }).tokens;
+  });
+
+  it("CommandCorrelator resolves every user-command block as ok", async () => {
+    if (!tokens) tokens = tokenizeBuffer(rawBuf);
+    await assertCorrelatorResolvesAll(tokens);
+  });
+});
+
+describe("golden: tmux35a-C.raw (real tmux 3.5a, post-3.4, -C, debian:trixie)", () => {
+  const rawBuf = fixtureBytes("tmux35a-C.raw");
+  let tokens: ControlToken[] | undefined;
+
+  it("parser stack accepts the capture and parses expected events", () => {
+    tokens = assertRealCapture(rawBuf, { minBeginCount: 5, dcs: false }).tokens;
+  });
+
+  it("%window-renamed is parsed (3.5a emits it on shell auto-rename)", () => {
+    // 3.5a is the first version in our corpus that emits %window-renamed
+    // during this script.  Make sure notifications.ts still parses it.
+    if (!tokens) tokens = tokenizeBuffer(rawBuf);
+    const wrTok = tokens.find(
+      (t) => t.kind === "notification" && t.keyword === "window-renamed",
+    );
+    assert.ok(wrTok !== undefined, "expected %window-renamed in 3.5a capture");
+    if (wrTok!.kind === "notification") {
+      const ev = parseNotification(wrTok!);
+      assert.equal(ev.kind, "window-renamed");
+      if (ev.kind === "window-renamed") {
+        assert.ok(ev.windowId >= 0);
+        assert.ok(ev.name.length > 0);
+      }
+    }
+  });
+
+  it("CommandCorrelator resolves every user-command block as ok", async () => {
+    if (!tokens) tokens = tokenizeBuffer(rawBuf);
+    await assertCorrelatorResolvesAll(tokens);
+  });
+});
+
+describe("golden: tmux34-CC.raw (real tmux 3.4, -CC DCS-wrapped, host)", () => {
+  const rawBuf = fixtureBytes("tmux34-CC.raw");
+  let tokens: ControlToken[] | undefined;
+
+  it("parser stack accepts the capture; DCS wrapper bookends the stream", () => {
+    tokens = assertRealCapture(rawBuf, { minBeginCount: 5, dcs: true }).tokens;
+  });
+
+  it("CommandCorrelator resolves every user-command block as ok", async () => {
+    if (!tokens) tokens = tokenizeBuffer(rawBuf);
+    await assertCorrelatorResolvesAll(tokens);
+  });
+
+  it("inner lines use CRLF (\\r\\n) — control-mode over a real pty", () => {
+    // -CC traffic comes off a tmux pty; line endings are CR-LF.  The
+    // tokenizer must not include the CR in the rawLine for notifications
+    // (it strips the trailing \r before the \n).  Spot-check %exit.
+    if (!tokens) tokens = tokenizeBuffer(rawBuf);
+    const exitTok = tokens.find(
+      (t) => t.kind === "notification" && t.keyword === "exit",
+    );
+    assert.ok(exitTok !== undefined);
+    if (exitTok!.kind === "notification") {
+      // The rawLine should be empty for `%exit` with no reason, regardless
+      // of CR — i.e. the tokenizer correctly stripped the trailing \r.
+      const rl = new TextDecoder().decode(exitTok!.rawLine);
+      assert.ok(
+        !rl.includes("\r"),
+        `%exit rawLine must not contain CR, got ${JSON.stringify(rl)}`,
+      );
     }
   });
 });
