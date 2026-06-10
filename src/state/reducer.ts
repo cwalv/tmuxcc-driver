@@ -63,10 +63,16 @@
  *   model is added to the window (cols/rows from the layout cell, mode "normal",
  *   no scrollbackHandle yet). This handles the common case where tmux emits a
  *   layout-change after a split but before an explicit pane-add notification.
- *   REMOVAL: panes are NOT removed from the model based solely on layout absence.
- *   Removal is driven by explicit `%window-close` (removes all its panes) or
- *   future explicit pane-close notifications. Layout removal is unreliable during
- *   rapid splits/closes; trusting explicit close events is safer.
+ *   AUTHORITATIVE REMOVAL: panes of window W that are absent from the new layout
+ *   are REMOVED from the model. Each %layout-change is authoritative for that
+ *   window's current pane set. tmux control mode has NO per-pane close
+ *   notification, so layout-absence is the only signal for in-window pane death
+ *   (external kill-pane or extension-initiated kill). Cross-window moves
+ *   (break-pane, swap-pane) are handled naturally: the pane disappears from W's
+ *   layout and appears in the destination window's layout-change; the conservative
+ *   ADD policy re-adds it there. Removal + re-add = a move with no duplicates.
+ *   Per-pane resources (scrollback buffers) are dropped on removal via
+ *   ctx.buffers.drop, matching the %window-close teardown path.
  *
  * ## %output / %extended-output handling
  *
@@ -104,6 +110,7 @@ import {
   addSession,
   addWindow,
   addPane,
+  removePane,
   removeWindow,
   updateWindow,
   updatePane,
@@ -295,7 +302,9 @@ function parseLayoutChangeLine(rawLine: Uint8Array): LayoutChangeFields | null {
 // Layout-change reconciliation
 //
 // After converting ParsedLayout → WindowLayout, reconcile the window's pane set
-// with the leaf pane ids in the layout. Policy: CONSERVATIVE ADD only.
+// with the leaf pane ids in the layout.
+// Policy: CONSERVATIVE ADD (new panes in layout) + AUTHORITATIVE REMOVAL (panes
+// in model absent from layout). See module-level JSDoc for rationale.
 // ---------------------------------------------------------------------------
 
 /**
@@ -699,7 +708,7 @@ export function reduce(
     // -------------------------------------------------------------------------
     case "unknown": {
       if (event.keyword === "layout-change") {
-        return handleLayoutChange(model, event.rawLine);
+        return handleLayoutChange(model, event.rawLine, ctx);
       }
       // Truly unknown keyword — no-op, don't crash.
       return model;
@@ -788,8 +797,13 @@ export function reduce(
  *   2. Parse the layout string via `parseLayout`.
  *   3. Convert to `WindowLayout` via `parsedLayoutToWindowLayout`, mapping
  *      tmux leaf pane ids to daemon `PaneId`s via `mintPaneId`.
- *   4. Reconcile the window's pane set: ADD any pane from the layout that is
- *      not yet in the model (conservative add policy).
+ *   4. Reconcile the window's pane set:
+ *      - ADD any pane from the layout that is not yet in the model (conservative
+ *        add policy — handles layout-change arriving before an explicit pane-add).
+ *      - REMOVE any pane of window W that is absent from the new layout (authoritative
+ *        removal policy — tmux has no per-pane close notification; layout absence is
+ *        the only signal for in-window pane death). Per-pane buffer resources are
+ *        dropped via ctx.buffers.drop, matching the %window-close teardown path.
  *   5. Set the window's layout to the new `WindowLayout`.
  *
  * Returns the input model unchanged if the line is malformed, if the window
@@ -797,7 +811,7 @@ export function reduce(
  * must not synthesize a session id — the layout will be applied once the window
  * is properly registered), or if the layout string cannot be parsed.
  */
-function handleLayoutChange(model: SessionModel, rawLine: Uint8Array): SessionModel {
+function handleLayoutChange(model: SessionModel, rawLine: Uint8Array, ctx: ReducerContext): SessionModel {
   const fields = parseLayoutChangeLine(rawLine);
   if (fields === null) return model;
 
@@ -846,6 +860,19 @@ function handleLayoutChange(model: SessionModel, rawLine: Uint8Array): SessionMo
   // pane.resized delta on the wire.
   const leaves = collectLayoutLeaves(parsedLayout.root);
   const win = model.windows.get(wid)!;
+
+  // Build the set of pane ids present in the new layout (for removal check below).
+  const layoutPaneIds = new Set(leaves.map((leaf) => mintPaneId(leaf.tmuxId)));
+
+  // AUTHORITATIVE REMOVAL: remove any pane of window W that is absent from the
+  // new layout. Each %layout-change is authoritative for that window's current
+  // pane set. Drop per-pane buffer resources matching the %window-close teardown.
+  for (const pid of win.paneIds) {
+    if (!layoutPaneIds.has(pid)) {
+      ctx.buffers.drop(pid);
+      model = removePane(model, pid);
+    }
+  }
 
   for (const leaf of leaves) {
     const pid = mintPaneId(leaf.tmuxId);

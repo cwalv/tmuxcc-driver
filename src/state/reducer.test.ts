@@ -924,6 +924,116 @@ describe("reducer: layout-change (via unknown keyword)", () => {
     assert.equal(after.windows.get(W1)!.layout, null, "layout unchanged (still null)");
     assert.deepEqual(checkInvariants(after), []);
   });
+
+  // -------------------------------------------------------------------------
+  // tc-tfv.13: Authoritative removal on %layout-change
+  // -------------------------------------------------------------------------
+
+  it("%layout-change: pane absent from new layout is removed from model (authoritative removal)", () => {
+    // Model: s0 → w1 → {p1, p2}. Then layout-change arrives with only p1.
+    // Expected: p2 removed from model, change signal (different object) fired.
+    let model = emptyModel();
+    model = addSession(model, makeSession(S0, [], null));
+    model = addWindow(model, makeWindow(W1, S0, [], null));
+    model = addPane(model, makePane(P1, W1, S0));
+    model = addPane(model, makePane(P2, W1, S0));
+
+    assert.equal(model.panes.size, 2, "precondition: two panes in model");
+    assert.equal(model.windows.get(W1)!.paneIds.length, 2, "precondition: window has two panes");
+
+    const { ctx, store } = makeCtx();
+
+    // Seed p2's buffer so we can verify drop is called
+    store.append(P2, new Uint8Array([0x41, 0x42]));
+    assert.equal(store.size(P2), 2, "precondition: p2 buffer has bytes");
+
+    // Layout-change with only p1 (p2 killed externally)
+    const layoutStr = "0000,80x24,0,0,1"; // single pane p1
+    const event: NotificationEvent = {
+      kind: "unknown",
+      keyword: "layout-change",
+      rawLine: asBytes(`%layout-change @1 ${layoutStr}\n`),
+    };
+
+    const after = reduce(model, event, ctx);
+
+    // p2 must be gone
+    assert.ok(!after.panes.has(P2), "p2 removed from model");
+    assert.equal(after.panes.size, 1, "model has exactly one pane");
+    assert.ok(after.panes.has(P1), "p1 still present");
+
+    // Window must have updated paneIds
+    const win = after.windows.get(W1)!;
+    assert.equal(win.paneIds.length, 1, "window.paneIds has one entry");
+    assert.ok(win.paneIds.includes(P1), "window.paneIds contains p1");
+
+    // Buffer for removed pane must be dropped
+    assert.equal(store.size(P2), 0, "p2 buffer dropped after removal");
+
+    // Model must have changed (new object reference — change signal fired)
+    assert.notStrictEqual(after, model, "model changed (not same reference)");
+
+    assert.deepEqual(checkInvariants(after, { checkLayoutConsistency: true }), [], "no invariant violations");
+  });
+
+  it("%layout-change: break-pane sequence — pane moves from W1 to W2, no duplicates", () => {
+    // Simulate: window w1 has {p1, p2}. break-pane moves p2 to new window w2.
+    // Step 1: %layout-change on w1 with only p1 (p2 removed from w1).
+    // Step 2: %window-add for w2.
+    // Step 3: %layout-change on w2 with p2 (p2 added to w2).
+    // Expected: p2 ends up in w2 only — no duplicates.
+
+    const W2 = windowId("w2");
+
+    let model = emptyModel();
+    model = addSession(model, makeSession(S0, [], null));
+    model = addWindow(model, makeWindow(W1, S0, [], null));
+    model = addPane(model, makePane(P1, W1, S0));
+    model = addPane(model, makePane(P2, W1, S0));
+
+    const { ctx } = makeCtx();
+
+    // Step 1: layout-change on w1, p2 absent → p2 removed from w1
+    const layoutW1 = "0000,80x24,0,0,1"; // only p1
+    model = reduce(model, {
+      kind: "unknown",
+      keyword: "layout-change",
+      rawLine: asBytes(`%layout-change @1 ${layoutW1}\n`),
+    }, ctx);
+
+    assert.ok(!model.panes.has(P2), "p2 removed from w1 after layout-change");
+    assert.ok(model.panes.has(P1), "p1 still in w1");
+    assert.equal(model.windows.get(W1)!.paneIds.length, 1, "w1 has 1 pane");
+
+    // Step 2: window-add for w2 (tmux creates the new window for the broken pane)
+    model = reduce(model, { kind: "window-add", windowId: 2, unlinked: false }, ctx);
+    assert.ok(model.windows.has(W2), "w2 added to model");
+
+    // Step 3: layout-change on w2 with p2 → p2 re-added to w2
+    const layoutW2 = "0000,80x24,0,0,2"; // pane p2 (tmux id=2)
+    model = reduce(model, {
+      kind: "unknown",
+      keyword: "layout-change",
+      rawLine: asBytes(`%layout-change @2 ${layoutW2}\n`),
+    }, ctx);
+
+    assert.ok(model.panes.has(P2), "p2 re-added to w2");
+    const p2 = model.panes.get(P2)!;
+    assert.equal(p2.windowId, W2, "p2 now belongs to w2");
+
+    // w2 must contain p2
+    const w2 = model.windows.get(W2)!;
+    assert.ok(w2.paneIds.includes(P2), "w2.paneIds includes p2");
+
+    // w1 must NOT contain p2
+    const w1 = model.windows.get(W1)!;
+    assert.ok(!w1.paneIds.includes(P2), "w1.paneIds does not include p2");
+
+    // Total pane count: p1 in w1, p2 in w2 → 2 panes total (no duplicates)
+    assert.equal(model.panes.size, 2, "exactly 2 panes in model (no duplicates)");
+
+    assert.deepEqual(checkInvariants(model, { checkLayoutConsistency: true }), [], "no invariant violations");
+  });
 });
 
 describe("reducer: immutability", () => {
