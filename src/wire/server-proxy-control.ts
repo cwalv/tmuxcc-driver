@@ -1,18 +1,18 @@
 /**
- * Broker wire control-plane message schema (tc-j9c Stage 0 placeholder).
+ * ServerProxy wire control-plane message schema (tc-j9c Stage 0 placeholder).
  *
- * The broker is a per-tmux-socket discovery and lifecycle service. Clients
- * talk to it first to learn what sessions exist and to obtain a daemon
+ * The server-proxy is a per-tmux-socket discovery and lifecycle service. Clients
+ * talk to it first to learn what sessions exist and to obtain a session-proxy
  * endpoint for a specific session.
  *
- * This file defines the data shapes only. The broker process, its transport,
+ * This file defines the data shapes only. The server-proxy process, its transport,
  * and its runtime are implemented in Stage 2 (tc-j9c.3).
  *
  * ---------------------------------------------------------------------------
  * WIRE CONTRACT INVARIANT
  * ---------------------------------------------------------------------------
  *
- * The broker wire speaks in terms of sessions (metadata) and endpoints.
+ * The server-proxy wire speaks in terms of sessions (metadata) and endpoints.
  * It MUST NEVER carry:
  *   - Pane-level data (output bytes, resize events, input)
  *   - South-side tmux vocabulary (%output, %begin/%end, etc.)
@@ -22,15 +22,15 @@
  * DIRECTION MODEL
  * ---------------------------------------------------------------------------
  *
- * Broker → Client (broker push): session list snapshot + lifecycle deltas.
- * Client → Broker (client request): claim/create/destroy commands.
+ * ServerProxy → Client (server-proxy push): session list snapshot + lifecycle deltas.
+ * Client → ServerProxy (client request): claim/create/destroy commands.
  * Both: capabilities handshake.
  *
  * ---------------------------------------------------------------------------
  * STATUS
  * ---------------------------------------------------------------------------
  *
- * This file compiles but is not yet wired in. Broker implementation is
+ * This file compiles but is not yet wired in. ServerProxy implementation is
  * Stage 2 work (bead tc-j9c.3). Types are defined now so that Stage 0's
  * file layout matches the target shape described in SCHEMA.md.
  */
@@ -39,32 +39,32 @@ import type { MessageBase, Capabilities } from "./envelope.js";
 import type { PaneId, SessionId } from "./ids.js";
 
 // ---------------------------------------------------------------------------
-// Broker → Client: capabilities handshake
+// ServerProxy → Client: capabilities handshake
 // ---------------------------------------------------------------------------
 
 /**
- * Broker's capabilities advertisement (sent once at handshake time).
- * direction: broker→client
+ * ServerProxy's capabilities advertisement (sent once at handshake time).
+ * direction: server-proxy→client
  *
  * The handshake sequence is defined by bead tc-auj; this is just the shape.
  */
-export interface BrokerCapabilitiesMessage extends MessageBase {
-  readonly type: "broker.capabilities";
+export interface ServerProxyCapabilitiesMessage extends MessageBase {
+  readonly type: "server-proxy.capabilities";
   readonly capabilities: Capabilities;
 }
 
 // ---------------------------------------------------------------------------
-// Broker session info (shared across snapshot and deltas)
+// ServerProxy session info (shared across snapshot and deltas)
 // ---------------------------------------------------------------------------
 
 /**
- * A session as known to the broker.
+ * A session as known to the server-proxy.
  *
- * Counts are static at snapshot/delta time; the broker does not push
+ * Counts are static at snapshot/delta time; the server-proxy does not push
  * live count updates. Clients that need fresh counts may issue a new
  * session.claim or reconnect to get a fresh snapshot.
  */
-export interface BrokerSessionInfo {
+export interface ServerProxySessionInfo {
   readonly sessionId: SessionId;
   readonly name: string;
   /** Number of windows currently in this session (at snapshot/delta time). */
@@ -74,34 +74,34 @@ export interface BrokerSessionInfo {
 }
 
 // ---------------------------------------------------------------------------
-// Broker → Client: snapshot
+// ServerProxy → Client: snapshot
 // ---------------------------------------------------------------------------
 
 /**
- * Full session-list snapshot, sent once by the broker immediately after the
+ * Full session-list snapshot, sent once by the server-proxy immediately after the
  * capabilities handshake.
- * direction: broker→client
+ * direction: server-proxy→client
  *
  * Clients use this to populate their session picker without polling.
  */
-export interface BrokerSnapshotMessage extends MessageBase {
+export interface ServerProxySnapshotMessage extends MessageBase {
   readonly type: "sessions.snapshot";
-  /** All sessions known to this broker at snapshot time. */
-  readonly sessions: readonly BrokerSessionInfo[];
+  /** All sessions known to this server-proxy at snapshot time. */
+  readonly sessions: readonly ServerProxySessionInfo[];
 }
 
 // ---------------------------------------------------------------------------
-// Broker → Client: session-set deltas (when "sessions-watch" is negotiated)
+// ServerProxy → Client: session-set deltas (when "sessions-watch" is negotiated)
 // ---------------------------------------------------------------------------
 
 /**
- * A new session has become visible to the broker.
- * direction: broker→client
+ * A new session has become visible to the server-proxy.
+ * direction: server-proxy→client
  *
- * Shape mirrors BrokerSessionInfo so clients can update their session model
+ * Shape mirrors ServerProxySessionInfo so clients can update their session model
  * without polling.
  */
-export interface BrokerSessionAddedMessage extends MessageBase {
+export interface ServerProxySessionAddedMessage extends MessageBase {
   readonly type: "sessions.added";
   readonly sessionId: SessionId;
   readonly name: string;
@@ -112,51 +112,51 @@ export interface BrokerSessionAddedMessage extends MessageBase {
 }
 
 /**
- * A session has disappeared from the broker.
- * direction: broker→client
+ * A session has disappeared from the server-proxy.
+ * direction: server-proxy→client
  *
- * The broker reaps the daemon (if any) bound to this session before
- * emitting sessions.removed. Clients holding a stale daemon endpoint
- * will see their daemon connection close with "session.unavailable".
+ * The server-proxy reaps the sessionProxy (if any) bound to this session before
+ * emitting sessions.removed. Clients holding a stale session-proxy endpoint
+ * will see their session-proxy connection close with "session.unavailable".
  */
-export interface BrokerSessionRemovedMessage extends MessageBase {
+export interface ServerProxySessionRemovedMessage extends MessageBase {
   readonly type: "sessions.removed";
   readonly sessionId: SessionId;
 }
 
 /**
  * A session was renamed.
- * direction: broker→client
+ * direction: server-proxy→client
  *
- * The broker emits this alongside the daemon wire's DaemonSessionRenamedMessage.
+ * The server-proxy emits this alongside the session-proxy wire's SessionProxySessionRenamedMessage.
  * Ordering between the two events on a single client is not guaranteed; clients
  * should treat the later arrival as canonical.
  */
-export interface BrokerSessionRenamedMessage extends MessageBase {
+export interface ServerProxySessionRenamedMessage extends MessageBase {
   readonly type: "sessions.renamed";
   readonly sessionId: SessionId;
   readonly newName: string;
 }
 
 // ---------------------------------------------------------------------------
-// Client → Broker: commands
+// Client → ServerProxy: commands
 // ---------------------------------------------------------------------------
 
 /**
- * Claim or obtain the daemon endpoint for a named session.
+ * Claim or obtain the session-proxy endpoint for a named session.
  *
  * Semantics:
- *   - If a daemon for `name` already exists, return its endpoint.
+ *   - If a session-proxy for `name` already exists, return its endpoint.
  *   - If `name` does not exist as a tmux session, create it (`tmux new-session
- *     -d -s <name>`), spawn a daemon, and return.
- *   - If `name` exists but no daemon is bound, spawn one and return.
+ *     -d -s <name>`), spawn a sessionProxy, and return.
+ *   - If `name` exists but no session-proxy is bound, spawn one and return.
  *
  * Per-name atomicity: concurrent claims for the same name are serialized.
  * Two racing clients receive identical responses without producing two daemons.
  *
  * The response payload's `created` flag reports whether THIS claim minted the
  * tmux session (`true`) or attached to a pre-existing one (`false`).  The
- * broker is the system's single create-or-attach point, so this flag is the
+ * server-proxy is the system's single create-or-attach point, so this flag is the
  * authority clients use for create-time-only behaviour (e.g. profile apply,
  * tc-3y8.2).  Claims that join an in-flight claim for the same name receive
  * `created: false` — exactly one claimant observes `created: true` per
@@ -177,7 +177,7 @@ export interface SessionCreateCommand {
 }
 
 /**
- * Destroy an existing session and reap its daemon.
+ * Destroy an existing session and reap its session-proxy.
  */
 export interface SessionDestroyCommand {
   readonly kind: "session.destroy";
@@ -188,15 +188,15 @@ export interface SessionDestroyCommand {
  * Attach a new client to a specific pane within a session (tc-7xv.36).
  *
  * Semantics:
- *   - Same daemon endpoint as `session.claim` is returned — the broker does NOT
+ *   - Same session-proxy endpoint as `session.claim` is returned — the server-proxy does NOT
  *     spawn per-pane daemons, and the data plane is unchanged.
- *   - `paneId` is an opaque hint that the broker echoes back in the response
+ *   - `paneId` is an opaque hint that the server-proxy echoes back in the response
  *     payload.  The client uses it to drive its render-level decision of
  *     "which pane should the host pty bind to" (vs. the default first-pane-wins).
- *   - The broker does NOT validate that the pane exists.  Pane-level state is
- *     a daemon concern (see WIRE CONTRACT INVARIANT above) — the broker only
+ *   - The server-proxy does NOT validate that the pane exists.  Pane-level state is
+ *     a session-proxy concern (see WIRE CONTRACT INVARIANT above) — the server-proxy only
  *     knows about sessions.  If the pane has disappeared by the time the
- *     client connects to the daemon, the snapshot will simply not contain it
+ *     client connects to the sessionProxy, the snapshot will simply not contain it
  *     and the client must surface that to the user.
  *
  * Use cases (tc-7xv.36):
@@ -209,12 +209,12 @@ export interface SessionDestroyCommand {
  *     original paneId only to disambiguate the attach intent (the client may
  *     then issue a follow-up `split-pane` to materialise a fresh pane).
  *
- * Why this lives on the broker wire and not the daemon wire:
- *   - The same daemon process can serve multiple clients with disjoint host-
- *     pane targets — declaring the intent at attach time keeps the broker as
+ * Why this lives on the server-proxy wire and not the session-proxy wire:
+ *   - The same session-proxy process can serve multiple clients with disjoint host-
+ *     pane targets — declaring the intent at attach time keeps the server-proxy as
  *     the single discovery entry-point for both session-wide and per-pane
  *     attaches.
- *   - The broker does not pump pane bytes — `paneId` is an identifier, not
+ *   - The server-proxy does not pump pane bytes — `paneId` is an identifier, not
  *     pane-level data — so the wire contract invariant is preserved.
  *
  * Additive addition — non-breaking per the versioning policy.  Older brokers
@@ -223,51 +223,51 @@ export interface SessionDestroyCommand {
  */
 export interface PaneAttachCommand {
   readonly kind: "pane.attach";
-  /** Session containing the target pane (broker-minted SessionId). */
+  /** Session containing the target pane (server-proxy-minted SessionId). */
   readonly sessionId: SessionId;
-  /** Target pane on the daemon side; echoed back in the response payload. */
+  /** Target pane on the session-proxy side; echoed back in the response payload. */
   readonly paneId: PaneId;
 }
 
 /**
- * Read-only broker diagnostics snapshot (tc-k6v).
+ * Read-only server-proxy diagnostics snapshot (tc-k6v).
  *
- * Issued by debug surfaces (the VS Code `tmuxcc.showBrokerInfo` command) to
- * render a triage panel without shelling out to pgrep/ls.  The broker answers
+ * Issued by debug surfaces (the VS Code `tmuxcc.showServerProxyInfo` command) to
+ * render a triage panel without shelling out to pgrep/ls.  The server-proxy answers
  * from its in-memory state plus cheap synchronous tmux queries; nothing is
  * mutated.
  *
  * Wire-contract note: the per-session entries carry session-level METADATA
  * only (names, counts, pids) — no pane content, no south-side vocabulary —
- * so the broker-wire invariant is preserved.
+ * so the server-proxy-wire invariant is preserved.
  *
  * Additive addition — non-breaking per the versioning policy.  Older brokers
- * respond with `protocol.unknown-message`; clients surface "broker does not
- * support broker.info" in that case.
+ * respond with `protocol.unknown-message`; clients surface "server-proxy does not
+ * support server-proxy.info" in that case.
  */
-export interface BrokerInfoCommand {
-  readonly kind: "broker.info";
+export interface ServerProxyInfoCommand {
+  readonly kind: "server-proxy.info";
 }
 
 /**
- * One session row in a `broker.info` response (tc-k6v).
+ * One session row in a `server-proxy.info` response (tc-k6v).
  */
-export interface BrokerInfoSession {
+export interface ServerProxyInfoSession {
   readonly sessionId: SessionId;
   readonly name: string;
   /**
-   * PID of the per-session daemon child, or `null` when no daemon is
+   * PID of the per-session session-proxy child, or `null` when no session-proxy is
    * currently running for this session (not yet claimed, or crashed and
    * awaiting lazy respawn on the next claim).
    */
-  readonly daemonPid: number | null;
+  readonly sessionProxyPid: number | null;
   /** Number of windows in the session (from `tmux list-sessions`). */
   readonly windowCount: number;
   /** Number of panes across all windows (from `tmux list-panes -a`). */
   readonly paneCount: number;
   /**
    * Raw tmux `session_attached` count.  NOTE: this includes tmuxcc's own
-   * `-CC` clients (the per-session daemon and possibly the broker's thin
+   * `-CC` clients (the per-session session-proxy and possibly the server-proxy's thin
    * watcher), so it overstates "real" attached clients — open bead tc-3y8.7
    * owns fixing the semantics.  Display surfaces should label it as raw.
    */
@@ -275,20 +275,20 @@ export interface BrokerInfoSession {
 }
 
 /**
- * Payload of a successful `broker.info` response (tc-k6v).
+ * Payload of a successful `server-proxy.info` response (tc-k6v).
  */
-export interface BrokerInfoPayload {
+export interface ServerProxyInfoPayload {
   /**
-   * The tmux socket name this broker serves (`-L <socketName>`).  Also the
-   * broker's runtime sub-directory name — broker socket name and tmux socket
+   * The tmux socket name this server-proxy serves (`-L <socketName>`).  Also the
+   * server-proxy's runtime sub-directory name — server-proxy socket name and tmux socket
    * name are the same value by construction (tc-5kv).
    */
   readonly socketName: string;
-  /** Absolute path of the broker's unix socket. */
-  readonly brokerSocketPath: string;
-  /** The broker process's PID. */
-  readonly brokerPid: number;
-  /** Milliseconds since the broker's `start()` completed. */
+  /** Absolute path of the server-proxy's unix socket. */
+  readonly serverProxySocketPath: string;
+  /** The server-proxy process's PID. */
+  readonly serverProxyPid: number;
+  /** Milliseconds since the server-proxy's `start()` completed. */
   readonly uptimeMs: number;
   /**
    * PID of the tmux server on `socketName`, or `null` when the server is not
@@ -296,76 +296,76 @@ export interface BrokerInfoPayload {
    */
   readonly tmuxServerPid: number | null;
   /**
-   * Whether the broker attached to a PRE-EXISTING tmux server at start
+   * Whether the server-proxy attached to a PRE-EXISTING tmux server at start
    * (ext-a §6.2 "adopted server"): true iff sessions already existed on the
-   * socket when the broker started.  False when the broker started against
+   * socket when the server-proxy started.  False when the server-proxy started against
    * an empty socket (server minted later by the first session.claim).
    */
   readonly adoptedExistingServer: boolean;
   /**
-   * Number of currently open IPC connections to the broker socket (raw
+   * Number of currently open IPC connections to the server-proxy socket (raw
    * socket-level count, pre-handshake — same value that drives the tc-3iv
    * idle-exit hysteresis).  Includes the connection carrying this very
-   * `broker.info` request.
+   * `server-proxy.info` request.
    */
   readonly connectedClientCount: number;
   /**
-   * Absolute path of the broker's append-only log file
-   * (`<runtime>/<socketName>/broker.log`), or `null` when the broker was
+   * Absolute path of the server-proxy's append-only log file
+   * (`<runtime>/<socketName>/server-proxy.log`), or `null` when the server-proxy was
    * started without log redirection (programmatic/in-process brokers).
    */
   readonly logPath: string | null;
   /** Per-session diagnostics rows. */
-  readonly sessions: readonly BrokerInfoSession[];
+  readonly sessions: readonly ServerProxyInfoSession[];
 }
 
 /**
- * Discriminated union of all broker commands a client may issue.
+ * Discriminated union of all server-proxy commands a client may issue.
  * Narrow with `cmd.kind`.
  */
-export type BrokerCommand =
+export type ServerProxyCommand =
   | SessionClaimCommand
   | SessionCreateCommand
   | SessionDestroyCommand
   | PaneAttachCommand
-  | BrokerInfoCommand;
+  | ServerProxyInfoCommand;
 
 /**
- * Client issues a broker-level command.
- * direction: client→broker
+ * Client issues a server-proxy-level command.
+ * direction: client→server-proxy
  *
  * `correlationId` is a client-generated opaque string echoed back in
- * BrokerCommandResponseMessage. The broker does NOT assign correlation ids.
+ * ServerProxyCommandResponseMessage. The server-proxy does NOT assign correlation ids.
  */
-export interface BrokerCommandRequestMessage extends MessageBase {
+export interface ServerProxyCommandRequestMessage extends MessageBase {
   readonly type: "command.request";
   /** Client-generated opaque string, echoed in the matching response. */
   readonly correlationId: string;
-  /** The broker operation to perform. */
-  readonly command: BrokerCommand;
+  /** The server-proxy operation to perform. */
+  readonly command: ServerProxyCommand;
 }
 
 /**
- * Successful broker command result payload.
+ * Successful server-proxy command result payload.
  *
  * Per-kind payloads:
  *   session.claim / session.create → { sessionId, endpoint, created }
  *   session.destroy                → { ok: true }
  *   pane.attach                    → { sessionId, endpoint, paneId }
- *   broker.info                    → { info }
+ *   server-proxy.info                    → { info }
  */
-export interface BrokerCommandOkPayload {
+export interface ServerProxyCommandOkPayload {
   readonly sessionId?: SessionId;
   /**
    * Opaque connection string (unix socket path under the v3 trust model).
-   * Clients pass it to `createDaemonTransport(endpoint)`.
+   * Clients pass it to `createSessionProxyTransport(endpoint)`.
    */
   readonly endpoint?: string;
   /**
    * Echoed target paneId for a `pane.attach` response (tc-7xv.36).
    *
-   * Carried solely so the client has the broker's confirmation that the
-   * attach intent referenced this pane.  The broker does not validate
+   * Carried solely so the client has the server-proxy's confirmation that the
+   * attach intent referenced this pane.  The server-proxy does not validate
    * existence — see `PaneAttachCommand` notes.
    */
   readonly paneId?: PaneId;
@@ -384,36 +384,36 @@ export interface BrokerCommandOkPayload {
    */
   readonly created?: boolean;
   /**
-   * Diagnostics snapshot for a `broker.info` response (tc-k6v).
+   * Diagnostics snapshot for a `server-proxy.info` response (tc-k6v).
    * Absent on all other command kinds.
    */
-  readonly info?: BrokerInfoPayload;
+  readonly info?: ServerProxyInfoPayload;
 }
 
 /**
- * The broker's response to a BrokerCommandRequestMessage.
- * direction: broker→client
+ * The server-proxy's response to a ServerProxyCommandRequestMessage.
+ * direction: server-proxy→client
  *
  * Command-specific failures arrive HERE as `result.ok = false`.
  * The separate `ErrorMessage` (type: "error") is for unsolicited /
  * protocol-level errors where there is no in-flight command to correlate.
  */
-export interface BrokerCommandResponseMessage extends MessageBase {
+export interface ServerProxyCommandResponseMessage extends MessageBase {
   readonly type: "command.response";
-  /** Echoed from the matching BrokerCommandRequestMessage. */
+  /** Echoed from the matching ServerProxyCommandRequestMessage. */
   readonly correlationId: string;
   /** Discriminated result: success or failure. */
   readonly result:
-    | { readonly ok: true; readonly payload?: BrokerCommandOkPayload }
+    | { readonly ok: true; readonly payload?: ServerProxyCommandOkPayload }
     | { readonly ok: false; readonly code: string; readonly message: string };
 }
 
 // ---------------------------------------------------------------------------
-// Broker wire error codes
+// ServerProxy wire error codes
 // ---------------------------------------------------------------------------
 
 /**
- * Broker-wire error codes.
+ * ServerProxy-wire error codes.
  *
  * "protocol.unknown-message"  — unknown message type received; message dropped.
  * "protocol.malformed"        — parse failure.
@@ -422,11 +422,11 @@ export interface BrokerCommandResponseMessage extends MessageBase {
  *                               named an unknown session.
  * "session.name-taken"        — session.create requested a name already in use.
  * "tmux.unavailable"          — underlying tmux server is gone or refusing commands.
- * "internal"                  — unexpected broker-side error.
+ * "internal"                  — unexpected server-proxy-side error.
  *
  * The type is open-ended for forward compatibility.
  */
-export type BrokerErrorCode =
+export type ServerProxyErrorCode =
   | "protocol.unknown-message"
   | "protocol.malformed"
   | "protocol.version-mismatch"
@@ -437,36 +437,36 @@ export type BrokerErrorCode =
   | (string & Record<never, never>);
 
 // ---------------------------------------------------------------------------
-// Union types — broker wire discriminated unions
+// Union types — server-proxy wire discriminated unions
 // ---------------------------------------------------------------------------
 
 /**
- * All messages the broker pushes to the client.
+ * All messages the server-proxy pushes to the client.
  * Narrow with `msg.type`.
  */
-export type BrokerMessage =
-  | BrokerCapabilitiesMessage
-  | BrokerSnapshotMessage
-  | BrokerSessionAddedMessage
-  | BrokerSessionRemovedMessage
-  | BrokerSessionRenamedMessage
-  | BrokerCommandResponseMessage;
-// Note: ErrorMessage (type: "error") is shared with the daemon wire and
-// is re-exported from daemon-control.ts. Broker wire uses the same shape.
+export type ServerProxyMessage =
+  | ServerProxyCapabilitiesMessage
+  | ServerProxySnapshotMessage
+  | ServerProxySessionAddedMessage
+  | ServerProxySessionRemovedMessage
+  | ServerProxySessionRenamedMessage
+  | ServerProxyCommandResponseMessage;
+// Note: ErrorMessage (type: "error") is shared with the session-proxy wire and
+// is re-exported from session-proxy-control.ts. ServerProxy wire uses the same shape.
 
 /**
- * Narrows a MessageBase to a broker→client message type.
+ * Narrows a MessageBase to a server-proxy→client message type.
  *
- * NOTE: `command.response` is ambiguous between broker and daemon wires
+ * NOTE: `command.response` is ambiguous between server-proxy and session-proxy wires
  * (both use `type: "command.response"`). In practice the caller knows which
  * wire they are on from the transport, and `command.kind` discriminates
- * further. This guard checks only the broker-specific message types plus
+ * further. This guard checks only the server-proxy-specific message types plus
  * the shared `command.response` discriminant.
  */
-export function isBrokerMessage(msg: MessageBase): msg is BrokerMessage {
+export function isServerProxyMessage(msg: MessageBase): msg is ServerProxyMessage {
   const t = msg.type;
   return (
-    t === "broker.capabilities" ||
+    t === "server-proxy.capabilities" ||
     t === "sessions.snapshot" ||
     t === "sessions.added" ||
     t === "sessions.removed" ||

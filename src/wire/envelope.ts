@@ -1,14 +1,14 @@
 /**
  * Shared wire envelope types and type guards.
  *
- * This module contains the envelope primitives shared by BOTH the broker wire
- * and the daemon wire:
+ * This module contains the envelope primitives shared by BOTH the server-proxy wire
+ * and the session-proxy wire:
  *   - MessageBase: the discriminant + seq envelope every control-plane message carries.
  *   - Capabilities / WireFeature: the handshake data shape (content differs per wire).
  *   - WIRE_PROTOCOL_VERSION: the monotonically-increasing schema revision integer.
  *   - isControlMessage: shallow structural guard (type: string, seq: number).
- *   - isBrokerMessage / isDaemonMessage / isClientMessage: direction guards whose
- *     concrete narrowings are filled in by broker-control.ts and daemon-control.ts
+ *   - isServerProxyMessage / isSessionProxyMessage / isClientMessage: direction guards whose
+ *     concrete narrowings are filled in by server-proxy-control.ts and session-proxy-control.ts
  *     (they re-export the full implementations from those modules).
  *
  * ---------------------------------------------------------------------------
@@ -24,8 +24,8 @@
  * compact. Version negotiation happens once at handshake time.
  *
  * v1 → v2 (tc-7ml.4): Added ResyncRequestMessage (type: "resync.request") to
- * the daemon wire ClientMessage union.
- * v2 → v3 (tc-j9c): Broker wire introduced; daemon wire becomes single-session.
+ * the session-proxy wire ClientMessage union.
+ * v2 → v3 (tc-j9c): ServerProxy wire introduced; session-proxy wire becomes single-session.
  * WIRE_PROTOCOL_VERSION stays at 2 in Stage 0 (the bump to 3 happens with
  * Stage 1 + Stage 2 schema rebuilds).
  */
@@ -46,7 +46,7 @@ export const WIRE_PROTOCOL_VERSION = 3 as const;
 // ---------------------------------------------------------------------------
 
 /**
- * Every control-plane message on both the broker wire and the daemon wire
+ * Every control-plane message on both the server-proxy wire and the session-proxy wire
  * carries a `type` discriminant and a monotonically-increasing sequence
  * number. The sequence number lets the receiver detect drops and order
  * events; it is per-connection per-sender, starting at 1.
@@ -59,7 +59,7 @@ export interface MessageBase {
   readonly type: string;
   /**
    * Per-connection per-sender sequence number, starting at 1, incremented by
-   * the SENDER for each message. Broker counters and daemon counters are
+   * the SENDER for each message. ServerProxy counters and session-proxy counters are
    * independent even when both connections originate from the same client.
    */
   readonly seq: number;
@@ -73,9 +73,9 @@ export interface MessageBase {
  * Feature flags and version info exchanged during handshake.
  * direction: both (each side advertises its own capabilities).
  *
- * Both the broker wire and the daemon wire use this same shape; only the
- * valid WireFeature strings differ (see broker-control.ts and
- * daemon-control.ts for per-wire feature sets).
+ * Both the server-proxy wire and the session-proxy wire use this same shape; only the
+ * valid WireFeature strings differ (see server-proxy-control.ts and
+ * session-proxy-control.ts for per-wire feature sets).
  *
  * The handshake *sequence* (who sends first, fallback logic) is defined by
  * bead tc-auj; this type is only the data shape.
@@ -94,20 +94,20 @@ export interface Capabilities {
  * Named feature flags. Extensible: unknown strings are ignored by older
  * implementations (forward-compatible).
  *
- * Valid values differ between the broker wire and the daemon wire; this type
+ * Valid values differ between the server-proxy wire and the session-proxy wire; this type
  * is the open union that admits both sets.
  */
 export type WireFeature =
-  | "pane-lifecycle"    // daemon wire: pane open/close/resize events
-  | "layout-updates"   // daemon wire: structured window layout pushes
-  | "focus-events"     // daemon wire: active-pane focus notifications
-  | "input-forwarding" // daemon wire: client→daemon key/text input
-  | "sessions-watch"   // broker wire: push notifications on session-set changes
-  | "session-create"   // broker wire: client may request a new session
-  | "session-destroy"  // broker wire: client may request a session be killed
-  | "session-claim"    // broker wire: client may obtain a daemon endpoint by session
-  | "pane-attach"      // broker wire: client may attach to a specific pane (tc-7xv.36)
-  | "broker-info"      // broker wire: client may request a diagnostics snapshot (tc-k6v)
+  | "pane-lifecycle"    // session-proxy wire: pane open/close/resize events
+  | "layout-updates"   // session-proxy wire: structured window layout pushes
+  | "focus-events"     // session-proxy wire: active-pane focus notifications
+  | "input-forwarding" // session-proxy wire: client→session-proxy key/text input
+  | "sessions-watch"   // server-proxy wire: push notifications on session-set changes
+  | "session-create"   // server-proxy wire: client may request a new session
+  | "session-destroy"  // server-proxy wire: client may request a session be killed
+  | "session-claim"    // server-proxy wire: client may obtain a session-proxy endpoint by session
+  | "pane-attach"      // server-proxy wire: client may attach to a specific pane (tc-7xv.36)
+  | "server-proxy-info"      // server-proxy wire: client may request a diagnostics snapshot (tc-k6v)
   | (string & Record<never, never>); // open-ended for future features
 
 // ---------------------------------------------------------------------------
@@ -119,8 +119,8 @@ export type WireFeature =
  * string `type` and a numeric `seq`). Does NOT do deep field validation —
  * use a validator library (e.g. zod) if you need full schema validation.
  *
- * This guard is wire-agnostic: it accepts messages from both the broker wire
- * and the daemon wire.
+ * This guard is wire-agnostic: it accepts messages from both the server-proxy wire
+ * and the session-proxy wire.
  */
 export function isControlMessage(value: unknown): value is MessageBase {
   return (

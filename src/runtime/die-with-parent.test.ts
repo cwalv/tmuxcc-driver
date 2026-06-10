@@ -277,7 +277,7 @@ describe("tc-2c5: installDieWithParent — subprocess (real reparenting)", () =>
         const elapsed = await waitUntilGone(childPid, 10_000);
         assert.ok(
           elapsed <= 3_000,
-          `daemon-side child must exit ≤ 3000 ms after parent SIGKILL; took ${elapsed} ms` +
+          `session-proxy-side child must exit ≤ 3000 ms after parent SIGKILL; took ${elapsed} ms` +
             (stderrBuf.trim() ? `; stderr: ${stderrBuf.trim()}` : ""),
         );
       } finally {

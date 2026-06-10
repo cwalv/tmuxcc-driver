@@ -1,5 +1,5 @@
 /**
- * Model→wire projection for the tmuxcc daemon (tc-7gp, updated tc-j9c.2).
+ * Model→wire projection for the tmuxcc sessionProxy (tc-7gp, updated tc-j9c.2).
  *
  * Two entry points:
  *   - `projectSnapshot(model, opts?)` — full-state snapshot for a new client.
@@ -11,20 +11,20 @@
  * ---------------------------------------------------------------------------
  *
  * ## Single-session (v3)
- * The daemon wire is single-session. `projectSnapshot` takes the first session
+ * The session-proxy wire is single-session. `projectSnapshot` takes the first session
  * from the model as the bound session. `diffModel` emits only
- * `DaemonSessionRenamedMessage` for session renames (no session.added,
+ * `SessionProxySessionRenamedMessage` for session renames (no session.added,
  * session.closed, session.changed). The `sessionId` field is absent from
  * all pane/window/layout/focus deltas.
  *
  * ## SnapshotPane and pane bytes
- * `SnapshotPane` in daemon-control.ts does NOT carry pane byte content.
+ * `SnapshotPane` in session-proxy-control.ts does NOT carry pane byte content.
  * Initial byte sync is therefore the data-plane's responsibility (tc-2mq /
  * tc-fbz), not the projection's.
  *
  * ## Sequence numbers (seq)
  * `seq` is a per-connection counter owned by the SENDER (spec: MessageBase).
- * The daemon runtime (E4 / tc-dv3) maintains the counter and passes `nextSeq`
+ * The session-proxy runtime (E4 / tc-dv3) maintains the counter and passes `nextSeq`
  * via `ProjectSnapshotOpts`. If not supplied, `projectSnapshot` starts at 2
  * (the snapshot is always the second message after capabilities at seq=1).
  * `diffModel` does NOT assign seq values — the returned delta array has
@@ -63,7 +63,7 @@ import type {
   SnapshotSession,
   SnapshotWindow,
   SnapshotPane,
-  DaemonMessage,
+  SessionProxyMessage,
   PaneOpenedMessage,
   PaneClosedMessage,
   PaneResizedMessage,
@@ -76,8 +76,8 @@ import type {
   WindowMonitorSilenceChangedMessage,
   LayoutUpdatedMessage,
   FocusChangedMessage,
-  DaemonSessionRenamedMessage,
-} from "../wire/daemon-control.js";
+  SessionProxySessionRenamedMessage,
+} from "../wire/session-proxy-control.js";
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -86,12 +86,12 @@ import type {
 /**
  * Options for projectSnapshot.
  *
- * `seq`: the sequence number to stamp on the snapshot message. The E4 daemon
+ * `seq`: the sequence number to stamp on the snapshot message. The E4 session-proxy
  * runtime owns the per-connection counter and passes it here. Defaults to 2
- * (snapshot is always the second daemon→client message after capabilities
+ * (snapshot is always the second session-proxy→client message after capabilities
  * at seq=1).
  *
- * `attachedClientCount`: the number of daemon-protocol clients connected at
+ * `attachedClientCount`: the number of session-proxy-protocol clients connected at
  * snapshot time (tc-1elae, §11.4 tooltip). The serve layer (tc-dv3) passes
  * `server.clientCount()` here. Omit to leave the field absent (backwards-
  * compatible; older clients simply do not read it).
@@ -109,7 +109,7 @@ export interface ProjectSnapshotOpts {
  * (windows, panes), and the focus pair. All ids are the model's branded ids
  * (same types as the wire uses — no conversion needed).
  *
- * Assumes the model has exactly one session (the daemon's bound session).
+ * Assumes the model has exactly one session (the session-proxy's bound session).
  * If the model is empty (no sessions), returns a snapshot with a placeholder
  * session identity.
  *
@@ -188,8 +188,8 @@ export function projectSnapshot(
  *
  * Returns an empty array if `prev` and `next` are observably identical.
  */
-export function diffModel(prev: SessionModel, next: SessionModel): DaemonMessage[] {
-  const out: DaemonMessage[] = [];
+export function diffModel(prev: SessionModel, next: SessionModel): SessionProxyMessage[] {
+  const out: SessionProxyMessage[] = [];
 
   // Placeholder seq — the E4 caller assigns real values before sending.
   const SEQ = 0;
@@ -357,7 +357,7 @@ export function diffModel(prev: SessionModel, next: SessionModel): DaemonMessage
   const prevSess = prev.sessions.values().next().value;
   const nextSess = next.sessions.values().next().value;
   if (prevSess && nextSess && prevSess.name !== nextSess.name) {
-    const msg: DaemonSessionRenamedMessage = {
+    const msg: SessionProxySessionRenamedMessage = {
       type: "session.renamed",
       seq: SEQ,
       newName: nextSess.name,

@@ -30,11 +30,11 @@
  *
  * tmux notification events carry raw numeric ids (`paneId: number`, `windowId:
  * number`, `sessionId: number`) without the `%`/`@`/`$` sigils. These must be
- * mapped to the daemon's branded `PaneId` / `WindowId` / `SessionId` before
+ * mapped to the session-proxy's branded `PaneId` / `WindowId` / `SessionId` before
  * touching the model. The reducer uses simple string-based minting:
  *   `paneId("p" + tmuxId)` / `windowId("w" + tmuxId)` / `sessionId("s" + tmuxId)`
  * This is a deterministic 1:1 mapping so the same tmux id always produces the
- * same branded id within a session (the daemon namespace is per-connection).
+ * same branded id within a session (the session-proxy namespace is per-connection).
  * E4 bootstrap (tc-835) will own the full id registry; the reducer depends only
  * on this naming convention being consistent.
  *
@@ -160,7 +160,7 @@ export interface PaneBufferStore {
  *              issue `attach-session -t <bound>` on the -CC connection.
  * "unavailable" — the bound session is gone; the caller should emit
  *                 ErrorMessage{code:"session.unavailable"} and close all
- *                 client connections on this daemon.
+ *                 client connections on this session-proxy.
  */
 export type SwitchClientOutcome = "reattach" | "unavailable";
 
@@ -173,13 +173,13 @@ export interface ReducerContext {
   readonly buffers: PaneBufferStore;
 
   /**
-   * The session id this daemon is bound to (the `-CC attach -t <session>`
+   * The session id this session-proxy is bound to (the `-CC attach -t <session>`
    * argument). Used by the switch-client narrowing logic in the
    * `%session-changed` / `%client-session-changed` handlers.
    *
    * The value is a branded SessionId produced by mintSessionId() from the
    * tmux numeric id of the bound session. E4 bootstrap supplies this once at
-   * daemon startup; it never changes for the lifetime of the daemon.
+   * session-proxy startup; it never changes for the lifetime of the session-proxy.
    *
    * When absent (undefined), `%session-changed` and `%client-session-changed`
    * events are no-ops (model returned unchanged). This should only occur if
@@ -206,10 +206,10 @@ export interface ReducerContext {
 // ---------------------------------------------------------------------------
 // Id minting helpers
 //
-// Deterministic mapping: tmux numeric id → daemon branded id.
+// Deterministic mapping: tmux numeric id → session-proxy branded id.
 // Convention: paneId("p" + n), windowId("w" + n), sessionId("s" + n).
 // E4 bootstrap owns the full registry; the reducer relies on this convention
-// being consistent across the daemon.
+// being consistent across the session-proxy.
 // ---------------------------------------------------------------------------
 
 function mintPaneId(tmuxId: number): PaneId {
@@ -402,7 +402,7 @@ export function reduce(
     // client's session (tmux control-notify.c, control_notify_window_linked:
     // `winlink_find_by_window_id(&cs->windows, …)` decides linked vs
     // unlinked PER RECEIVING CLIENT).  It announces another session's window
-    // — e.g. a sibling daemon's `new-session` on the same tmux server.
+    // — e.g. a sibling session-proxy's `new-session` on the same tmux server.
     // Adding it here grafted a phantom window onto OUR bound session; the
     // tc-fx4 layout reconcile then fetched its layout (`list-windows -a` is
     // server-wide) and surfaced the OTHER session's pane as a pane.opened
@@ -558,8 +558,8 @@ export function reduce(
     // %client-session-changed on EVERY attach-session — including a
     // same-session re-attach (server-client.c server_client_set_session calls
     // notify_client unconditionally, plus recalculate_sizes + redraw). With
-    // N≥2 daemons on one socket each daemon's "reattach" re-triggered every
-    // other daemon's, a mutual notification storm (~8000 notifications/s at
+    // N≥2 daemons on one socket each session-proxy's "reattach" re-triggered every
+    // other session-proxy's, a mutual notification storm (~8000 notifications/s at
     // N=3) that drove the tmux server CPU-bound: ~350-400 ms per command,
     // the epic's headline latency bug. N=1 was stable only because there was
     // no other client to misinterpret.
@@ -567,7 +567,7 @@ export function reduce(
     // Model effect: if the event names our bound session, refresh its name
     // (the payload is current truth about that session). No focus update —
     // another client's attach does not move our focus. Foreign sessions are
-    // a no-op: a single-session daemon does not track other clients.
+    // a no-op: a single-session session-proxy does not track other clients.
     // -------------------------------------------------------------------------
     case "client-session-changed": {
       const sid = mintSessionId(event.sessionId);
@@ -703,7 +703,7 @@ export function reduce(
     // -------------------------------------------------------------------------
     // %exit [reason]
     //
-    // tmux daemon is exiting. The model is left as-is (snapshot of last state).
+    // tmux session-proxy is exiting. The model is left as-is (snapshot of last state).
     // E4 runtime should treat this as a signal to tear down the connection,
     // notify clients via ErrorMessage("session.unavailable"), and stop the
     // reducer loop. The reason string (if present) can be logged by E4.
@@ -812,7 +812,7 @@ export function reduce(
  *   1. Parse the raw line to extract windowId and layoutString.
  *   2. Parse the layout string via `parseLayout`.
  *   3. Convert to `WindowLayout` via `parsedLayoutToWindowLayout`, mapping
- *      tmux leaf pane ids to daemon `PaneId`s via `mintPaneId`.
+ *      tmux leaf pane ids to session-proxy `PaneId`s via `mintPaneId`.
  *   4. Reconcile the window's pane set:
  *      - ADD any pane from the layout that is not yet in the model (conservative
  *        add policy — handles layout-change arriving before an explicit pane-add).

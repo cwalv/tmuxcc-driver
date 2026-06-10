@@ -1,12 +1,12 @@
 /**
  * Resync recovery integration test — tc-7ml.4 acceptance criteria.
  *
- * Verifies the full resync round-trip using real daemon code (createControlServer)
+ * Verifies the full resync round-trip using real session-proxy code (createControlServer)
  * and the real client Mirror, connected via a filtered in-memory transport pair.
  *
  * Acceptance criteria covered:
  *   1. The mirror sends `resync.request` when a seq gap is detected.
- *   2. The daemon re-sends a fresh snapshot at the next per-connection seq (no
+ *   2. The session-proxy re-sends a fresh snapshot at the next per-connection seq (no
  *      seq reset).
  *   3. The mirror recovers — model is consistent — WITHOUT a full reconnect.
  *   4. Dedup policy: further gaps while resync is in flight are suppressed.
@@ -26,15 +26,15 @@
  *   2. Drop predicate drops model delta (seq=3, e.g. pane.opened).
  *   3. A SECOND model change fires delta (seq=4); mirror receives it and
  *      detects the gap (expected=3, received=4).
- *   4. Mirror sends resync.request → daemon re-sends snapshot (seq=5+).
+ *   4. Mirror sends resync.request → session-proxy re-sends snapshot (seq=5+).
  *   5. Mirror applies the resync snapshot → recovered.
  *
  * # Import strategy
  *
  * This file imports from @tmuxcc/client via relative src paths (outside the
- * daemon's rootDir). tsx resolves them at runtime without issues, but tsc
+ * session-proxy's rootDir). tsx resolves them at runtime without issues, but tsc
  * rejects the rootDir violation. Therefore this file is excluded from
- * daemon/tsconfig.json (see the "exclude" array there) — matching the pattern
+ * session-proxy/tsconfig.json (see the "exclude" array there) — matching the pattern
  * used by e2e-smoke.test.ts.
  *
  * @module runtime/resync.test
@@ -44,7 +44,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 // ---------------------------------------------------------------------------
-// Daemon internals (within rootDir — no tsconfig issue)
+// SessionProxy internals (within rootDir — no tsconfig issue)
 // ---------------------------------------------------------------------------
 
 import { createControlServer } from "./serve.js";
@@ -61,11 +61,11 @@ import type { Transport, ControlMessage, ControlHandler, CloseHandler, PaneId } 
 
 // ---------------------------------------------------------------------------
 // Client modules — relative src paths; tsx resolves at runtime.
-// Excluded from daemon tsconfig (see tsconfig.json "exclude").
+// Excluded from session-proxy tsconfig (see tsconfig.json "exclude").
 // ---------------------------------------------------------------------------
 
 // @ts-ignore — outside rootDir; resolved by tsx at runtime
-import { DaemonConnection } from "../../../tmuxcc-client/src/connection.js";
+import { SessionProxyConnection } from "../../../tmuxcc-client/src/connection.js";
 // @ts-ignore — outside rootDir; resolved by tsx at runtime
 import { Mirror } from "../../../tmuxcc-client/src/mirror.js";
 
@@ -140,18 +140,18 @@ function makeModel2(): SessionModel {
 // Filtering transport pair
 //
 // Wraps independent handler closures to simulate a two-leg transport with a
-// drop filter on the daemon→client direction.  Client→daemon messages are
-// recorded and forwarded unfiltered (so resync.request reaches the daemon).
+// drop filter on the session-proxy→client direction.  Client→session-proxy messages are
+// recorded and forwarded unfiltered (so resync.request reaches the sessionProxy).
 // ---------------------------------------------------------------------------
 
 interface FilteredPair {
-  /** Daemon-side transport (passed to createControlServer). */
-  daemonT: Transport;
-  /** Client-side transport (passed to DaemonConnection). */
+  /** SessionProxy-side transport (passed to createControlServer). */
+  sessionProxyT: Transport;
+  /** Client-side transport (passed to SessionProxyConnection). */
   clientT: Transport;
-  /** Set a predicate to drop matching daemon→client control messages. */
+  /** Set a predicate to drop matching session-proxy→client control messages. */
   setDropPredicate(pred: ((msg: ControlMessage) => boolean) | null): void;
-  /** All control messages sent by the client (client→daemon direction). */
+  /** All control messages sent by the client (client→session-proxy direction). */
   readonly clientToServer: ControlMessage[];
 }
 
@@ -159,36 +159,36 @@ function createFilteredPair(): FilteredPair {
   let dropPredicate: ((msg: ControlMessage) => boolean) | null = null;
   const clientToServer: ControlMessage[] = [];
 
-  let daemonControlHandler: ControlHandler = () => {};
-  let daemonCloseHandler: CloseHandler = () => {};
+  let sessionProxyControlHandler: ControlHandler = () => {};
+  let sessionProxyCloseHandler: CloseHandler = () => {};
   let clientControlHandler: ControlHandler = () => {};
   let clientCloseHandler: CloseHandler = () => {};
   let closed = false;
 
-  const daemonT: Transport = {
+  const sessionProxyT: Transport = {
     sendControl(msg: ControlMessage) {
       if (closed) return;
-      // Apply drop filter (daemon→client direction).
+      // Apply drop filter (session-proxy→client direction).
       if (dropPredicate !== null && dropPredicate(msg)) return;
       clientControlHandler(msg);
     },
-    onControl(handler: ControlHandler) { daemonControlHandler = handler; },
+    onControl(handler: ControlHandler) { sessionProxyControlHandler = handler; },
     sendData(_pid: PaneId, _b: Uint8Array) { /* no data plane in this test */ },
     onData() { /* unused */ },
-    onClose(handler: CloseHandler) { daemonCloseHandler = handler; },
+    onClose(handler: CloseHandler) { sessionProxyCloseHandler = handler; },
     close(err?: Error) {
       if (closed) return;
       closed = true;
       clientCloseHandler(err);
-      daemonCloseHandler(err);
+      sessionProxyCloseHandler(err);
     },
   };
 
   const clientT: Transport = {
     sendControl(msg: ControlMessage) {
       if (closed) return;
-      clientToServer.push(msg); // record client→daemon messages
-      daemonControlHandler(msg);
+      clientToServer.push(msg); // record client→session-proxy messages
+      sessionProxyControlHandler(msg);
     },
     onControl(handler: ControlHandler) { clientControlHandler = handler; },
     sendData(_pid: PaneId, _b: Uint8Array) { /* no data plane in this test */ },
@@ -197,13 +197,13 @@ function createFilteredPair(): FilteredPair {
     close(err?: Error) {
       if (closed) return;
       closed = true;
-      daemonCloseHandler(err);
+      sessionProxyCloseHandler(err);
       clientCloseHandler(err);
     },
   };
 
   return {
-    daemonT,
+    sessionProxyT,
     clientT,
     setDropPredicate(pred) { dropPredicate = pred; },
     clientToServer,
@@ -225,21 +225,21 @@ describe("resync.request — tc-7ml.4 acceptance criteria", { timeout: 5000 }, (
   //   seq=3: pane.opened P2 (model1→model2) — DROPPED; lastSeq stays 2
   //   seq=4: pane.closed P2 (model2→model1) — arrives → gap(3!=4) detected
   //          → resync.request sent synchronously
-  //          → daemon sends snapshot(seq=5, model1) → mirror recovers (1 pane)
+  //          → session-proxy sends snapshot(seq=5, model1) → mirror recovers (1 pane)
   //   result: mirror has 1 pane; connection still "ready"
   // --------------------------------------------------------------------------
 
-  it("mirror sends resync.request after dropped delta; daemon re-snapshots; model recovers without reconnect", async () => {
+  it("mirror sends resync.request after dropped delta; session-proxy re-snapshots; model recovers without reconnect", async () => {
     const model1 = makeModel1();
     const model2 = makeModel2();
     const pipeline = createFakePipeline(model1);
     const server = createControlServer(pipeline);
-    const { daemonT, clientT, setDropPredicate, clientToServer } = createFilteredPair();
+    const { sessionProxyT, clientT, setDropPredicate, clientToServer } = createFilteredPair();
 
     // Connect both sides concurrently (same pattern as serve.test.ts).
-    const conn = new DaemonConnection(clientT);
+    const conn = new SessionProxyConnection(clientT);
     await Promise.all([
-      server.addClient(daemonT),
+      server.addClient(sessionProxyT),
       conn.connect(),
     ]);
 
@@ -264,7 +264,7 @@ describe("resync.request — tc-7ml.4 acceptance criteria", { timeout: 5000 }, (
 
     // pane.closed P2: model2→model1 — arrives at mirror.
     // Mirror detects a seq gap (expected N+1, got N+2 due to dropped pane.opened).
-    // Synchronously: resync.request sent → daemon sends resync snapshot → mirror recovers.
+    // Synchronously: resync.request sent → session-proxy sends resync snapshot → mirror recovers.
     pipeline.fireChange(model1, model2);
 
     // Gap was detected.
@@ -283,7 +283,7 @@ describe("resync.request — tc-7ml.4 acceptance criteria", { timeout: 5000 }, (
     // Connection should still be open — no full reconnect.
     assert.equal(conn.state, "ready", "connection must still be 'ready' (no full reconnect)");
 
-    daemonT.close();
+    sessionProxyT.close();
   });
 
   // --------------------------------------------------------------------------
@@ -294,7 +294,7 @@ describe("resync.request — tc-7ml.4 acceptance criteria", { timeout: 5000 }, (
   //   seq=2: client-count.changed — passes through; lastSeq=2
   //   seq=3: pane.opened P2 — DROPPED (first model delta); lastSeq stays 2
   //   seq=4: pane.closed P2 — arrives → gap(3!=4) → resync.request sent
-  //          → daemon sends snapshot(seq=5) — also DROPPED (resync in flight)
+  //          → session-proxy sends snapshot(seq=5) — also DROPPED (resync in flight)
   //   seq=6: pane.opened P2 — arrives → another gap → #resyncRequested is still true
   //          → DEDUP → no second resync.request
   //   result: only 1 resync.request sent despite 2+ gaps
@@ -305,11 +305,11 @@ describe("resync.request — tc-7ml.4 acceptance criteria", { timeout: 5000 }, (
     const model2 = makeModel2();
     const pipeline = createFakePipeline(model1);
     const server = createControlServer(pipeline);
-    const { daemonT, clientT, setDropPredicate, clientToServer } = createFilteredPair();
+    const { sessionProxyT, clientT, setDropPredicate, clientToServer } = createFilteredPair();
 
-    const conn = new DaemonConnection(clientT);
+    const conn = new SessionProxyConnection(clientT);
     await Promise.all([
-      server.addClient(daemonT),
+      server.addClient(sessionProxyT),
       conn.connect(),
     ]);
 
@@ -342,7 +342,7 @@ describe("resync.request — tc-7ml.4 acceptance criteria", { timeout: 5000 }, (
     assert.equal(gapCount, 0, "no gap yet after first dropped delta");
 
     // pane.closed P2 — arrives → gap detected → resync.request sent.
-    // daemon sends resync snapshot → DROPPED → #resyncRequested still true.
+    // session-proxy sends resync snapshot → DROPPED → #resyncRequested still true.
     pipeline.fireChange(model1, model2);
     assert.equal(gapCount, 1, "first gap detected");
 
@@ -356,7 +356,7 @@ describe("resync.request — tc-7ml.4 acceptance criteria", { timeout: 5000 }, (
     const resyncMsgs = clientToServer.filter((m: ControlMessage) => m.type === "resync.request");
     assert.equal(resyncMsgs.length, 1, "dedup: only 1 resync.request should be sent");
 
-    daemonT.close();
+    sessionProxyT.close();
   });
 
   // --------------------------------------------------------------------------
@@ -377,11 +377,11 @@ describe("resync.request — tc-7ml.4 acceptance criteria", { timeout: 5000 }, (
     const model2 = makeModel2();
     const pipeline = createFakePipeline(model1);
     const server = createControlServer(pipeline);
-    const { daemonT, clientT, setDropPredicate } = createFilteredPair();
+    const { sessionProxyT, clientT, setDropPredicate } = createFilteredPair();
 
-    const conn = new DaemonConnection(clientT);
+    const conn = new SessionProxyConnection(clientT);
     await Promise.all([
-      server.addClient(daemonT),
+      server.addClient(sessionProxyT),
       conn.connect(),
     ]);
 
@@ -433,7 +433,7 @@ describe("resync.request — tc-7ml.4 acceptance criteria", { timeout: 5000 }, (
   });
 
   // --------------------------------------------------------------------------
-  // 4. Seq continuity: daemon does NOT reset seq on resync
+  // 4. Seq continuity: session-proxy does NOT reset seq on resync
   //
   // Timeline (tc-44wu0: client-count.changed is seq=2 on connect):
   //   seq=1: initial snapshot  seq=2: client-count.changed (passes through)
@@ -448,7 +448,7 @@ describe("resync.request — tc-7ml.4 acceptance criteria", { timeout: 5000 }, (
     const model2 = makeModel2();
     const pipeline = createFakePipeline(model1);
     const server = createControlServer(pipeline);
-    const { daemonT, clientT, setDropPredicate } = createFilteredPair();
+    const { sessionProxyT, clientT, setDropPredicate } = createFilteredPair();
 
     // Spy on ALL control messages delivered to the client transport handler.
     const allReceived: ControlMessage[] = [];
@@ -460,9 +460,9 @@ describe("resync.request — tc-7ml.4 acceptance criteria", { timeout: 5000 }, (
       });
     };
 
-    const conn = new DaemonConnection(clientT);
+    const conn = new SessionProxyConnection(clientT);
     await Promise.all([
-      server.addClient(daemonT),
+      server.addClient(sessionProxyT),
       conn.connect(),
     ]);
 
@@ -506,7 +506,7 @@ describe("resync.request — tc-7ml.4 acceptance criteria", { timeout: 5000 }, (
     pipeline.fireChange(model2, model1);
 
     const postResyncDeltas = allReceived.filter(
-      (m: ControlMessage) => m.seq > resyncSeq && m.type !== "daemon.capabilities",
+      (m: ControlMessage) => m.seq > resyncSeq && m.type !== "session-proxy.capabilities",
     );
     assert.ok(postResyncDeltas.length >= 1, "should have at least one delta after resync snapshot");
     assert.equal(
@@ -515,7 +515,7 @@ describe("resync.request — tc-7ml.4 acceptance criteria", { timeout: 5000 }, (
       `first post-resync delta should have seq = resync snapshot seq + 1 (${resyncSeq + 1})`,
     );
 
-    daemonT.close();
+    sessionProxyT.close();
   });
 
 });

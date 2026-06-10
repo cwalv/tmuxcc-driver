@@ -500,7 +500,7 @@ describe("reducer: switch-client narrowing (tc-j9c.7)", () => {
   // socket reattach in response to each other's reattach notifications — a
   // mutual storm that drove the tmux server CPU-bound (~350-400 ms/command).
   it("client-session-changed: foreign session → NO narrowing callback, model unchanged (tc-3y8.8)", () => {
-    // Another client (e.g. a sibling daemon's -CC client) attached to its own
+    // Another client (e.g. a sibling session-proxy's -CC client) attached to its own
     // session s2.  Our bound session s0 is alive.  This must NOT be read as
     // our own drift.
     let model = emptyModel();
@@ -557,7 +557,7 @@ describe("reducer: switch-client narrowing (tc-j9c.7)", () => {
     // The exact storm ingredient: another client (re-)attaches to a session —
     // tmux broadcasts %client-session-changed for it even when that client's
     // session did not actually change.  When the event names our bound
-    // session (e.g. the broker watcher re-attaching to s0), we may refresh
+    // session (e.g. the server-proxy watcher re-attaching to s0), we may refresh
     // the name but must not fire the narrowing callback.
     let model = emptyModel();
     model = addSession(model, makeSession(S0, [], null));

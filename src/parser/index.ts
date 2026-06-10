@@ -1,7 +1,7 @@
 /**
  * tmux -CC control-mode stream parser.
  *
- * The parser module is the SOUTH-facing layer of the daemon: it consumes the
+ * The parser module is the SOUTH-facing layer of the sessionProxy: it consumes the
  * raw byte stream from `tmux -CC` and emits typed tokens for higher-level
  * consumers.
  *

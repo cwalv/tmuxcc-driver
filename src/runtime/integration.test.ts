@@ -1,7 +1,7 @@
 /**
- * Daemon integration test — full runtime end-to-end (tc-93a).
+ * SessionProxy integration test — full runtime end-to-end (tc-93a).
  *
- * Covers the E4 acceptance: drive the full assembled daemon and assert
+ * Covers the E4 acceptance: drive the full assembled session-proxy and assert
  * wire output (snapshot/deltas/frames), input round-trip, resize, and
  * flow control.
  *
@@ -30,7 +30,7 @@
  * ## Real-tmux harness (guarded smoke test, skipped if tmux absent)
  *
  * Uses createTmuxHost (real tmux 3.4 via the PTY bridge) + the full
- * createDaemon assembly.  Verifies:
+ * createSessionProxy assembly.  Verifies:
  *
  *   R1. Snapshot on connect (real session: 1 window, 1 pane minimum).
  *   R2. Some pane output arrives on the client data plane (echo round-trip).
@@ -62,7 +62,7 @@ import { createRuntimePipeline } from "./pipeline.js";
 import { createControlServer } from "./serve.js";
 import { createInputPath } from "./input-path.js";
 import { createFlowController } from "./flow-control.js";
-import { createDaemon } from "./daemon.js";
+import { createSessionProxy } from "./session-proxy.js";
 
 // ---------------------------------------------------------------------------
 // Wire utilities
@@ -75,7 +75,7 @@ import {
 import type {
   Transport,
   SnapshotMessage,
-  DaemonMessage,
+  SessionProxyMessage,
   InputMessage,
   ResizeRequestMessage,
   PaneId,
@@ -327,41 +327,41 @@ function waitFor<T>(
 // createRecordingPair — like createInMemoryTransportPair but with persistent
 // message recording that survives handler replacement.
 //
-// The handshake helpers (runDaemonHandshake / runClientHandshake) call
+// The handshake helpers (runSessionProxyHandshake / runClientHandshake) call
 // transport.onControl(() => {}) when they settle, which normally wipes any
 // collector installed before the handshake.  This wrapper intercepts every
-// sendControl call on the daemon side and records it unconditionally, so the
+// sendControl call on the session-proxy side and records it unconditionally, so the
 // snapshot (and deltas) are captured regardless of handler replacement.
 // ---------------------------------------------------------------------------
 
 interface RecordingPair {
-  daemonTransport: Transport;
+  sessionProxyTransport: Transport;
   clientTransport: Transport;
-  controlMessages: DaemonMessage[];
+  controlMessages: SessionProxyMessage[];
   dataFrames: Array<{ paneId: PaneId; bytes: Uint8Array }>;
 }
 
 function createRecordingPair(): RecordingPair {
-  const { daemon: rawDaemon, client: rawClient } = createInMemoryTransportPair();
+  const { sessionProxy: rawSessionProxy, client: rawClient } = createInMemoryTransportPair();
 
-  const controlMessages: DaemonMessage[] = [];
+  const controlMessages: SessionProxyMessage[] = [];
   const dataFrames: Array<{ paneId: PaneId; bytes: Uint8Array }> = [];
 
-  // Tap the daemon endpoint's sendControl so every outbound message is recorded.
-  // The daemon sends control messages TO the client (snapshot, deltas) via
-  // daemon.sendControl, which delivers to clientControlHandler.  We wrap
-  // daemon.sendControl to also push to our recorder.
-  const daemonTransport: Transport = {
+  // Tap the session-proxy endpoint's sendControl so every outbound message is recorded.
+  // The session-proxy sends control messages TO the client (snapshot, deltas) via
+  // sessionProxy.sendControl, which delivers to clientControlHandler.  We wrap
+  // sessionProxy.sendControl to also push to our recorder.
+  const sessionProxyTransport: Transport = {
     sendControl(msg) {
-      // Record every message the daemon sends (snapshot, deltas, capabilities).
-      controlMessages.push(msg as DaemonMessage);
-      return rawDaemon.sendControl(msg);
+      // Record every message the session-proxy sends (snapshot, deltas, capabilities).
+      controlMessages.push(msg as SessionProxyMessage);
+      return rawSessionProxy.sendControl(msg);
     },
-    onControl(handler) { rawDaemon.onControl(handler); },
-    sendData(paneId, bytes) { return rawDaemon.sendData(paneId, bytes); },
-    onData(handler) { rawDaemon.onData(handler); },
-    onClose(handler) { rawDaemon.onClose(handler); },
-    close(err) { rawDaemon.close(err); },
+    onControl(handler) { rawSessionProxy.onControl(handler); },
+    sendData(paneId, bytes) { return rawSessionProxy.sendData(paneId, bytes); },
+    onData(handler) { rawSessionProxy.onData(handler); },
+    onClose(handler) { rawSessionProxy.onClose(handler); },
+    close(err) { rawSessionProxy.close(err); },
   };
 
   // Tap the client endpoint's sendData so data-plane frames are recorded.
@@ -369,8 +369,8 @@ function createRecordingPair(): RecordingPair {
     sendControl(msg) { return rawClient.sendControl(msg); },
     onControl(handler) { rawClient.onControl(handler); },
     sendData(paneId, bytes) {
-      // Data frames from daemon→client arrive here on the client side.
-      // BUT: the daemon calls daemonTransport.sendData, which goes to rawClient.
+      // Data frames from session-proxy→client arrive here on the client side.
+      // BUT: the session-proxy calls sessionProxyTransport.sendData, which goes to rawClient.
       // To tap that, we also wrap rawClient.sendData.
       dataFrames.push({ paneId, bytes });
       return rawClient.sendData(paneId, bytes);
@@ -380,21 +380,21 @@ function createRecordingPair(): RecordingPair {
     close(err) { rawClient.close(err); },
   };
 
-  // Also tap the daemon's sendData so data plane frames are captured.
-  // daemon.sendData → rawClient's dataHandler.  We intercept at daemon side.
-  const originalDaemonSendData = rawDaemon.sendData.bind(rawDaemon);
-  (daemonTransport as Transport & { sendData: typeof rawDaemon.sendData }).sendData = (paneId, bytes) => {
+  // Also tap the session-proxy's sendData so data plane frames are captured.
+  // sessionProxy.sendData → rawClient's dataHandler.  We intercept at session-proxy side.
+  const originalSessionProxySendData = rawSessionProxy.sendData.bind(rawSessionProxy);
+  (sessionProxyTransport as Transport & { sendData: typeof rawSessionProxy.sendData }).sendData = (paneId, bytes) => {
     dataFrames.push({ paneId, bytes });
-    return originalDaemonSendData(paneId, bytes);
+    return originalSessionProxySendData(paneId, bytes);
   };
 
-  return { daemonTransport, clientTransport, controlMessages, dataFrames };
+  return { sessionProxyTransport, clientTransport, controlMessages, dataFrames };
 }
 
 // ---------------------------------------------------------------------------
-// Helper: wire daemon + client for a scripted host
+// Helper: wire session-proxy + client for a scripted host
 //
-// Returns the connected daemon transport pair and collected client messages.
+// Returns the connected session-proxy transport pair and collected client messages.
 // The caller is responsible for teardown (calling cleanup()).
 // ---------------------------------------------------------------------------
 
@@ -404,9 +404,9 @@ interface WiredSession {
   pipeline: ReturnType<typeof createRuntimePipeline>;
   server: ReturnType<typeof createControlServer>;
   inputPath: ReturnType<typeof createInputPath>;
-  daemonTransport: Transport;
+  sessionProxyTransport: Transport;
   clientTransport: Transport;
-  controlMessages: DaemonMessage[];
+  controlMessages: SessionProxyMessage[];
   dataFrames: Array<{ paneId: PaneId; bytes: Uint8Array }>;
   cleanup(): Promise<void>;
 }
@@ -436,31 +436,31 @@ async function wireScriptedSession(
 
   // 6. Create a recording transport pair.
   //
-  // createRecordingPair taps daemon.sendControl so all outbound daemon messages
+  // createRecordingPair taps sessionProxy.sendControl so all outbound session-proxy messages
   // (snapshot, deltas) are captured regardless of how onControl is overwritten
   // by the handshake helpers.  See createRecordingPair for details.
-  const { daemonTransport, clientTransport, controlMessages, dataFrames } = createRecordingPair();
+  const { sessionProxyTransport, clientTransport, controlMessages, dataFrames } = createRecordingPair();
 
-  // Attach demux to the daemon-side transport (data plane fan-out).
-  demux.attachTransport(daemonTransport);
+  // Attach demux to the session-proxy-side transport (data plane fan-out).
+  demux.attachTransport(sessionProxyTransport);
 
   // Run server-side handshake + snapshot + delta subscription concurrently with
   // the client-side handshake.
-  const serverAddPromise = server.addClient(daemonTransport);
+  const serverAddPromise = server.addClient(sessionProxyTransport);
   const clientHandshakePromise = runClientHandshake(clientTransport, CLIENT_CAPS);
   await Promise.all([serverAddPromise, clientHandshakePromise]);
 
-  // Wire input path on the daemon transport AFTER addClient (which clears the
-  // daemon-side onControl handler when the handshake settles inside it).
-  // Client → daemon control messages (input, resize) route here.
-  daemonTransport.onControl((msg) => {
-    inputPath.handleClientMessage(msg as import("../wire/daemon-control.js").ClientMessage);
+  // Wire input path on the session-proxy transport AFTER addClient (which clears the
+  // session-proxy-side onControl handler when the handshake settles inside it).
+  // Client → session-proxy control messages (input, resize) route here.
+  sessionProxyTransport.onControl((msg) => {
+    inputPath.handleClientMessage(msg as import("../wire/session-proxy-control.js").ClientMessage);
   });
 
   const cleanup = async () => {
     pipeline.stop();
     clientTransport.close();
-    daemonTransport.close();
+    sessionProxyTransport.close();
     host.kill();
     await host.waitForExit();
   };
@@ -471,7 +471,7 @@ async function wireScriptedSession(
     pipeline,
     server,
     inputPath,
-    daemonTransport,
+    sessionProxyTransport,
     clientTransport,
     controlMessages,
     dataFrames,
@@ -483,7 +483,7 @@ async function wireScriptedSession(
 // Suite 1 — Fake-tmux harness (deterministic)
 // ===========================================================================
 
-describe("tc-93a: Daemon integration — fake-tmux harness", () => {
+describe("tc-93a: SessionProxy integration — fake-tmux harness", () => {
   // -------------------------------------------------------------------------
   // T1. Snapshot on connect
   // -------------------------------------------------------------------------
@@ -499,7 +499,7 @@ describe("tc-93a: Daemon integration — fake-tmux harness", () => {
 
     try {
       // The snapshot is the first control-stream message (seq=1).
-      // deltaMessages also includes daemon.capabilities (seq=1 from handshake);
+      // deltaMessages also includes session-proxy.capabilities (seq=1 from handshake);
       // filter by type to get just the snapshot.
       const snapshot = deltaMessages.find(
         (m) => m.type === "snapshot",
@@ -557,9 +557,9 @@ describe("tc-93a: Daemon integration — fake-tmux harness", () => {
       }
 
       // The control-stream messages (snapshot + deltas — excluding the
-      // daemon.capabilities handshake message, which has its own seq=1)
+      // session-proxy.capabilities handshake message, which has its own seq=1)
       // must be strictly monotonically increasing.
-      const controlStreamMsgs = deltaMessages.filter((m) => m.type !== "daemon.capabilities");
+      const controlStreamMsgs = deltaMessages.filter((m) => m.type !== "session-proxy.capabilities");
       const seqs = controlStreamMsgs.map((m) => m.seq);
       for (let i = 1; i < seqs.length; i++) {
         assert.ok(
@@ -716,7 +716,7 @@ describe("tc-93a: Daemon integration — fake-tmux harness", () => {
     await pipeline.start();
 
     // Attach a client.
-    const { daemon: dt, client: ct } = createInMemoryTransportPair();
+    const { sessionProxy: dt, client: ct } = createInMemoryTransportPair();
     const receivedData: Array<{ paneId: PaneId; bytes: Uint8Array }> = [];
     ct.onData((pid, bytes) => receivedData.push({ paneId: pid, bytes }));
 
@@ -813,7 +813,7 @@ describe("tc-93a: Daemon integration — fake-tmux harness", () => {
 interface FakePushSession {
   host: TmuxHost;
   inject: (bytes: Uint8Array) => void;
-  deltaMessages: DaemonMessage[];
+  deltaMessages: SessionProxyMessage[];
   dataFrames: Array<{ paneId: PaneId; bytes: Uint8Array }>;
   cleanup(): Promise<void>;
 }
@@ -870,7 +870,7 @@ async function buildFakePushSession(
   // Use a recording pair so snapshot + deltas are captured regardless of
   // handler replacement by the handshake helpers.
   const {
-    daemonTransport: dt,
+    sessionProxyTransport: dt,
     clientTransport: ct,
     controlMessages: deltaMessages,
     dataFrames,
@@ -896,7 +896,7 @@ async function buildFakePushSession(
 //
 // These tests exercise the assembly-level wiring fixes from tc-7ml.1:
 //   1. pipeline.onNotification routes %pause/%continue to the FlowController.
-//   2. daemon.addClient wraps the transport's sendData so fc.noteDrained is
+//   2. sessionProxy.addClient wraps the transport's sendData so fc.noteDrained is
 //      called automatically for each byte successfully sent to a client.
 //
 // Uses the in-memory FakePushSession infrastructure — no real tmux required.
@@ -907,7 +907,7 @@ describe("tc-7ml.1: flow-control resume wiring — notification routing + noteDr
   // W1. %continue notification → FC resumes the paused pane
   //
   // Sets up the FC + pipeline via buildFakePushSession, manually wires
-  // pipeline.onNotification → FC (replicating createDaemon's step 8), floods
+  // pipeline.onNotification → FC (replicating createSessionProxy's step 8), floods
   // bytes to trigger pause, injects a raw %continue notification, and verifies
   // the FC (and demux gate) transitions to resumed.
   //
@@ -947,7 +947,7 @@ describe("tc-7ml.1: flow-control resume wiring — notification routing + noteDr
     const demuxW1 = createOutputDemux();
     const fcW1 = createFlowController(host2, demuxW1, { highWaterBytes: HIGH, lowWaterBytes: LOW });
 
-    // Accounting store: same as createDaemon's accountingStore.
+    // Accounting store: same as createSessionProxy's accountingStore.
     const accountingW1: typeof demuxW1.store = {
       append(pid: PaneId, bytes: Uint8Array): void {
         demuxW1.store.append(pid, bytes);
@@ -961,7 +961,7 @@ describe("tc-7ml.1: flow-control resume wiring — notification routing + noteDr
 
     const pipelineW1 = createRuntimePipeline(host2, { buffers: accountingW1 });
 
-    // Wire pipeline.onNotification → FC (this is the fix from createDaemon step 8).
+    // Wire pipeline.onNotification → FC (this is the fix from createSessionProxy step 8).
     pipelineW1.onNotification((event) => {
       if (event.kind === "pause") {
         fcW1.onPauseNotification(paneId("p" + event.paneId));
@@ -1091,15 +1091,15 @@ describe("tc-7ml.1: flow-control resume wiring — notification routing + noteDr
   });
 
   // -------------------------------------------------------------------------
-  // W3. drainingTransport auto-noteDrained — verify that daemon.addClient
+  // W3. drainingTransport auto-noteDrained — verify that sessionProxy.addClient
   //     wraps sendData to call fc.noteDrained automatically
   //
   // This is a unit-level check of the drainingTransport pattern introduced
-  // in createDaemon.addClient.  We replicate the pattern directly and verify:
+  // in createSessionProxy.addClient.  We replicate the pattern directly and verify:
   //   - when sendData fires, fc.noteDrained is called for the right pane + count
   //   - after a pause+drain cycle driven purely by sendData, the FC is drained
   //
-  // This tests the WIRING PATTERN, not createDaemon directly (since createDaemon
+  // This tests the WIRING PATTERN, not createSessionProxy directly (since createSessionProxy
   // creates its own TmuxHost internally and can't easily accept a fake host).
   // -------------------------------------------------------------------------
 
@@ -1123,7 +1123,7 @@ describe("tc-7ml.1: flow-control resume wiring — notification routing + noteDr
     const demuxW3 = createOutputDemux();
     const fcW3 = createFlowController(host4, demuxW3, { highWaterBytes: HIGH, lowWaterBytes: LOW });
 
-    // Create the accounting store (same as createDaemon's accountingStore).
+    // Create the accounting store (same as createSessionProxy's accountingStore).
     const accountingW3: typeof demuxW3.store = {
       append(pid: PaneId, bytes: Uint8Array): void {
         demuxW3.store.append(pid, bytes);
@@ -1148,12 +1148,12 @@ describe("tc-7ml.1: flow-control resume wiring — notification routing + noteDr
       `W3: bufferedBytes (${pausedCounter}) must exceed HIGH (${HIGH}) while paused`,
     );
 
-    // Now attach a client via the drainingTransport pattern (createDaemon's fix).
-    const { daemon: rawDaemon } = createInMemoryTransportPair();
+    // Now attach a client via the drainingTransport pattern (createSessionProxy's fix).
+    const { sessionProxy: rawSessionProxy } = createInMemoryTransportPair();
     const drainingTransport: Transport = {
-      ...rawDaemon,
+      ...rawSessionProxy,
       sendData(pid: PaneId, bytes: Uint8Array): void | Promise<void> {
-        const result = rawDaemon.sendData(pid, bytes);
+        const result = rawSessionProxy.sendData(pid, bytes);
         if (bytes.length > 0) {
           fcW3.noteDrained(pid, bytes.length);
         }
@@ -1202,30 +1202,30 @@ describe("tc-7ml.1: flow-control resume wiring — notification routing + noteDr
 });
 
 // ===========================================================================
-// Suite 2 — createDaemon assembly smoke test (fake-tmux)
+// Suite 2 — createSessionProxy assembly smoke test (fake-tmux)
 // ===========================================================================
 
-describe("tc-93a: createDaemon assembly — fake-tmux smoke", () => {
-  it("createDaemon() wires all components; start() + addClient() succeeds", async () => {
-    // Use a ScriptedHost indirectly by creating the daemon with a custom host option
+describe("tc-93a: createSessionProxy assembly — fake-tmux smoke", () => {
+  it("createSessionProxy() wires all components; start() + addClient() succeeds", async () => {
+    // Use a ScriptedHost indirectly by creating the session-proxy with a custom host option
     // that points to fake-tmux (no real tmux binary needed).
-    // We build the daemon manually (wiring ScriptedHost as the host) to test assembly.
+    // We build the session-proxy manually (wiring ScriptedHost as the host) to test assembly.
     const scriptedHost = createScriptedHost();
 
-    // Build the daemon with components wired manually to use our scripted host.
-    // We test createDaemon() itself by providing a real env and asserting the
-    // assembled daemon's addClient() route works end-to-end.
+    // Build the session-proxy with components wired manually to use our scripted host.
+    // We test createSessionProxy() itself by providing a real env and asserting the
+    // assembled session-proxy's addClient() route works end-to-end.
 
-    // Since createDaemon() always creates its own TmuxHost via createTmuxHost(),
-    // we test the assembly here by calling createDaemon() and verifying the
-    // shape of the returned Daemon object.
+    // Since createSessionProxy() always creates its own TmuxHost via createTmuxHost(),
+    // we test the assembly here by calling createSessionProxy() and verifying the
+    // shape of the returned SessionProxy object.
     // tc-blk — track the assembly-test socket too, even though we never start
-    // the daemon (kill is called below). The trackSocket call is cheap and
-    // covers the case where createDaemon evolves to do eager work later.
+    // the sessionProxy (kill is called below). The trackSocket call is cheap and
+    // covers the case where createSessionProxy evolves to do eager work later.
     // tc-bpn — shape: tmuxcc-test-<pid>-<suffix> required by test-tmux-cleanup.
     const asmSock = `tmuxcc-test-${process.pid}-daemon-asm-${Date.now()}`;
     trackSocket(asmSock);
-    const daemon = createDaemon({
+    const sessionProxy = createSessionProxy({
       host: {
         // Use a nonexistent socket so we don't conflict; we kill immediately.
         socketName: asmSock,
@@ -1233,20 +1233,20 @@ describe("tc-93a: createDaemon assembly — fake-tmux smoke", () => {
       },
     });
 
-    // Verify the Daemon interface is complete.
-    assert.ok(typeof daemon.start === "function", "daemon.start must be a function");
-    assert.ok(typeof daemon.stop === "function", "daemon.stop must be a function");
-    assert.ok(typeof daemon.kill === "function", "daemon.kill must be a function");
-    assert.ok(typeof daemon.addClient === "function", "daemon.addClient must be a function");
-    assert.ok(daemon.host !== undefined, "daemon.host must be defined");
-    assert.ok(daemon.demux !== undefined, "daemon.demux must be defined");
-    assert.ok(daemon.pipeline !== undefined, "daemon.pipeline must be defined");
-    assert.ok(daemon.server !== undefined, "daemon.server must be defined");
-    assert.ok(daemon.inputPath !== undefined, "daemon.inputPath must be defined");
-    assert.ok(daemon.flowController !== undefined, "daemon.flowController must be defined");
+    // Verify the SessionProxy interface is complete.
+    assert.ok(typeof sessionProxy.start === "function", "sessionProxy.start must be a function");
+    assert.ok(typeof sessionProxy.stop === "function", "sessionProxy.stop must be a function");
+    assert.ok(typeof sessionProxy.kill === "function", "sessionProxy.kill must be a function");
+    assert.ok(typeof sessionProxy.addClient === "function", "sessionProxy.addClient must be a function");
+    assert.ok(sessionProxy.host !== undefined, "sessionProxy.host must be defined");
+    assert.ok(sessionProxy.demux !== undefined, "sessionProxy.demux must be defined");
+    assert.ok(sessionProxy.pipeline !== undefined, "sessionProxy.pipeline must be defined");
+    assert.ok(sessionProxy.server !== undefined, "sessionProxy.server must be defined");
+    assert.ok(sessionProxy.inputPath !== undefined, "sessionProxy.inputPath must be defined");
+    assert.ok(sessionProxy.flowController !== undefined, "sessionProxy.flowController must be defined");
 
     // Kill without starting (no-op).
-    daemon.kill();
+    sessionProxy.kill();
 
     // Also verify the ScriptedHost scripted path works end-to-end for snapshot.
     const { controlMessages, cleanup } = await wireScriptedSession();
@@ -1262,7 +1262,7 @@ describe("tc-93a: createDaemon assembly — fake-tmux smoke", () => {
     const sess = await wireScriptedSession();
     try {
       assert.equal(sess.server.clientCount(), 1, "should have 1 client after addClient");
-      sess.server.removeClient(sess.daemonTransport);
+      sess.server.removeClient(sess.sessionProxyTransport);
       assert.equal(sess.server.clientCount(), 0, "should have 0 clients after removeClient");
     } finally {
       await sess.cleanup();
@@ -1288,7 +1288,7 @@ const REAL_RUN_SUFFIX = `${Date.now()}`;
 function realSockName(label: string): string {
   // tc-bpn — shape: tmuxcc-test-<pid>-<suffix> required by test-tmux-cleanup.
   const sock = `tmuxcc-test-${process.pid}-int-${REAL_RUN_SUFFIX}-${label}`;
-  // tc-blk — track BEFORE the daemon is created so a thrown test still gets
+  // tc-blk — track BEFORE the session-proxy is created so a thrown test still gets
   // its server reaped via the process-exit / top-level after() net.
   trackSocket(sock);
   return sock;
@@ -1329,16 +1329,16 @@ describe(
       const sock = realSockName("snap");
       after(() => killRealServer(sock));
 
-      const daemon = createDaemon({
+      const sessionProxy = createSessionProxy({
         host: { socketName: sock, sessionName: "r1session", cols: 80, rows: 24 },
       });
-      daemon.host.onError(() => {}); // suppress unhandled error events
+      sessionProxy.host.onError(() => {}); // suppress unhandled error events
 
-      await daemon.start();
+      await sessionProxy.start();
 
-      const { daemonTransport: dt, clientTransport: ct, controlMessages } = createRecordingPair();
-      daemon.demux.attachTransport(dt);
-      const addPromise = daemon.server.addClient(dt);
+      const { sessionProxyTransport: dt, clientTransport: ct, controlMessages } = createRecordingPair();
+      sessionProxy.demux.attachTransport(dt);
+      const addPromise = sessionProxy.server.addClient(dt);
       const clientPromise = runClientHandshake(ct, CLIENT_CAPS);
       await Promise.all([addPromise, clientPromise]);
 
@@ -1351,8 +1351,8 @@ describe(
       assert.ok(snapshot!.windows.length >= 1, "real session must have ≥1 window in snapshot");
       assert.ok(snapshot!.panes.length >= 1, "real session must have ≥1 pane in snapshot");
 
-      daemon.kill();
-      await new Promise<void>((r) => { daemon.host.onExit(() => r()); });
+      sessionProxy.kill();
+      await new Promise<void>((r) => { sessionProxy.host.onExit(() => r()); });
     });
 
     // -------------------------------------------------------------------------
@@ -1363,16 +1363,16 @@ describe(
       const sock = realSockName("output");
       after(() => killRealServer(sock));
 
-      const daemon = createDaemon({
+      const sessionProxy = createSessionProxy({
         host: { socketName: sock, sessionName: "r2session", cols: 80, rows: 24 },
       });
-      daemon.host.onError(() => {});
+      sessionProxy.host.onError(() => {});
 
-      await daemon.start();
+      await sessionProxy.start();
 
-      const { daemonTransport: dt, clientTransport: ct, controlMessages, dataFrames } = createRecordingPair();
-      daemon.demux.attachTransport(dt);
-      const addPromise = daemon.server.addClient(dt);
+      const { sessionProxyTransport: dt, clientTransport: ct, controlMessages, dataFrames } = createRecordingPair();
+      sessionProxy.demux.attachTransport(dt);
+      const addPromise = sessionProxy.server.addClient(dt);
       const clientPromise = runClientHandshake(ct, CLIENT_CAPS);
       await Promise.all([addPromise, clientPromise]);
 
@@ -1387,7 +1387,7 @@ describe(
       const tmuxPaneNum = parseInt(wirePaneId.slice(1), 10);
 
       // Send a visible command that produces output.
-      daemon.host.write(`send-keys -H -t %${tmuxPaneNum} 68 69 0A\n`); // "hi\n" in hex
+      sessionProxy.host.write(`send-keys -H -t %${tmuxPaneNum} 68 69 0A\n`); // "hi\n" in hex
 
       // Wait for data frames to arrive (with a generous timeout for real tmux latency).
       await waitFor(
@@ -1398,32 +1398,32 @@ describe(
 
       assert.ok(dataFrames.length > 0, "data plane must receive bytes from real tmux pane output");
 
-      daemon.kill();
-      await new Promise<void>((r) => { daemon.host.onExit(() => r()); });
+      sessionProxy.kill();
+      await new Promise<void>((r) => { sessionProxy.host.onExit(() => r()); });
     });
 
     // -------------------------------------------------------------------------
     // R3. Clean teardown — no leaked tmux servers
     // -------------------------------------------------------------------------
 
-    it("R3: clean teardown — host bridge exits cleanly via daemon.stop(); server killed explicitly", async () => {
+    it("R3: clean teardown — host bridge exits cleanly via sessionProxy.stop(); server killed explicitly", async () => {
       const sock = realSockName("teardown");
       after(() => killRealServer(sock)); // belt-and-suspenders
 
-      const daemon = createDaemon({
+      const sessionProxy = createSessionProxy({
         host: { socketName: sock, sessionName: "r3session", cols: 80, rows: 24 },
       });
-      daemon.host.onError(() => {});
+      sessionProxy.host.onError(() => {});
 
-      await daemon.start();
-      assert.equal(daemon.host.exited, false, "host must be running after start()");
+      await sessionProxy.start();
+      assert.equal(sessionProxy.host.exited, false, "host must be running after start()");
 
-      // daemon.stop() closes stdin → bridge exits → tmux server MAY still linger
+      // sessionProxy.stop() closes stdin → bridge exits → tmux server MAY still linger
       // briefly.  We stop the bridge process and then explicitly kill the server.
-      await daemon.stop();
+      await sessionProxy.stop();
 
       // The bridge process (host) should have exited after stop().
-      assert.equal(daemon.host.exited, true, "host bridge process must have exited after stop()");
+      assert.equal(sessionProxy.host.exited, true, "host bridge process must have exited after stop()");
 
       // Explicitly kill the tmux server so it doesn't linger.
       killRealServer(sock);

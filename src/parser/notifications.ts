@@ -276,7 +276,7 @@ export interface UnknownNotification {
 // --- Internal (synthetic, never from tmux wire) ----------------------------
 
 /**
- * Synthetic internal event: the daemon applied a set-synchronize-panes command
+ * Synthetic internal event: the session-proxy applied a set-synchronize-panes command
  * (optimistic) and is now updating the model.
  *
  * This event is NEVER parsed from tmux control-mode output — it is injected by
@@ -296,7 +296,7 @@ export interface InternalWindowSyncSetNotification {
 // ── tc-7xv.15 ─────────────────────────────────────────────────────────────────
 
 /**
- * Synthetic internal event: the daemon applied a set-monitor-activity command
+ * Synthetic internal event: the session-proxy applied a set-monitor-activity command
  * (optimistic) and is now updating the model.
  *
  * This event is NEVER parsed from tmux control-mode output — it is injected by
@@ -314,7 +314,7 @@ export interface InternalWindowMonitorActivitySetNotification {
 }
 
 /**
- * Synthetic internal event: the daemon applied a set-monitor-silence command
+ * Synthetic internal event: the session-proxy applied a set-monitor-silence command
  * (optimistic) and is now updating the model.
  *
  * This event is NEVER parsed from tmux control-mode output — it is injected by

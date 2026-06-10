@@ -3,7 +3,7 @@
  *
  * These tests verify:
  *   1. Representative control messages can be constructed with correct shapes.
- *   2. Type guards (isControlMessage, isDaemonMessage, isClientMessage) narrow
+ *   2. Type guards (isControlMessage, isSessionProxyMessage, isClientMessage) narrow
  *      correctly at runtime.
  *   3. The discriminated union covers all expected message types.
  *
@@ -20,7 +20,7 @@ import {
   windowId,
   sessionId,
   isControlMessage,
-  isDaemonMessage,
+  isSessionProxyMessage,
   isClientMessage,
 } from "./index.js";
 
@@ -30,7 +30,7 @@ import type {
   PaneResizedMessage,
   LayoutUpdatedMessage,
   FocusChangedMessage,
-  DaemonCapabilitiesMessage,
+  SessionProxyCapabilitiesMessage,
   InputMessage,
   ResizeRequestMessage,
   ClientCapabilitiesMessage,
@@ -42,7 +42,7 @@ import type {
   WindowAddedMessage,
   WindowClosedMessage,
   WindowRenamedMessage,
-  DaemonSessionRenamedMessage,
+  SessionProxySessionRenamedMessage,
   // Backward-compat aliases (still exported for caller migration)
   CommandRequestMessage,
   CommandResponseMessage,
@@ -103,7 +103,7 @@ describe("id constructors", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Daemon → Client message construction
+// SessionProxy → Client message construction
 // ---------------------------------------------------------------------------
 
 describe("PaneOpenedMessage", () => {
@@ -194,10 +194,10 @@ describe("FocusChangedMessage", () => {
   });
 });
 
-describe("DaemonCapabilitiesMessage", () => {
+describe("SessionProxyCapabilitiesMessage", () => {
   it("constructs with protocol version and features", () => {
-    const msg: DaemonCapabilitiesMessage = {
-      type: "daemon.capabilities",
+    const msg: SessionProxyCapabilitiesMessage = {
+      type: "session-proxy.capabilities",
       seq: 7,
       capabilities: {
         protocolVersion: WIRE_PROTOCOL_VERSION,
@@ -210,7 +210,7 @@ describe("DaemonCapabilitiesMessage", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Client → Daemon message construction
+// Client → SessionProxy message construction
 // ---------------------------------------------------------------------------
 
 describe("InputMessage", () => {
@@ -269,7 +269,7 @@ describe("ClientCapabilitiesMessage", () => {
 // ---------------------------------------------------------------------------
 
 describe("isControlMessage", () => {
-  it("accepts a valid daemon message", () => {
+  it("accepts a valid session-proxy message", () => {
     const msg: ControlMessage = {
       type: "pane.opened",
       seq: 1,
@@ -299,31 +299,31 @@ describe("isControlMessage", () => {
   });
 });
 
-describe("isDaemonMessage / isClientMessage", () => {
-  it("identifies daemon→client messages", () => {
-    const daemonTypes = [
+describe("isSessionProxyMessage / isClientMessage", () => {
+  it("identifies session-proxy→client messages", () => {
+    const sessionProxyTypes = [
       "pane.opened",
       "pane.closed",
       "pane.resized",
       "layout.updated",
       "focus.changed",
-      "daemon.capabilities",
+      "session-proxy.capabilities",
     ] as const;
 
-    for (const t of daemonTypes) {
+    for (const t of sessionProxyTypes) {
       const msg = { type: t, seq: 1 } as ControlMessage;
-      assert.strictEqual(isDaemonMessage(msg), true, `${t} should be daemon message`);
+      assert.strictEqual(isSessionProxyMessage(msg), true, `${t} should be session-proxy message`);
       assert.strictEqual(isClientMessage(msg), false, `${t} should not be client message`);
     }
   });
 
-  it("identifies client→daemon messages", () => {
+  it("identifies client→session-proxy messages", () => {
     const clientTypes = ["input", "resize.request", "client.capabilities", "resync.request"] as const;
 
     for (const t of clientTypes) {
       const msg = { type: t, seq: 1 } as ControlMessage;
       assert.strictEqual(isClientMessage(msg), true, `${t} should be client message`);
-      assert.strictEqual(isDaemonMessage(msg), false, `${t} should not be daemon message`);
+      assert.strictEqual(isSessionProxyMessage(msg), false, `${t} should not be session-proxy message`);
     }
   });
 });
@@ -376,9 +376,9 @@ describe("SnapshotMessage", () => {
     assert.strictEqual(msg.focus.paneId, null);
   });
 
-  it("is recognized as a daemon message by isDaemonMessage", () => {
+  it("is recognized as a session-proxy message by isSessionProxyMessage", () => {
     const msg = { type: "snapshot", seq: 1 } as ControlMessage;
-    assert.strictEqual(isDaemonMessage(msg), true);
+    assert.strictEqual(isSessionProxyMessage(msg), true);
     assert.strictEqual(isClientMessage(msg), false);
   });
 });
@@ -401,9 +401,9 @@ describe("WindowAddedMessage", () => {
     assert.strictEqual(msg.active, false);
   });
 
-  it("is a daemon message", () => {
+  it("is a session-proxy message", () => {
     const msg = { type: "window.added", seq: 1 } as ControlMessage;
-    assert.strictEqual(isDaemonMessage(msg), true);
+    assert.strictEqual(isSessionProxyMessage(msg), true);
   });
 });
 
@@ -433,12 +433,12 @@ describe("WindowRenamedMessage", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Session delta messages (v3: only session.renamed on daemon wire)
+// Session delta messages (v3: only session.renamed on session-proxy wire)
 // ---------------------------------------------------------------------------
 
-describe("DaemonSessionRenamedMessage", () => {
+describe("SessionProxySessionRenamedMessage", () => {
   it("constructs correctly (no sessionId field in v3)", () => {
-    const msg: DaemonSessionRenamedMessage = {
+    const msg: SessionProxySessionRenamedMessage = {
       type: "session.renamed",
       seq: 23,
       newName: "prod",
@@ -449,9 +449,9 @@ describe("DaemonSessionRenamedMessage", () => {
     assert.ok(!("sessionId" in msg));
   });
 
-  it("is a daemon message", () => {
+  it("is a session-proxy message", () => {
     const msg = { type: "session.renamed", seq: 1 } as ControlMessage;
-    assert.strictEqual(isDaemonMessage(msg), true);
+    assert.strictEqual(isSessionProxyMessage(msg), true);
   });
 });
 
@@ -491,9 +491,9 @@ describe("PaneModeChangedMessage", () => {
     assert.strictEqual(msg.mode, "some-future-mode");
   });
 
-  it("is a daemon message", () => {
+  it("is a session-proxy message", () => {
     const msg = { type: "pane.mode-changed", seq: 1 } as ControlMessage;
-    assert.strictEqual(isDaemonMessage(msg), true);
+    assert.strictEqual(isSessionProxyMessage(msg), true);
   });
 });
 
@@ -571,7 +571,7 @@ describe("CommandRequestMessage", () => {
   it("is recognized as a client message", () => {
     const msg = { type: "command.request", seq: 1 } as ControlMessage;
     assert.strictEqual(isClientMessage(msg), true);
-    assert.strictEqual(isDaemonMessage(msg), false);
+    assert.strictEqual(isSessionProxyMessage(msg), false);
   });
 });
 
@@ -599,9 +599,9 @@ describe("CommandResponseMessage — success", () => {
     assert.strictEqual(msg.result.ok, true);
   });
 
-  it("is recognized as a daemon message", () => {
+  it("is recognized as a session-proxy message", () => {
     const msg = { type: "command.response", seq: 1 } as ControlMessage;
-    assert.strictEqual(isDaemonMessage(msg), true);
+    assert.strictEqual(isSessionProxyMessage(msg), true);
   });
 });
 
@@ -660,20 +660,20 @@ describe("ErrorMessage", () => {
     assert.strictEqual(msg.code, "future.error-kind");
   });
 
-  it("is recognized as a daemon message", () => {
+  it("is recognized as a session-proxy message", () => {
     const msg = { type: "error", seq: 1 } as ControlMessage;
-    assert.strictEqual(isDaemonMessage(msg), true);
+    assert.strictEqual(isSessionProxyMessage(msg), true);
     assert.strictEqual(isClientMessage(msg), false);
   });
 });
 
 // ---------------------------------------------------------------------------
-// Guard coverage — all new daemon types
+// Guard coverage — all new session-proxy types
 // ---------------------------------------------------------------------------
 
-describe("isDaemonMessage covers all new daemon type strings", () => {
-  // v3: session.added / session.closed / session.changed removed from daemon wire
-  const newDaemonTypes = [
+describe("isSessionProxyMessage covers all new session-proxy type strings", () => {
+  // v3: session.added / session.closed / session.changed removed from session-proxy wire
+  const newSessionProxyTypes = [
     "snapshot",
     "pane.mode-changed",
     "window.added",
@@ -684,10 +684,10 @@ describe("isDaemonMessage covers all new daemon type strings", () => {
     "error",
   ] as const;
 
-  for (const t of newDaemonTypes) {
-    it(`isDaemonMessage returns true for "${t}"`, () => {
+  for (const t of newSessionProxyTypes) {
+    it(`isSessionProxyMessage returns true for "${t}"`, () => {
       const msg = { type: t, seq: 1 } as ControlMessage;
-      assert.strictEqual(isDaemonMessage(msg), true, `${t} should be daemon message`);
+      assert.strictEqual(isSessionProxyMessage(msg), true, `${t} should be session-proxy message`);
       assert.strictEqual(isClientMessage(msg), false, `${t} should not be client message`);
     });
   }
@@ -697,7 +697,7 @@ describe("isClientMessage covers command.request", () => {
   it("returns true for command.request", () => {
     const msg = { type: "command.request", seq: 1 } as ControlMessage;
     assert.strictEqual(isClientMessage(msg), true);
-    assert.strictEqual(isDaemonMessage(msg), false);
+    assert.strictEqual(isSessionProxyMessage(msg), false);
   });
 });
 

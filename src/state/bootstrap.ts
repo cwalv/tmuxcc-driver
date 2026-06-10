@@ -5,7 +5,7 @@
  *
  * # Problem
  *
- * When the daemon attaches to a `tmux -CC` session that ALREADY has
+ * When the session-proxy attaches to a `tmux -CC` session that ALREADY has
  * windows/panes, tmux does NOT replay their creation as notifications — they
  * already exist. A pure notification reducer (tc-8hy) starts from `emptyModel()`
  * and never learns about pre-existing structure. This module solves that by:
@@ -80,7 +80,7 @@
  *
  * # Id mapping convention
  *
- * Same as the reducer (tc-8hy): tmux numeric ids map to daemon branded ids via:
+ * Same as the reducer (tc-8hy): tmux numeric ids map to session-proxy branded ids via:
  *   paneId("p" + N)    for tmux `%N`
  *   windowId("w" + N)  for tmux `@N`
  *   sessionId("s" + N) for tmux `$N`
@@ -117,7 +117,7 @@
  *
  * # E4 integration contract
  *
- * E4 (daemon runtime, tc-aum) drives the coordinator:
+ * E4 (session-proxy runtime, tc-aum) drives the coordinator:
  *
  * ```ts
  * // On attach:
@@ -211,7 +211,7 @@ export const BOOTSTRAP_PANES_FORMAT =
 /**
  * Return the two tmux commands to issue on attach.
  *
- * The daemon sends these in order; the correlator pairs the replies in FIFO
+ * The session-proxy sends these in order; the correlator pairs the replies in FIFO
  * order. E4 must call `expectCommand()` TWICE on the correlator before (or
  * immediately after) sending, so that the reply blocks are matched in order.
  *
@@ -434,7 +434,7 @@ export function buildInitialModel(
 
   // ---- Step 1: collect sessions ----------------------------------------
   // Keyed by tmuxSessionId. We also track which session is the "active"
-  // session (has an active window). In practice, the daemon attaches to one
+  // session (has an active window). In practice, the session-proxy attaches to one
   // session; but we enumerate all to support multi-session setups.
   const sessionNames = new Map<number, string>();
   const sessionActiveWindowId = new Map<number, number>(); // tmux ids
@@ -546,7 +546,7 @@ export function buildInitialModel(
 
   // ---- Step 5: compute global focus triple -----------------------------
   // Find the session with the most recently-active indicator. In a typical
-  // single-session daemon attach, there's one session. For multi-session,
+  // single-session session-proxy attach, there's one session. For multi-session,
   // we pick the session whose active window flag was set (arbitrary tie-break:
   // first such session in iteration order).
   //
@@ -589,7 +589,7 @@ export interface BootstrapCoordinatorOptions {
   readonly buffers: ReducerContext["buffers"];
 
   /**
-   * The tmux session name this daemon is attached to (the `-t <name>` argument
+   * The tmux session name this session-proxy is attached to (the `-t <name>` argument
    * from TmuxHostOptions). Used to resolve `boundSessionId` from the initial
    * model after bootstrap: the coordinator finds the session whose name matches
    * `sessionName` and wires the resulting `SessionId` into the ReducerContext

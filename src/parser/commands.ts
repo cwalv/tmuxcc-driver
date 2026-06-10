@@ -5,7 +5,7 @@
  * suitable for writing verbatim to a tmux -CC control-mode stdin.  No I/O
  * here; callers write the returned strings.
  *
- * When the daemon sends one of these commands tmux responds with a
+ * When the session-proxy sends one of these commands tmux responds with a
  * %begin … %end block (or %error).  The correlator (tc-82a) matches those
  * blocks to the original requests; this module is decoupled from that
  * correlation — each function returns a single complete command line.
@@ -124,7 +124,7 @@ export function refreshClientSize(cols: number, rows: number): string {
  * Set the control-mode client's size for a specific window (tmux >= 3.4).
  *
  * Emits `refresh-client -C @<windowId>:<cols>x<rows>`.  Useful when the
- * daemon manages multiple windows at different sizes (e.g. iTerm2 per-tab
+ * session-proxy manages multiple windows at different sizes (e.g. iTerm2 per-tab
  * sizing).
  *
  * @param windowId  Numeric window ID (the N in `@N`).
@@ -175,7 +175,7 @@ export function refreshClientFlow(
 /**
  * Default format string for list-windows.
  *
- * Tab-separated fields that capture the data the daemon needs for window
+ * Tab-separated fields that capture the data the session-proxy needs for window
  * state tracking.  Modeled on iTerm2's listWindowsDetailedFormat
  * (TmuxController.m): session_name, window_id, window_name, dimensions,
  * layout, flags, active flag, visible layout.

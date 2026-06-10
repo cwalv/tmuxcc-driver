@@ -1,16 +1,16 @@
 /**
- * Handshake sequence — capability negotiation shared by daemon and broker wires.
+ * Handshake sequence — capability negotiation shared by session-proxy and server-proxy wires.
  *
  * # Sequence (server-initiates pattern, used by both wires)
  *
- * The server (daemon or broker) sends capabilities first; the client waits
+ * The server (session-proxy or serverProxy) sends capabilities first; the client waits
  * for the server's advertisement, then responds with its own. This mirrors
  * the convention used by other server-first protocols (SSH, SMTP, FTP): the
  * server speaks first so the client can react to what the server supports
  * before committing any state.
  *
  * ```
- * Server (daemon or broker)       Client
+ * Server (session-proxy or serverProxy)       Client
  *   |                               |
  *   |-- <server>.capabilities ----->|   (1) server advertises version + features
  *   |<-- client.capabilities -------|   (2) client responds with its own
@@ -20,20 +20,20 @@
  *   |    features = intersection(serverFeatures, clientFeatures)
  * ```
  *
- * # Daemon wire
+ * # SessionProxy wire
  *
  * ```
- * Daemon                          Client
- *   |-- daemon.capabilities ------->|
+ * SessionProxy                          Client
+ *   |-- session-proxy.capabilities ------->|
  *   |<-- client.capabilities -------|
  *   |-- snapshot ------------------>|   (normal data flow)
  * ```
  *
- * # Broker wire
+ * # ServerProxy wire
  *
  * ```
- * Broker                          Client
- *   |-- broker.capabilities ------->|
+ * ServerProxy                          Client
+ *   |-- server-proxy.capabilities ------->|
  *   |<-- client.capabilities -------|
  *   |-- sessions.snapshot ---------->|  (initial session list)
  * ```
@@ -65,15 +65,15 @@
  *
  * In all failure cases the caller is expected to close the transport.
  *
- * # Parameterization for broker vs daemon
+ * # Parameterization for server-proxy vs session-proxy
  *
  * `runServerHandshake` and `runClientHandshake` accept the server-side
  * capabilities message type discriminant as a parameter (`serverCapabilitiesType`).
- * This lets both the daemon wire (`"daemon.capabilities"`) and the future broker
- * wire (`"broker.capabilities"`) share the same handshake logic.
+ * This lets both the session-proxy wire (`"session-proxy.capabilities"`) and the future server-proxy
+ * wire (`"server-proxy.capabilities"`) share the same handshake logic.
  *
- * The convenience wrappers `runDaemonHandshake` / `runDaemonClientHandshake`
- * fix the discriminants for the daemon wire.
+ * The convenience wrappers `runSessionProxyHandshake` / `runSessionProxyClientHandshake`
+ * fix the discriminants for the session-proxy wire.
  */
 
 import { WIRE_PROTOCOL_VERSION } from "./envelope.js";
@@ -164,17 +164,17 @@ export function negotiateCapabilities(
 const HANDSHAKE_SEQ = 1 as const;
 
 // ---------------------------------------------------------------------------
-// Generic server-side handshake (shared by daemon and broker wires)
+// Generic server-side handshake (shared by session-proxy and server-proxy wires)
 // ---------------------------------------------------------------------------
 
 /**
  * Run the server side of the handshake over `transport`.
  *
- * This is the shared implementation used by both the daemon wire and the
- * broker wire. The `serverCapabilitiesType` parameter controls which message
+ * This is the shared implementation used by both the session-proxy wire and the
+ * server-proxy wire. The `serverCapabilitiesType` parameter controls which message
  * type discriminant is sent in step (1):
- *   - Daemon wire: `"daemon.capabilities"`
- *   - Broker wire: `"broker.capabilities"`
+ *   - SessionProxy wire: `"session-proxy.capabilities"`
+ *   - ServerProxy wire: `"server-proxy.capabilities"`
  *
  * Steps:
  *   1. Send `<serverCapabilitiesType>` (seq=1) advertising `serverCapabilities`.
@@ -260,17 +260,17 @@ export function runServerHandshake(
 }
 
 // ---------------------------------------------------------------------------
-// Generic client-side handshake (shared by daemon and broker wires)
+// Generic client-side handshake (shared by session-proxy and server-proxy wires)
 // ---------------------------------------------------------------------------
 
 /**
  * Run the client side of the handshake over `transport`.
  *
- * This is the shared implementation used by both the daemon wire and the
- * broker wire. The `serverCapabilitiesType` parameter controls which message
+ * This is the shared implementation used by both the session-proxy wire and the
+ * server-proxy wire. The `serverCapabilitiesType` parameter controls which message
  * type discriminant is expected from the server in step (1):
- *   - Daemon wire: `"daemon.capabilities"`
- *   - Broker wire: `"broker.capabilities"`
+ *   - SessionProxy wire: `"session-proxy.capabilities"`
+ *   - ServerProxy wire: `"server-proxy.capabilities"`
  *
  * Steps:
  *   1. Wait for the server to send `<serverCapabilitiesType>`.
@@ -284,7 +284,7 @@ export function runServerHandshake(
 export function runClientHandshake(
   transport: Transport,
   clientCapabilities: Capabilities,
-  serverCapabilitiesType: string = "daemon.capabilities",
+  serverCapabilitiesType: string = "session-proxy.capabilities",
 ): Promise<NegotiatedSession> {
   return new Promise<NegotiatedSession>((resolve, reject) => {
     let settled = false;
@@ -347,17 +347,17 @@ export function runClientHandshake(
 }
 
 // ---------------------------------------------------------------------------
-// Daemon wire convenience wrappers
+// SessionProxy wire convenience wrappers
 // ---------------------------------------------------------------------------
 
 /**
- * Run the daemon side of the handshake over `transport`.
+ * Run the session-proxy side of the handshake over `transport`.
  *
  * Convenience wrapper over `runServerHandshake` fixing the discriminant to
- * `"daemon.capabilities"`.
+ * `"session-proxy.capabilities"`.
  *
  * Steps:
- *   1. Send `daemon.capabilities` (seq=1) advertising `daemonCapabilities`.
+ *   1. Send `session-proxy.capabilities` (seq=1) advertising `sessionProxyCapabilities`.
  *   2. Wait for the client to send `client.capabilities`.
  *   3. Negotiate the session (version check + feature intersection).
  *
@@ -365,13 +365,13 @@ export function runClientHandshake(
  * Rejects with `HandshakeError` on version mismatch, unexpected message type,
  * or transport closure before the client responds.
  */
-export function runDaemonHandshake(
+export function runSessionProxyHandshake(
   transport: Transport,
-  daemonCapabilities: Capabilities,
+  sessionProxyCapabilities: Capabilities,
 ): Promise<NegotiatedSession> {
-  return runServerHandshake(transport, daemonCapabilities, "daemon.capabilities");
+  return runServerHandshake(transport, sessionProxyCapabilities, "session-proxy.capabilities");
 }
 
 // Note: runClientHandshake already defaults serverCapabilitiesType to
-// "daemon.capabilities", so it serves as the daemon-wire client handshake
+// "session-proxy.capabilities", so it serves as the session-proxy-wire client handshake
 // without any additional wrapper needed.

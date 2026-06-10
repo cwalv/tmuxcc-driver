@@ -1,17 +1,17 @@
 // tmuxcc-daemon — package entry point.
 // Real logic lives in parser/, state/, runtime/, wire/.
 
-export const DAEMON_PLACEHOLDER = true;
+export const SESSION_PROXY_PLACEHOLDER = true;
 
-/** Stub type: will be replaced by the real daemon interface. */
-export interface DaemonHandle {
+/** Stub type: will be replaced by the real session-proxy interface. */
+export interface SessionProxyHandle {
   readonly pid: number;
   stop(): Promise<void>;
 }
 
-// Wire protocol public surface — re-exported so that @tmuxcc/daemon is the
+// Wire protocol public surface — re-exported so that @tmuxcc/session-proxy is the
 // single import path for all wire types and utilities. Client packages import:
-//   import { encodeFrame, decodeFrame, ... } from "@tmuxcc/daemon";
+//   import { encodeFrame, decodeFrame, ... } from "@tmuxcc/session-proxy";
 export * from "./wire/index.js";
 
 // State model + projection — exported so client tests can run round-trip proofs
@@ -48,29 +48,29 @@ export {
 export { projectSnapshot, diffModel } from "./state/projection.js";
 export type { ProjectSnapshotOpts } from "./state/projection.js";
 
-// Runtime — createDaemon and supporting types (tc-93a).
-// Re-exported from src/index so consumers can import from "@tmuxcc/daemon"
+// Runtime — createSessionProxy and supporting types (tc-93a).
+// Re-exported from src/index so consumers can import from "@tmuxcc/session-proxy"
 // without reaching into internal sub-paths.
-export { createDaemon } from "./runtime/daemon.js";
-export type { Daemon, DaemonOptions } from "./runtime/daemon.js";
-// createTmuxHost is exported for @tmuxcc/broker (tc-3iv): the broker's thin
+export { createSessionProxy } from "./runtime/session-proxy.js";
+export type { SessionProxy, SessionProxyOptions } from "./runtime/session-proxy.js";
+// createTmuxHost is exported for @tmuxcc/server-proxy (tc-3iv): the server-proxy's thin
 // `-CC` watcher must hold a LIVE control-mode connection (its EOF is the
-// broker's tmux-death exit trigger, §6.2), and tmux's client calls tcgetattr()
+// server-proxy's tmux-death exit trigger, §6.2), and tmux's client calls tcgetattr()
 // on stdin even in control mode — so the watcher needs the same PTY bridge
-// the daemon uses. The barrel is the only sanctioned import path for the
-// broker (see tmuxcc-broker/.dependency-cruiser.cjs broker-no-daemon-runtime).
+// the session-proxy uses. The barrel is the only sanctioned import path for the
+// serverProxy (see tmuxcc-broker/.dependency-cruiser.cjs server-proxy-no-daemon-runtime).
 export { createTmuxHost } from "./runtime/tmux-host.js";
 export type { TmuxHost, TmuxHostOptions } from "./runtime/tmux-host.js";
 
-// Die-with-parent watchdog (tc-2c5) — daemon entry points (e.g. @tmuxcc/broker's
-// daemon-entry.ts) install this at startup to enforce ext-a §6.3: daemons die
-// with the broker; there is no orphan-and-reclaim path.
+// Die-with-parent watchdog (tc-2c5) — session-proxy entry points (e.g. @tmuxcc/server-proxy's
+// session-proxy-entry.ts) install this at startup to enforce ext-a §6.3: daemons die
+// with the serverProxy; there is no orphan-and-reclaim path.
 export { installDieWithParent } from "./runtime/die-with-parent.js";
 export type { DieWithParentOptions } from "./runtime/die-with-parent.js";
 
 // Flow-control + output-demux primitives — exported so tc-7xv.6/tc-7xv.24
-// regression tests in @tmuxcc/broker can drive a real SocketTransport through
-// the same daemon-side wiring without booting a full Daemon.
+// regression tests in @tmuxcc/server-proxy can drive a real SocketTransport through
+// the same session-proxy-side wiring without booting a full SessionProxy.
 export {
   createOutputDemux,
 } from "./runtime/output-demux.js";

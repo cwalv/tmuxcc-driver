@@ -33,8 +33,8 @@ import type { Session, Window, Pane, SessionModel, FocusState } from "./model.js
 import type { PaneId, WindowId, SessionId } from "../wire/ids.js";
 import type {
   SnapshotMessage,
-  DaemonMessage,
-} from "../wire/daemon-control.js";
+  SessionProxyMessage,
+} from "../wire/session-proxy-control.js";
 
 // ---------------------------------------------------------------------------
 // Test fixture helpers
@@ -138,7 +138,7 @@ function baseModel(): SessionModel {
 // In v3 single-session shape: no sessions array, no sessionId on deltas.
 // ---------------------------------------------------------------------------
 
-function applyDeltas(snap: SnapshotMessage, deltas: DaemonMessage[]): SnapshotMessage {
+function applyDeltas(snap: SnapshotMessage, deltas: SessionProxyMessage[]): SnapshotMessage {
   // Work on mutable copies of the flat arrays.
   let session = snap.session;
   let windows = [...snap.windows];
@@ -147,7 +147,7 @@ function applyDeltas(snap: SnapshotMessage, deltas: DaemonMessage[]): SnapshotMe
 
   for (const delta of deltas) {
     switch (delta.type) {
-      // --- session lifecycle (only rename on daemon wire) ---
+      // --- session lifecycle (only rename on session-proxy wire) ---
       case "session.renamed":
         session = { ...session, newName: delta.newName } as typeof session;
         session = { sessionId: session.sessionId, name: delta.newName };
@@ -238,7 +238,7 @@ function applyDeltas(snap: SnapshotMessage, deltas: DaemonMessage[]): SnapshotMe
         }));
         break;
 
-      // Ignore daemon→client messages not relevant to snapshot state:
+      // Ignore session-proxy→client messages not relevant to snapshot state:
       default:
         break;
     }

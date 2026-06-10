@@ -1,6 +1,6 @@
 // dwp-parent.mjs — test fixture for die-with-parent.test.ts (tc-2c5).
 //
-// Plays the "broker" role: spawns the command given in argv as a regular
+// Plays the "server-proxy" role: spawns the command given in argv as a regular
 // (non-detached) child, prints the child's pid, and then idles until killed.
 // The test SIGKILLs THIS process and asserts the child exits on its own —
 // proving the child's die-with-parent enforcement, since a SIGKILLed parent

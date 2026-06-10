@@ -2,7 +2,7 @@
  * tc-2ph — Full-stack e2e smoke test
  *
  * Drives REAL tmux 3.4 through the whole stack:
- *   tmux -CC (via PTY bridge) → createDaemon → transport pair → client modules
+ *   tmux -CC (via PTY bridge) → createSessionProxy → transport pair → client modules
  *   (Mirror + PaneStreamConsumer + Mirror.attach) → EchoRenderHook callbacks
  *
  * Acceptance scenarios (run against real tmux):
@@ -16,13 +16,13 @@
  * # Handshake sequencing — why we use the low-level approach
  *
  * The high-level `createClient(transport, hook).connect()` runs
- * `runClientHandshake` which must overlap with the daemon's
- * `runDaemonHandshake` (both run concurrently in Promise.all).  The
- * `setImmediate` deferral of `daemon.addClient()` causes the server-side
+ * `runClientHandshake` which must overlap with the session-proxy's
+ * `runSessionProxyHandshake` (both run concurrently in Promise.all).  The
+ * `setImmediate` deferral of `sessionProxy.addClient()` causes the server-side
  * handshake to race with the already-completed client-side handshake.
  *
  * Solution: mirror the proven pattern from integration.test.ts (Suite 3 R1/R2)
- * and daemon-transport.test.ts — run both handshakes concurrently, then
+ * and session-proxy-transport.test.ts — run both handshakes concurrently, then
  * wire up the client modules (Mirror, PaneStreamConsumer) manually AFTER the
  * handshake resolves, then call mirror.wireDataSources(byteSource) +
  * mirror.attach(hook).  This gives us EchoRenderHook callbacks without the
@@ -47,8 +47,8 @@
  *
  * This file imports from @tmuxcc/client by relative src paths (outside
  * rootDir) so that tsx resolves them correctly at runtime.  It is excluded
- * from the daemon's tsconfig build to avoid rootDir violations — matching the
- * pattern used by tmuxcc-vscode/tsconfig.json for daemon-transport.test.ts.
+ * from the session-proxy's tsconfig build to avoid rootDir violations — matching the
+ * pattern used by tmuxcc-vscode/tsconfig.json for session-proxy-transport.test.ts.
  *
  * @module runtime/e2e-smoke.test
  */
@@ -65,11 +65,11 @@ import { fileURLToPath } from "node:url";
 import { trackSocket, killTmuxServer, flushAllTracked } from "./test-tmux-cleanup.js";
 
 // ---------------------------------------------------------------------------
-// Daemon internals (within daemon/src, no rootDir issue)
+// SessionProxy internals (within session-proxy/src, no rootDir issue)
 // ---------------------------------------------------------------------------
 
-import { createDaemon } from "./daemon.js";
-import type { Daemon } from "./daemon.js";
+import { createSessionProxy } from "./session-proxy.js";
+import type { SessionProxy } from "./session-proxy.js";
 import { createInMemoryTransportPair } from "../wire/transport.js";
 import type { PaneId } from "../wire/ids.js";
 import {
@@ -80,7 +80,7 @@ import type { ClientMessage } from "../wire/index.js";
 
 // ---------------------------------------------------------------------------
 // Client sub-modules — relative src paths; tsx resolves at runtime.
-// Excluded from daemon tsconfig (see tsconfig.json "exclude").
+// Excluded from session-proxy tsconfig (see tsconfig.json "exclude").
 // ---------------------------------------------------------------------------
 
 // @ts-ignore — outside rootDir; resolved by tsx at runtime
@@ -119,7 +119,7 @@ const tmuxAvailable = (() => {
 })();
 
 // ---------------------------------------------------------------------------
-// Capabilities — same as integration.test.ts and daemon-transport.test.ts
+// Capabilities — same as integration.test.ts and session-proxy-transport.test.ts
 // ---------------------------------------------------------------------------
 
 const CLIENT_CAPS = {
@@ -237,7 +237,7 @@ function accumulatedOutput(
 //
 // const session = await setupE2E("my-label");
 // try {
-//   const { hook, paneId, controller, daemon } = session;
+//   const { hook, paneId, controller, sessionProxy } = session;
 //   controller.sendInput(paneId, "echo hello\n");
 //   await session.waitForOutput(paneId, "hello", 8000);
 // } finally {
@@ -246,20 +246,20 @@ function accumulatedOutput(
 // ```
 //
 // Fields returned:
-//   daemon     — Daemon handle (host, demux, pipeline, server, inputPath,
+//   session-proxy     — SessionProxy handle (host, demux, pipeline, server, inputPath,
 //                flowController).  Low-level access for advanced tests.
 //   controller — ClientController with sendInput / resizePane / sendCommand.
 //   hook       — EchoRenderHook recording all render-hook callbacks.
 //   paneId     — Wire PaneId of the first pane from the snapshot (e.g. "p1").
 //   socketName — tmux -L socket name (for direct tmux commands if needed).
-//   daemonTransport / clientTransport — the raw transport pair.
+//   sessionProxyTransport / clientTransport — the raw transport pair.
 //   waitForOutput(paneId, needle, ms) — poll hook until pane output has needle.
-//   teardown() — stop render driver, kill daemon, kill tmux server. Idempotent.
+//   teardown() — stop render driver, kill sessionProxy, kill tmux server. Idempotent.
 // ===========================================================================
 
 export interface E2ESession {
-  /** The fully assembled daemon runtime. */
-  readonly daemon: Daemon;
+  /** The fully assembled session-proxy runtime. */
+  readonly sessionProxy: SessionProxy;
   /** Client controller: sendInput / resizePane / sendCommand. */
   readonly controller: ClientController;
   /** EchoRenderHook recording all render-hook callbacks. */
@@ -268,13 +268,13 @@ export interface E2ESession {
   readonly paneId: PaneId;
   /** tmux -L socket name. */
   readonly socketName: string;
-  /** The daemon-side transport endpoint. */
-  readonly daemonTransport: ReturnType<typeof createInMemoryTransportPair>["daemon"];
+  /** The session-proxy-side transport endpoint. */
+  readonly sessionProxyTransport: ReturnType<typeof createInMemoryTransportPair>["session-proxy"];
   /** The client-side transport endpoint. */
   readonly clientTransport: ReturnType<typeof createInMemoryTransportPair>["client"];
   /** Poll until pane output contains needle. Throws on timeout. */
   waitForOutput(paneId: PaneId, needle: string, timeoutMs: number): Promise<void>;
-  /** Graceful teardown: detach mirror hook → kill daemon → kill tmux server. */
+  /** Graceful teardown: detach mirror hook → kill session-proxy → kill tmux server. */
   teardown(): Promise<void>;
 }
 
@@ -282,11 +282,11 @@ export interface E2ESession {
  * Stand up the full tmuxcc stack against a real tmux -CC session.
  *
  * Uses the proven low-level wiring pattern from integration.test.ts (Suite 3
- * R1/R2) and daemon-transport.test.ts: both handshakes run concurrently in
+ * R1/R2) and session-proxy-transport.test.ts: both handshakes run concurrently in
  * Promise.all, then client modules are wired up afterward.
  *
  * @param label - Short label for the socket name (keep it test-unique).
- * @param opts  - Optional daemon host overrides (cols, rows, sessionName).
+ * @param opts  - Optional session-proxy host overrides (cols, rows, sessionName).
  */
 export async function setupE2E(
   label: string,
@@ -298,8 +298,8 @@ export async function setupE2E(
   trackSocket(sock);
   const sessionName = opts.sessionName ?? `e2e-${label}`;
 
-  // 1. Create and start the daemon (spawns real tmux -CC via PTY bridge).
-  const daemon = createDaemon({
+  // 1. Create and start the sessionProxy (spawns real tmux -CC via PTY bridge).
+  const sessionProxy = createSessionProxy({
     host: {
       socketName: sock,
       sessionName,
@@ -307,14 +307,14 @@ export async function setupE2E(
       rows: opts.rows ?? 24,
     },
   });
-  daemon.host.onError(() => { /**/ });
-  await daemon.start();
+  sessionProxy.host.onError(() => { /**/ });
+  await sessionProxy.start();
 
   // 2. Create in-memory transport pair.
-  const { daemon: daemonTransport, client: clientTransport } = createInMemoryTransportPair();
+  const { sessionProxy: sessionProxyTransport, client: clientTransport } = createInMemoryTransportPair();
 
   // 3. Attach data-plane demux BEFORE handshake so byte frames are received.
-  const detach = daemon.demux.attachTransport(daemonTransport);
+  const detach = sessionProxy.demux.attachTransport(sessionProxyTransport);
 
   // 4. Build client-side modules upfront — they don't require the snapshot yet.
   const mirror = new Mirror();
@@ -324,10 +324,10 @@ export async function setupE2E(
   //    We do NOT await addClient yet — we must wire clientTransport.onControl
   //    BEFORE addClient's snapshot arrives.
   //
-  //    Timing contract (mirrors DaemonConnection.connect()):
-  //      addClient:           await runDaemonHandshake → ... → await Promise.resolve()
+  //    Timing contract (mirrors SessionProxyConnection.connect()):
+  //      addClient:           await runSessionProxyHandshake → ... → await Promise.resolve()
   //                           → sendSnapshot  (microtask N+1)
-  //      runClientHandshake:  receives daemon.capabilities → sends client.capabilities
+  //      runClientHandshake:  receives session-proxy.capabilities → sends client.capabilities
   //                           → resolves (microtask N)
   //      THIS CODE:           await runClientHandshake resolves (microtask N)
   //                           → install clientTransport.onControl synchronously (no await)
@@ -335,12 +335,12 @@ export async function setupE2E(
   //
   //    The microtask gap (await Promise.resolve() in serve.ts addClient) is the
   //    seam that lets us install the handler between handshake-settle and snapshot-send.
-  const addPromise = daemon.server.addClient(daemonTransport);
+  const addPromise = sessionProxy.server.addClient(sessionProxyTransport);
   await runClientHandshake(clientTransport, CLIENT_CAPS);
 
   // 6. Wire clientTransport.onControl → mirror SYNCHRONOUSLY here, before the
   //    next microtask (which is when addClient sends the real wire snapshot).
-  //    This is the same pattern used by DaemonConnection.#installPostHandshakeRouting().
+  //    This is the same pattern used by SessionProxyConnection.#installPostHandshakeRouting().
   //    Any subsequent wire message (snapshot, deltas, client-count.changed, etc.)
   //    is routed through here — no manual snapshot construction needed.
   clientTransport.onControl((msg: ClientMessage) => {
@@ -363,15 +363,15 @@ export async function setupE2E(
   // wire messages) will have flowed through clientTransport.onControl above.
   await addPromise;
 
-  // 7. Wire the input path (daemon.server.addClient() sets up resync handling
-  //    on daemonTransport.onControl; we overwrite it here with our inputPath
+  // 7. Wire the input path (sessionProxy.server.addClient() sets up resync handling
+  //    on sessionProxyTransport.onControl; we overwrite it here with our inputPath
   //    handler since these tests do not exercise resync).
-  daemonTransport.onControl((msg) => {
-    daemon.inputPath.handleClientMessage(msg as ClientMessage);
+  sessionProxyTransport.onControl((msg) => {
+    sessionProxy.inputPath.handleClientMessage(msg as ClientMessage);
   });
 
   // 8. InputApi — for sendInput / resizePane / sendCommand.
-  //    createInputApi expects a DaemonConnection with a send() method.
+  //    createInputApi expects a SessionProxyConnection with a send() method.
   //    We provide a minimal shim that forwards to clientTransport.sendControl.
   const connShim = {
     send(msg: ClientMessage): void {
@@ -407,7 +407,7 @@ export async function setupE2E(
   if (firstPaneOpened === undefined || firstPaneOpened.type !== "paneOpened") {
     mirror.detachHook();
     detach();
-    daemon.kill();
+    sessionProxy.kill();
     killServer(sock);
     throw new Error("setupE2E: no onPaneOpened after mirror.attach() — snapshot may be empty");
   }
@@ -421,10 +421,10 @@ export async function setupE2E(
     tornDown = true;
     try { mirror.detachHook(); } catch { /**/ }
     try { detach(); } catch { /**/ }
-    try { daemon.kill(); } catch { /**/ }
+    try { sessionProxy.kill(); } catch { /**/ }
     await new Promise<void>((r) => {
-      if (daemon.host.exited) { r(); return; }
-      daemon.host.onExit(() => r());
+      if (sessionProxy.host.exited) { r(); return; }
+      sessionProxy.host.onExit(() => r());
       setTimeout(r, 1500);
     });
     killServer(sock);
@@ -435,12 +435,12 @@ export async function setupE2E(
   }
 
   return {
-    daemon,
+    sessionProxy,
     controller,
     hook,
     paneId: firstPaneId,
     socketName: sock,
-    daemonTransport,
+    sessionProxyTransport,
     clientTransport,
     waitForOutput: sessionWaitForOutput,
     teardown,
@@ -456,7 +456,7 @@ export async function setupE2E(
 // ===========================================================================
 
 if (isMain) describe(
-  "tc-2ph: Full e2e smoke — real tmux → daemon → client → render hooks",
+  "tc-2ph: Full e2e smoke — real tmux → session-proxy → client → render hooks",
   { skip: !tmuxAvailable ? "tmux not found on PATH" : false },
   () => {
     // -----------------------------------------------------------------------
@@ -603,7 +603,7 @@ if (isMain) describe(
     // tmux 3.4 emits %window-add WITHOUT a following %layout-change for a
     // freshly created window, so the window's pane(s) are invisible to the
     // model unless the pipeline queries the layout explicitly
-    // (RuntimePipelineImpl._reconcileNewWindowLayout).  This is the daemon
+    // (RuntimePipelineImpl._reconcileNewWindowLayout).  This is the session-proxy
     // half of the tc-fx4 "user ran tmuxcc.newWindow and saw nothing" bug:
     // without the reconcile, no pane.opened delta reaches the client and no
     // VS Code terminal tab is ever created.
@@ -676,20 +676,20 @@ if (isMain) describe(
     );
 
     // -----------------------------------------------------------------------
-    // E4. Resize — resizePane round-trip; daemon stays alive after resize
+    // E4. Resize — resizePane round-trip; session-proxy stays alive after resize
     //
-    // resizePane() sends resize.request → daemon issues refresh-client -C WxH
+    // resizePane() sends resize.request → session-proxy issues refresh-client -C WxH
     // → tmux applies → may or may not emit pane.resized delta (tmux 3.4 only
     // emits %layout-change when the layout actually changes; in a single-pane
     // session the pane may already fill the window so no layout event fires).
     // We assert two things:
     //   1. The resize is processed without error (no throw/crash).
-    //   2. The daemon is still alive: a subsequent echo still produces output.
+    //   2. The session-proxy is still alive: a subsequent echo still produces output.
     // If onPaneResized does arrive within the window, we also validate it.
     // -----------------------------------------------------------------------
 
     it(
-      "E4: resizePane(100, 30) — processed without error; daemon stays live post-resize",
+      "E4: resizePane(100, 30) — processed without error; session-proxy stays live post-resize",
       { timeout: 20_000 },
       async () => {
         const session = await setupE2E("resize");
@@ -713,7 +713,7 @@ if (isMain) describe(
             assert.ok(resized.cols > 0 && resized.rows > 0, "paneResized dims must be positive");
           }
 
-          // Assert daemon is still live: a subsequent echo must produce output.
+          // Assert session-proxy is still live: a subsequent echo must produce output.
           controller.sendInput(paneId, "echo post-resize-alive\n");
           await session.waitForOutput(paneId, "post-resize-alive", 10_000);
         } finally {
@@ -727,7 +727,7 @@ if (isMain) describe(
     // -----------------------------------------------------------------------
 
     it(
-      "E5: teardown() kills daemon + tmux server cleanly",
+      "E5: teardown() kills session-proxy + tmux server cleanly",
       { timeout: 15_000 },
       async () => {
         const sock = sockName("cleanup");
@@ -793,10 +793,10 @@ if (isMain) describe(
           `E6 (tc-blk): tmux server on ${session.socketName} must be reaped by the safety net`,
         );
 
-        // Also tear down the daemon's bridge process so we don't leave a
+        // Also tear down the session-proxy's bridge process so we don't leave a
         // stranded host child (it will exit on its own when tmux dies, but
         // we wait briefly to be a polite test citizen).
-        session.daemon.kill();
+        session.sessionProxy.kill();
       },
     );
   },
@@ -813,19 +813,19 @@ if (isMain) describe(
 // Tests:
 //   SP1. After setSynchronizePanes(windowId, true) the model reflects on=true
 //        (window.sync.changed delta reaches the mirror).
-//   SP2. REGRESSION: sync ON + send-keys via broker to one pane → ALL panes
+//   SP2. REGRESSION: sync ON + send-keys via server-proxy to one pane → ALL panes
 //        receive the input (native tmux broadcast, §4.5 VERIFIED).
 //   SP3. After setSynchronizePanes(windowId, false) the model reflects on=false.
 // ===========================================================================
 
 describe(
-  "tc-7xv.12: synchronize-panes — broker wiring + broadcast regression",
+  "tc-7xv.12: synchronize-panes — server-proxy wiring + broadcast regression",
   { skip: !tmuxAvailable ? "tmux not found on PATH" : false },
   () => {
     // -----------------------------------------------------------------------
     // SP1 + SP2 + SP3: single test that covers all three acceptance criteria.
     //
-    // Design: use setupE2E to get a real daemon (pane1), then split to get
+    // Design: use setupE2E to get a real sessionProxy (pane1), then split to get
     // pane2, then enable sync and verify input to pane1 appears in pane2 too.
     // -----------------------------------------------------------------------
 
@@ -875,7 +875,7 @@ describe(
 
           // Step 4 (SP1): enable synchronize-panes via the BROKER command path.
           //
-          // This sends a set-synchronize-panes WireCommand through the daemon's
+          // This sends a set-synchronize-panes WireCommand through the session-proxy's
           // input-path, which: (a) sends `set-option -wt @N synchronize-panes on`
           // to tmux, and (b) immediately injects an optimistic model update via
           // injectNotification (tc-7xv.12 fix).  No external CLI or polling needed.
@@ -886,19 +886,19 @@ describe(
           });
 
           // Step 5 (SP1): wait for the optimistic model update to be reflected
-          // in the daemon model.  injectNotification fires synchronously, so
+          // in the session-proxy model.  injectNotification fires synchronously, so
           // the model should already be updated by the time we poll here.
           const syncModel = await waitFor(
             () => {
-              const m = session.daemon.pipeline.getModel();
+              const m = session.sessionProxy.pipeline.getModel();
               const win = m.windows.get(windowId as import("../wire/ids.js").WindowId);
               if (win?.synchronizePanes === true) return win;
               return undefined;
             },
             5_000,
-            "window.synchronizePanes did not become true in daemon model",
+            "window.synchronizePanes did not become true in session-proxy model",
           );
-          assert.equal(syncModel.synchronizePanes, true, "daemon model: synchronizePanes must be true");
+          assert.equal(syncModel.synchronizePanes, true, "session-proxy model: synchronizePanes must be true");
 
           // Step 6 (SP2 — the REGRESSION criterion): send input to pane1 only.
           // With sync ON, tmux broadcasts to all panes natively (§4.5 VERIFIED).
@@ -918,7 +918,7 @@ describe(
             `when synchronize-panes is on (§4.5 VERIFIED). Got ${pane2Bytes.length} bytes.`,
           );
 
-          // Step 7 (SP3): turn sync off via the broker command path.
+          // Step 7 (SP3): turn sync off via the server-proxy command path.
           controller.sendCommand({
             kind: "set-synchronize-panes",
             windowId: windowId as import("../wire/ids.js").WindowId,
@@ -928,7 +928,7 @@ describe(
           // Wait for the optimistic model update to reflect sync=off.
           await waitFor(
             () => {
-              const m = session.daemon.pipeline.getModel();
+              const m = session.sessionProxy.pipeline.getModel();
               const win = m.windows.get(windowId as import("../wire/ids.js").WindowId);
               if (win?.synchronizePanes === false) return win;
               return undefined;

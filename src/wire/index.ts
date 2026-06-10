@@ -1,5 +1,5 @@
 /**
- * Wire protocol public surface — daemon↔client contract.
+ * Wire protocol public surface — session-proxy↔client contract.
  *
  * The wire speaks in terms of panes, bytes, deltas, input, resize, and layout.
  * It NEVER leaks:
@@ -12,13 +12,13 @@
  *   - Data plane (tc-2mq): length-prefixed raw pane byte streams; imports
  *     PaneId from ids.ts to tag frames.
  *
- * Handshake flow (tc-auj) uses the Capabilities / DaemonCapabilitiesMessage /
+ * Handshake flow (tc-auj) uses the Capabilities / SessionProxyCapabilitiesMessage /
  * ClientCapabilitiesMessage types defined here; the sequence logic lives there.
  *
  * File layout (tc-j9c Stage 0):
  *   envelope.ts        — MessageBase, Capabilities, WireFeature, WIRE_PROTOCOL_VERSION, isControlMessage
- *   broker-control.ts  — Broker wire control messages + BrokerCommand union
- *   daemon-control.ts  — Daemon wire control messages + WireCommand union
+ *   server-proxy-control.ts  — ServerProxy wire control messages + ServerProxyCommand union
+ *   session-proxy-control.ts  — SessionProxy wire control messages + WireCommand union
  */
 
 // Shared primitives — used by both planes
@@ -40,73 +40,73 @@ export { WIRE_PROTOCOL_VERSION } from "./envelope.js";
 export type { Capabilities, WireFeature, MessageBase } from "./envelope.js";
 export { isControlMessage } from "./envelope.js";
 
-// Broker wire control messages (placeholder — not yet wired, Stage 2)
+// ServerProxy wire control messages (placeholder — not yet wired, Stage 2)
 export type {
-  BrokerCapabilitiesMessage,
-  BrokerSessionInfo,
-  BrokerSnapshotMessage,
-  BrokerSessionAddedMessage,
-  BrokerSessionRemovedMessage,
-  BrokerSessionRenamedMessage,
-  BrokerCommand,
+  ServerProxyCapabilitiesMessage,
+  ServerProxySessionInfo,
+  ServerProxySnapshotMessage,
+  ServerProxySessionAddedMessage,
+  ServerProxySessionRemovedMessage,
+  ServerProxySessionRenamedMessage,
+  ServerProxyCommand,
   SessionClaimCommand,
   SessionCreateCommand,
   SessionDestroyCommand,
   // tc-7xv.36: targeted-pane attach
   PaneAttachCommand,
-  // tc-k6v: broker diagnostics snapshot
-  BrokerInfoCommand,
-  BrokerInfoSession,
-  BrokerInfoPayload,
-  BrokerCommandRequestMessage,
-  BrokerCommandOkPayload,
-  BrokerCommandResponseMessage,
-  BrokerErrorCode,
-  BrokerMessage,
-} from "./broker-control.js";
-export { isBrokerMessage } from "./broker-control.js";
+  // tc-k6v: server-proxy diagnostics snapshot
+  ServerProxyInfoCommand,
+  ServerProxyInfoSession,
+  ServerProxyInfoPayload,
+  ServerProxyCommandRequestMessage,
+  ServerProxyCommandOkPayload,
+  ServerProxyCommandResponseMessage,
+  ServerProxyErrorCode,
+  ServerProxyMessage,
+} from "./server-proxy-control.js";
+export { isServerProxyMessage } from "./server-proxy-control.js";
 
-// Daemon wire control-plane messages and unions
+// SessionProxy wire control-plane messages and unions
 export type {
   // Snapshot
   SnapshotSession,
   SnapshotWindow,
   SnapshotPane,
   SnapshotMessage,
-  // Daemon → Client (pane deltas)
+  // SessionProxy → Client (pane deltas)
   PaneOpenedMessage,
   PaneClosedMessage,
   PaneResizedMessage,
   PaneMode,
   PaneModeChangedMessage,
-  // Daemon → Client (window deltas)
+  // SessionProxy → Client (window deltas)
   WindowAddedMessage,
   WindowClosedMessage,
   WindowRenamedMessage,
-  // Daemon → Client (sync-panes delta — tc-7xv.12)
+  // SessionProxy → Client (sync-panes delta — tc-7xv.12)
   WindowSyncChangedMessage,
-  // Daemon → Client (layout deltas)
+  // SessionProxy → Client (layout deltas)
   LayoutUpdatedMessage,
-  // Daemon → Client (focus deltas)
+  // SessionProxy → Client (focus deltas)
   FocusChangedMessage,
-  // Daemon → Client (session delta — only rename on daemon wire)
-  DaemonSessionRenamedMessage,
-  // Daemon → Client (client-count delta — tc-44wu0)
+  // SessionProxy → Client (session delta — only rename on session-proxy wire)
+  SessionProxySessionRenamedMessage,
+  // SessionProxy → Client (client-count delta — tc-44wu0)
   ClientCountChangedMessage,
-  // Daemon → Client (capabilities)
-  DaemonCapabilitiesMessage,
-  // Daemon → Client (command response + error)
-  DaemonCommandOkPayload,
-  DaemonCommandResponseMessage,
+  // SessionProxy → Client (capabilities)
+  SessionProxyCapabilitiesMessage,
+  // SessionProxy → Client (command response + error)
+  SessionProxyCommandOkPayload,
+  SessionProxyCommandResponseMessage,
   WireErrorCode,
   ErrorMessage,
-  // Daemon union
-  DaemonMessage,
-  // Client → Daemon (input + resize)
+  // SessionProxy union
+  SessionProxyMessage,
+  // Client → SessionProxy (input + resize)
   InputMessage,
   ResizeRequestMessage,
   ClientCapabilitiesMessage,
-  // Client → Daemon (commands)
+  // Client → SessionProxy (commands)
   WireCommand,
   OpenWindowCommand,
   SplitPaneCommand,
@@ -118,19 +118,19 @@ export type {
   SetSynchronizePanesCommand,
   KillWindowCommand,
   SwapWindowCommand,
-  DaemonCommandRequestMessage,
-  // Client → Daemon (resync)
+  SessionProxyCommandRequestMessage,
+  // Client → SessionProxy (resync)
   ResyncRequestMessage,
   // Client union
   ClientMessage,
-  // Either direction (daemon wire)
+  // Either direction (session-proxy wire)
   ControlMessage,
   // Backward-compat aliases (deprecated)
   CommandOkPayload,
   CommandResponseMessage,
   CommandRequestMessage,
-} from "./daemon-control.js";
-export { isDaemonMessage, isClientMessage } from "./daemon-control.js";
+} from "./session-proxy-control.js";
+export { isSessionProxyMessage, isClientMessage } from "./session-proxy-control.js";
 
 // Data-plane binary frame format (tc-2mq)
 export { FRAME_MAGIC, MAX_FRAME, encodeFrame, decodeFrame, FrameDecoder } from "./framing.js";
@@ -143,7 +143,7 @@ export {
   intersectFeatures,
   negotiateCapabilities,
   runServerHandshake,
-  runDaemonHandshake,
+  runSessionProxyHandshake,
   runClientHandshake,
 } from "./handshake.js";
 

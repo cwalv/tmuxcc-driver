@@ -1,7 +1,7 @@
 /**
  * Tests for flow-control coordinator (tc-1ho).
  *
- * Acceptance: Under a high-output flood, the daemon throttles via pause mode
+ * Acceptance: Under a high-output flood, the session-proxy throttles via pause mode
  * without dropping or corrupting bytes.
  *
  * Strategy:
@@ -339,8 +339,8 @@ describe("createFlowController — byte integrity", () => {
   it("delivers all bytes byte-exact before pause and does not deliver while paused", () => {
     const { host } = makeFakeHost();
     const demux = createOutputDemux();
-    const { daemon, client } = createInMemoryTransportPair();
-    demux.attachTransport(daemon);
+    const { sessionProxy, client } = createInMemoryTransportPair();
+    demux.attachTransport(sessionProxy);
     const fc = createFlowController(host, demux, {
       highWaterBytes: 1_000,
       lowWaterBytes: 200,
@@ -391,8 +391,8 @@ describe("createFlowController — byte integrity", () => {
   it("handles non-UTF-8 bytes without corruption", () => {
     const { host } = makeFakeHost();
     const demux = createOutputDemux();
-    const { daemon, client } = createInMemoryTransportPair();
-    demux.attachTransport(daemon);
+    const { sessionProxy, client } = createInMemoryTransportPair();
+    demux.attachTransport(sessionProxy);
     const fc = createFlowController(host, demux, {
       highWaterBytes: 10_000,
       lowWaterBytes: 1_000,
@@ -413,8 +413,8 @@ describe("createFlowController — byte integrity", () => {
   it("delivers bytes in order across multiple appends", () => {
     const { host } = makeFakeHost();
     const demux = createOutputDemux();
-    const { daemon, client } = createInMemoryTransportPair();
-    demux.attachTransport(daemon);
+    const { sessionProxy, client } = createInMemoryTransportPair();
+    demux.attachTransport(sessionProxy);
     const fc = createFlowController(host, demux, {
       highWaterBytes: 10_000,
       lowWaterBytes: 1_000,
@@ -435,8 +435,8 @@ describe("createFlowController — byte integrity", () => {
   it("independent pane state: pausing P3 does not affect P5", () => {
     const { host } = makeFakeHost();
     const demux = createOutputDemux();
-    const { daemon, client } = createInMemoryTransportPair();
-    demux.attachTransport(daemon);
+    const { sessionProxy, client } = createInMemoryTransportPair();
+    demux.attachTransport(sessionProxy);
     const fc = createFlowController(host, demux, {
       highWaterBytes: 100,
       lowWaterBytes: 20,

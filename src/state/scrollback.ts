@@ -8,7 +8,7 @@
  * ## Keying
  * Buffers are keyed by `PaneId` directly (not by the `ScrollbackHandle` opaque
  * number). `PaneId` is already the canonical per-pane identity used everywhere
- * in the daemon, so keying by it avoids a needless indirection layer. The
+ * in the sessionProxy, so keying by it avoids a needless indirection layer. The
  * `scrollbackHandle` field on `Pane` was reserved as an opaque slot in the
  * model spec; this module documents the decision to use `PaneId` instead — the
  * reducer (tc-5dd) should do the same when calling `append`/`drop`.
@@ -53,7 +53,7 @@ import type { PaneId } from "../wire/ids.js";
  * Store for per-pane scrollback byte buffers.
  *
  * Implementations must be mutable (methods update state in place). This is a
- * daemon-internal store; it is NOT serialized to the wire directly. Projection
+ * session-proxy-internal store; it is NOT serialized to the wire directly. Projection
  * (tc-7gp) calls `getContents` to embed the retained bytes in a `SnapshotPane`
  * for newly-connecting clients.
  */

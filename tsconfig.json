@@ -8,7 +8,7 @@
   // Exclude full-stack e2e tests: they import from @tmuxcc/client (a sibling
   // workspace) via relative src paths outside rootDir, which tsc rejects but
   // tsx handles correctly at runtime.  This matches the pattern used by
-  // tmuxcc-vscode's tsconfig for daemon-transport.test.ts.
+  // tmuxcc-vscode's tsconfig for session-proxy-transport.test.ts.
   //   e2e-smoke.test.ts  — tc-2ph full-stack smoke harness
   //   flow-load.test.ts  — tc-55t flow-control under load (imports e2e-smoke.test.ts)
   "exclude": [

@@ -52,10 +52,10 @@ describe("createOutputDemux", () => {
   describe("single client, single pane", () => {
     it("delivers plain ASCII bytes byte-exact to the attached transport", () => {
       const demux = createOutputDemux();
-      const { daemon, client } = createInMemoryTransportPair();
+      const { sessionProxy, client } = createInMemoryTransportPair();
       const frames = captureFrames(client);
 
-      demux.attachTransport(daemon);
+      demux.attachTransport(sessionProxy);
 
       const payload = new TextEncoder().encode("hello world");
       demux.store.append(P1, payload);
@@ -67,10 +67,10 @@ describe("createOutputDemux", () => {
 
     it("delivers non-UTF-8 bytes byte-exact (canonical non-UTF-8 payload)", () => {
       const demux = createOutputDemux();
-      const { daemon, client } = createInMemoryTransportPair();
+      const { sessionProxy, client } = createInMemoryTransportPair();
       const frames = captureFrames(client);
 
-      demux.attachTransport(daemon);
+      demux.attachTransport(sessionProxy);
 
       // Canonical non-UTF-8 test payload: contains 0xFF, 0x00, 0xFE.
       const payload = bytes(0xff, 0x00, 0xfe, 0x80, 0xbf);
@@ -91,10 +91,10 @@ describe("createOutputDemux", () => {
   describe("two panes", () => {
     it("delivers each pane's output to the correct tagged frame", () => {
       const demux = createOutputDemux();
-      const { daemon, client } = createInMemoryTransportPair();
+      const { sessionProxy, client } = createInMemoryTransportPair();
       const frames = captureFrames(client);
 
-      demux.attachTransport(daemon);
+      demux.attachTransport(sessionProxy);
 
       const payloadP1 = new TextEncoder().encode("pane-1-data");
       const payloadP2 = bytes(0x01, 0x02, 0x03);
@@ -116,10 +116,10 @@ describe("createOutputDemux", () => {
 
     it("does not mix bytes across panes", () => {
       const demux = createOutputDemux();
-      const { daemon, client } = createInMemoryTransportPair();
+      const { sessionProxy, client } = createInMemoryTransportPair();
       const frames = captureFrames(client);
 
-      demux.attachTransport(daemon);
+      demux.attachTransport(sessionProxy);
 
       const p1Chunk1 = bytes(0x10, 0x11);
       const p2Chunk1 = bytes(0x20, 0x21);
@@ -141,15 +141,15 @@ describe("createOutputDemux", () => {
   });
 
   describe("non-UTF-8 round-trip through InMemoryTransportPair", () => {
-    it("byte-exact round-trip: daemon.sendData → client.onData", () => {
+    it("byte-exact round-trip: sessionProxy.sendData → client.onData", () => {
       // Drive the demux, verify the client receives unmodified bytes.
       const demux = createOutputDemux();
-      const { daemon, client } = createInMemoryTransportPair();
+      const { sessionProxy, client } = createInMemoryTransportPair();
 
       const received: { paneId: PaneId; bytes: Uint8Array }[] = [];
       client.onData((pid, b) => received.push({ paneId: pid, bytes: b }));
 
-      demux.attachTransport(daemon);
+      demux.attachTransport(sessionProxy);
 
       // Non-UTF-8 payload: surrogate range bytes, null, high byte.
       const original = bytes(0xed, 0xa0, 0x80, 0x00, 0xff, 0xfe);
@@ -178,8 +178,8 @@ describe("createOutputDemux", () => {
       const frames1 = captureFrames(pair1.client);
       const frames2 = captureFrames(pair2.client);
 
-      demux.attachTransport(pair1.daemon);
-      demux.attachTransport(pair2.daemon);
+      demux.attachTransport(pair1.sessionProxy);
+      demux.attachTransport(pair2.sessionProxy);
 
       const payload = bytes(0xaa, 0xbb, 0xcc);
       demux.store.append(P1, payload);
@@ -202,8 +202,8 @@ describe("createOutputDemux", () => {
       const frames1 = captureFrames(pair1.client);
       const frames2 = captureFrames(pair2.client);
 
-      const unsub1 = demux.attachTransport(pair1.daemon);
-      demux.attachTransport(pair2.daemon);
+      const unsub1 = demux.attachTransport(pair1.sessionProxy);
+      demux.attachTransport(pair2.sessionProxy);
 
       // Both receive first chunk.
       demux.store.append(P1, bytes(0x01));
@@ -221,14 +221,14 @@ describe("createOutputDemux", () => {
 
     it("detachTransport method is equivalent to unsub()", () => {
       const demux = createOutputDemux();
-      const { daemon, client } = createInMemoryTransportPair();
+      const { sessionProxy, client } = createInMemoryTransportPair();
       const frames = captureFrames(client);
 
-      demux.attachTransport(daemon);
+      demux.attachTransport(sessionProxy);
       demux.store.append(P1, bytes(0x01));
       assert.equal(frames.length, 1);
 
-      demux.detachTransport(daemon);
+      demux.detachTransport(sessionProxy);
       demux.store.append(P1, bytes(0x02));
       assert.equal(frames.length, 1, "detached transport must not receive further frames");
     });
@@ -248,10 +248,10 @@ describe("createOutputDemux", () => {
     it("inner store supplied via opts is used and also written to", () => {
       const inner = createPaneBufferStore();
       const demux = createOutputDemux({ innerStore: inner });
-      const { daemon, client } = createInMemoryTransportPair();
+      const { sessionProxy, client } = createInMemoryTransportPair();
       const frames = captureFrames(client);
 
-      demux.attachTransport(daemon);
+      demux.attachTransport(sessionProxy);
       const payload = bytes(0x10, 0x20, 0x30);
       demux.store.append(P1, payload);
 
@@ -267,10 +267,10 @@ describe("createOutputDemux", () => {
   describe("flow-control (pausePane / resumePane)", () => {
     it("paused pane output is NOT sent to transports", () => {
       const demux = createOutputDemux();
-      const { daemon, client } = createInMemoryTransportPair();
+      const { sessionProxy, client } = createInMemoryTransportPair();
       const frames = captureFrames(client);
 
-      demux.attachTransport(daemon);
+      demux.attachTransport(sessionProxy);
       demux.pausePane(P1);
 
       demux.store.append(P1, bytes(0xff, 0x00));
@@ -290,10 +290,10 @@ describe("createOutputDemux", () => {
 
     it("resumed pane output is sent again after resumePane", () => {
       const demux = createOutputDemux();
-      const { daemon, client } = createInMemoryTransportPair();
+      const { sessionProxy, client } = createInMemoryTransportPair();
       const frames = captureFrames(client);
 
-      demux.attachTransport(daemon);
+      demux.attachTransport(sessionProxy);
       demux.pausePane(P1);
       demux.store.append(P1, bytes(0x01)); // dropped from transport
       assert.equal(frames.length, 0);
@@ -315,10 +315,10 @@ describe("createOutputDemux", () => {
 
     it("pausing P1 does not affect P2 output", () => {
       const demux = createOutputDemux();
-      const { daemon, client } = createInMemoryTransportPair();
+      const { sessionProxy, client } = createInMemoryTransportPair();
       const frames = captureFrames(client);
 
-      demux.attachTransport(daemon);
+      demux.attachTransport(sessionProxy);
       demux.pausePane(P1);
 
       demux.store.append(P1, bytes(0x01)); // paused — dropped
@@ -333,10 +333,10 @@ describe("createOutputDemux", () => {
   describe("edge cases", () => {
     it("empty bytes array is not sent to transports", () => {
       const demux = createOutputDemux();
-      const { daemon, client } = createInMemoryTransportPair();
+      const { sessionProxy, client } = createInMemoryTransportPair();
       const frames = captureFrames(client);
 
-      demux.attachTransport(daemon);
+      demux.attachTransport(sessionProxy);
       demux.store.append(P1, new Uint8Array(0));
 
       assert.equal(frames.length, 0, "empty payload must not produce a frame");
@@ -344,12 +344,12 @@ describe("createOutputDemux", () => {
 
     it("attachTransport is idempotent (same transport, same Set)", () => {
       const demux = createOutputDemux();
-      const { daemon, client } = createInMemoryTransportPair();
+      const { sessionProxy, client } = createInMemoryTransportPair();
       const frames = captureFrames(client);
 
       // Attach the same transport twice — Set ensures single delivery.
-      demux.attachTransport(daemon);
-      demux.attachTransport(daemon);
+      demux.attachTransport(sessionProxy);
+      demux.attachTransport(sessionProxy);
 
       demux.store.append(P1, bytes(0x01));
       // Set deduplication: only one delivery, not two.
@@ -358,21 +358,21 @@ describe("createOutputDemux", () => {
 
     it("detachTransport on non-attached transport is a no-op", () => {
       const demux = createOutputDemux();
-      const { daemon, client } = createInMemoryTransportPair();
+      const { sessionProxy, client } = createInMemoryTransportPair();
       const frames = captureFrames(client);
 
       // Never attached — should not throw.
-      demux.detachTransport(daemon);
+      demux.detachTransport(sessionProxy);
       demux.store.append(P1, bytes(0x01));
       assert.equal(frames.length, 0);
     });
 
     it("multiple sequential appends for the same pane produce ordered frames", () => {
       const demux = createOutputDemux();
-      const { daemon, client } = createInMemoryTransportPair();
+      const { sessionProxy, client } = createInMemoryTransportPair();
       const frames = captureFrames(client);
 
-      demux.attachTransport(daemon);
+      demux.attachTransport(sessionProxy);
 
       const chunks = [bytes(0x01), bytes(0x02, 0x03), bytes(0x04)];
       for (const chunk of chunks) {

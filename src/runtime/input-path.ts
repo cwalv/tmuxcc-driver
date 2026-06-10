@@ -15,7 +15,7 @@
  *
  * # Id-mapping approach
  *
- * Wire `PaneId` / `WindowId` values follow the daemon's minting convention
+ * Wire `PaneId` / `WindowId` values follow the session-proxy's minting convention
  * (confirmed in src/state/reducer.ts):
  *
  *   - PaneId   → `"p" + tmuxPaneNum`   (e.g. "p1" → tmux pane %1)
@@ -26,7 +26,7 @@
  * `windowIdToTmux` perform this inversion.
  *
  * LIMITATION: this approach relies on the "p<N>"/"w<N>" prefix convention
- * being stable.  A future registry-based approach (daemon-level Map<PaneId,
+ * being stable.  A future registry-based approach (session-proxy-level Map<PaneId,
  * number>) would be more robust if the convention changes — e.g. to support
  * multi-session namespacing like "s0-p3".  The factory accepts an optional
  * `paneIdToTmux` override so callers can inject a registry at integration
@@ -49,7 +49,7 @@
  *
  * # API seam
  *
- * The daemon's serve layer (tc-dv3) constructs an InputPath and forwards each
+ * The session-proxy's serve layer (tc-dv3) constructs an InputPath and forwards each
  * decoded ClientMessage to `handleClientMessage`.  Example wiring:
  *
  * ```ts
@@ -94,7 +94,7 @@ function defaultPaneIdToTmux(id: PaneId): number {
     throw new TypeError(
       `defaultPaneIdToTmux: expected internal model PaneId format "p<N>" (e.g. "p1"); ` +
       `got "${s}". If you have a tmux-format id (e.g. "%1"), ` +
-      `use the model's PaneId directly (the daemon mints them as "p" + tmuxPaneNum).`,
+      `use the model's PaneId directly (the session-proxy mints them as "p" + tmuxPaneNum).`,
     );
   }
   const n = parseInt(s.slice(1), 10);
@@ -124,7 +124,7 @@ function defaultWindowIdToTmux(id: WindowId): number {
     throw new TypeError(
       `defaultWindowIdToTmux: expected internal model WindowId format "w<N>" (e.g. "w3"); ` +
       `got "${s}". If you have a tmux-format id (e.g. "@9"), ` +
-      `use the model's WindowId directly (the daemon mints them as "w" + tmuxWindowNum).`,
+      `use the model's WindowId directly (the session-proxy mints them as "w" + tmuxWindowNum).`,
     );
   }
   const n = parseInt(s.slice(1), 10);
@@ -157,7 +157,7 @@ export interface InputPathOptions {
    * Override the default PaneId→tmux-numeric mapping.
    *
    * The default strips the "p" prefix and parses the trailing decimal integer.
-   * Supply a registry-backed function here when the daemon maintains an
+   * Supply a registry-backed function here when the session-proxy maintains an
    * explicit PaneId↔tmux-number map (more robust for future multi-session
    * namespacing).
    */
@@ -172,7 +172,7 @@ export interface InputPathOptions {
 
   /**
    * Inject a synthetic NotificationEvent into the live pipeline after a
-   * daemon-issued command that needs to immediately update the model.
+   * session-proxy-issued command that needs to immediately update the model.
    *
    * Used for the optimistic-update path: input-path sends a tmux command and
    * then injects the expected model change without waiting for a tmux
@@ -472,7 +472,7 @@ export function createInputPath(
             // kill-session -t =<sessionName>
             // Terminates the tmux session and all its windows/panes.
             // Used when tmuxcc.killSessionOnLastWindowClose=true (ux-design.md [deleted; map: ux-design-v2 §8] §13).
-            // The daemon will receive a session exit notification from tmux;
+            // The session-proxy will receive a session exit notification from tmux;
             // callers should expect the connection to close shortly after.
             //
             // tc-91o: the wire command now carries sessionName directly, so no
@@ -611,7 +611,7 @@ export function createInputPath(
             // kill-window -t @<N>  (tc-7xv.18)
             //
             // Kills the tmux window and all its panes.  tmux emits pane-exited
-            // and window-close notifications which flow back through the daemon
+            // and window-close notifications which flow back through the session-proxy
             // mirror as pane.closed + window.removed deltas.
             const tmuxWinNum = toTmuxWindow(command.windowId);
             sendCommand(`kill-window -t @${tmuxWinNum}`);

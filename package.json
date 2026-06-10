@@ -1,5 +1,5 @@
 {
-  "name": "@tmuxcc/daemon",
+  "name": "@tmuxcc/session-proxy",
   "version": "0.0.0",
   "private": true,
   "type": "module",

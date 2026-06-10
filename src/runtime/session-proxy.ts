@@ -1,8 +1,8 @@
 /**
- * createDaemon — assemble the full daemon runtime from its component parts (tc-93a).
+ * createSessionProxy — assemble the full session-proxy runtime from its component parts (tc-93a).
  *
  * This is the canonical "wire everything together" entry point for the E4
- * daemon runtime.  It mirrors what createClient() does on the client side:
+ * session-proxy runtime.  It mirrors what createClient() does on the client side:
  * hides the per-component wiring and exposes a single lifecycle handle.
  *
  * # Component graph
@@ -60,8 +60,8 @@ import type { SwitchClientOutcome } from "../state/reducer.js";
 // Public types
 // ---------------------------------------------------------------------------
 
-/** Options for createDaemon. Each sub-group maps to the respective component. */
-export interface DaemonOptions {
+/** Options for createSessionProxy. Each sub-group maps to the respective component. */
+export interface SessionProxyOptions {
   /**
    * Options forwarded to createTmuxHost (socketName, sessionName, cols/rows, …).
    *
@@ -79,13 +79,13 @@ export interface DaemonOptions {
 }
 
 /**
- * A fully-assembled daemon runtime.
+ * A fully-assembled session-proxy runtime.
  *
  * Call `start()` to spawn tmux and bootstrap the pipeline.
  * Call `addClient(transport)` for each new client connection.
  * Call `stop()` / `kill()` for shutdown.
  */
-export interface Daemon {
+export interface SessionProxy {
   /** The underlying TmuxHost (useful for direct write() in tests). */
   readonly host: TmuxHost;
   /** The output demux (attach/detach transports, pause/resume panes). */
@@ -100,7 +100,7 @@ export interface Daemon {
   readonly flowController: FlowController;
 
   /**
-   * Start the daemon: spawn tmux and run the bootstrap exchange.
+   * Start the sessionProxy: spawn tmux and run the bootstrap exchange.
    * Resolves once the pipeline is live (model populated).
    */
   start(): Promise<void>;
@@ -130,9 +130,9 @@ export interface Daemon {
 // ---------------------------------------------------------------------------
 
 /**
- * Assemble the full daemon runtime.
+ * Assemble the full session-proxy runtime.
  *
- * The returned Daemon is NOT started yet — call `daemon.start()` to spawn tmux.
+ * The returned SessionProxy is NOT started yet — call `sessionProxy.start()` to spawn tmux.
  *
  * Wiring order (important for correctness):
  *   1. createOutputDemux           — creates the tapped PaneBufferStore.
@@ -144,7 +144,7 @@ export interface Daemon {
  *
  * @param opts - Optional per-component options.
  */
-export function createDaemon(opts: DaemonOptions): Daemon {
+export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
   // 1. Host
   const host = createTmuxHost(opts.host);
 
@@ -250,7 +250,7 @@ export function createDaemon(opts: DaemonOptions): Daemon {
   });
 
   // ---------------------------------------------------------------------------
-  // Daemon handle
+  // SessionProxy handle
   // ---------------------------------------------------------------------------
 
   return {
@@ -287,7 +287,7 @@ export function createDaemon(opts: DaemonOptions): Daemon {
       }
 
       // Subscribe to host.onExit so that when tmux dies unexpectedly the
-      // daemon tears down its pipeline and notifies all connected clients.
+      // session-proxy tears down its pipeline and notifies all connected clients.
       host.onExit(() => {
         // Stop the pipeline (mirrors stop() but without waiting for host exit
         // since we're already in the exit handler).
@@ -315,7 +315,7 @@ export function createDaemon(opts: DaemonOptions): Daemon {
       //    with actual transport drain.  Previously we called noteDrained
       //    synchronously after transport.sendData returned, which credited
       //    bytes as drained the instant they entered the kernel send buffer —
-      //    so the daemon never observed real consumer backpressure and tmux
+      //    so the session-proxy never observed real consumer backpressure and tmux
       //    was never told to pause.  Now we await the Promise returned by
       //    transport.sendData (set when the underlying socket is backpressured)
       //    and only credit drain after the socket reports 'drain'.
@@ -359,7 +359,7 @@ export function createDaemon(opts: DaemonOptions): Daemon {
           server.handleResyncRequest(transport);
           return;
         }
-        inputPath.handleClientMessage(msg as import("../wire/daemon-control.js").ClientMessage);
+        inputPath.handleClientMessage(msg as import("../wire/session-proxy-control.js").ClientMessage);
       });
 
       // 4. Clean up data plane when the transport closes.

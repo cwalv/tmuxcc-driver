@@ -5,7 +5,7 @@
  * # Problem
  *
  * A firehose pane (e.g. `yes`) can emit bytes faster than the client can
- * consume them.  Without backpressure the daemon buffers unboundedly and the
+ * consume them.  Without backpressure the session-proxy buffers unboundedly and the
  * client's receive queue grows without bound.
  *
  * tmux's control-mode provides flow control via `refresh-client -A`:
@@ -19,7 +19,7 @@
  *
  * ## Two sources of pause/resume
  *
- * 1. **Backpressure (high/low-water)**: the daemon's own byte accounting.
+ * 1. **Backpressure (high/low-water)**: the session-proxy's own byte accounting.
  *    Each time `onPaneBytes(paneId, n)` is called (by whoever appends to the
  *    demux store), buffered bytes are incremented.  When a pane crosses the
  *    HIGH-WATER mark the controller:

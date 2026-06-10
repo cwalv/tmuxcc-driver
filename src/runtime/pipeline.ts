@@ -1,7 +1,7 @@
 /**
  * Runtime pipeline — wire stdout→tokenizer→parser→reducer→live model + deltas (tc-4fo).
  *
- * This is the SPINE of the daemon runtime (E4): it connects a TmuxHost's raw
+ * This is the SPINE of the session-proxy runtime (E4): it connects a TmuxHost's raw
  * stdout byte stream to the E2 parser (ControlTokenizer + parseNotification +
  * CommandCorrelator) and the E3 state layer (BootstrapCoordinator + reduce),
  * maintaining the live SessionModel and emitting model-change signals.
@@ -108,7 +108,7 @@ export interface RuntimePipelineOptions {
   checkInvariantsOnUpdate?: boolean;
 
   /**
-   * The tmux session name this daemon is attached to.
+   * The tmux session name this session-proxy is attached to.
    * Forwarded to `BootstrapCoordinator` so that after bootstrap the
    * coordinator can resolve `boundSessionId` from the initial model and
    * wire it into the ReducerContext for switch-client narrowing (tc-j9c.7).
@@ -346,7 +346,7 @@ class RuntimePipelineImpl implements RuntimePipeline {
       this._host.write(setOption("window-global", "monitor-activity", "on") + "\n");
     }
 
-    // tc-7xv.28: register a per-window subscription so the daemon detects
+    // tc-7xv.28: register a per-window subscription so the session-proxy detects
     // synchronize-panes changes made by external tmux clients (e.g.
     // `tmux set-option -wt @N synchronize-panes on`).
     //

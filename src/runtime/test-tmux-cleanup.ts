@@ -47,7 +47,7 @@
  * This keeps the test surface unambiguous in `/tmp/tmux-<uid>/`:
  *
  *   - Anything starting with `tmuxcc-test-` is a test artifact.
- *   - Production names (`tmuxcc-vscode-<pid>-<ts>` from daemon-transport.ts,
+ *   - Production names (`tmuxcc-vscode-<pid>-<ts>` from session-proxy-transport.ts,
  *     the bare `tmuxcc` socket from `isolatedSocket: true`, the user's own
  *     `-L default`) are all strictly out of scope and will never be touched.
  *

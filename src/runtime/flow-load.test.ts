@@ -4,7 +4,7 @@
  *
  * # What this tests
  *
- * Drives a REAL tmux session through the full daemon stack with a firehose pane
+ * Drives a REAL tmux session through the full session-proxy stack with a firehose pane
  * (`yes` / bounded seq loop) and asserts three acceptance criteria:
  *
  *   1. **Pause/resume engagement** — under sustained flood, the flow controller
@@ -26,12 +26,12 @@
  *
  * # How pause is triggered
  *
- * The daemon's `accountingStore` (wired in daemon.ts) calls `fc.onPaneBytes`
+ * The session-proxy's `accountingStore` (wired in session-proxy.ts) calls `fc.onPaneBytes`
  * on every append.  `noteDrained` is NEVER called automatically by the real
  * serve layer — it is an explicit drain signal.  Therefore, under a real
  * firehose, `fc.bufferedBytes` grows monotonically until the high-water mark
  * is crossed and pause is issued.  Tests drive the resume cycle by calling
- * `daemon.flowController.noteDrained(paneId, n)` directly.
+ * `sessionProxy.flowController.noteDrained(paneId, n)` directly.
  *
  * # Cap-eviction semantics
  *
@@ -130,13 +130,13 @@ describe(
     // -----------------------------------------------------------------------
     // F1. Pause engagement under firehose
     //
-    // Stand up a real daemon + client, start a firehose pane (`yes`).
+    // Stand up a real session-proxy + client, start a firehose pane (`yes`).
     // Since `noteDrained` is never auto-called by the serve layer, the flow
     // controller's buffered byte counter accumulates until it crosses the
     // high-water mark (256 KiB).  At that point:
     //   - fc.isPanePaused(paneId) must become true
     //   - demux.isPanePaused(paneId) must become true
-    //   - daemon.host.write() must have been called with a pause command
+    //   - sessionProxy.host.write() must have been called with a pause command
     //
     // We poll for up to 15 s (generous; yes at full speed should hit 256 KiB
     // in < 100 ms).  A tight time-box prevents CI hangs.
@@ -150,9 +150,9 @@ describe(
         after(() => killServer(session.socketName));
 
         try {
-          const { daemon, controller, paneId } = session;
-          const fc = daemon.flowController;
-          const demux = daemon.demux;
+          const { sessionProxy, controller, paneId } = session;
+          const fc = sessionProxy.flowController;
+          const demux = sessionProxy.demux;
 
           // Sanity: pane is not paused at start.
           assert.equal(fc.isPanePaused(paneId), false, "pane must not be paused before firehose");
@@ -222,9 +222,9 @@ describe(
         after(() => killServer(session.socketName));
 
         try {
-          const { daemon, controller, paneId } = session;
-          const fc = daemon.flowController;
-          const demux = daemon.demux;
+          const { sessionProxy, controller, paneId } = session;
+          const fc = sessionProxy.flowController;
+          const demux = sessionProxy.demux;
 
           // Start firehose to trigger pause.
           controller.sendInput(paneId, "yes\n");
@@ -297,9 +297,9 @@ describe(
         after(() => killServer(session.socketName));
 
         try {
-          const { daemon, controller, paneId } = session;
-          const fc = daemon.flowController;
-          const demux = daemon.demux;
+          const { sessionProxy, controller, paneId } = session;
+          const fc = sessionProxy.flowController;
+          const demux = sessionProxy.demux;
 
           for (let cycle = 1; cycle <= 2; cycle++) {
             // Start firehose.
@@ -360,9 +360,9 @@ describe(
         after(() => killServer(session.socketName));
 
         try {
-          const { daemon, controller, paneId } = session;
-          const fc = daemon.flowController;
-          const store = daemon.demux.store;
+          const { sessionProxy, controller, paneId } = session;
+          const fc = sessionProxy.flowController;
+          const store = sessionProxy.demux.store;
 
           // Start a high-output loop (bounded: 100k iterations of echo).
           // Using `yes | head -n 200000` to stay bounded in time.
@@ -469,8 +469,8 @@ describe(
         after(() => killServer(session.socketName));
 
         try {
-          const { daemon, controller, paneId } = session;
-          const fc = daemon.flowController;
+          const { sessionProxy, controller, paneId } = session;
+          const fc = sessionProxy.flowController;
 
           // Run a bounded sequential loop.
           // Use a high-numbered sentinel that cannot appear in the command
@@ -579,20 +579,20 @@ describe(
     //   1. Send Ctrl-C to stop the firehose.
     //   2. Drain the flow controller.
     //   3. Assert pane is resumed + demux gate is open.
-    //   4. Assert daemon is still alive (subsequent echo works).
+    //   4. Assert session-proxy is still alive (subsequent echo works).
     // -----------------------------------------------------------------------
 
     it(
-      "F6: Ctrl-C stops firehose → drain → resume + daemon alive",
+      "F6: Ctrl-C stops firehose → drain → resume + session-proxy alive",
       { timeout: 30_000 },
       async () => {
         const session: E2ESession = await setupE2E("flow-stop");
         after(() => killServer(session.socketName));
 
         try {
-          const { daemon, controller, paneId } = session;
-          const fc = daemon.flowController;
-          const demux = daemon.demux;
+          const { sessionProxy, controller, paneId } = session;
+          const fc = sessionProxy.flowController;
+          const demux = sessionProxy.demux;
 
           // Start firehose.
           controller.sendInput(paneId, "yes\n");
@@ -631,7 +631,7 @@ describe(
             "bufferedBytes must be 0 after full drain",
           );
 
-          // Daemon must still be alive.
+          // SessionProxy must still be alive.
           controller.sendInput(paneId, "echo after-stop-alive\n");
           await session.waitForOutput(paneId, "after-stop-alive", 10_000);
 

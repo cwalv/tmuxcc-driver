@@ -1,8 +1,8 @@
 /**
- * Daemon wire control-plane message schema for the tmuxcc wire protocol.
+ * SessionProxy wire control-plane message schema for the tmuxcc wire protocol.
  *
- * These are the STRUCTURED messages that flow between daemon and client
- * on the daemon wire (one connection = one tmux session).
+ * These are the STRUCTURED messages that flow between session-proxy and client
+ * on the session-proxy wire (one connection = one tmux session).
  * They are transport-agnostic: no WebSocket frames, no pipe framing, no
  * length-prefixed byte streams (that is tc-2mq's job).
  *
@@ -10,19 +10,19 @@
  *   - No tmux south-side vocabulary: no %output, no %begin/%end, no tmux
  *     command numbers, no octal escapes, no layout-string syntax.
  *   - No renderer/host vocabulary: no Pseudoterminal, no VS Code types, no DOM.
- *   The wire is the daemon's projection of its model, not a passthrough of
+ *   The wire is the session-proxy's projection of its model, not a passthrough of
  *   tmux's control-mode syntax and not a renderer API.
  *
  * ---------------------------------------------------------------------------
  * DIRECTION MODEL
  * ---------------------------------------------------------------------------
  *
- * Daemon → Client (server push): the daemon is the source of truth and pushes
+ * SessionProxy → Client (server push): the session-proxy is the source of truth and pushes
  *   state changes to the client. These are read-only events from the client's
  *   perspective.
  *
- * Client → Daemon (client request): the client sends input or resize requests
- *   to the daemon.
+ * Client → SessionProxy (client request): the client sends input or resize requests
+ *   to the session-proxy.
  *
  * Both: the handshake messages (capabilities exchange) flow in both directions;
  *   their sequencing is defined by tc-auj; here we only define the data shapes.
@@ -33,20 +33,20 @@
  *
  * See envelope.ts for WIRE_PROTOCOL_VERSION.
  *
- * v2 → v3 (tc-j9c.1/tc-j9c.2): Daemon wire becomes single-session.
+ * v2 → v3 (tc-j9c.1/tc-j9c.2): SessionProxy wire becomes single-session.
  *   - Plural `sessions[]` snapshot replaced by singular `session`.
  *   - `sessionId` stripped from every delta (PaneOpenedMessage, PaneClosedMessage,
  *     LayoutUpdatedMessage, FocusChangedMessage, WindowAddedMessage, WindowClosedMessage).
  *   - `active` stripped from SnapshotSession (always true — bound session).
  *   - `sessionId` stripped from SnapshotWindow, SnapshotPane, and focus.
- *   - SessionAddedMessage, SessionChangedMessage removed from daemon wire
- *     (moved to broker wire).
- *   - SessionRenamedMessage renamed DaemonSessionRenamedMessage; sessionId dropped.
+ *   - SessionAddedMessage, SessionChangedMessage removed from session-proxy wire
+ *     (moved to server-proxy wire).
+ *   - SessionRenamedMessage renamed SessionProxySessionRenamedMessage; sessionId dropped.
  *   - SessionClosedMessage removed; session destruction surfaces as ErrorMessage
  *     with code "session.unavailable".
- *   - CommandRequestMessage renamed DaemonCommandRequestMessage;
- *     CommandResponseMessage renamed DaemonCommandResponseMessage;
- *     CommandOkPayload renamed DaemonCommandOkPayload.
+ *   - CommandRequestMessage renamed SessionProxyCommandRequestMessage;
+ *     CommandResponseMessage renamed SessionProxyCommandResponseMessage;
+ *     CommandOkPayload renamed SessionProxyCommandOkPayload.
  *   - `sessionId` dropped from OpenWindowCommand.
  *   - "session.closed" removed from WireErrorCode; "session.unavailable" remains.
  */
@@ -56,15 +56,15 @@ import type { WindowLayout } from "./layout.js";
 import type { MessageBase, Capabilities } from "./envelope.js";
 
 // ---------------------------------------------------------------------------
-// Daemon → Client messages (server push)
+// SessionProxy → Client messages (server push)
 // ---------------------------------------------------------------------------
 
 /**
  * A new pane has been created.
- * direction: daemon→client
+ * direction: session-proxy→client
  *
  * Sent when a pane opens (new window, split, or any other tmux operation
- * that produces a new pane). The daemon maps the tmux-internal id to a
+ * that produces a new pane). The session-proxy maps the tmux-internal id to a
  * wire PaneId before sending; `%N` never appears here.
  */
 export interface PaneOpenedMessage extends MessageBase {
@@ -83,9 +83,9 @@ export interface PaneOpenedMessage extends MessageBase {
 
 /**
  * A pane has been closed (exited or killed).
- * direction: daemon→client
+ * direction: session-proxy→client
  *
- * `exitCode` is the process exit code if the daemon captured it. It is
+ * `exitCode` is the process exit code if the session-proxy captured it. It is
  * optional because the current tmux notification layer (%window-close) does
  * not carry the per-pane exit status — tmux only notifies that the window
  * closed, not the individual pane's exit code. When absent, renderers should
@@ -99,7 +99,7 @@ export interface PaneClosedMessage extends MessageBase {
   readonly windowId: WindowId;
   /**
    * Exit code of the pane's process, if known.
-   * Absent when the daemon could not determine the exit code (most common case:
+   * Absent when the session-proxy could not determine the exit code (most common case:
    * tmux's %window-close notification does not include a per-pane exit status).
    */
   readonly exitCode?: number;
@@ -107,9 +107,9 @@ export interface PaneClosedMessage extends MessageBase {
 
 /**
  * A pane's dimensions have changed (user resized the terminal or layout changed).
- * direction: daemon→client
+ * direction: session-proxy→client
  *
- * Distinct from ResizeRequestMessage (client→daemon): this is the daemon
+ * Distinct from ResizeRequestMessage (client→sessionProxy): this is the session-proxy
  * confirming the new size after the resize has taken effect.
  */
 export interface PaneResizedMessage extends MessageBase {
@@ -121,7 +121,7 @@ export interface PaneResizedMessage extends MessageBase {
 
 /**
  * The layout of a window has changed.
- * direction: daemon→client
+ * direction: session-proxy→client
  *
  * Sent whenever panes are added, removed, or resized within a window,
  * giving clients the full current geometry as a structured tree.
@@ -138,7 +138,7 @@ export interface LayoutUpdatedMessage extends MessageBase {
 
 /**
  * The active (focused) pane has changed.
- * direction: daemon→client
+ * direction: session-proxy→client
  *
  * Sent when the user navigates between panes or when tmux changes focus for
  * any reason. If no pane is active (e.g., no windows open), `paneId` is null.
@@ -150,18 +150,18 @@ export interface FocusChangedMessage extends MessageBase {
 }
 
 /**
- * The daemon's capabilities advertisement (sent once at handshake time).
- * direction: daemon→client
+ * The session-proxy's capabilities advertisement (sent once at handshake time).
+ * direction: session-proxy→client
  *
  * The handshake sequence is defined by bead tc-auj; this is just the shape.
  */
-export interface DaemonCapabilitiesMessage extends MessageBase {
-  readonly type: "daemon.capabilities";
+export interface SessionProxyCapabilitiesMessage extends MessageBase {
+  readonly type: "session-proxy.capabilities";
   readonly capabilities: Capabilities;
 }
 
 // ---------------------------------------------------------------------------
-// Snapshot (daemon→client, sent once on connect)
+// Snapshot (session-proxy→client, sent once on connect)
 // ---------------------------------------------------------------------------
 
 /**
@@ -213,9 +213,9 @@ export interface SnapshotPane {
 }
 
 /**
- * Full-state snapshot, sent once by the daemon immediately after the
+ * Full-state snapshot, sent once by the session-proxy immediately after the
  * capabilities handshake.
- * direction: daemon→client
+ * direction: session-proxy→client
  *
  * Design: normalized (flat arrays) rather than deeply nested. The client
  * builds its own in-memory tree by joining on ids. This avoids deeply
@@ -226,7 +226,7 @@ export interface SnapshotPane {
  * (ordered by seq) to maintain an up-to-date local model. The Snapshot
  * seq acts as the baseline; any Delta with a higher seq is applied on top.
  *
- * The daemon is bound to exactly one session for its lifetime; that session
+ * The session-proxy is bound to exactly one session for its lifetime; that session
  * is carried in `session`. There is no `sessions[]` array — the plural
  * multi-session shape was removed in v3 (tc-j9c.2).
  *
@@ -235,7 +235,7 @@ export interface SnapshotPane {
  */
 export interface SnapshotMessage extends MessageBase {
   readonly type: "snapshot";
-  /** The daemon's bound session. */
+  /** The session-proxy's bound session. */
   readonly session: SnapshotSession;
   /** All windows in the bound session. */
   readonly windows: readonly SnapshotWindow[];
@@ -250,7 +250,7 @@ export interface SnapshotMessage extends MessageBase {
     readonly windowId: WindowId | null;
   };
   /**
-   * Number of daemon-protocol clients currently connected to the server at
+   * Number of session-proxy-protocol clients currently connected to the server at
    * the moment the snapshot was built.
    *
    * tc-1elae (Phase 2 — §11.4 tooltip): used by the VS Code status bar to
@@ -265,12 +265,12 @@ export interface SnapshotMessage extends MessageBase {
 }
 
 // ---------------------------------------------------------------------------
-// Additional Deltas — window lifecycle (daemon→client)
+// Additional Deltas — window lifecycle (session-proxy→client)
 // ---------------------------------------------------------------------------
 
 /**
  * A new window was added to the bound session.
- * direction: daemon→client
+ * direction: session-proxy→client
  */
 export interface WindowAddedMessage extends MessageBase {
   readonly type: "window.added";
@@ -285,7 +285,7 @@ export interface WindowAddedMessage extends MessageBase {
 
 /**
  * A window was closed (all its panes exited or it was explicitly destroyed).
- * direction: daemon→client
+ * direction: session-proxy→client
  */
 export interface WindowClosedMessage extends MessageBase {
   readonly type: "window.closed";
@@ -294,7 +294,7 @@ export interface WindowClosedMessage extends MessageBase {
 
 /**
  * A window was renamed.
- * direction: daemon→client
+ * direction: session-proxy→client
  */
 export interface WindowRenamedMessage extends MessageBase {
   readonly type: "window.renamed";
@@ -303,14 +303,14 @@ export interface WindowRenamedMessage extends MessageBase {
 }
 
 // ---------------------------------------------------------------------------
-// Additional Deltas — synchronize-panes state (daemon→client, tc-7xv.12)
+// Additional Deltas — synchronize-panes state (session-proxy→client, tc-7xv.12)
 // ---------------------------------------------------------------------------
 
 /**
  * The synchronize-panes state of a window has changed.
- * direction: daemon→client
+ * direction: session-proxy→client
  *
- * Emitted by the daemon when `synchronize-panes` is toggled for a window —
+ * Emitted by the session-proxy when `synchronize-panes` is toggled for a window —
  * either via a `set-synchronize-panes` command (tc-7xv.12, optimistic update)
  * or via a future reactive mechanism for out-of-band CLI changes.
  *
@@ -336,9 +336,9 @@ export interface WindowSyncChangedMessage extends MessageBase {
 
 /**
  * The monitor-activity state of a window has changed.
- * direction: daemon→client
+ * direction: session-proxy→client
  *
- * Emitted by the daemon when `monitor-activity` is toggled for a window via a
+ * Emitted by the session-proxy when `monitor-activity` is toggled for a window via a
  * `set-monitor-activity` command (tc-7xv.15, optimistic update).
  *
  * `on: true`  → activity monitoring is active for this window.
@@ -356,9 +356,9 @@ export interface WindowMonitorActivityChangedMessage extends MessageBase {
 
 /**
  * The monitor-silence state of a window has changed.
- * direction: daemon→client
+ * direction: session-proxy→client
  *
- * Emitted by the daemon when `monitor-silence` is toggled for a window via a
+ * Emitted by the session-proxy when `monitor-silence` is toggled for a window via a
  * `set-monitor-silence` command (tc-7xv.15, optimistic update).
  *
  * `seconds > 0` → silence monitoring is active (fires after N seconds of no output).
@@ -378,12 +378,12 @@ export interface WindowMonitorSilenceChangedMessage extends MessageBase {
 }
 
 // ---------------------------------------------------------------------------
-// Additional Deltas — client-count changes (daemon→client, tc-44wu0)
+// Additional Deltas — client-count changes (session-proxy→client, tc-44wu0)
 // ---------------------------------------------------------------------------
 
 /**
- * The number of daemon-protocol clients connected to this session has changed.
- * direction: daemon→client
+ * The number of session-proxy-protocol clients connected to this session has changed.
+ * direction: session-proxy→client
  *
  * Sent by the ControlServer whenever a client connects or disconnects so that
  * every still-connected client can update its "Attached clients: K" tooltip
@@ -399,32 +399,32 @@ export interface WindowMonitorSilenceChangedMessage extends MessageBase {
  */
 export interface ClientCountChangedMessage extends MessageBase {
   readonly type: "client-count.changed";
-  /** Authoritative number of connected daemon-protocol clients. */
+  /** Authoritative number of connected session-proxy-protocol clients. */
   readonly count: number;
 }
 
 // ---------------------------------------------------------------------------
-// Additional Deltas — session lifecycle (daemon→client)
+// Additional Deltas — session lifecycle (session-proxy→client)
 // ---------------------------------------------------------------------------
 
 /**
  * The bound session was renamed.
- * direction: daemon→client
+ * direction: session-proxy→client
  *
- * There is only one session on the daemon wire; no sessionId is needed.
- * The broker wire emits its own BrokerSessionRenamedMessage to broker-wire
+ * There is only one session on the session-proxy wire; no sessionId is needed.
+ * The server-proxy wire emits its own ServerProxySessionRenamedMessage to server-proxy-wire
  * subscribers for the same rename event.
  *
- * Session creation and destruction are broker-wire concerns. Session
- * destruction surfaces on the daemon wire as ErrorMessage{code:"session.unavailable"}.
+ * Session creation and destruction are server-proxy-wire concerns. Session
+ * destruction surfaces on the session-proxy wire as ErrorMessage{code:"session.unavailable"}.
  */
-export interface DaemonSessionRenamedMessage extends MessageBase {
+export interface SessionProxySessionRenamedMessage extends MessageBase {
   readonly type: "session.renamed";
   readonly newName: string;
 }
 
 // ---------------------------------------------------------------------------
-// Additional Deltas — pane mode (daemon→client)
+// Additional Deltas — pane mode (session-proxy→client)
 // ---------------------------------------------------------------------------
 
 /**
@@ -445,7 +445,7 @@ export type PaneMode = "normal" | "copy" | "view" | (string & Record<never, neve
 
 /**
  * A pane entered or left a mode (e.g. entered copy mode, or returned to normal).
- * direction: daemon→client
+ * direction: session-proxy→client
  */
 export interface PaneModeChangedMessage extends MessageBase {
   readonly type: "pane.mode-changed";
@@ -454,17 +454,17 @@ export interface PaneModeChangedMessage extends MessageBase {
 }
 
 // ---------------------------------------------------------------------------
-// Command request / response (client↔daemon, correlated)
+// Command request / response (client↔sessionProxy, correlated)
 // ---------------------------------------------------------------------------
 
 /**
  * Open a new window in the bound session.
- * The daemon chooses the pane id(s); the created window/pane ids arrive via
- * DaemonCommandResponseMessage on success (payload.windowId, payload.paneId).
+ * The session-proxy chooses the pane id(s); the created window/pane ids arrive via
+ * SessionProxyCommandResponseMessage on success (payload.windowId, payload.paneId).
  */
 export interface OpenWindowCommand {
   readonly kind: "open-window";
-  /** Optional name for the new window. If omitted the daemon picks one. */
+  /** Optional name for the new window. If omitted the session-proxy picks one. */
   readonly name?: string;
   /**
    * Working directory for the first pane of the new window (`-c <dir>`).
@@ -483,12 +483,12 @@ export interface OpenWindowCommand {
 
 /**
  * Split an existing pane into two.
- * The new pane's id arrives in DaemonCommandResponseMessage on success (payload.paneId).
+ * The new pane's id arrives in SessionProxyCommandResponseMessage on success (payload.paneId).
  */
 export interface SplitPaneCommand {
   readonly kind: "split-pane";
   /**
-   * The pane to split.  When absent, the daemon splits the current pane
+   * The pane to split.  When absent, the session-proxy splits the current pane
    * (tmux's implicit target).  This is used by the cold-start profile
    * applicator (tc-cr4dz) when splitting a pane in a newly-created window
    * where the new window's first pane ID is not yet known.
@@ -514,7 +514,7 @@ export interface SplitPaneCommand {
 }
 
 /**
- * Close (kill) a pane. The daemon emits a pane.closed delta on success.
+ * Close (kill) a pane. The session-proxy emits a pane.closed delta on success.
  */
 export interface ClosePaneCommand {
   readonly kind: "close-pane";
@@ -522,7 +522,7 @@ export interface ClosePaneCommand {
 }
 
 /**
- * Rename a window. The daemon emits a window.renamed delta on success.
+ * Rename a window. The session-proxy emits a window.renamed delta on success.
  */
 export interface RenameWindowCommand {
   readonly kind: "rename-window";
@@ -531,7 +531,7 @@ export interface RenameWindowCommand {
 }
 
 /**
- * Focus (select) a pane. The daemon emits a focus.changed delta on success.
+ * Focus (select) a pane. The session-proxy emits a focus.changed delta on success.
  */
 export interface SelectPaneCommand {
   readonly kind: "select-pane";
@@ -539,7 +539,7 @@ export interface SelectPaneCommand {
 }
 
 /**
- * Resize a pane. The daemon emits a pane.resized delta on success.
+ * Resize a pane. The session-proxy emits a pane.resized delta on success.
  * Distinct from ResizeRequestMessage (viewport-driven); this is an explicit
  * user-initiated resize command.
  */
@@ -554,7 +554,7 @@ export interface ResizePaneCommand {
  * Kill the tmux session entirely.
  *
  * Used when `tmuxcc.killSessionOnLastWindowClose: true` (ux-design.md [deleted; map: ux-design-v2 §8] §13)
- * and the last window of the session is closed. The daemon emits
+ * and the last window of the session is closed. The session-proxy emits
  * ErrorMessage{code:"session.unavailable"} and closes all client connections.
  *
  * Additive addition — non-breaking per the versioning policy
@@ -562,7 +562,7 @@ export interface ResizePaneCommand {
  * command kinds per the forward-compatible `default` branch in input-path.ts).
  *
  * tc-91o: uses sessionName (string) rather than sessionId (SessionId) so the
- * daemon can pass the name directly to `kill-session -t =<name>` without a
+ * session-proxy can pass the name directly to `kill-session -t =<name>` without a
  * fragile numeric-id mapping (tmux session numbers can be reshuffled).
  */
 export interface KillSessionCommand {
@@ -572,9 +572,9 @@ export interface KillSessionCommand {
 
 /**
  * Toggle `synchronize-panes` for a window.
- * direction: client→daemon
+ * direction: client→session-proxy
  *
- * The daemon emits `set-option -wt @<N> synchronize-panes on|off` and, when the
+ * The session-proxy emits `set-option -wt @<N> synchronize-panes on|off` and, when the
  * hook detects the option change, pushes a `window.sync.changed` delta to all
  * connected clients (tc-7xv.12).
  *
@@ -594,12 +594,12 @@ export interface SetSynchronizePanesCommand {
 
 /**
  * Break a pane out of its window into a new window.
- * direction: client→daemon
+ * direction: client→session-proxy
  *
  * Corresponds to `break-pane -dP -t %<N>`.  The `-d` flag keeps the new
  * window in the background so VS Code's tab strip doesn't jump focus.
  *
- * The daemon will emit a window.added delta (new window) followed by
+ * The session-proxy will emit a window.added delta (new window) followed by
  * pane.opened (the pane in its new home).  The old window may emit
  * window.closed if it had only one pane.
  *
@@ -612,12 +612,12 @@ export interface BreakPaneCommand {
 
 /**
  * Swap a pane with the most-recently-used (MRU) other pane.
- * direction: client→daemon
+ * direction: client→session-proxy
  *
- * When `targetPaneId` is absent the daemon calls `swap-pane -D`, which
+ * When `targetPaneId` is absent the session-proxy calls `swap-pane -D`, which
  * rotates the active pane with the next pane in the window's layout — a
  * simple "swap with next" that requires no picker.  When `targetPaneId`
- * is supplied the daemon calls `swap-pane -s %<src> -t %<tgt>`.
+ * is supplied the session-proxy calls `swap-pane -s %<src> -t %<tgt>`.
  *
  * Additive addition — non-breaking per the versioning policy.
  */
@@ -630,7 +630,7 @@ export interface SwapPaneCommand {
 
 /**
  * Set a display title on a pane (`select-pane -T <title>`).
- * direction: client→daemon
+ * direction: client→session-proxy
  *
  * tmux does not persist pane titles across restarts; they are display-only
  * decorations.  The extension stores the user-visible label in the binding
@@ -651,9 +651,9 @@ export interface RenamePaneCommand {
 
 /**
  * Set `monitor-activity` for a window.
- * direction: client→daemon
+ * direction: client→session-proxy
  *
- * The daemon emits `set-option -wt @<N> monitor-activity on|off` and injects
+ * The session-proxy emits `set-option -wt @<N> monitor-activity on|off` and injects
  * an optimistic `internal:set-window-monitor-activity` event to update the
  * model immediately (tc-7xv.15).
  *
@@ -671,9 +671,9 @@ export interface SetMonitorActivityCommand {
 
 /**
  * Set `monitor-silence` for a window.
- * direction: client→daemon
+ * direction: client→session-proxy
  *
- * The daemon emits `set-option -wt @<N> monitor-silence <seconds>` (when
+ * The session-proxy emits `set-option -wt @<N> monitor-silence <seconds>` (when
  * enabling) or `set-option -wt @<N> monitor-silence 0` (when disabling) and
  * injects an optimistic `internal:set-window-monitor-silence` event (tc-7xv.15).
  *
@@ -699,7 +699,7 @@ export interface SetMonitorSilenceCommand {
  * Kill a tmux window and all its panes.
  *
  * Issues `kill-window -t @<N>` in the bound session.
- * The daemon emits window.removed + pane.closed deltas for each affected pane.
+ * The session-proxy emits window.removed + pane.closed deltas for each affected pane.
  *
  * `windowId` is the wire WindowId of the window to kill (e.g. "w2").
  *
@@ -735,8 +735,8 @@ export interface SwapWindowCommand {
  * Narrow with `cmd.kind` to get the specific shape.
  *
  * All commands are model-level — no raw tmux command strings are exposed.
- * The daemon translates each command kind to the appropriate tmux operation
- * internally (south-side boundary). The E4 daemon runtime implements the
+ * The session-proxy translates each command kind to the appropriate tmux operation
+ * internally (south-side boundary). The E4 session-proxy runtime implements the
  * actual tmux side; this is the wire shape only.
  *
  * All commands operate within the bound session. None carry sessionId.
@@ -762,15 +762,15 @@ export type WireCommand =
   | SwapWindowCommand;
 
 /**
- * Client issues a model-level command to the daemon.
- * direction: client→daemon
+ * Client issues a model-level command to the session-proxy.
+ * direction: client→session-proxy
  *
  * `correlationId` is a client-generated opaque string (e.g. a UUID or
- * monotonic counter string) that the daemon echoes back in
- * `DaemonCommandResponseMessage`. Clients use it to match responses to outstanding
- * requests. The daemon does NOT assign correlation ids.
+ * monotonic counter string) that the session-proxy echoes back in
+ * `SessionProxyCommandResponseMessage`. Clients use it to match responses to outstanding
+ * requests. The session-proxy does NOT assign correlation ids.
  */
-export interface DaemonCommandRequestMessage extends MessageBase {
+export interface SessionProxyCommandRequestMessage extends MessageBase {
   readonly type: "command.request";
   /** Client-generated opaque string, echoed in the matching response. */
   readonly correlationId: string;
@@ -780,53 +780,53 @@ export interface DaemonCommandRequestMessage extends MessageBase {
 
 /**
  * Successful command result payload. Fields are optional because not every
- * command produces a new entity. The daemon includes ids for newly created
+ * command produces a new entity. The session-proxy includes ids for newly created
  * entities (open-window → windowId + paneId, split-pane → paneId).
  */
-export interface DaemonCommandOkPayload {
+export interface SessionProxyCommandOkPayload {
   readonly windowId?: WindowId;
   readonly paneId?: PaneId;
 }
 
 /**
- * The daemon's response to a DaemonCommandRequestMessage.
- * direction: daemon→client
+ * The session-proxy's response to a SessionProxyCommandRequestMessage.
+ * direction: session-proxy→client
  *
  * Error handling: command-specific failures (unknown pane, invalid size,
  * permission denied) arrive HERE as `result.ok = false`. The separate
  * `ErrorMessage` (type: "error") is for UNSOLICITED / protocol-level errors
  * (malformed message, unknown message type, session in bad state) where there
  * is no in-flight command to correlate. If a failure is attributable to a
- * specific command request, the error comes in DaemonCommandResponseMessage, not
+ * specific command request, the error comes in SessionProxyCommandResponseMessage, not
  * ErrorMessage. This keeps the contract simple: command.request always gets
  * exactly one command.response.
  */
-export interface DaemonCommandResponseMessage extends MessageBase {
+export interface SessionProxyCommandResponseMessage extends MessageBase {
   readonly type: "command.response";
-  /** Echoed from the matching DaemonCommandRequestMessage. */
+  /** Echoed from the matching SessionProxyCommandRequestMessage. */
   readonly correlationId: string;
   /** Discriminated result: success or failure. */
   readonly result:
-    | { readonly ok: true; readonly payload?: DaemonCommandOkPayload }
+    | { readonly ok: true; readonly payload?: SessionProxyCommandOkPayload }
     | { readonly ok: false; readonly code: string; readonly message: string };
 }
 
 // ---------------------------------------------------------------------------
-// Error — unsolicited / protocol-level errors (daemon→client)
+// Error — unsolicited / protocol-level errors (session-proxy→client)
 // ---------------------------------------------------------------------------
 
 /**
- * Daemon-level error codes.
+ * SessionProxy-level error codes.
  *
- * "protocol.unknown-message"   — the daemon received a message type it does not
+ * "protocol.unknown-message"   — the session-proxy received a message type it does not
  *                                recognise; the message was dropped.
- * "protocol.malformed"         — the daemon could not parse the message
+ * "protocol.malformed"         — the session-proxy could not parse the message
  *                                (e.g. missing required field, wrong type).
  * "protocol.version-mismatch"  — protocol version negotiation failed.
  * "session.unavailable"        — the tmux session the connection was bound to
  *                                has gone away unexpectedly, or a switch-client
  *                                caused the bound session to disappear.
- * "internal"                   — unexpected daemon-side error not attributable
+ * "internal"                   — unexpected session-proxy-side error not attributable
  *                                to a specific command.
  *
  * The type is open-ended for forward compatibility.
@@ -840,15 +840,15 @@ export type WireErrorCode =
   | (string & Record<never, never>);
 
 /**
- * Unsolicited error pushed by the daemon.
- * direction: daemon→client
+ * Unsolicited error pushed by the session-proxy.
+ * direction: session-proxy→client
  *
  * ONLY for errors that are NOT attributable to a specific outstanding
- * DaemonCommandRequestMessage. If the error IS attributable to a command, the daemon
- * sends a DaemonCommandResponseMessage with `result.ok = false` instead.
+ * SessionProxyCommandRequestMessage. If the error IS attributable to a command, the session-proxy
+ * sends a SessionProxyCommandResponseMessage with `result.ok = false` instead.
  *
  * `correlationId` is OPTIONAL: if present, it ties the error to an earlier
- * command request that the daemon is now aborting without a normal response
+ * command request that the session-proxy is now aborting without a normal response
  * (e.g. the session died mid-execution). If absent, the error is fully
  * unsolicited (e.g. protocol parse failure on an unrelated frame).
  *
@@ -861,21 +861,21 @@ export interface ErrorMessage extends MessageBase {
   readonly code: WireErrorCode;
   /** Human-readable error description (English, for logging/debugging). */
   readonly message: string;
-  /** If set, ties this error to a prior DaemonCommandRequestMessage. */
+  /** If set, ties this error to a prior SessionProxyCommandRequestMessage. */
   readonly correlationId?: string;
 }
 
 // ---------------------------------------------------------------------------
-// Client → Daemon messages (client requests)
+// Client → SessionProxy messages (client requests)
 // ---------------------------------------------------------------------------
 
 /**
  * Client sends text/key input destined for a pane.
- * direction: client→daemon
+ * direction: client→session-proxy
  *
- * Input is represented as a UTF-8 string. The daemon forwards this to the
+ * Input is represented as a UTF-8 string. The session-proxy forwards this to the
  * pane's pty without tmux-level interpretation (NOT tmux send-keys syntax;
- * the daemon writes bytes directly). Special keys (e.g. escape sequences)
+ * the session-proxy writes bytes directly). Special keys (e.g. escape sequences)
  * should be pre-encoded by the client as their byte sequences before sending.
  *
  * Rationale for string vs Uint8Array: the control plane is structured text
@@ -892,11 +892,11 @@ export interface InputMessage extends MessageBase {
 
 /**
  * Client requests that a pane be resized.
- * direction: client→daemon
+ * direction: client→session-proxy
  *
  * The client sends this when the host viewport changes (e.g. VS Code pane
- * resized). The daemon applies the resize to tmux and then emits a
- * PaneResizedMessage (daemon→client) confirming the new dimensions.
+ * resized). The session-proxy applies the resize to tmux and then emits a
+ * PaneResizedMessage (session-proxy→client) confirming the new dimensions.
  */
 export interface ResizeRequestMessage extends MessageBase {
   readonly type: "resize.request";
@@ -907,11 +907,11 @@ export interface ResizeRequestMessage extends MessageBase {
 
 /**
  * Client's capabilities advertisement (sent once at handshake time).
- * direction: client→daemon (and client→broker)
+ * direction: client→sessionProxy (and client→serverProxy)
  *
  * This message type is shared between both wires — the same `type:
- * "client.capabilities"` discriminant is used on both the broker wire and
- * the daemon wire (each connection sends this once at handshake).
+ * "client.capabilities"` discriminant is used on both the server-proxy wire and
+ * the session-proxy wire (each connection sends this once at handshake).
  *
  * The handshake sequence is defined by bead tc-auj; this is just the shape.
  */
@@ -921,15 +921,15 @@ export interface ClientCapabilitiesMessage extends MessageBase {
 }
 
 /**
- * Client requests that the daemon re-send a full snapshot for this connection.
- * direction: client→daemon
+ * Client requests that the session-proxy re-send a full snapshot for this connection.
+ * direction: client→session-proxy
  *
  * Sent when the mirror detects a seq gap (a delta was dropped in transit) and
  * needs to re-establish a consistent baseline. No payload is required — the
  * connection identity is implicit in the transport.
  *
- * Daemon response: re-sends a SnapshotMessage at the next per-connection seq.
- * The daemon does NOT reset its seq counter; subsequent deltas continue from
+ * SessionProxy response: re-sends a SnapshotMessage at the next per-connection seq.
+ * The session-proxy does NOT reset its seq counter; subsequent deltas continue from
  * the seq that follows the re-sent snapshot.
  *
  * Client policy (tc-7ml.4):
@@ -940,7 +940,7 @@ export interface ClientCapabilitiesMessage extends MessageBase {
  *   4. If a gap is still present AFTER the snapshot delivers (persistent gap):
  *      escalate to `transport.close()` — the reconnect path handles the rest.
  *
- * Added in protocol v2 (tc-7ml.4). A v1 daemon receiving this message will
+ * Added in protocol v2 (tc-7ml.4). A v1 session-proxy receiving this message will
  * treat it as an unknown type; both sides must be v2+ for resync to work.
  * The exact-version handshake enforces this.
  */
@@ -953,24 +953,24 @@ export interface ResyncRequestMessage extends MessageBase {
 // ---------------------------------------------------------------------------
 
 /**
- * All messages the daemon pushes to the client.
+ * All messages the session-proxy pushes to the client.
  * Narrow with `msg.type` to get the specific shape.
  *
  * Grouped by family:
- *   Capabilities:  DaemonCapabilitiesMessage
+ *   Capabilities:  SessionProxyCapabilitiesMessage
  *   Snapshot:      SnapshotMessage
  *   Pane deltas:   PaneOpenedMessage | PaneClosedMessage | PaneResizedMessage | PaneModeChangedMessage
  *   Window deltas: WindowAddedMessage | WindowClosedMessage | WindowRenamedMessage | WindowSyncChangedMessage | WindowMonitorActivityChangedMessage | WindowMonitorSilenceChangedMessage
  *   Layout deltas: LayoutUpdatedMessage
  *   Focus deltas:  FocusChangedMessage
- *   Session delta: DaemonSessionRenamedMessage
+ *   Session delta: SessionProxySessionRenamedMessage
  *   Client delta:  ClientCountChangedMessage
- *   Commands:      DaemonCommandResponseMessage
+ *   Commands:      SessionProxyCommandResponseMessage
  *   Errors:        ErrorMessage
  */
-export type DaemonMessage =
+export type SessionProxyMessage =
   // Capabilities
-  | DaemonCapabilitiesMessage
+  | SessionProxyCapabilitiesMessage
   // Snapshot
   | SnapshotMessage
   // Pane deltas
@@ -991,42 +991,42 @@ export type DaemonMessage =
   | LayoutUpdatedMessage
   // Focus deltas
   | FocusChangedMessage
-  // Session delta (only rename survives in the daemon wire)
-  | DaemonSessionRenamedMessage
+  // Session delta (only rename survives in the session-proxy wire)
+  | SessionProxySessionRenamedMessage
   // Client-count delta (tc-44wu0)
   | ClientCountChangedMessage
   // Command responses
-  | DaemonCommandResponseMessage
+  | SessionProxyCommandResponseMessage
   // Unsolicited errors
   | ErrorMessage;
 
 /**
- * All messages the client sends to the daemon.
+ * All messages the client sends to the session-proxy.
  * Narrow with `msg.type` to get the specific shape.
  */
 export type ClientMessage =
   | InputMessage
   | ResizeRequestMessage
   | ClientCapabilitiesMessage
-  | DaemonCommandRequestMessage
+  | SessionProxyCommandRequestMessage
   | ResyncRequestMessage;
 
 /**
- * Any control-plane message (either direction) on the daemon wire.
+ * Any control-plane message (either direction) on the session-proxy wire.
  * Useful for generic transport code that doesn't care about direction.
  */
-export type ControlMessage = DaemonMessage | ClientMessage;
+export type ControlMessage = SessionProxyMessage | ClientMessage;
 
 // ---------------------------------------------------------------------------
 // Type guards — runtime narrowing without external schema libraries.
 // ---------------------------------------------------------------------------
 
-/** Narrows a ControlMessage to a specific daemon→client message type. */
-export function isDaemonMessage(msg: ControlMessage): msg is DaemonMessage {
+/** Narrows a ControlMessage to a specific session-proxy→client message type. */
+export function isSessionProxyMessage(msg: ControlMessage): msg is SessionProxyMessage {
   const t = msg.type;
   return (
     // Capabilities
-    t === "daemon.capabilities" ||
+    t === "session-proxy.capabilities" ||
     // Snapshot
     t === "snapshot" ||
     // Pane deltas
@@ -1058,7 +1058,7 @@ export function isDaemonMessage(msg: ControlMessage): msg is DaemonMessage {
   );
 }
 
-/** Narrows a ControlMessage to a specific client→daemon message type. */
+/** Narrows a ControlMessage to a specific client→session-proxy message type. */
 export function isClientMessage(msg: ControlMessage): msg is ClientMessage {
   const t = msg.type;
   return (
@@ -1075,16 +1075,16 @@ export function isClientMessage(msg: ControlMessage): msg is ClientMessage {
 // ---------------------------------------------------------------------------
 
 /**
- * @deprecated Use DaemonCommandRequestMessage. Kept for transition period.
+ * @deprecated Use SessionProxyCommandRequestMessage. Kept for transition period.
  */
-export type CommandRequestMessage = DaemonCommandRequestMessage;
+export type CommandRequestMessage = SessionProxyCommandRequestMessage;
 
 /**
- * @deprecated Use DaemonCommandResponseMessage. Kept for transition period.
+ * @deprecated Use SessionProxyCommandResponseMessage. Kept for transition period.
  */
-export type CommandResponseMessage = DaemonCommandResponseMessage;
+export type CommandResponseMessage = SessionProxyCommandResponseMessage;
 
 /**
- * @deprecated Use DaemonCommandOkPayload. Kept for transition period.
+ * @deprecated Use SessionProxyCommandOkPayload. Kept for transition period.
  */
-export type CommandOkPayload = DaemonCommandOkPayload;
+export type CommandOkPayload = SessionProxyCommandOkPayload;

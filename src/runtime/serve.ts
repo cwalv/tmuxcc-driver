@@ -6,7 +6,7 @@
  * `createControlServer` manages a set of connected clients over the CONTROL plane
  * (structured `ControlMessage` values). For each client it:
  *
- *   1. Runs the daemon side of the capability handshake (`runDaemonHandshake`).
+ *   1. Runs the session-proxy side of the capability handshake (`runSessionProxyHandshake`).
  *   2. Sends a full snapshot of the current model (`projectSnapshot`) as the
  *      client's first message after the handshake.
  *   3. Subscribes to `RuntimePipeline.onModelChange` and forwards each set of
@@ -16,7 +16,7 @@
  *
  * # Per-connection sequence counter
  *
- * Every `ControlMessage` carries a `seq` field (MessageBase). For daemon-push
+ * Every `ControlMessage` carries a `seq` field (MessageBase). For session-proxy-push
  * messages the seq is the DAEMON's per-connection counter, starting at 1 and
  * incrementing by 1 for each message sent to that client.
  *
@@ -40,7 +40,7 @@
  * To wire BOTH planes after accepting a client connection, the caller (tc-93a
  * integration) MUST:
  *
- *   1. Call `server.addClient(daemonSideTransport)` — returns a Promise that
+ *   1. Call `server.addClient(sessionProxySideTransport)` — returns a Promise that
  *      resolves with `NegotiatedSession` once the handshake + initial snapshot
  *      are done.  At this point the control stream is live.
  *   2. Use the resolved `NegotiatedSession` (features, protocolVersion) to
@@ -52,9 +52,9 @@
  * data-plane pump (tc-fbz) should use its own `transport.onClose` handler or
  * share the same one (calling `removeClient` is idempotent).
  *
- * # Inbound messages (client → daemon)
+ * # Inbound messages (client → sessionProxy)
  *
- * The control plane is bidirectional.  Most client→daemon messages (`command.request`,
+ * The control plane is bidirectional.  Most client→session-proxy messages (`command.request`,
  * `input`, `resize.request`) are routed by tc-93a / tc-kvk.  The one exception
  * handled HERE is `resync.request` (tc-7ml.4), because only the serve layer holds
  * the per-connection seq counter and can re-send the snapshot correctly.
@@ -70,17 +70,17 @@
 import type { RuntimePipeline } from "./pipeline.js";
 import type { Transport } from "../wire/transport.js";
 import {
-  runDaemonHandshake,
+  runSessionProxyHandshake,
   type NegotiatedSession,
 } from "../wire/handshake.js";
 import { WIRE_PROTOCOL_VERSION } from "../wire/envelope.js";
 import type { Capabilities } from "../wire/envelope.js";
 import type {
-  DaemonMessage,
+  SessionProxyMessage,
   ControlMessage,
   ErrorMessage,
   ClientCountChangedMessage,
-} from "../wire/daemon-control.js";
+} from "../wire/session-proxy-control.js";
 import { projectSnapshot } from "../state/projection.js";
 import { diffModel } from "../state/projection.js";
 
@@ -93,7 +93,7 @@ import { diffModel } from "../state/projection.js";
  */
 export interface ControlServerOptions {
   /**
-   * Capabilities the daemon advertises during the handshake.
+   * Capabilities the session-proxy advertises during the handshake.
    *
    * Defaults to a capabilities set advertising
    * `WIRE_PROTOCOL_VERSION` and all known wire features.
@@ -110,23 +110,23 @@ export interface ControlServerOptions {
  * const server = createControlServer(pipeline);
  *
  * // When a new client transport arrives (e.g. from the IPC listener):
- * const session = await server.addClient(daemonSideTransport);
+ * const session = await server.addClient(sessionProxySideTransport);
  * // Control stream is live. Now wire the data-plane:
- * attachOutputDemux(daemonSideTransport, pipeline.buffers, session);
+ * attachOutputDemux(sessionProxySideTransport, pipeline.buffers, session);
  *
  * // To inspect connection count:
  * console.log(server.clientCount());
  *
  * // To forcibly disconnect a client (e.g. during shutdown):
- * server.removeClient(daemonSideTransport);
+ * server.removeClient(sessionProxySideTransport);
  * ```
  */
 export interface ControlServer {
   /**
-   * Accept a new client connection over the given daemon-side `Transport`.
+   * Accept a new client connection over the given session-proxy-side `Transport`.
    *
    * Steps performed:
-   *   1. Run `runDaemonHandshake(transport, daemonCapabilities)`.
+   *   1. Run `runSessionProxyHandshake(transport, sessionProxyCapabilities)`.
    *   2. Subscribe to `pipeline.onModelChange` to forward subsequent deltas
    *      (with per-connection seq stamping, starting at seq = 2).
    *   3. Register an `onClose` handler so cleanup happens automatic.
@@ -145,7 +145,7 @@ export interface ControlServer {
    * case the transport is closed (if not already) and the client is never added
    * to the active set.
    *
-   * @param transport - The daemon-side half of a Transport pair for this client.
+   * @param transport - The session-proxy-side half of a Transport pair for this client.
    */
   addClient(transport: Transport): Promise<NegotiatedSession>;
 
@@ -159,7 +159,7 @@ export interface ControlServer {
    * The integration layer (tc-93a) may also call this explicitly during
    * controlled shutdown to stop delta delivery before closing the socket.
    *
-   * @param transport - The daemon-side transport to remove.
+   * @param transport - The session-proxy-side transport to remove.
    */
   removeClient(transport: Transport): void;
 
@@ -172,7 +172,7 @@ export interface ControlServer {
   /**
    * Push an unsolicited `ErrorMessage` to ALL currently connected clients.
    *
-   * Used by the daemon to notify clients of unrecoverable conditions such as
+   * Used by the session-proxy to notify clients of unrecoverable conditions such as
    * `session.unavailable` (tmux process exited unexpectedly).  Each copy
    * stamped with the correct per-connection `seq` before delivery.
    *
@@ -187,7 +187,7 @@ export interface ControlServer {
    * The `onClose` cleanup runs automatically via the existing `transport.onClose`
    * handler installed during `addClient`, so the server state is consistent.
    *
-   * Use this for terminal conditions where the daemon cannot continue (e.g.
+   * Use this for terminal conditions where the session-proxy cannot continue (e.g.
    * `session.unavailable` due to switch-client beyond recovery).
    */
   broadcastErrorAndClose(error: Omit<ErrorMessage, "seq">): void;
@@ -200,7 +200,7 @@ export interface ControlServer {
    * internal state.  Normal code should call `addClient` / `removeClient` —
    * those methods call this automatically.
    *
-   * @internal — not part of the external daemon API; exposed only for testing.
+   * @internal — not part of the external session-proxy API; exposed only for testing.
    */
   broadcastClientCount(): void;
 
@@ -211,12 +211,12 @@ export interface ControlServer {
    * the counter.  Subsequent deltas continue from there.  Only the given client
    * is affected; the pipeline and other clients are untouched.
    *
-   * Exposed so that integration layers (e.g. daemon.ts) that ALSO install a
+   * Exposed so that integration layers (e.g. session-proxy.ts) that ALSO install a
    * `transport.onControl` handler (replacing the one installed by `addClient`)
    * can proxy `resync.request` messages through here rather than silently
    * dropping them.
    *
-   * @param transport - The daemon-side transport of the requesting client.
+   * @param transport - The session-proxy-side transport of the requesting client.
    */
   handleResyncRequest(transport: Transport): void;
 }
@@ -236,7 +236,7 @@ const DEFAULT_CAPABILITIES: Capabilities = {
 
 interface ClientState {
   transport: Transport;
-  /** Next seq number for outbound daemon messages. Starts at 1. */
+  /** Next seq number for outbound session-proxy messages. Starts at 1. */
   nextSeq: number;
   /** Unsubscribe from pipeline.onModelChange. */
   unsubModelChange: (() => void) | null;
@@ -263,21 +263,21 @@ class ControlServerImpl implements ControlServer {
   }
 
   async addClient(transport: Transport): Promise<NegotiatedSession> {
-    // Run the daemon-side capability handshake. This will:
-    //   • Send daemon.capabilities (seq=1, handled internally by runDaemonHandshake)
+    // Run the session-proxy-side capability handshake. This will:
+    //   • Send session-proxy.capabilities (seq=1, handled internally by runSessionProxyHandshake)
     //   • Wait for the client to send client.capabilities
     //   • Negotiate the session (version check + feature intersection)
     //
-    // IMPORTANT: runDaemonHandshake resets transport.onControl to a no-op when
+    // IMPORTANT: runSessionProxyHandshake resets transport.onControl to a no-op when
     // it settles (via its internal settle() function).  The client side
-    // (DaemonConnection.connect / runClientHandshake) installs its own
+    // (SessionProxyConnection.connect / runClientHandshake) installs its own
     // post-handshake onControl handler SYNCHRONOUSLY after runClientHandshake
     // resolves — before yielding to the event loop.  We must therefore defer the
     // snapshot send by at least one microtask after the handshake resolves, so
     // the client's onControl installation has a chance to run.
     //
     // Timing contract (both sides):
-    //   Daemon: await handshake → install delta subscription + onClose
+    //   SessionProxy: await handshake → install delta subscription + onClose
     //           → await one microtask (Promise.resolve())
     //           → send snapshot
     //   Client: await handshake → install onControl synchronously (no await)
@@ -288,7 +288,7 @@ class ControlServerImpl implements ControlServer {
     // the time the snapshot bytes arrive the client's onControl is already set.
     let session: NegotiatedSession;
     try {
-      session = await runDaemonHandshake(transport, this._capabilities);
+      session = await runSessionProxyHandshake(transport, this._capabilities);
     } catch (err) {
       // Handshake failed — transport may already be closed; close defensively.
       try { transport.close(); } catch { /* ignore */ }
@@ -311,12 +311,12 @@ class ControlServerImpl implements ControlServer {
       // Guard: client may have been removed before this fires.
       if (!this._clients.has(transport)) return;
 
-      const deltas: DaemonMessage[] = diffModel(prevModel, newModel);
+      const deltas: SessionProxyMessage[] = diffModel(prevModel, newModel);
       for (const delta of deltas) {
-        // Stamp seq on a new object (DaemonMessage fields are readonly; spread).
+        // Stamp seq on a new object (SessionProxyMessage fields are readonly; spread).
         const stamped = { ...delta, seq: state.nextSeq };
         state.nextSeq++;
-        transport.sendControl(stamped as DaemonMessage);
+        transport.sendControl(stamped as SessionProxyMessage);
       }
     });
     state.unsubModelChange = unsub;
@@ -327,7 +327,7 @@ class ControlServerImpl implements ControlServer {
     });
 
     // Inbound control handler: handle resync.request from the client.
-    // This is the only client→daemon message the serve layer processes; all
+    // This is the only client→session-proxy message the serve layer processes; all
     // other inbound messages (command.request, input, resize.request) are
     // routed by the integration layer (tc-93a / tc-kvk).
     //
@@ -344,7 +344,7 @@ class ControlServerImpl implements ControlServer {
     });
 
     // Defer the snapshot by one microtask so the client's post-handshake
-    // onControl handler (installed synchronously in DaemonConnection.connect()
+    // onControl handler (installed synchronously in SessionProxyConnection.connect()
     // after runClientHandshake resolves) is registered before the snapshot
     // arrives.  See timing contract in the comment above.
     await Promise.resolve();
@@ -386,7 +386,7 @@ class ControlServerImpl implements ControlServer {
 
   broadcastError(error: Omit<ErrorMessage, "seq">): void {
     for (const [transport, state] of this._clients) {
-      const stamped: DaemonMessage = { ...error, seq: state.nextSeq } as DaemonMessage;
+      const stamped: SessionProxyMessage = { ...error, seq: state.nextSeq } as SessionProxyMessage;
       state.nextSeq++;
       try {
         transport.sendControl(stamped);
@@ -402,7 +402,7 @@ class ControlServerImpl implements ControlServer {
     // which calls _cleanupClient, mutating _clients.  Iterate the snapshot.
     const clients = [...this._clients];
     for (const [transport, state] of clients) {
-      const stamped: DaemonMessage = { ...error, seq: state.nextSeq } as DaemonMessage;
+      const stamped: SessionProxyMessage = { ...error, seq: state.nextSeq } as SessionProxyMessage;
       state.nextSeq++;
       try {
         transport.sendControl(stamped);
@@ -434,7 +434,7 @@ class ControlServerImpl implements ControlServer {
     };
     for (const [transport, state] of this._clients) {
       if (transport === opts.exclude) continue;
-      const stamped: DaemonMessage = { ...base, seq: state.nextSeq } as DaemonMessage;
+      const stamped: SessionProxyMessage = { ...base, seq: state.nextSeq } as SessionProxyMessage;
       state.nextSeq++;
       try {
         transport.sendControl(stamped);
@@ -502,10 +502,10 @@ class ControlServerImpl implements ControlServer {
  * const server = createControlServer(pipeline);
  *
  * // For each new client connection (e.g. from the IPC accept loop):
- * const { daemon: daemonTransport } = createInMemoryTransportPair();
- * const session = await server.addClient(daemonTransport);
+ * const { sessionProxy: sessionProxyTransport } = createInMemoryTransportPair();
+ * const session = await server.addClient(sessionProxyTransport);
  * // session.features describes the negotiated feature set.
- * // The data-plane pump (tc-fbz) should now attach to daemonTransport.sendData.
+ * // The data-plane pump (tc-fbz) should now attach to sessionProxyTransport.sendData.
  * ```
  *
  * @param pipeline - The live runtime pipeline (already started).

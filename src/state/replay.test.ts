@@ -50,7 +50,7 @@ import { emptyModel, checkInvariants, paneId, windowId, sessionId } from "./mode
 import type { SessionModel } from "./model.js";
 import { createPaneBufferStore } from "./scrollback.js";
 import { projectSnapshot, diffModel } from "./projection.js";
-import type { SnapshotMessage, DaemonMessage } from "../wire/daemon-control.js";
+import type { SnapshotMessage, SessionProxyMessage } from "../wire/session-proxy-control.js";
 import type { PaneId } from "../wire/ids.js";
 
 // ---------------------------------------------------------------------------
@@ -72,7 +72,7 @@ function loadGolden(): Uint8Array {
 // must deep-equal snap(next).
 // ---------------------------------------------------------------------------
 
-function applyDeltas(snap: SnapshotMessage, deltas: DaemonMessage[]): SnapshotMessage {
+function applyDeltas(snap: SnapshotMessage, deltas: SessionProxyMessage[]): SnapshotMessage {
   // v3 single-session wire: no sessions array, no sessionId on deltas.
   let session = snap.session;
   let windows = [...snap.windows];
@@ -81,7 +81,7 @@ function applyDeltas(snap: SnapshotMessage, deltas: DaemonMessage[]): SnapshotMe
 
   for (const delta of deltas) {
     switch (delta.type) {
-      // --- session lifecycle (only rename on daemon wire in v3) ---
+      // --- session lifecycle (only rename on session-proxy wire in v3) ---
       case "session.renamed":
         session = { sessionId: session.sessionId, name: delta.newName };
         break;
@@ -209,7 +209,7 @@ interface ReplayResult {
   /** snapshots[i] = model state after event i, projected to a SnapshotMessage. */
   snapshots: SnapshotMessage[];
   /** All deltas emitted step-by-step across the full replay. */
-  allDeltas: DaemonMessage[];
+  allDeltas: SessionProxyMessage[];
   bufferStore: ReturnType<typeof createPaneBufferStore>;
   /** Number of notification events processed. */
   eventCount: number;
@@ -229,7 +229,7 @@ function replayCapture(rawBuf: Uint8Array, ctxExtras?: Omit<ReducerContext, "buf
 
   let model = emptyModel();
   const snapshots: SnapshotMessage[] = [];
-  const allDeltas: DaemonMessage[] = [];
+  const allDeltas: SessionProxyMessage[] = [];
   let eventCount = 0;
 
   for (const tok of tokens) {
@@ -528,7 +528,7 @@ describe("E3 e2e replay: projectSnapshot on final model", () => {
 describe("E3 e2e replay: delta round-trip", () => {
   it("DELTA ROUND-TRIP: applyDeltas(snap(post-session-bootstrap), all_deltas) deep-equals snap(final)", () => {
     // v3: session identity is established at connection time (in the snapshot), not via deltas.
-    // There is no session.added delta on the daemon wire. The round-trip property therefore
+    // There is no session.added delta on the session-proxy wire. The round-trip property therefore
     // requires the initial snapshot to already carry the session identity.
     // We use snapshots[0] (after the first notification event, which establishes the session)
     // as the baseline, since step 1 (session-changed) emits no wire deltas.
@@ -563,8 +563,8 @@ describe("E3 e2e replay: delta round-trip", () => {
     );
   });
 
-  it("DELTA STREAM: first delta is window.added (v3 daemon wire has no session.added)", () => {
-    // v3: session.added is not on the daemon wire — the bound session is established
+  it("DELTA STREAM: first delta is window.added (v3 session-proxy wire has no session.added)", () => {
+    // v3: session.added is not on the session-proxy wire — the bound session is established
     // at connection time. The first observable delta is window.added.
     const rawBuf = loadGolden();
     const { allDeltas } = replayCapture(rawBuf);
@@ -636,7 +636,7 @@ describe("E3 e2e replay: delta round-trip", () => {
   });
 
   it("DELTA STREAM: ordering — window.added precedes pane.opened", () => {
-    // v3: no session.added on the daemon wire; first structural delta is window.added
+    // v3: no session.added on the session-proxy wire; first structural delta is window.added
     const rawBuf = loadGolden();
     const { allDeltas } = replayCapture(rawBuf);
 

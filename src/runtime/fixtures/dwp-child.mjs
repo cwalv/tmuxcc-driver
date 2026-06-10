@@ -1,12 +1,12 @@
 // dwp-child.mjs — test fixture for die-with-parent.test.ts (tc-2c5).
 //
-// Plays the "daemon" role: imports the real die-with-parent module (URL given
+// Plays the "session-proxy" role: imports the real die-with-parent module (URL given
 // in argv — a .ts file, resolved by the tsx loader the test spawns us with),
 // installs the watchdog with PRODUCTION defaults (1 s poll, self-SIGTERM,
 // 1.5 s hard-exit backstop), reports readiness, and idles forever.
 //
 // No SIGTERM handler is installed, so the default disposition terminates the
-// process when the watchdog fires — like a daemon whose graceful path is the
+// process when the watchdog fires — like a session-proxy whose graceful path is the
 // signal default.
 //
 // Usage: node --import tsx dwp-child.mjs <die-with-parent-module-url>

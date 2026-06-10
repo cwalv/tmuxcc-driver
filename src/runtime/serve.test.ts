@@ -32,7 +32,7 @@ import {
   runClientHandshake,
   WIRE_PROTOCOL_VERSION,
 } from "../wire/index.js";
-import type { Transport, ControlMessage, DaemonMessage, SnapshotMessage, ControlHandler, CloseHandler } from "../wire/index.js";
+import type { Transport, ControlMessage, SessionProxyMessage, SnapshotMessage, ControlHandler, CloseHandler } from "../wire/index.js";
 import type { RuntimePipeline, ModelChangeHandler, NotificationHandler } from "./pipeline.js";
 import {
   emptyModel,
@@ -115,35 +115,35 @@ const CLIENT_CAPS = {
 
 /**
  * Run the client side of the handshake concurrently with server.addClient.
- * Returns {received, daemonTransport} where received[] accumulates all daemon-push
- * control messages EXCEPT the handshake message (daemon.capabilities).
+ * Returns {received, sessionProxyTransport} where received[] accumulates all session-proxy-push
+ * control messages EXCEPT the handshake message (session-proxy.capabilities).
  *
  * # Interception strategy
  *
- * The serve layer calls `daemonTransport.sendControl(msg)` to push messages to the
- * client. We intercept by wrapping `daemonTransport.sendControl` with a spy that
- * records every message except `daemon.capabilities` (the handshake advertisement,
- * which the serve layer sends via `runDaemonHandshake` internally).
+ * The serve layer calls `sessionProxyTransport.sendControl(msg)` to push messages to the
+ * client. We intercept by wrapping `sessionProxyTransport.sendControl` with a spy that
+ * records every message except `session-proxy.capabilities` (the handshake advertisement,
+ * which the serve layer sends via `runSessionProxyHandshake` internally).
  *
- * This is done on the daemon-side transport, so it is independent of which
+ * This is done on the session-proxy-side transport, so it is independent of which
  * `onControl` handler the client-side transport currently has registered.
  * The handshake resets `clientTransport.onControl` to `() => {}` when it settles
- * (per runDaemonHandshake / runClientHandshake implementation), so we MUST NOT
+ * (per runSessionProxyHandshake / runClientHandshake implementation), so we MUST NOT
  * rely on `clientTransport.onControl` for post-handshake collection.
  */
 async function connectClient(
   server: ControlServer,
-): Promise<{ received: ControlMessage[]; daemonTransport: Transport }> {
-  const { daemon: daemonTransport, client: clientTransport } = createInMemoryTransportPair();
+): Promise<{ received: ControlMessage[]; sessionProxyTransport: Transport }> {
+  const { sessionProxy: sessionProxyTransport, client: clientTransport } = createInMemoryTransportPair();
 
   const received: ControlMessage[] = [];
 
-  // Wrap sendControl on the daemon transport to spy on outgoing messages.
-  // We skip "daemon.capabilities" (the handshake advertisement) so tests only
+  // Wrap sendControl on the session-proxy transport to spy on outgoing messages.
+  // We skip "session-proxy.capabilities" (the handshake advertisement) so tests only
   // see application-level messages: snapshot, deltas, errors.
-  const originalSendControl = daemonTransport.sendControl.bind(daemonTransport);
-  daemonTransport.sendControl = function (msg: ControlMessage) {
-    if (msg.type !== "daemon.capabilities") {
+  const originalSendControl = sessionProxyTransport.sendControl.bind(sessionProxyTransport);
+  sessionProxyTransport.sendControl = function (msg: ControlMessage) {
+    if (msg.type !== "session-proxy.capabilities") {
       received.push(msg);
     }
     return originalSendControl(msg);
@@ -153,11 +153,11 @@ async function connectClient(
   // snapshot has been sent (synchronously inside addClient, before its promise
   // resolves). runClientHandshake resolves once capabilities are exchanged.
   await Promise.all([
-    server.addClient(daemonTransport),
+    server.addClient(sessionProxyTransport),
     runClientHandshake(clientTransport, CLIENT_CAPS),
   ]);
 
-  return { received, daemonTransport };
+  return { received, sessionProxyTransport };
 }
 
 // ---------------------------------------------------------------------------
@@ -220,7 +220,7 @@ describe("createControlServer", () => {
       const { received } = await connectClient(server);
 
       // The snapshot is the first message (after handshake traffic which is
-      // handled inside runClientHandshake and runDaemonHandshake, not re-delivered
+      // handled inside runClientHandshake and runSessionProxyHandshake, not re-delivered
       // to the application-level onControl after they unregister their handlers).
       //
       // tc-44wu0: a client-count.changed message is broadcast immediately after
@@ -268,7 +268,7 @@ describe("createControlServer", () => {
       }
 
       // Verify a pane.opened delta for P2 is present
-      const delta = received.find((m) => m.type === "pane.opened") as DaemonMessage | undefined;
+      const delta = received.find((m) => m.type === "pane.opened") as SessionProxyMessage | undefined;
       assert.ok(delta !== undefined, "should have a pane.opened delta for P2");
       if (delta && delta.type === "pane.opened") {
         assert.equal(delta.paneId, P2);
@@ -408,9 +408,9 @@ describe("createControlServer", () => {
       const server = createControlServer(pipeline);
 
       assert.equal(server.clientCount(), 0);
-      const { daemonTransport: t1 } = await connectClient(server);
+      const { sessionProxyTransport: t1 } = await connectClient(server);
       assert.equal(server.clientCount(), 1);
-      const { daemonTransport: _t2 } = await connectClient(server);
+      const { sessionProxyTransport: _t2 } = await connectClient(server);
       assert.equal(server.clientCount(), 2);
 
       server.removeClient(t1);
@@ -430,11 +430,11 @@ describe("createControlServer", () => {
       const pipeline = createFakePipeline(model1);
       const server = createControlServer(pipeline);
 
-      const { received, daemonTransport } = await connectClient(server);
+      const { received, sessionProxyTransport } = await connectClient(server);
       const countAfterSnapshot = received.length;
 
       // Remove the client
-      server.removeClient(daemonTransport);
+      server.removeClient(sessionProxyTransport);
       assert.equal(server.clientCount(), 0);
 
       // Fire a model change — should NOT deliver to the removed client
@@ -449,11 +449,11 @@ describe("createControlServer", () => {
       const pipeline = createFakePipeline(model1);
       const server = createControlServer(pipeline);
 
-      const { received, daemonTransport } = await connectClient(server);
+      const { received, sessionProxyTransport } = await connectClient(server);
       const countAfterSnapshot = received.length;
 
       // Close the transport (simulates remote disconnect)
-      daemonTransport.close();
+      sessionProxyTransport.close();
       assert.equal(server.clientCount(), 0);
 
       // Fire a model change — should NOT crash or deliver
@@ -466,7 +466,7 @@ describe("createControlServer", () => {
       const pipeline = createFakePipeline();
       const server = createControlServer(pipeline);
 
-      const { daemon: t } = createInMemoryTransportPair();
+      const { sessionProxy: t } = createInMemoryTransportPair();
       // Never added — removeClient should be a no-op
       assert.doesNotThrow(() => server.removeClient(t));
       assert.doesNotThrow(() => server.removeClient(t));
@@ -478,7 +478,7 @@ describe("createControlServer", () => {
       const pipeline = createFakePipeline(model1);
       const server = createControlServer(pipeline);
 
-      const { received: recv1, daemonTransport: t1 } = await connectClient(server);
+      const { received: recv1, sessionProxyTransport: t1 } = await connectClient(server);
       const { received: recv2 } = await connectClient(server);
 
       // Disconnect client1
@@ -529,13 +529,13 @@ describe("createControlServer", () => {
 
       // Client caps include "focus-events" but server only has "pane-lifecycle"
       // The negotiated features intersection = ["pane-lifecycle"]
-      const { daemon: daemonTransport, client: clientTransport } = createInMemoryTransportPair();
+      const { sessionProxy: sessionProxyTransport, client: clientTransport } = createInMemoryTransportPair();
       const received: ControlMessage[] = [];
       clientTransport.onControl((msg) => received.push(msg));
 
       let negotiated;
       [, negotiated] = await Promise.all([
-        server.addClient(daemonTransport),
+        server.addClient(sessionProxyTransport),
         runClientHandshake(clientTransport, {
           protocolVersion: WPV,
           features: ["pane-lifecycle", "focus-events"],
@@ -553,9 +553,9 @@ describe("createControlServer", () => {
 // ---------------------------------------------------------------------------
 // Multi-client snapshot fan-out (tc-j9c.7)
 //
-// Verifies the fan-out contract from SCHEMA.md "Multiple clients on one daemon":
+// Verifies the fan-out contract from SCHEMA.md "Multiple clients on one session-proxy":
 //   - Each connection receives its own independent snapshot (seq=1).
-//   - A single tmux event fans out as N daemon-wire deltas, one per client,
+//   - A single tmux event fans out as N session-proxy-wire deltas, one per client,
 //     each stamped with that client's per-connection seq counter (seq=2, 3, …).
 //   - Seq counters are INDEPENDENT across clients: client A and client B both
 //     get their own seq=1 snapshot and seq=2 first-delta, regardless of when
@@ -649,8 +649,8 @@ describe("multi-client snapshot fan-out (tc-j9c.7)", () => {
 //
 // Timing contract being verified (tc-3eh.2):
 //
-//   Daemon side:
-//     1. await runDaemonHandshake() — resolves; settle() set daemonTransport.onControl
+//   SessionProxy side:
+//     1. await runSessionProxyHandshake() — resolves; settle() set sessionProxyTransport.onControl
 //        to a no-op.
 //     2. Install delta subscription + onClose (synchronous).
 //     3. await Promise.resolve() — yield one microtask so the client's
@@ -661,7 +661,7 @@ describe("multi-client snapshot fan-out (tc-j9c.7)", () => {
 //     1. await runClientHandshake() — resolves; settle() set clientTransport.onControl
 //        to a no-op.
 //     2. SYNCHRONOUSLY install post-handshake onControl (no await between steps 1
-//        and 2 — DaemonConnection.#installPostHandshakeRouting() is called directly
+//        and 2 — SessionProxyConnection.#installPostHandshakeRouting() is called directly
 //        after runClientHandshake returns, before any awaits).
 //
 //   With async delivery: by the time the snapshot arrives on the client transport,
@@ -673,30 +673,30 @@ describe("multi-client snapshot fan-out (tc-j9c.7)", () => {
  * remote endpoint via queueMicrotask, simulating a real async socket transport.
  * sendData and close remain synchronous for simplicity.
  */
-function createAsyncTransportPair(): { daemon: Transport; client: Transport } {
-  const { daemon: rawDaemon, client: rawClient } = createInMemoryTransportPair();
+function createAsyncTransportPair(): { sessionProxy: Transport; client: Transport } {
+  const { sessionProxy: rawSessionProxy, client: rawClient } = createInMemoryTransportPair();
 
-  // clientControlHandler and daemonControlHandler are accessed via the raw
+  // clientControlHandler and sessionProxyControlHandler are accessed via the raw
   // transport's delivery mechanism.  We override sendControl on each side to
   // queue the delivery, but the raw onControl replacement still works because
   // the raw transport's closure captures the handler by reference.
   //
   // To defer delivery without touching raw internals, we layer over sendControl:
-  // instead of calling rawDaemon.sendControl (which delivers synchronously to
+  // instead of calling rawSessionProxy.sendControl (which delivers synchronously to
   // clientControlHandler), we capture the current clientControlHandler at
   // send time via a closure over the raw transport pair's state.
   //
   // Simpler: build our own minimal async transport pair from scratch.
 
-  let daemonControlHandler: ControlHandler = () => {};
-  let daemonCloseHandler: CloseHandler = () => {};
+  let sessionProxyControlHandler: ControlHandler = () => {};
+  let sessionProxyCloseHandler: CloseHandler = () => {};
 
   let clientControlHandler: ControlHandler = () => {};
   let clientCloseHandler: CloseHandler = () => {};
 
   let closed = false;
 
-  const daemon: Transport = {
+  const sessionProxy: Transport = {
     sendControl(msg) {
       if (closed) return;
       // Defer delivery to the client's onControl handler via a microtask.
@@ -705,26 +705,26 @@ function createAsyncTransportPair(): { daemon: Transport; client: Transport } {
       const handler = clientControlHandler;
       queueMicrotask(() => { if (!closed) handler(msg); });
     },
-    onControl(handler) { daemonControlHandler = handler; },
+    onControl(handler) { sessionProxyControlHandler = handler; },
     sendData(paneId, bytes) {
       if (closed) return;
       // Data plane: synchronous for test simplicity.
     },
     onData(_handler) { /* not used in this test */ },
-    onClose(handler) { daemonCloseHandler = handler; },
+    onClose(handler) { sessionProxyCloseHandler = handler; },
     close(err) {
       if (closed) return;
       closed = true;
       clientCloseHandler(err);
-      daemonCloseHandler(err);
+      sessionProxyCloseHandler(err);
     },
   };
 
   const client: Transport = {
     sendControl(msg) {
       if (closed) return;
-      // Client → daemon: also async for symmetry.
-      const handler = daemonControlHandler;
+      // Client → sessionProxy: also async for symmetry.
+      const handler = sessionProxyControlHandler;
       queueMicrotask(() => { if (!closed) handler(msg); });
     },
     onControl(handler) { clientControlHandler = handler; },
@@ -736,12 +736,12 @@ function createAsyncTransportPair(): { daemon: Transport; client: Transport } {
     close(err) {
       if (closed) return;
       closed = true;
-      daemonCloseHandler(err);
+      sessionProxyCloseHandler(err);
       clientCloseHandler(err);
     },
   };
 
-  return { daemon, client };
+  return { sessionProxy, client };
 }
 
 // ---------------------------------------------------------------------------
@@ -756,7 +756,7 @@ describe("tc-3eh.2: addClient snapshot timing — async transport regression", (
    *   - Both addClient and runClientHandshake run concurrently.
    *   - After runClientHandshake resolves, the client installs its onControl
    *     handler SYNCHRONOUSLY (before any await).
-   *   - Daemon defers snapshot by one microtask after handshake.
+   *   - SessionProxy defers snapshot by one microtask after handshake.
    *   - Snapshot must arrive at the client's real handler, not the no-op.
    *
    * WITHOUT the fix (no `await Promise.resolve()` in addClient before send):
@@ -771,8 +771,8 @@ describe("tc-3eh.2: addClient snapshot timing — async transport regression", (
    *   so it hits the no-op → snapshot dropped.
    *
    * WITH the fix (`await Promise.resolve()` before send):
-   *   The daemon yields one microtask, allowing the client's runClientHandshake
-   *   continuation to run (installing the real onControl).  Then the daemon
+   *   The session-proxy yields one microtask, allowing the client's runClientHandshake
+   *   continuation to run (installing the real onControl).  Then the session-proxy
    *   sends the snapshot.  Its queueMicrotask fires after the handler is set.
    */
   it("client receives snapshot on async transport after microtask-deferred send", async () => {
@@ -780,19 +780,19 @@ describe("tc-3eh.2: addClient snapshot timing — async transport regression", (
     const pipeline = createFakePipeline(model);
     const server = createControlServer(pipeline);
 
-    const { daemon: daemonTransport, client: clientTransport } = createAsyncTransportPair();
+    const { sessionProxy: sessionProxyTransport, client: clientTransport } = createAsyncTransportPair();
 
     // Received messages on the client side (installed AFTER handshake, mimicking
-    // DaemonConnection.#installPostHandshakeRouting's synchronous installation).
+    // SessionProxyConnection.#installPostHandshakeRouting's synchronous installation).
     const received: ControlMessage[] = [];
 
     // Run both handshake halves concurrently, just as production code does.
     const [, ] = await Promise.all([
-      server.addClient(daemonTransport),
+      server.addClient(sessionProxyTransport),
       (async () => {
         await runClientHandshake(clientTransport, CLIENT_CAPS);
         // Install the post-handshake handler SYNCHRONOUSLY after runClientHandshake
-        // resolves — no await in between.  This matches DaemonConnection behavior.
+        // resolves — no await in between.  This matches SessionProxyConnection behavior.
         clientTransport.onControl((msg) => {
           received.push(msg);
         });
@@ -813,7 +813,7 @@ describe("tc-3eh.2: addClient snapshot timing — async transport regression", (
     assert.equal(snapshot!.seq, 1, "snapshot seq must be 1");
     assert.ok(snapshot!.session !== undefined, "snapshot must have a session");
 
-    daemonTransport.close();
+    sessionProxyTransport.close();
   });
 
   it("snapshot arrives before any deltas on async transport", async () => {
@@ -822,11 +822,11 @@ describe("tc-3eh.2: addClient snapshot timing — async transport regression", (
     const pipeline = createFakePipeline(model1);
     const server = createControlServer(pipeline);
 
-    const { daemon: daemonTransport, client: clientTransport } = createAsyncTransportPair();
+    const { sessionProxy: sessionProxyTransport, client: clientTransport } = createAsyncTransportPair();
     const received: ControlMessage[] = [];
 
     await Promise.all([
-      server.addClient(daemonTransport),
+      server.addClient(sessionProxyTransport),
       (async () => {
         await runClientHandshake(clientTransport, CLIENT_CAPS);
         clientTransport.onControl((msg) => { received.push(msg); });
@@ -840,8 +840,8 @@ describe("tc-3eh.2: addClient snapshot timing — async transport regression", (
     await new Promise<void>((r) => setImmediate(r));
     await new Promise<void>((r) => setImmediate(r));
 
-    // Filter to application messages (skip daemon.capabilities if any leaked through).
-    const appMsgs = received.filter((m) => m.type !== "daemon.capabilities");
+    // Filter to application messages (skip session-proxy.capabilities if any leaked through).
+    const appMsgs = received.filter((m) => m.type !== "session-proxy.capabilities");
 
     assert.ok(appMsgs.length >= 2, `expected snapshot + at least one delta, got ${appMsgs.length} messages`);
 
@@ -857,24 +857,24 @@ describe("tc-3eh.2: addClient snapshot timing — async transport regression", (
       );
     }
 
-    daemonTransport.close();
+    sessionProxyTransport.close();
   });
 
   it("snapshot is not dropped when client installs onControl synchronously after handshake", async () => {
-    // Demonstrate the exact timing that production DaemonConnection uses:
+    // Demonstrate the exact timing that production SessionProxyConnection uses:
     // install onControl synchronously (no await gap) after runClientHandshake.
     // The microtask defer in addClient makes this safe.
     const model = makeModel1();
     const pipeline = createFakePipeline(model);
     const server = createControlServer(pipeline);
 
-    const { daemon: daemonTransport, client: clientTransport } = createAsyncTransportPair();
+    const { sessionProxy: sessionProxyTransport, client: clientTransport } = createAsyncTransportPair();
 
     let snapshotReceived = false;
     let snapshotSeq = -1;
 
     const [, ] = await Promise.all([
-      server.addClient(daemonTransport),
+      server.addClient(sessionProxyTransport),
       (async () => {
         // This await runClientHandshake simulates the client's async handshake.
         await runClientHandshake(clientTransport, CLIENT_CAPS);
@@ -894,7 +894,7 @@ describe("tc-3eh.2: addClient snapshot timing — async transport regression", (
     assert.ok(snapshotReceived, "snapshot must be received when onControl is installed synchronously after handshake");
     assert.equal(snapshotSeq, 1, "received snapshot must have seq=1");
 
-    daemonTransport.close();
+    sessionProxyTransport.close();
   });
 
 });

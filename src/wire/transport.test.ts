@@ -14,7 +14,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import { createInMemoryTransportPair } from "./transport.js";
-import type { ControlMessage } from "./daemon-control.js";
+import type { ControlMessage } from "./session-proxy-control.js";
 import { paneId } from "./ids.js";
 
 // ---------------------------------------------------------------------------
@@ -22,8 +22,8 @@ import { paneId } from "./ids.js";
 // ---------------------------------------------------------------------------
 
 describe("InMemoryTransportPair — control plane", () => {
-  it("delivers a control message from daemon to client", () => {
-    const { daemon, client } = createInMemoryTransportPair();
+  it("delivers a control message from session-proxy to client", () => {
+    const { sessionProxy, client } = createInMemoryTransportPair();
 
     const received: ControlMessage[] = [];
     client.onControl((msg) => received.push(msg));
@@ -38,17 +38,17 @@ describe("InMemoryTransportPair — control plane", () => {
       active: true,
     };
 
-    daemon.sendControl(msg);
+    sessionProxy.sendControl(msg);
 
     assert.equal(received.length, 1, "expected exactly one message");
     assert.deepStrictEqual(received[0], msg);
   });
 
-  it("delivers a control message from client to daemon", () => {
-    const { daemon, client } = createInMemoryTransportPair();
+  it("delivers a control message from client to session-proxy", () => {
+    const { sessionProxy, client } = createInMemoryTransportPair();
 
     const received: ControlMessage[] = [];
-    daemon.onControl((msg) => received.push(msg));
+    sessionProxy.onControl((msg) => received.push(msg));
 
     const msg: ControlMessage = {
       type: "input",
@@ -64,7 +64,7 @@ describe("InMemoryTransportPair — control plane", () => {
   });
 
   it("replaces the control handler when onControl is called again", () => {
-    const { daemon, client } = createInMemoryTransportPair();
+    const { sessionProxy, client } = createInMemoryTransportPair();
 
     const first: ControlMessage[] = [];
     const second: ControlMessage[] = [];
@@ -79,7 +79,7 @@ describe("InMemoryTransportPair — control plane", () => {
       windowId: null,
     };
 
-    daemon.sendControl(msg);
+    sessionProxy.sendControl(msg);
 
     assert.equal(first.length, 0, "first handler should have been replaced");
     assert.equal(second.length, 1);
@@ -91,8 +91,8 @@ describe("InMemoryTransportPair — control plane", () => {
 // ---------------------------------------------------------------------------
 
 describe("InMemoryTransportPair — data plane", () => {
-  it("delivers raw bytes from daemon to client, byte-identical", () => {
-    const { daemon, client } = createInMemoryTransportPair();
+  it("delivers raw bytes from session-proxy to client, byte-identical", () => {
+    const { sessionProxy, client } = createInMemoryTransportPair();
 
     const pid = paneId("p0");
     const sentBytes = Uint8Array.from([0x48, 0x65, 0x6c, 0x6c, 0x6f]); // "Hello"
@@ -105,7 +105,7 @@ describe("InMemoryTransportPair — data plane", () => {
       receivedBytes = bytes;
     });
 
-    daemon.sendData(pid, sentBytes);
+    sessionProxy.sendData(pid, sentBytes);
 
     assert.equal(receivedPaneId, pid);
     assert.ok(receivedBytes !== null);
@@ -113,7 +113,7 @@ describe("InMemoryTransportPair — data plane", () => {
   });
 
   it("delivers non-UTF-8 bytes byte-identical (binary transparency)", () => {
-    const { daemon, client } = createInMemoryTransportPair();
+    const { sessionProxy, client } = createInMemoryTransportPair();
 
     // Non-UTF-8 sequence: 0xff 0x00 0xfe — would corrupt if run through JSON/base64.
     const nonUtf8 = Uint8Array.from([0xff, 0x00, 0xfe]);
@@ -124,7 +124,7 @@ describe("InMemoryTransportPair — data plane", () => {
       receivedBytes = bytes;
     });
 
-    daemon.sendData(pid, nonUtf8);
+    sessionProxy.sendData(pid, nonUtf8);
 
     assert.ok(receivedBytes !== null, "expected bytes to be received");
     assert.deepStrictEqual(
@@ -134,14 +134,14 @@ describe("InMemoryTransportPair — data plane", () => {
     );
   });
 
-  it("delivers raw bytes from client to daemon", () => {
-    const { daemon, client } = createInMemoryTransportPair();
+  it("delivers raw bytes from client to session-proxy", () => {
+    const { sessionProxy, client } = createInMemoryTransportPair();
 
     const pid = paneId("p3");
     const bytes = Uint8Array.from([0x1b, 0x5b, 0x41]); // ESC [ A (cursor up)
 
     let receivedBytes: Uint8Array | null = null;
-    daemon.onData((_id, b) => {
+    sessionProxy.onData((_id, b) => {
       receivedBytes = b;
     });
 
@@ -152,13 +152,13 @@ describe("InMemoryTransportPair — data plane", () => {
   });
 
   it("tags data frames with the correct paneId", () => {
-    const { daemon, client } = createInMemoryTransportPair();
+    const { sessionProxy, client } = createInMemoryTransportPair();
 
     const received: Array<{ paneId: string; bytes: number[] }> = [];
     client.onData((id, bytes) => received.push({ paneId: id, bytes: Array.from(bytes) }));
 
-    daemon.sendData(paneId("p10"), Uint8Array.from([0x61]));
-    daemon.sendData(paneId("p11"), Uint8Array.from([0x62]));
+    sessionProxy.sendData(paneId("p10"), Uint8Array.from([0x61]));
+    sessionProxy.sendData(paneId("p11"), Uint8Array.from([0x62]));
 
     assert.equal(received.length, 2);
     assert.equal(received[0]?.paneId, "p10");
@@ -174,81 +174,81 @@ describe("InMemoryTransportPair — data plane", () => {
 
 describe("InMemoryTransportPair — lifecycle", () => {
   it("propagates close to the remote endpoint's onClose handler", () => {
-    const { daemon, client } = createInMemoryTransportPair();
+    const { sessionProxy, client } = createInMemoryTransportPair();
 
     let clientCloseCalled = false;
     client.onClose(() => {
       clientCloseCalled = true;
     });
 
-    daemon.close();
+    sessionProxy.close();
 
-    assert.ok(clientCloseCalled, "client onClose handler should fire when daemon closes");
+    assert.ok(clientCloseCalled, "client onClose handler should fire when session-proxy closes");
   });
 
   it("also fires the closing endpoint's own onClose handler", () => {
-    const { daemon, client } = createInMemoryTransportPair();
+    const { sessionProxy, client } = createInMemoryTransportPair();
 
-    let daemonCloseCalled = false;
+    let sessionProxyCloseCalled = false;
     let clientCloseCalled = false;
 
-    daemon.onClose(() => {
-      daemonCloseCalled = true;
+    sessionProxy.onClose(() => {
+      sessionProxyCloseCalled = true;
     });
     client.onClose(() => {
       clientCloseCalled = true;
     });
 
-    daemon.close();
+    sessionProxy.close();
 
-    assert.ok(daemonCloseCalled, "daemon onClose handler should fire");
+    assert.ok(sessionProxyCloseCalled, "session-proxy onClose handler should fire");
     assert.ok(clientCloseCalled, "client onClose handler should fire");
   });
 
   it("propagates an error to both close handlers", () => {
-    const { daemon, client } = createInMemoryTransportPair();
+    const { sessionProxy, client } = createInMemoryTransportPair();
 
     const testErr = new Error("transport failure");
-    let daemonErr: Error | undefined;
+    let sessionProxyErr: Error | undefined;
     let clientErr: Error | undefined;
 
-    daemon.onClose((err) => {
-      daemonErr = err;
+    sessionProxy.onClose((err) => {
+      sessionProxyErr = err;
     });
     client.onClose((err) => {
       clientErr = err;
     });
 
-    daemon.close(testErr);
+    sessionProxy.close(testErr);
 
     assert.equal(clientErr, testErr, "error should propagate to client");
-    assert.equal(daemonErr, testErr, "error should propagate to daemon's own handler");
+    assert.equal(sessionProxyErr, testErr, "error should propagate to session-proxy's own handler");
   });
 
   it("close is idempotent — calling close twice does not double-fire handlers", () => {
-    const { daemon, client } = createInMemoryTransportPair();
+    const { sessionProxy, client } = createInMemoryTransportPair();
 
     let callCount = 0;
     client.onClose(() => {
       callCount++;
     });
 
-    daemon.close();
-    daemon.close(); // second close — should be a no-op
+    sessionProxy.close();
+    sessionProxy.close(); // second close — should be a no-op
 
     assert.equal(callCount, 1);
   });
 
   it("drops messages sent after close", () => {
-    const { daemon, client } = createInMemoryTransportPair();
+    const { sessionProxy, client } = createInMemoryTransportPair();
 
     const received: ControlMessage[] = [];
     client.onControl((msg) => received.push(msg));
 
-    daemon.close();
+    sessionProxy.close();
 
     const msg: ControlMessage = { type: "focus.changed", seq: 3, paneId: null, windowId: null };
-    daemon.sendControl(msg); // should silently drop
+    sessionProxy.sendControl(msg); // should silently drop
 
     assert.equal(received.length, 0, "messages after close should be dropped");
   });

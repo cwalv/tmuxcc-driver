@@ -1,12 +1,12 @@
 /**
  * tc-i7e — Resize correctness round-trip test
  *
- * Verifies: client resize → daemon issues refresh-client -C WxH → tmux reflows
- * → %layout-change → daemon parser → state reducer → daemon model window layout
+ * Verifies: client resize → session-proxy issues refresh-client -C WxH → tmux reflows
+ * → %layout-change → session-proxy parser → state reducer → session-proxy model window layout
  * updated → projection emits layout.updated wire delta.
  *
  * Acceptance: A resize round-trips to correct pane/window dimensions in the
- * daemon model + wire.  We test two sizes (grow + shrink) and a single-pane
+ * session-proxy model + wire.  We test two sizes (grow + shrink) and a single-pane
  * window so the cols×rows assertion is clean.
  *
  * # Round-trip anatomy
@@ -17,7 +17,7 @@
  *        → InputApi.resizePane → coalescer flushes after one microtask
  *        → clientTransport.sendControl({type:"resize.request", cols, rows})
  *
- *   2. daemonTransport.onControl → inputPath.handleClientMessage
+ *   2. sessionProxyTransport.onControl → inputPath.handleClientMessage
  *        → refreshClientSize(cols, rows)
  *        → host.write("refresh-client -C <cols>x<rows>\n")
  *
@@ -33,7 +33,7 @@
  *
  *   5. controlServer broadcasts to clients:
  *        → diffModel(prev, next) emits layout.updated (window layout changed)
- *        → daemonTransport.sendControl(layout.updated)
+ *        → sessionProxyTransport.sendControl(layout.updated)
  *        → → clientTransport delivers to client mirror
  *
  *   6. Client mirror processes layout.updated:
@@ -68,17 +68,17 @@
  * # What this test asserts (the observable truth)
  *
  *   - Tmux applies the resize: list-panes shows the new cols×rows.
- *   - Daemon model window layout is updated: pipeline.getModel() window layout
+ *   - SessionProxy model window layout is updated: pipeline.getModel() window layout
  *     has the correct cols×rows.
- *   - layout.updated wire delta is sent: the daemon control server broadcasts it.
- *   - Daemon stays alive: a subsequent echo round-trips successfully.
+ *   - layout.updated wire delta is sent: the session-proxy control server broadcasts it.
+ *   - SessionProxy stays alive: a subsequent echo round-trips successfully.
  *   - Model invariants hold: all panes have positive dims after resize.
  *
  * # What is NOT asserted (documented limitations)
  *
  *   - pane.resized hook callback: not fired (see limitation 2 above).
  *   - layoutChanged hook callback: not fired (see limitation 3 above).
- *   - pane.cols/rows in daemon model: not updated (see limitation 2 above).
+ *   - pane.cols/rows in session-proxy model: not updated (see limitation 2 above).
  *
  * @module runtime/resize-roundtrip.test
  */
@@ -167,7 +167,7 @@ function queryTmuxPaneDims(sock: string): { cols: number; rows: number } | null 
 }
 
 // ---------------------------------------------------------------------------
-// getWindowLayout — get cols/rows from the daemon model's window layout.
+// getWindowLayout — get cols/rows from the session-proxy model's window layout.
 //
 // Returns {cols, rows} of the window layout, or null if not found.
 // ---------------------------------------------------------------------------
@@ -176,14 +176,14 @@ function getWindowLayout(
   session: E2ESession,
   windowId: string,
 ): { cols: number; rows: number } | null {
-  const model = session.daemon.pipeline.getModel();
+  const model = session.sessionProxy.pipeline.getModel();
   const win = (model.windows as Map<string, { layout: { cols: number; rows: number } | null }>).get(windowId);
   if (!win?.layout) return null;
   return { cols: win.layout.cols, rows: win.layout.rows };
 }
 
 // ---------------------------------------------------------------------------
-// pollWindowLayoutUpdate — poll daemon model until window layout reaches
+// pollWindowLayoutUpdate — poll session-proxy model until window layout reaches
 // expectedCols × expectedRows.
 // ---------------------------------------------------------------------------
 
@@ -202,7 +202,7 @@ async function pollWindowLayoutUpdate(
       return undefined;
     },
     timeoutMs,
-    `daemon model window ${windowId} layout did not reach ${expectedCols}×${expectedRows} within ${timeoutMs}ms`,
+    `session-proxy model window ${windowId} layout did not reach ${expectedCols}×${expectedRows} within ${timeoutMs}ms`,
   );
 }
 
@@ -223,16 +223,16 @@ describe(
     //
     // Asserts:
     //   - tmux list-panes shows 200×50 (tmux applied the resize).
-    //   - Daemon model window layout is 200×50.
+    //   - SessionProxy model window layout is 200×50.
     //   - No status-bar row deduction in control mode (full 50 rows available).
-    //   - Daemon is still alive after resize (echo round-trip).
+    //   - SessionProxy is still alive after resize (echo round-trip).
     //
     // Documented: pane.resized and layoutChanged hook callbacks are NOT fired
     // by the current implementation (see module doc for details).
     // -----------------------------------------------------------------------
 
     it(
-      "R1: grow resize (200×50) — tmux applies resize, daemon model window layout updated, daemon live",
+      "R1: grow resize (200×50) — tmux applies resize, session-proxy model window layout updated, session-proxy live",
       { timeout: 35_000 },
       async () => {
         const session = await setupE2E("resize-grow", { cols: 80, rows: 24 });
@@ -279,22 +279,22 @@ describe(
           assert.strictEqual(tmuxDims.cols, requestedCols, `tmux cols must be ${requestedCols}`);
           assert.strictEqual(tmuxDims.rows, requestedRows, `tmux rows must be ${requestedRows}`);
 
-          // --- Assert 2: daemon model window layout updated ---
-          // Poll the daemon pipeline model until window layout is updated.
-          const daemonLayout = await pollWindowLayoutUpdate(
+          // --- Assert 2: session-proxy model window layout updated ---
+          // Poll the session-proxy pipeline model until window layout is updated.
+          const sessionProxyLayout = await pollWindowLayoutUpdate(
             session, windowId, requestedCols, requestedRows, 20_000,
           );
-          assert.strictEqual(daemonLayout.cols, requestedCols, `daemon layout cols must be ${requestedCols}`);
-          assert.strictEqual(daemonLayout.rows, requestedRows, `daemon layout rows must be ${requestedRows}`);
+          assert.strictEqual(sessionProxyLayout.cols, requestedCols, `session-proxy layout cols must be ${requestedCols}`);
+          assert.strictEqual(sessionProxyLayout.rows, requestedRows, `session-proxy layout rows must be ${requestedRows}`);
 
           // --- Assert 3: model invariants hold ---
-          const model = session.daemon.pipeline.getModel();
+          const model = session.sessionProxy.pipeline.getModel();
           for (const [pid, pane] of model.panes) {
             assert.ok(pane.cols > 0, `model corruption: pane ${pid as string} has cols=${pane.cols}`);
             assert.ok(pane.rows > 0, `model corruption: pane ${pid as string} has rows=${pane.rows}`);
           }
 
-          // --- Assert 4: daemon alive after resize ---
+          // --- Assert 4: session-proxy alive after resize ---
           controller.sendInput(paneId, "echo grow-alive\n");
           await session.waitForOutput(paneId, "grow-alive", 12_000);
         } finally {
@@ -307,11 +307,11 @@ describe(
     // R2. Shrink: resize from 200×50 back to 80×24
     //
     // Verifies the round-trip when shrinking the client area.
-    // Expected: tmux shows 80×24; daemon model window layout = 80×24.
+    // Expected: tmux shows 80×24; session-proxy model window layout = 80×24.
     // -----------------------------------------------------------------------
 
     it(
-      "R2: shrink resize (80×24) — tmux applies resize, daemon model window layout updated, daemon live",
+      "R2: shrink resize (80×24) — tmux applies resize, session-proxy model window layout updated, session-proxy live",
       { timeout: 35_000 },
       async () => {
         const session = await setupE2E("resize-shrink", { cols: 200, rows: 50 });
@@ -352,21 +352,21 @@ describe(
           assert.strictEqual(tmuxDims.cols, requestedCols, `tmux cols must be ${requestedCols}`);
           assert.strictEqual(tmuxDims.rows, requestedRows, `tmux rows must be ${requestedRows}`);
 
-          // --- Assert 2: daemon model window layout updated ---
-          const daemonLayout = await pollWindowLayoutUpdate(
+          // --- Assert 2: session-proxy model window layout updated ---
+          const sessionProxyLayout = await pollWindowLayoutUpdate(
             session, windowId, requestedCols, requestedRows, 20_000,
           );
-          assert.strictEqual(daemonLayout.cols, requestedCols, `daemon layout cols must be ${requestedCols}`);
-          assert.strictEqual(daemonLayout.rows, requestedRows, `daemon layout rows must be ${requestedRows}`);
+          assert.strictEqual(sessionProxyLayout.cols, requestedCols, `session-proxy layout cols must be ${requestedCols}`);
+          assert.strictEqual(sessionProxyLayout.rows, requestedRows, `session-proxy layout rows must be ${requestedRows}`);
 
           // --- Assert 3: model invariants hold ---
-          const model = session.daemon.pipeline.getModel();
+          const model = session.sessionProxy.pipeline.getModel();
           for (const [pid, pane] of model.panes) {
             assert.ok(pane.cols > 0, `model corruption: pane ${pid as string} has cols=${pane.cols}`);
             assert.ok(pane.rows > 0, `model corruption: pane ${pid as string} has rows=${pane.rows}`);
           }
 
-          // --- Assert 4: daemon alive after resize ---
+          // --- Assert 4: session-proxy alive after resize ---
           controller.sendInput(paneId, "echo shrink-alive\n");
           await session.waitForOutput(paneId, "shrink-alive", 12_000);
         } finally {
@@ -378,13 +378,13 @@ describe(
     // -----------------------------------------------------------------------
     // R3. Wire delta fidelity: layout.updated carries correct geometry
     //
-    // Assert that the layout.updated wire delta IS sent by the daemon control
+    // Assert that the layout.updated wire delta IS sent by the session-proxy control
     // server with the correct cols×rows.  We verify this by subscribing to
-    // model changes on the daemon pipeline and confirming the layout.updated
-    // message flows from daemon → client transport.
+    // model changes on the session-proxy pipeline and confirming the layout.updated
+    // message flows from session-proxy → client transport.
     //
     // Also asserts:
-    //   - pane.cols/rows in daemon model are NOT updated (known limitation).
+    //   - pane.cols/rows in session-proxy model are NOT updated (known limitation).
     //     The correct dims are in the window layout tree.
     //   - The layout root rect for a single-pane window has the correct dims.
     // -----------------------------------------------------------------------
@@ -397,7 +397,7 @@ describe(
         after(() => killServer(session.socketName));
 
         try {
-          const { controller, paneId, daemon, clientTransport } = session;
+          const { controller, paneId, sessionProxy, clientTransport } = session;
 
           // Find windowId.
           const calls = session.hook.calls as Array<{ type: string; pane?: { paneId: string; windowId: string } }>;
@@ -429,7 +429,7 @@ describe(
           // Actually the harness installs its own onControl at step 11 — we replace
           // it here. The mirror was already populated from the snapshot (step 6).
           // The only thing we lose by replacing is future delta routing to the mirror.
-          // For THIS test (R3), we only need the daemon model (not the client mirror).
+          // For THIS test (R3), we only need the session-proxy model (not the client mirror).
 
           clientTransport.onControl((msg: unknown) => {
             const m = msg as { type: string; seq?: number };
@@ -460,7 +460,7 @@ describe(
             `tmux did not show ${requestedCols}×${requestedRows}`,
           );
 
-          // --- Assert 2: daemon model window layout updated ---
+          // --- Assert 2: session-proxy model window layout updated ---
           await pollWindowLayoutUpdate(session, windowId, requestedCols, requestedRows, 20_000);
 
           // --- Assert 3: layout.updated wire delta was sent ---
@@ -482,7 +482,7 @@ describe(
           assert.strictEqual(matching.layout.cols, requestedCols, "layout.updated.layout.cols correct");
           assert.strictEqual(matching.layout.rows, requestedRows, "layout.updated.layout.rows correct");
 
-          // --- Assert 4: daemon model window layout root rect ---
+          // --- Assert 4: session-proxy model window layout root rect ---
           // For a single-pane window the layout root is a leaf pane rect.
           const finalLayout = getWindowLayout(session, windowId);
           assert.ok(finalLayout !== null, "window layout must exist");
@@ -493,18 +493,18 @@ describe(
           // The reducer's handleLayoutChange does not update existing pane dims.
           // The pane's cols/rows stay at the initial values (100×30).
           // The correct post-resize dims are in the window layout tree.
-          const daemonModel = daemon.pipeline.getModel();
-          const daemonPane = daemonModel.panes.get(paneId);
-          assert.ok(daemonPane !== undefined, "pane must still exist in daemon model");
-          // Pane cols/rows in daemon model are NOT equal to requested dims
+          const sessionProxyModel = sessionProxy.pipeline.getModel();
+          const sessionProxyPane = sessionProxyModel.panes.get(paneId);
+          assert.ok(sessionProxyPane !== undefined, "pane must still exist in session-proxy model");
+          // Pane cols/rows in session-proxy model are NOT equal to requested dims
           // (this is the known reducer limitation documented in this test):
-          //   daemonPane.cols === 100  (initial, NOT updated to 120)
-          //   daemonPane.rows === 30   (initial, NOT updated to 35)
+          //   sessionProxyPane.cols === 100  (initial, NOT updated to 120)
+          //   sessionProxyPane.rows === 30   (initial, NOT updated to 35)
           // We assert they are still positive (model invariants hold):
-          assert.ok(daemonPane.cols > 0, "pane cols must be positive");
-          assert.ok(daemonPane.rows > 0, "pane rows must be positive");
+          assert.ok(sessionProxyPane.cols > 0, "pane cols must be positive");
+          assert.ok(sessionProxyPane.rows > 0, "pane rows must be positive");
 
-          // --- Assert 6: daemon alive after resize ---
+          // --- Assert 6: session-proxy alive after resize ---
           controller.sendInput(paneId, "echo wire-fidelity-ok\n");
           await session.waitForOutput(paneId, "wire-fidelity-ok", 12_000);
         } finally {

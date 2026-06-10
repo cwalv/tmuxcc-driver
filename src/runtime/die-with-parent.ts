@@ -1,18 +1,18 @@
 /**
- * Die-with-parent enforcement for the session-proxy (daemon) process (tc-2c5).
+ * Die-with-parent enforcement for the session-proxy (sessionProxy) process (tc-2c5).
  *
  * # Why explicit enforcement
  *
- * The daemon is spawned as a regular (non-detached) child of the broker, but
- * process-group mechanics alone do NOT guarantee it dies with the broker: when
+ * The session-proxy is spawned as a regular (non-detached) child of the serverProxy, but
+ * process-group mechanics alone do NOT guarantee it dies with the serverProxy: when
  * a parent is SIGKILLed, its children are silently reparented to init (or the
- * nearest subreaper) and receive NO signal.  The orphan daemon-entry processes
+ * nearest subreaper) and receive NO signal.  The orphan session-proxy-entry processes
  * found in the 2026-06-08 debug session are evidence of exactly this gap.
  *
  * Per the component-lifetime model (ext-a-design-context.md §6.3) there is no
- * orphan-and-reclaim path: tmux is the only persistence layer and the daemon
- * holds no state worth preserving.  Recovery from broker death is: client
- * launcher respawns a fresh broker → fresh broker spawns fresh daemons on the
+ * orphan-and-reclaim path: tmux is the only persistence layer and the session-proxy
+ * holds no state worth preserving.  Recovery from server-proxy death is: client
+ * launcher respawns a fresh server-proxy → fresh server-proxy spawns fresh daemons on the
  * next `session.claim` → fresh `-CC attach` to the surviving tmux sessions.
  *
  * # Mechanism: getppid() poll (both platforms)
@@ -57,7 +57,7 @@ export interface DieWithParentOptions {
   /**
    * In default mode (no `onParentDeath`): how long after self-SIGTERM to wait
    * before hard-exiting via process.exit(0), in milliseconds.  This bounds the
-   * daemon's lifetime even if the graceful SIGTERM path stalls (e.g. a hung
+   * session-proxy's lifetime even if the graceful SIGTERM path stalls (e.g. a hung
    * tmux client).  Default: 1500.
    */
   graceMs?: number;
@@ -83,7 +83,7 @@ export interface DieWithParentOptions {
 /**
  * Install the die-with-parent watchdog.  Call once, at process startup,
  * BEFORE any long-running work (the entry point's first statement is ideal —
- * a daemon that crashes later still had the watchdog from t=0).
+ * a session-proxy that crashes later still had the watchdog from t=0).
  *
  * The poll timer is unref'd so the watchdog never keeps an otherwise-finished
  * process alive.

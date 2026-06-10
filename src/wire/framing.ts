@@ -55,14 +55,14 @@
  *
  * # Sequence numbers
  *
- * SEQ is a per-pane monotonically-increasing uint32, starting at 0.  The daemon
+ * SEQ is a per-pane monotonically-increasing uint32, starting at 0.  The session-proxy
  * owns the counter for each pane and increments it for every frame it emits.
  * Clients use it to:
  *   - Detect frame drops (gap in seq for the same paneId).
  *   - Restore output ordering if frames arrive out-of-order (unlikely on a local
  *     socket, but possible on a routed transport).
  *
- * Callers of `encodeFrame` pass the current seq value; the daemon is responsible
+ * Callers of `encodeFrame` pass the current seq value; the session-proxy is responsible
  * for maintaining a per-pane counter and incrementing it.
  *
  * # Streaming decoder
@@ -108,7 +108,7 @@ const MIN_HEADER_BYTES = 11;
  * buffered chunks indefinitely. The cap is enforced on the decode path so that
  * untrusted transports (network sockets) cannot trigger unbounded allocation.
  *
- * 8 MiB is chosen as well above any legitimate single frame: the daemon's
+ * 8 MiB is chosen as well above any legitimate single frame: the session-proxy's
  * practical chunk size is ~4 KiB of terminal output, and the flow-control
  * high-water mark is 256 KiB. 8 MiB leaves a 32× headroom buffer for large
  * burst payloads while bounding the worst-case allocation to a reasonable

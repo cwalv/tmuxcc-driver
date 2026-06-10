@@ -12,7 +12,7 @@ import { createInMemoryTransportPair } from "./transport.js";
 import { WIRE_PROTOCOL_VERSION } from "./envelope.js";
 import type { Capabilities } from "./envelope.js";
 import {
-  runDaemonHandshake,
+  runSessionProxyHandshake,
   runClientHandshake,
   intersectFeatures,
   negotiateCapabilities,
@@ -103,12 +103,12 @@ describe("negotiateCapabilities", () => {
 // Integration: happy path — full handshake over in-memory transport pair
 // ---------------------------------------------------------------------------
 
-describe("runDaemonHandshake + runClientHandshake — happy path", () => {
+describe("runSessionProxyHandshake + runClientHandshake — happy path", () => {
   it("both sides arrive at the same negotiated version", async () => {
-    const { daemon: daemonTransport, client: clientTransport } =
+    const { sessionProxy: sessionProxyTransport, client: clientTransport } =
       createInMemoryTransportPair();
 
-    const daemonCaps = makeCaps([
+    const sessionProxyCaps = makeCaps([
       "pane-lifecycle",
       "layout-updates",
       "focus-events",
@@ -120,38 +120,38 @@ describe("runDaemonHandshake + runClientHandshake — happy path", () => {
       "input-forwarding",
     ]);
 
-    const [daemonSession, clientSession] = await Promise.all([
-      runDaemonHandshake(daemonTransport, daemonCaps),
+    const [sessionProxySession, clientSession] = await Promise.all([
+      runSessionProxyHandshake(sessionProxyTransport, sessionProxyCaps),
       runClientHandshake(clientTransport, clientCaps),
     ]);
 
     // Both sides agree on the protocol version
-    assert.equal(daemonSession.protocolVersion, WIRE_PROTOCOL_VERSION);
+    assert.equal(sessionProxySession.protocolVersion, WIRE_PROTOCOL_VERSION);
     assert.equal(clientSession.protocolVersion, WIRE_PROTOCOL_VERSION);
 
     // Both sides compute the same feature intersection
     assert.deepStrictEqual(
-      [...daemonSession.features].sort(),
+      [...sessionProxySession.features].sort(),
       [...clientSession.features].sort(),
     );
   });
 
   it("negotiated features are the intersection of both sides' advertised sets", async () => {
-    const { daemon: daemonTransport, client: clientTransport } =
+    const { sessionProxy: sessionProxyTransport, client: clientTransport } =
       createInMemoryTransportPair();
 
-    // Daemon: A, B, C;  Client: B, C, D  →  negotiated: B, C
-    const daemonCaps = makeCaps(["pane-lifecycle", "layout-updates", "focus-events"]);
+    // SessionProxy: A, B, C;  Client: B, C, D  →  negotiated: B, C
+    const sessionProxyCaps = makeCaps(["pane-lifecycle", "layout-updates", "focus-events"]);
     const clientCaps = makeCaps(["layout-updates", "focus-events", "input-forwarding"]);
 
-    const [daemonSession, clientSession] = await Promise.all([
-      runDaemonHandshake(daemonTransport, daemonCaps),
+    const [sessionProxySession, clientSession] = await Promise.all([
+      runSessionProxyHandshake(sessionProxyTransport, sessionProxyCaps),
       runClientHandshake(clientTransport, clientCaps),
     ]);
 
     const expectedFeatures = ["layout-updates", "focus-events"];
     assert.deepStrictEqual(
-      [...daemonSession.features].sort(),
+      [...sessionProxySession.features].sort(),
       [...expectedFeatures].sort(),
     );
     assert.deepStrictEqual(
@@ -161,23 +161,23 @@ describe("runDaemonHandshake + runClientHandshake — happy path", () => {
   });
 
   it("succeeds with no overlapping features — negotiated set is empty", async () => {
-    const { daemon: daemonTransport, client: clientTransport } =
+    const { sessionProxy: sessionProxyTransport, client: clientTransport } =
       createInMemoryTransportPair();
 
-    const daemonCaps = makeCaps(["pane-lifecycle"]);
+    const sessionProxyCaps = makeCaps(["pane-lifecycle"]);
     const clientCaps = makeCaps(["input-forwarding"]);
 
-    const [daemonSession, clientSession] = await Promise.all([
-      runDaemonHandshake(daemonTransport, daemonCaps),
+    const [sessionProxySession, clientSession] = await Promise.all([
+      runSessionProxyHandshake(sessionProxyTransport, sessionProxyCaps),
       runClientHandshake(clientTransport, clientCaps),
     ]);
 
-    assert.deepStrictEqual(daemonSession.features, []);
+    assert.deepStrictEqual(sessionProxySession.features, []);
     assert.deepStrictEqual(clientSession.features, []);
   });
 
   it("succeeds when both sides advertise the same full feature set", async () => {
-    const { daemon: daemonTransport, client: clientTransport } =
+    const { sessionProxy: sessionProxyTransport, client: clientTransport } =
       createInMemoryTransportPair();
 
     const allFeatures: Capabilities["features"] = [
@@ -186,15 +186,15 @@ describe("runDaemonHandshake + runClientHandshake — happy path", () => {
       "focus-events",
       "input-forwarding",
     ];
-    const daemonCaps = makeCaps(allFeatures);
+    const sessionProxyCaps = makeCaps(allFeatures);
     const clientCaps = makeCaps(allFeatures);
 
-    const [daemonSession, clientSession] = await Promise.all([
-      runDaemonHandshake(daemonTransport, daemonCaps),
+    const [sessionProxySession, clientSession] = await Promise.all([
+      runSessionProxyHandshake(sessionProxyTransport, sessionProxyCaps),
       runClientHandshake(clientTransport, clientCaps),
     ]);
 
-    assert.deepStrictEqual([...daemonSession.features].sort(), [...allFeatures].sort());
+    assert.deepStrictEqual([...sessionProxySession.features].sort(), [...allFeatures].sort());
     assert.deepStrictEqual([...clientSession.features].sort(), [...allFeatures].sort());
   });
 });
@@ -203,29 +203,29 @@ describe("runDaemonHandshake + runClientHandshake — happy path", () => {
 // Integration: version mismatch — handshake fails cleanly (no hang)
 // ---------------------------------------------------------------------------
 
-describe("runDaemonHandshake + runClientHandshake — version mismatch", () => {
+describe("runSessionProxyHandshake + runClientHandshake — version mismatch", () => {
   it("both sides reject with HandshakeError when client has a different version", async () => {
-    const { daemon: daemonTransport, client: clientTransport } =
+    const { sessionProxy: sessionProxyTransport, client: clientTransport } =
       createInMemoryTransportPair();
 
     // Force version=2 on client side to simulate a future/mismatched client.
-    const daemonCaps = makeCaps(["pane-lifecycle"], 1);
+    const sessionProxyCaps = makeCaps(["pane-lifecycle"], 1);
     const clientCaps = makeCaps(["pane-lifecycle"], 2);
 
-    const [daemonResult, clientResult] = await Promise.allSettled([
-      runDaemonHandshake(daemonTransport, daemonCaps),
+    const [sessionProxyResult, clientResult] = await Promise.allSettled([
+      runSessionProxyHandshake(sessionProxyTransport, sessionProxyCaps),
       runClientHandshake(clientTransport, clientCaps),
     ]);
 
-    // Daemon sees the client's version=2 and rejects
-    assert.equal(daemonResult.status, "rejected");
-    if (daemonResult.status === "rejected") {
+    // SessionProxy sees the client's version=2 and rejects
+    assert.equal(sessionProxyResult.status, "rejected");
+    if (sessionProxyResult.status === "rejected") {
       assert.ok(
-        daemonResult.reason instanceof HandshakeError,
-        `expected HandshakeError, got ${daemonResult.reason}`,
+        sessionProxyResult.reason instanceof HandshakeError,
+        `expected HandshakeError, got ${sessionProxyResult.reason}`,
       );
       assert.equal(
-        (daemonResult.reason as HandshakeError).code,
+        (sessionProxyResult.reason as HandshakeError).code,
         "protocol.version-mismatch",
       );
     }
@@ -246,23 +246,23 @@ describe("runDaemonHandshake + runClientHandshake — version mismatch", () => {
     }
   });
 
-  it("daemon rejects with version-mismatch when daemon has a different version", async () => {
-    const { daemon: daemonTransport, client: clientTransport } =
+  it("session-proxy rejects with version-mismatch when session-proxy has a different version", async () => {
+    const { sessionProxy: sessionProxyTransport, client: clientTransport } =
       createInMemoryTransportPair();
 
-    const daemonCaps = makeCaps(["pane-lifecycle"], 2);
+    const sessionProxyCaps = makeCaps(["pane-lifecycle"], 2);
     const clientCaps = makeCaps(["pane-lifecycle"], 1);
 
-    const [daemonResult, clientResult] = await Promise.allSettled([
-      runDaemonHandshake(daemonTransport, daemonCaps),
+    const [sessionProxyResult, clientResult] = await Promise.allSettled([
+      runSessionProxyHandshake(sessionProxyTransport, sessionProxyCaps),
       runClientHandshake(clientTransport, clientCaps),
     ]);
 
-    assert.equal(daemonResult.status, "rejected");
-    if (daemonResult.status === "rejected") {
-      assert.ok(daemonResult.reason instanceof HandshakeError);
+    assert.equal(sessionProxyResult.status, "rejected");
+    if (sessionProxyResult.status === "rejected") {
+      assert.ok(sessionProxyResult.reason instanceof HandshakeError);
       assert.equal(
-        (daemonResult.reason as HandshakeError).code,
+        (sessionProxyResult.reason as HandshakeError).code,
         "protocol.version-mismatch",
       );
     }
@@ -283,16 +283,16 @@ describe("runDaemonHandshake + runClientHandshake — version mismatch", () => {
 // ---------------------------------------------------------------------------
 
 describe("handshake — transport closed early", () => {
-  it("daemon rejects with transport.closed if transport closes before client responds", async () => {
-    const { daemon: daemonTransport } = createInMemoryTransportPair();
+  it("session-proxy rejects with transport.closed if transport closes before client responds", async () => {
+    const { sessionProxy: sessionProxyTransport } = createInMemoryTransportPair();
 
-    const daemonCaps = makeCaps(["pane-lifecycle"]);
+    const sessionProxyCaps = makeCaps(["pane-lifecycle"]);
 
     // Close the transport immediately after starting the handshake
-    const daemonPromise = runDaemonHandshake(daemonTransport, daemonCaps);
-    daemonTransport.close();
+    const sessionProxyPromise = runSessionProxyHandshake(sessionProxyTransport, sessionProxyCaps);
+    sessionProxyTransport.close();
 
-    const result = await daemonPromise.then(
+    const result = await sessionProxyPromise.then(
       (v) => ({ ok: true as const, value: v }),
       (e: unknown) => ({ ok: false as const, error: e }),
     );
@@ -302,7 +302,7 @@ describe("handshake — transport closed early", () => {
     assert.equal((result.error as HandshakeError).code, "transport.closed");
   });
 
-  it("client rejects with transport.closed if transport closes before daemon advertises", async () => {
+  it("client rejects with transport.closed if transport closes before session-proxy advertises", async () => {
     const { client: clientTransport } = createInMemoryTransportPair();
 
     const clientCaps = makeCaps(["pane-lifecycle"]);
@@ -326,15 +326,15 @@ describe("handshake — transport closed early", () => {
 // ---------------------------------------------------------------------------
 
 describe("handshake — unexpected message type", () => {
-  it("client rejects with unexpected-message if daemon sends wrong type first", async () => {
-    const { daemon: daemonTransport, client: clientTransport } =
+  it("client rejects with unexpected-message if session-proxy sends wrong type first", async () => {
+    const { sessionProxy: sessionProxyTransport, client: clientTransport } =
       createInMemoryTransportPair();
 
     const clientCaps = makeCaps(["pane-lifecycle"]);
     const clientPromise = runClientHandshake(clientTransport, clientCaps);
 
-    // Daemon sends a non-capabilities message instead
-    daemonTransport.sendControl({
+    // SessionProxy sends a non-capabilities message instead
+    sessionProxyTransport.sendControl({
       type: "snapshot",
       seq: 1,
       session: { sessionId: "s0" as ReturnType<typeof import("./ids.js").sessionId>, name: "s0" },
@@ -356,12 +356,12 @@ describe("handshake — unexpected message type", () => {
     );
   });
 
-  it("daemon rejects with unexpected-message if client sends wrong type", async () => {
-    const { daemon: daemonTransport, client: clientTransport } =
+  it("session-proxy rejects with unexpected-message if client sends wrong type", async () => {
+    const { sessionProxy: sessionProxyTransport, client: clientTransport } =
       createInMemoryTransportPair();
 
-    const daemonCaps = makeCaps(["pane-lifecycle"]);
-    const daemonPromise = runDaemonHandshake(daemonTransport, daemonCaps);
+    const sessionProxyCaps = makeCaps(["pane-lifecycle"]);
+    const sessionProxyPromise = runSessionProxyHandshake(sessionProxyTransport, sessionProxyCaps);
 
     // Client sends a non-capabilities message instead of responding
     clientTransport.sendControl({
@@ -371,7 +371,7 @@ describe("handshake — unexpected message type", () => {
       data: "oops",
     });
 
-    const result = await daemonPromise.then(
+    const result = await sessionProxyPromise.then(
       (v) => ({ ok: true as const, value: v }),
       (e: unknown) => ({ ok: false as const, error: e }),
     );

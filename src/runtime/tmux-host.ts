@@ -208,10 +208,10 @@ export interface TmuxHost {
 // keystroke, not a test artifact; tc-nkz). Sibling placement is load-bearing:
 // the script is resolved relative to the module that spawns it, and that
 // resolution must hold in BOTH dist layouts —
-//   - daemon standalone: dist/runtime/tmux-host.js → dist/runtime/tmux-pty-bridge.py
+//   - session-proxy standalone: dist/runtime/tmux-host.js → dist/runtime/tmux-pty-bridge.py
 //     (the build step copies it there),
 //   - vscode bundle: import.meta.url collapses to the single bundle file
-//     (dist/extension.cjs / dist/daemon-entry.js) → dist/tmux-pty-bridge.py
+//     (dist/extension.cjs / dist/session-proxy-entry.js) → dist/tmux-pty-bridge.py
 //     (the extension's esbuild step copies it there).
 // A separate src/bridge/ home would need a `../bridge` hop that escapes dist/
 // in the flattened bundle, so the flat sibling is the cleaner invariant.

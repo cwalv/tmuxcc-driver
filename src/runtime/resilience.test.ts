@@ -1,7 +1,7 @@
 /**
  * tc-e3m — Reconnect / restart resilience
  *
- * Daemon survives tmux exit and client disconnect/reconnect: clean teardown,
+ * SessionProxy survives tmux exit and client disconnect/reconnect: clean teardown,
  * no leaks, resync on reconnect.
  *
  * # Harness split
@@ -16,14 +16,14 @@
  *       sends to the dead transport.
  *
  * ## Real-tmux tests (skipped if tmux absent)
- *   R1. tmux exit / server death — stand up daemon+client via setupE2E; kill
+ *   R1. tmux exit / server death — stand up session-proxy+client via setupE2E; kill
  *       the tmux server; assert host.onExit fires, host.exited becomes true,
- *       daemon does not crash.
+ *       session-proxy does not crash.
  *   R2. No leak after tmux-kill + teardown — tmux socket absent afterward.
  *   R3. Reconnect → fresh snapshot — split to 2nd pane; new client connecting
- *       to the same running daemon receives a snapshot with >= 2 panes.
- *   R4. Client disconnect (real daemon) — new client connects via daemon.addClient
- *       (full onClose wiring), closes; clientCount drops by 1, daemon stays live.
+ *       to the same running session-proxy receives a snapshot with >= 2 panes.
+ *   R4. Client disconnect (real sessionProxy) — new client connects via sessionProxy.addClient
+ *       (full onClose wiring), closes; clientCount drops by 1, session-proxy stays live.
  *
  * # Why real vs in-memory
  *
@@ -42,7 +42,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { trackSocket, killTmuxServer } from "./test-tmux-cleanup.js";
 
 // ---------------------------------------------------------------------------
-// Daemon internals
+// SessionProxy internals
 // ---------------------------------------------------------------------------
 import { createControlServer } from "./serve.js";
 import { createInMemoryTransportPair } from "../wire/transport.js";
@@ -188,14 +188,14 @@ describe("tc-e3m: In-memory resilience — ControlServer lifecycle (no real tmux
       const server = createControlServer(pipeline);
 
       // Connect a client.
-      const { daemon: dt1, client: ct1 } = createInMemoryTransportPair();
+      const { sessionProxy: dt1, client: ct1 } = createInMemoryTransportPair();
       const addPromise = server.addClient(dt1);
       await runClientHandshake(ct1, CLIENT_CAPS);
       await addPromise;
 
       assert.equal(server.clientCount(), 1, "clientCount must be 1 after addClient");
 
-      // Close the client-side transport — fires onClose on the daemon side,
+      // Close the client-side transport — fires onClose on the session-proxy side,
       // which the ControlServer wires to removeClient.
       ct1.close();
 
@@ -216,7 +216,7 @@ describe("tc-e3m: In-memory resilience — ControlServer lifecycle (no real tmux
       const server = createControlServer(pipeline);
 
       // First client connects.
-      const { daemon: dt1, client: ct1 } = createInMemoryTransportPair();
+      const { sessionProxy: dt1, client: ct1 } = createInMemoryTransportPair();
       const add1 = server.addClient(dt1);
       await runClientHandshake(ct1, CLIENT_CAPS);
       await add1;
@@ -227,7 +227,7 @@ describe("tc-e3m: In-memory resilience — ControlServer lifecycle (no real tmux
       assert.equal(server.clientCount(), 0, "count must be 0 after first client disconnect");
 
       // Second client connects.
-      const { daemon: dt2, client: ct2 } = createInMemoryTransportPair();
+      const { sessionProxy: dt2, client: ct2 } = createInMemoryTransportPair();
       const add2 = server.addClient(dt2);
       await runClientHandshake(ct2, CLIENT_CAPS);
       await add2;
@@ -259,7 +259,7 @@ describe("tc-e3m: In-memory resilience — ControlServer lifecycle (no real tmux
       assert.equal(pipeline._handlerCount, 0, "pipeline must have 0 handlers before addClient");
 
       // Connect a client — server subscribes to pipeline.
-      const { daemon: dt1, client: ct1 } = createInMemoryTransportPair();
+      const { sessionProxy: dt1, client: ct1 } = createInMemoryTransportPair();
       const addP = server.addClient(dt1);
       await runClientHandshake(ct1, CLIENT_CAPS);
       await addP;
@@ -296,12 +296,12 @@ describe("tc-e3m: In-memory resilience — ControlServer lifecycle (no real tmux
       const server = createControlServer(pipeline);
 
       // Two clients connect.
-      const { daemon: dt1, client: ct1 } = createInMemoryTransportPair();
+      const { sessionProxy: dt1, client: ct1 } = createInMemoryTransportPair();
       const add1 = server.addClient(dt1);
       await runClientHandshake(ct1, CLIENT_CAPS);
       await add1;
 
-      const { daemon: dt2, client: ct2 } = createInMemoryTransportPair();
+      const { sessionProxy: dt2, client: ct2 } = createInMemoryTransportPair();
       const add2 = server.addClient(dt2);
       await runClientHandshake(ct2, CLIENT_CAPS);
       await add2;
@@ -342,7 +342,7 @@ describe(
   () => {
 
     // -----------------------------------------------------------------------
-    // R1. tmux exit / server death — daemon detects exit
+    // R1. tmux exit / server death — session-proxy detects exit
     // -----------------------------------------------------------------------
 
     it(
@@ -353,13 +353,13 @@ describe(
         after(() => killServer(sock)); // belt-and-suspenders
 
         const session = await setupE2E("kill");
-        const { daemon } = session;
+        const { sessionProxy } = session;
 
         let hostExitFired = false;
-        daemon.host.onExit(() => { hostExitFired = true; });
+        sessionProxy.host.onExit(() => { hostExitFired = true; });
 
-        // Verify daemon is live before the kill.
-        assert.ok(!daemon.host.exited, "host must not be exited before kill");
+        // Verify session-proxy is live before the kill.
+        assert.ok(!sessionProxy.host.exited, "host must not be exited before kill");
 
         // Kill the tmux server.
         try {
@@ -368,18 +368,18 @@ describe(
 
         // Wait for the host to detect exit.
         await waitFor(
-          () => daemon.host.exited ? true : undefined,
+          () => sessionProxy.host.exited ? true : undefined,
           15_000,
-          "daemon host must detect tmux exit within 15 s",
+          "session-proxy host must detect tmux exit within 15 s",
         );
 
         assert.ok(hostExitFired, "host.onExit handler must have fired");
-        assert.ok(daemon.host.exited, "daemon.host.exited must be true after kill-server");
+        assert.ok(sessionProxy.host.exited, "sessionProxy.host.exited must be true after kill-server");
 
-        // Daemon must not have crashed — asserting we got here without
+        // SessionProxy must not have crashed — asserting we got here without
         // an unhandled exception and that server API is still usable.
         assert.ok(
-          typeof daemon.server.clientCount() === "number",
+          typeof sessionProxy.server.clientCount() === "number",
           "server.clientCount() must not throw after tmux exit",
         );
 
@@ -393,7 +393,7 @@ describe(
     // -----------------------------------------------------------------------
 
     it(
-      "R2: no tmux server leak after kill-server + daemon teardown",
+      "R2: no tmux server leak after kill-server + session-proxy teardown",
       { timeout: 20_000 },
       async () => {
         const sock = sockName("leak");
@@ -408,7 +408,7 @@ describe(
 
         // Wait for the host to detect exit.
         await waitFor(
-          () => session.daemon.host.exited ? true : undefined,
+          () => session.sessionProxy.host.exited ? true : undefined,
           10_000,
           "host must detect tmux exit",
         );
@@ -429,13 +429,13 @@ describe(
     // R3. Reconnect → fresh snapshot
     //
     // Steps:
-    //   1. Start daemon with real tmux (1 pane via setupE2E).
+    //   1. Start session-proxy with real tmux (1 pane via setupE2E).
     //   2. Split to create 2nd pane via first client's controller.
-    //   3. Wait for daemon model to reflect >= 2 panes.
-    //   4. Connect a SECOND client to the same running daemon (server.addClient
+    //   3. Wait for session-proxy model to reflect >= 2 panes.
+    //   4. Connect a SECOND client to the same running sessionProxy (server.addClient
     //      directly, with concurrent handshakes — the proven pattern from
     //      e2e-smoke.test.ts).
-    //   5. Project snapshot from the daemon model and assert >= 2 panes.
+    //   5. Project snapshot from the session-proxy model and assert >= 2 panes.
     //      Also assert the snapshot the server sends (ct2.onControl, installed
     //      AFTER the handshake resolves, per serve.ts timing contract) matches.
     // -----------------------------------------------------------------------
@@ -450,7 +450,7 @@ describe(
         const session = await setupE2E("recon");
 
         try {
-          const { daemon, controller, paneId: pane1Id } = session;
+          const { sessionProxy, controller, paneId: pane1Id } = session;
 
           // Split pane to create a 2nd pane.
           controller.sendCommand({
@@ -459,26 +459,26 @@ describe(
             direction: "vertical",
           });
 
-          // Wait for the daemon's model to reflect >= 2 panes.
+          // Wait for the session-proxy's model to reflect >= 2 panes.
           await waitFor(
-            () => daemon.pipeline.getModel().panes.size >= 2 ? true : undefined,
+            () => sessionProxy.pipeline.getModel().panes.size >= 2 ? true : undefined,
             15_000,
-            "daemon model must have >= 2 panes after split-pane",
+            "session-proxy model must have >= 2 panes after split-pane",
           );
 
-          const paneCountInModel = daemon.pipeline.getModel().panes.size;
+          const paneCountInModel = sessionProxy.pipeline.getModel().panes.size;
           assert.ok(
             paneCountInModel >= 2,
-            `daemon model must have >= 2 panes; got ${paneCountInModel}`,
+            `session-proxy model must have >= 2 panes; got ${paneCountInModel}`,
           );
 
           // Connect a SECOND client using server.addClient directly (the proven
           // pattern from e2e-smoke.test.ts): run both handshakes concurrently,
           // then install the control handler AFTER the handshakes resolve so we
           // don't get replaced by runClientHandshake's settle().
-          const { daemon: dt2, client: ct2 } = createInMemoryTransportPair();
+          const { sessionProxy: dt2, client: ct2 } = createInMemoryTransportPair();
 
-          const addPromise = daemon.server.addClient(dt2);
+          const addPromise = sessionProxy.server.addClient(dt2);
           await runClientHandshake(ct2, CLIENT_CAPS);
           await addPromise;
 
@@ -495,14 +495,14 @@ describe(
           //
           // Additionally we verify clientCount reflects the second client.
           assert.equal(
-            daemon.server.clientCount(),
+            sessionProxy.server.clientCount(),
             2, // the setupE2E client + our new one
-            "daemon must track both clients",
+            "session-proxy must track both clients",
           );
 
           // Project the snapshot that the server would have sent.
           const { projectSnapshot } = await import("../state/projection.js");
-          const projectedSnapshot = projectSnapshot(daemon.pipeline.getModel(), { seq: 1 });
+          const projectedSnapshot = projectSnapshot(sessionProxy.pipeline.getModel(), { seq: 1 });
 
           // The projected snapshot must reflect the CURRENT model (>= 2 panes).
           assert.ok(
@@ -517,10 +517,10 @@ describe(
           // After cleanup, clientCount must drop back by 1.
           // NOTE: serve.ts auto-cleans on transport.onClose — but only if the
           // server installed its onClose handler.  When we use server.addClient
-          // directly (not daemon.addClient), the auto-cleanup from serve.ts's
+          // directly (not sessionProxy.addClient), the auto-cleanup from serve.ts's
           // addClient onClose registration still fires.
           // The in-memory transport close is synchronous, so check immediately.
-          const expectedCountAfterClose = daemon.server.clientCount();
+          const expectedCountAfterClose = sessionProxy.server.clientCount();
           assert.ok(
             expectedCountAfterClose >= 1,
             `clientCount must have at least the first client remaining after second disconnects; ` +
@@ -533,11 +533,11 @@ describe(
     );
 
     // -----------------------------------------------------------------------
-    // R4. Client disconnect from a real daemon — clean removal, daemon stays live
+    // R4. Client disconnect from a real session-proxy — clean removal, session-proxy stays live
     // -----------------------------------------------------------------------
 
     it(
-      "R4: client disconnect from real daemon — clientCount drops, daemon stays alive",
+      "R4: client disconnect from real session-proxy — clientCount drops, session-proxy stays alive",
       { timeout: 20_000 },
       async () => {
         const sock = sockName("clidc");
@@ -546,34 +546,34 @@ describe(
         const session = await setupE2E("clidc");
 
         try {
-          const { daemon } = session;
+          const { sessionProxy } = session;
 
-          // Add a second client via daemon.addClient (which wires the full
+          // Add a second client via sessionProxy.addClient (which wires the full
           // onClose → removeClient path, unlike setupE2E's direct server.addClient).
-          const { daemon: dt2, client: ct2 } = createInMemoryTransportPair();
-          const addP = daemon.addClient(dt2);
+          const { sessionProxy: dt2, client: ct2 } = createInMemoryTransportPair();
+          const addP = sessionProxy.addClient(dt2);
           await runClientHandshake(ct2, CLIENT_CAPS);
           await addP;
 
-          const countBefore = daemon.server.clientCount();
+          const countBefore = sessionProxy.server.clientCount();
           assert.ok(
             countBefore >= 1,
             `must have >= 1 client before disconnect; got ${countBefore}`,
           );
 
-          // Close the client side — daemon.addClient wired onClose → detach + removeClient.
+          // Close the client side — sessionProxy.addClient wired onClose → detach + removeClient.
           ct2.close();
 
           // clientCount must drop by exactly 1.
-          const countAfter = daemon.server.clientCount();
+          const countAfter = sessionProxy.server.clientCount();
           assert.equal(
             countAfter,
             countBefore - 1,
             `clientCount must drop by 1 after disconnect (before=${countBefore} after=${countAfter})`,
           );
 
-          // Daemon must still be alive (tmux process running).
-          assert.ok(!daemon.host.exited, "daemon must still be running after client disconnect");
+          // SessionProxy must still be alive (tmux process running).
+          assert.ok(!sessionProxy.host.exited, "session-proxy must still be running after client disconnect");
         } finally {
           await session.teardown();
         }
@@ -583,14 +583,14 @@ describe(
     // -----------------------------------------------------------------------
     // R5. kill-server → connected clients receive session.unavailable
     //
-    // This is the daemon-level RESPONSE test (tc-7ml.2):
-    //   1. Start daemon + first client via setupE2E.
-    //   2. Connect a second client via daemon.addClient (full onClose wiring).
+    // This is the session-proxy-level RESPONSE test (tc-7ml.2):
+    //   1. Start session-proxy + first client via setupE2E.
+    //   2. Connect a second client via sessionProxy.addClient (full onClose wiring).
     //   3. Wire the second client's onControl to capture messages.
     //   4. Kill the tmux server.
     //   5. Assert the second client receives an error with code "session.unavailable".
     //
-    // Uses daemon.addClient so the data-plane detach + server.removeClient path
+    // Uses sessionProxy.addClient so the data-plane detach + server.removeClient path
     // is fully wired (same as production code).  The second client's transport
     // is kept alive so that the broadcastError delivery is observable.
     // -----------------------------------------------------------------------
@@ -605,12 +605,12 @@ describe(
         const session = await setupE2E("unavail");
 
         try {
-          const { daemon } = session;
+          const { sessionProxy } = session;
 
           // Connect a second client so we have an independent transport to observe.
-          // Use daemon.addClient for the full production wiring.
-          const { daemon: dt2, client: ct2 } = createInMemoryTransportPair();
-          const addP = daemon.addClient(dt2);
+          // Use sessionProxy.addClient for the full production wiring.
+          const { sessionProxy: dt2, client: ct2 } = createInMemoryTransportPair();
+          const addP = sessionProxy.addClient(dt2);
           await runClientHandshake(ct2, CLIENT_CAPS);
           await addP;
 
@@ -623,16 +623,16 @@ describe(
             received.push({ type: m.type, code: m.code });
           });
 
-          // Kill the tmux server — triggers host.onExit inside the daemon.
+          // Kill the tmux server — triggers host.onExit inside the session-proxy.
           try {
             execFileSync("tmux", ["-L", session.socketName, "kill-server"], { timeout: 5000 });
           } catch { /* already gone */ }
 
-          // Wait for the daemon host to detect the exit.
+          // Wait for the session-proxy host to detect the exit.
           await waitFor(
-            () => daemon.host.exited ? true : undefined,
+            () => sessionProxy.host.exited ? true : undefined,
             15_000,
-            "daemon host must detect tmux exit within 15 s",
+            "session-proxy host must detect tmux exit within 15 s",
           );
 
           // Give the event loop a few ticks to deliver the broadcastError to ct2.

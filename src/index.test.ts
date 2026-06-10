@@ -1,16 +1,16 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { DAEMON_PLACEHOLDER, type DaemonHandle } from "./index.js";
+import { SESSION_PROXY_PLACEHOLDER, type SessionProxyHandle } from "./index.js";
 
-describe("@tmuxcc/daemon placeholder", () => {
-  it("exports DAEMON_PLACEHOLDER as true", () => {
-    assert.strictEqual(DAEMON_PLACEHOLDER, true);
+describe("@tmuxcc/session-proxy placeholder", () => {
+  it("exports SESSION_PROXY_PLACEHOLDER as true", () => {
+    assert.strictEqual(SESSION_PROXY_PLACEHOLDER, true);
   });
 
-  it("DaemonHandle type is structurally sound (compile-time check)", () => {
+  it("SessionProxyHandle type is structurally sound (compile-time check)", () => {
     // Construct a minimal conforming object to confirm the type compiles correctly.
-    const stub: DaemonHandle = {
+    const stub: SessionProxyHandle = {
       pid: 1,
       stop: async () => {},
     };

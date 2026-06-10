@@ -6,7 +6,7 @@
  * here — outside either layer — so neither direction imports from the other.
  *
  * INVARIANT: nothing here may leak tmux south-side vocabulary.
- *   - PaneId is a clean opaque string — the daemon maps tmux's internal %N ids
+ *   - PaneId is a clean opaque string — the session-proxy maps tmux's internal %N ids
  *     to these at the south boundary and never exposes %N on the wire.
  *   - WindowId / SessionId follow the same pattern.
  *
@@ -28,13 +28,13 @@ type Brand<T, B extends string> = T & { readonly [__brand]: B };
 /**
  * Opaque pane identifier on the wire.
  *
- * Representation: a plain string (e.g. "p0", "p1", …). The daemon mints
+ * Representation: a plain string (e.g. "p0", "p1", …). The session-proxy mints
  * these; clients treat them as opaque tokens. Strings were chosen over numbers
  * so that future namespacing (multi-session, reconnect) can be encoded without
  * a breaking schema change (e.g. "s0-p3").
  *
- * South-side mapping: the daemon's tmux parser maps tmux's `%N` pane ids to
- * `PaneId` values. That mapping lives entirely inside the daemon; `%N` syntax
+ * South-side mapping: the session-proxy's tmux parser maps tmux's `%N` pane ids to
+ * `PaneId` values. That mapping lives entirely inside the sessionProxy; `%N` syntax
  * never appears on the wire.
  *
  * The data plane (tc-2mq) imports `PaneId` from this module to tag byte-stream
@@ -49,21 +49,21 @@ export type WindowId = Brand<string, "WindowId">;
 export type SessionId = Brand<string, "SessionId">;
 
 // ---------------------------------------------------------------------------
-// Constructor helpers (for use inside the daemon only — clients receive ids
-// from daemon-pushed messages and must not construct them independently).
+// Constructor helpers (for use inside the session-proxy only — clients receive ids
+// from session-proxy-pushed messages and must not construct them independently).
 // ---------------------------------------------------------------------------
 
-/** @internal Mint a PaneId from a raw string (daemon use only). */
+/** @internal Mint a PaneId from a raw string (session-proxy use only). */
 export function paneId(raw: string): PaneId {
   return raw as PaneId;
 }
 
-/** @internal Mint a WindowId from a raw string (daemon use only). */
+/** @internal Mint a WindowId from a raw string (session-proxy use only). */
 export function windowId(raw: string): WindowId {
   return raw as WindowId;
 }
 
-/** @internal Mint a SessionId from a raw string (daemon use only). */
+/** @internal Mint a SessionId from a raw string (session-proxy use only). */
 export function sessionId(raw: string): SessionId {
   return raw as SessionId;
 }

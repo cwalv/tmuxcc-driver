@@ -18,10 +18,10 @@
  * // 2. Pass `demux.store` to the pipeline so the reducer writes into it.
  * const pipeline = createRuntimePipeline(host, { buffers: demux.store });
  *
- * // 3. When a client connects, attach its daemon-side transport endpoint.
- * const unsub = demux.attachTransport(daemonTransport);
+ * // 3. When a client connects, attach its session-proxy-side transport endpoint.
+ * const unsub = demux.attachTransport(sessionProxyTransport);
  * // When the client disconnects:
- * unsub();           // or: demux.detachTransport(daemonTransport)
+ * unsub();           // or: demux.detachTransport(sessionProxyTransport)
  *
  * // 4. Optionally pause/resume a pane's data-plane output (tc-1ho flow ctrl).
  * demux.pausePane(paneId);
@@ -113,7 +113,7 @@ export interface OutputDemux {
    * Returns an unsubscribe function — call it when the client disconnects.
    * Equivalent to `demux.detachTransport(transport)`.
    *
-   * @param transport - The daemon-side half of an `InMemoryTransportPair` (or
+   * @param transport - The session-proxy-side half of an `InMemoryTransportPair` (or
    *   a real socket transport).  Bytes sent via `sendData` on this endpoint
    *   arrive on the `client` endpoint's `onData` handler.
    */
@@ -192,19 +192,19 @@ export function createOutputDemux(opts: OutputDemuxOptions = {}): OutputDemux {
       // Fan out to all attached transports — byte-exact, no copy or stringify.
       //
       // sendData MAY return a Promise<void> when the underlying transport is
-      // backpressured (kernel send buffer full).  Per the upstream daemon's
-      // accountingStore wrapper (daemon.ts addClient), the noteDrained call is
+      // backpressured (kernel send buffer full).  Per the upstream session-proxy's
+      // accountingStore wrapper (session-proxy.ts addClient), the noteDrained call is
       // chained off that Promise; we just need to NOT swallow it.  The
       // PaneBufferStore.append contract is synchronous (legacy callers do not
       // await), so we drop the Promise reference here — fc.noteDrained still
-      // fires correctly because daemon.ts chains it off the same Promise.
+      // fires correctly because session-proxy.ts chains it off the same Promise.
       //
       // tc-7xv.6 / tc-7xv.24 wedge fix: callers of demux.store.append that DO
       // care about backpressure (e.g. a future smarter pipeline) can switch to
       // an awaiting append; the contract upgrade is straightforward.
       for (const transport of _transports) {
-        // sendData returns void | Promise<void>; the daemon wrapper handles
-        // the Promise — see addClient in daemon.ts.
+        // sendData returns void | Promise<void>; the session-proxy wrapper handles
+        // the Promise — see addClient in session-proxy.ts.
         void transport.sendData(paneId, bytes);
       }
     },

@@ -25,7 +25,7 @@
  *
  * The Transport interface is implemented independently for each concrete
  * transport (Unix socket, WebSocket, in-process pair for tests).  Wire-level
- * code (daemon, client, codec) depends only on this interface so that the
+ * code (sessionProxy, client, codec) depends only on this interface so that the
  * concrete transport can be swapped without changing any wire logic.
  *
  * # Imports
@@ -33,7 +33,7 @@
  *   - PaneId          — from ids.ts (shared primitive, used by both planes)
  */
 
-import type { ControlMessage } from "./daemon-control.js";
+import type { ControlMessage } from "./session-proxy-control.js";
 import type { PaneId } from "./ids.js";
 
 // ---------------------------------------------------------------------------
@@ -61,11 +61,11 @@ export type CloseHandler = (err?: Error) => void;
 // ---------------------------------------------------------------------------
 
 /**
- * A bidirectional two-plane communication channel between daemon and client.
+ * A bidirectional two-plane communication channel between session-proxy and client.
  *
  * Implementations include:
  *   - In-process paired transport (this file) — for unit tests.
- *   - Unix-socket transport — for the production daemon (future bead).
+ *   - Unix-socket transport — for the production sessionProxy (future bead).
  *   - WebSocket transport   — for browser/remote clients (future bead).
  *
  * No concrete-transport details (socket fds, WebSocket opcodes, pipe handles)
@@ -153,39 +153,39 @@ export interface Transport {
 /**
  * A pair of Transport endpoints wired together in memory.
  *
- * Messages/bytes sent on `daemon` arrive on `client`, and vice-versa.
+ * Messages/bytes sent on `session-proxy` arrive on `client`, and vice-versa.
  * The two endpoints share no I/O — delivery is synchronous and immediate.
  * This makes the pair ideal for deterministic unit tests that don't need a
  * real socket.
  *
  * Usage:
  * ```ts
- * const { daemon, client } = createInMemoryTransportPair();
+ * const { sessionProxy, client } = createInMemoryTransportPair();
  *
  * client.onControl((msg) => { ... });
- * daemon.sendControl({ type: "pane.opened", seq: 1, ... });
+ * sessionProxy.sendControl({ type: "pane.opened", seq: 1, ... });
  * // handler fires synchronously
  * ```
  */
 export interface InMemoryTransportPair {
-  /** The daemon-side endpoint. Send here to deliver to the client. */
-  daemon: Transport;
-  /** The client-side endpoint. Send here to deliver to the daemon. */
+  /** The session-proxy-side endpoint. Send here to deliver to the client. */
+  sessionProxy: Transport;
+  /** The client-side endpoint. Send here to deliver to the session-proxy. */
   client: Transport;
 }
 
 /**
- * Create a paired in-memory transport for testing daemon↔client interactions
+ * Create a paired in-memory transport for testing session-proxy↔client interactions
  * without a real socket.
  *
- * Both endpoints start open.  Call `daemon.close()` or `client.close()` to
+ * Both endpoints start open.  Call `sessionProxy.close()` or `client.close()` to
  * tear down the pair; the close propagates to the remote endpoint's onClose
  * handler.
  */
 export function createInMemoryTransportPair(): InMemoryTransportPair {
-  let daemonControlHandler: ControlHandler | null = null;
-  let daemonDataHandler: DataHandler | null = null;
-  let daemonCloseHandler: CloseHandler | null = null;
+  let sessionProxyControlHandler: ControlHandler | null = null;
+  let sessionProxyDataHandler: DataHandler | null = null;
+  let sessionProxyCloseHandler: CloseHandler | null = null;
 
   let clientControlHandler: ControlHandler | null = null;
   let clientDataHandler: DataHandler | null = null;
@@ -193,44 +193,44 @@ export function createInMemoryTransportPair(): InMemoryTransportPair {
 
   let closed = false;
 
-  const daemon: Transport = {
+  const sessionProxy: Transport = {
     sendControl(msg) {
       if (closed) return;
       clientControlHandler?.(msg);
     },
     onControl(handler) {
-      daemonControlHandler = handler;
+      sessionProxyControlHandler = handler;
     },
     sendData(paneId, bytes) {
       if (closed) return;
       clientDataHandler?.(paneId, bytes);
     },
     onData(handler) {
-      daemonDataHandler = handler;
+      sessionProxyDataHandler = handler;
     },
     onClose(handler) {
-      daemonCloseHandler = handler;
+      sessionProxyCloseHandler = handler;
     },
     close(err) {
       if (closed) return;
       closed = true;
       // Notify the remote (client) side first, then self.
       clientCloseHandler?.(err);
-      daemonCloseHandler?.(err);
+      sessionProxyCloseHandler?.(err);
     },
   };
 
   const client: Transport = {
     sendControl(msg) {
       if (closed) return;
-      daemonControlHandler?.(msg);
+      sessionProxyControlHandler?.(msg);
     },
     onControl(handler) {
       clientControlHandler = handler;
     },
     sendData(paneId, bytes) {
       if (closed) return;
-      daemonDataHandler?.(paneId, bytes);
+      sessionProxyDataHandler?.(paneId, bytes);
     },
     onData(handler) {
       clientDataHandler = handler;
@@ -241,16 +241,16 @@ export function createInMemoryTransportPair(): InMemoryTransportPair {
     close(err) {
       if (closed) return;
       closed = true;
-      // Notify the remote (daemon) side first, then self.
-      daemonCloseHandler?.(err);
+      // Notify the remote (sessionProxy) side first, then self.
+      sessionProxyCloseHandler?.(err);
       clientCloseHandler?.(err);
     },
   };
 
-  // Cross-wire: daemon's incoming handlers come from daemonControlHandler /
-  // daemonDataHandler (set via daemon.onControl / daemon.onData).
-  // The send* methods on daemon deliver to the *client* handlers.
+  // Cross-wire: session-proxy's incoming handlers come from sessionProxyControlHandler /
+  // sessionProxyDataHandler (set via sessionProxy.onControl / sessionProxy.onData).
+  // The send* methods on session-proxy deliver to the *client* handlers.
   // This is already handled above by the closures — no extra wiring needed.
 
-  return { daemon, client };
+  return { sessionProxy, client };
 }

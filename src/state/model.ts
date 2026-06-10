@@ -16,7 +16,7 @@
  *
  * ## Id types
  * The model reuses wire id types directly: `PaneId`, `WindowId`, `SessionId`
- * from `src/wire/ids.ts`. The daemon mints new ids (via `paneId()` /
+ * from `src/wire/ids.ts`. The session-proxy mints new ids (via `paneId()` /
  * `windowId()` / `sessionId()`) when it maps tmux's `%N` / `@N` / `$N` sigil
  * ids at the south boundary. Everything above that mapping point (state,
  * projection, wire) uses these branded strings only — no tmux sigil ids appear
@@ -38,7 +38,7 @@
  * `undefined` (the field is `ScrollbackHandle | undefined`).
  *
  * ## PaneMode
- * Reuses `PaneMode` from `src/wire/daemon-control.ts` directly. The wire type is
+ * Reuses `PaneMode` from `src/wire/session-proxy-control.ts` directly. The wire type is
  * already open-ended (`"normal" | "copy" | "view" | string`) so no translation
  * is needed at projection.
  *
@@ -78,13 +78,13 @@
 
 import type { PaneId, WindowId, SessionId } from "../wire/ids.js";
 import type { WindowLayout, LayoutNode } from "../wire/layout.js";
-import type { PaneMode } from "../wire/daemon-control.js";
+import type { PaneMode } from "../wire/session-proxy-control.js";
 import type { ParsedLayout, LayoutCell } from "../parser/layout-string.js";
 
 // Re-export id constructors for convenience of reducers (avoids extra import)
 export { paneId, windowId, sessionId } from "../wire/ids.js";
 // Re-export PaneMode for reducer/projection use
-export type { PaneMode } from "../wire/daemon-control.js";
+export type { PaneMode } from "../wire/session-proxy-control.js";
 // Re-export WindowLayout so projection imports it from one place
 export type { WindowLayout } from "../wire/layout.js";
 
@@ -103,7 +103,7 @@ export type { WindowLayout } from "../wire/layout.js";
  */
 export type ScrollbackHandle = number & { readonly __scrollbackHandle: unique symbol };
 
-/** @internal Mint a ScrollbackHandle from a raw number (daemon use only). */
+/** @internal Mint a ScrollbackHandle from a raw number (session-proxy use only). */
 export function scrollbackHandle(n: number): ScrollbackHandle {
   return n as ScrollbackHandle;
 }
@@ -117,7 +117,7 @@ export function scrollbackHandle(n: number): ScrollbackHandle {
  *
  * Projection note: maps directly to `SnapshotPane` (paneId, windowId,
  * sessionId, cols, rows). The additional `mode` field projects to
- * `PaneModeChangedMessage` deltas; `scrollbackHandle` is daemon-internal only.
+ * `PaneModeChangedMessage` deltas; `scrollbackHandle` is session-proxy-internal only.
  */
 export interface Pane {
   /** Wire-branded pane id (same type as SnapshotPane.paneId). */
@@ -138,7 +138,7 @@ export interface Pane {
   /**
    * Handle into tc-fx2's scrollback buffer store, or undefined if no buffer
    * has been allocated yet. The reducer mints a handle on pane creation;
-   * tc-fx2 registers the buffer under it. This field is daemon-internal and
+   * tc-fx2 registers the buffer under it. This field is session-proxy-internal and
    * never sent on the wire.
    */
   readonly scrollbackHandle: ScrollbackHandle | undefined;
@@ -252,7 +252,7 @@ export interface FocusState {
 }
 
 /**
- * Root daemon session model.
+ * Root session-proxy session model.
  *
  * Normalized: three Maps (sessions, windows, panes) keyed by branded ids,
  * plus a global focus triple. The reducer (tc-5dd) produces a new SessionModel
@@ -811,7 +811,7 @@ export function setFocus(
  * `Window.layout` directly as `SnapshotWindow.layout`.
  *
  * `tmuxPaneIdToWireId` is a mapping function the reducer supplies — it maps
- * the integer tmux pane id from the parser to the daemon's branded `PaneId`.
+ * the integer tmux pane id from the parser to the session-proxy's branded `PaneId`.
  *
  * @throws {Error} if a leaf pane id is present but has no mapping in `tmuxPaneIdToWireId`.
  */
