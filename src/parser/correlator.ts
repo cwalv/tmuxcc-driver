@@ -72,14 +72,14 @@ import type {
  * The resolved result of a command block.
  *
  * Produced when a `%end` or `%error` guard line closes the in-flight block.
- * `body` is the concatenated raw bytes of all `block-body` lines between the
- * corresponding `%begin` and the terminator, in order (no trailing newlines;
- * lines are joined by `\n` as they arrive from the tokenizer — each
- * `BlockBodyToken.bytes` is one line).
+ * `body` is the raw bytes of all `block-body` lines between the corresponding
+ * `%begin` and the terminator, in order, joined by `\n` (each
+ * `BlockBodyToken.bytes` is one line with its own trailing newline already
+ * stripped by the tokenizer; there is no trailing `\n` after the last line).
  *
- * Note: `body` contains the raw bytes from the tokenizer (each line without its
- * trailing newline). If multiple body lines were emitted, they are concatenated
- * in order with no separator — this matches the raw payload semantics tmux uses.
+ * tc-fx4: the `\n` join is load-bearing — line-oriented body parsers
+ * (bootstrap's `parseWindowsReply` / `parsePanesReply`, the pipeline's
+ * %window-add layout reconcile) split on `\n` to recover the reply rows.
  */
 export interface CommandResult {
   /** True on `%end` (success), false on `%error` (failure). */
@@ -87,9 +87,8 @@ export interface CommandResult {
   /** The command sequence number from the `%end`/`%error` guard line. */
   readonly commandNumber: number;
   /**
-   * The accumulated raw body bytes from all `block-body` tokens in this block.
-   * Raw: may contain non-UTF-8 bytes. Each token's bytes are concatenated
-   * directly (no newlines inserted between lines).
+   * The accumulated raw body bytes from all `block-body` tokens in this
+   * block, joined by `\n`. Raw: may contain non-UTF-8 bytes within a line.
    */
   readonly body: Uint8Array;
 }
@@ -367,16 +366,34 @@ export class CommandCorrelator {
     pending.resolve({ ok, commandNumber, body });
   }
 
-  /** Concatenate all accumulated body chunks into one Uint8Array. */
+  /**
+   * Join all accumulated body chunks into one Uint8Array, with a `\n` (0x0a)
+   * separator between chunks (each chunk is one tokenizer line, already
+   * stripped of its trailing newline).
+   *
+   * tc-fx4: this restores the documented `CommandResult.body` contract
+   * ("lines are joined by `\n`").  The previous implementation concatenated
+   * chunks with NO separator, which glued multi-line replies together and
+   * silently broke every line-oriented body parser: bootstrap's
+   * `parseWindowsReply` / `parsePanesReply` (multi-window / multi-pane
+   * sessions lost all rows after the first) and the pipeline's %window-add
+   * layout reconcile.
+   */
   private _collectBody(): Uint8Array {
     if (this._inFlight === null) return new Uint8Array(0);
     const { bodyChunks, bodyLen } = this._inFlight;
     if (bodyChunks.length === 0) return new Uint8Array(0);
     if (bodyChunks.length === 1) return bodyChunks[0]!;
 
-    const out = new Uint8Array(bodyLen);
+    // bodyLen content bytes + one 0x0a separator between adjacent chunks.
+    const out = new Uint8Array(bodyLen + bodyChunks.length - 1);
     let offset = 0;
-    for (const chunk of bodyChunks) {
+    for (let i = 0; i < bodyChunks.length; i++) {
+      if (i > 0) {
+        out[offset] = 0x0a; // '\n'
+        offset += 1;
+      }
+      const chunk = bodyChunks[i]!;
       out.set(chunk, offset);
       offset += chunk.length;
     }

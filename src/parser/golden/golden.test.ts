@@ -742,7 +742,9 @@ describe("golden: sequential command blocks (realistic pipeline)", () => {
     assert.equal(r3!.commandNumber, 3);
     assert.equal(new TextDecoder().decode(r1!.body), "window0");
     assert.equal(new TextDecoder().decode(r2!.body), "");
-    assert.equal(new TextDecoder().decode(r3!.body), "pane0pane1");
+    // tc-fx4: CommandResult.body joins lines with \n (line-oriented parsers
+    // — bootstrap, window-add layout reconcile — split on \n).
+    assert.equal(new TextDecoder().decode(r3!.body), "pane0\npane1");
   });
 
   it("STREAMING: chunk-by-chunk (3 bytes) matches one-shot", () => {

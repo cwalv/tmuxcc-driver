@@ -497,6 +497,79 @@ class RuntimePipelineImpl implements RuntimePipeline {
     if (coordinator.isLive() && next !== prev) {
       this._emitModelChange(next, prev);
     }
+
+    // tc-fx4: %window-add carries NO layout, and tmux (verified on 3.4) does
+    // NOT follow up with a %layout-change for a freshly created window — the
+    // notification sequence for `new-window` is just:
+    //
+    //   %window-add @N
+    //   %session-window-changed $S @N
+    //   %sessions-changed
+    //
+    // Without intervention the new window registers with ZERO panes, no
+    // pane.opened delta ever reaches clients, and a `tmuxcc.newWindow` looks
+    // like a silent no-op (the original tc-fx4 bug).  Fix: query the new
+    // window's layout explicitly and synthesize the %layout-change line the
+    // reducer already knows how to reconcile (handleLayoutChange adds the
+    // missing panes → pane.opened deltas flow to clients).
+    //
+    // Live phase only: during bootstrap the list-windows/list-panes replies
+    // carry the layout for every existing window.
+    if (coordinator.isLive() && event.kind === "window-add") {
+      this._reconcileNewWindowLayout(event.windowId);
+    }
+  }
+
+  /**
+   * tc-fx4: fetch the layout of a newly-added window and inject a synthetic
+   * `%layout-change` so the reducer registers the window's pane(s).
+   *
+   * Uses the documented expectCommand()-before-write pattern (same FIFO
+   * pairing as bootstrap and input-path's optimistic updates; safe because
+   * the slot registration and the write happen synchronously back-to-back on
+   * the single JS event loop).
+   *
+   * `list-windows -a` (rather than a `-t @N` targeted form) mirrors the
+   * bootstrap query shape and is immune to target-resolution quirks; we pick
+   * the line for our window from the reply.
+   *
+   * Idempotent with a real %layout-change arriving for the same window (e.g.
+   * a later split): handleLayoutChange reconciles authoritatively, so a
+   * duplicate apply is a no-op.
+   *
+   * @param tmuxWindowId  Numeric tmux window id from the %window-add line.
+   */
+  private _reconcileNewWindowLayout(tmuxWindowId: number): void {
+    const resultPromise = this._correlator.expectCommand();
+    this._host.write(`list-windows -a -F "#{window_id}\t#{window_layout}"\n`);
+
+    void resultPromise.then(
+      (result: CommandResult) => {
+        if (this._stopped || !result.ok) return;
+        const text = new TextDecoder().decode(result.body);
+        for (const line of text.split("\n")) {
+          const trimmed = line.trim();
+          if (trimmed === "") continue;
+          const tabIdx = trimmed.indexOf("\t");
+          if (tabIdx === -1) continue;
+          const winIdStr = trimmed.slice(0, tabIdx);
+          const layoutStr = trimmed.slice(tabIdx + 1).trim();
+          if (winIdStr !== `@${tmuxWindowId}` || layoutStr === "") continue;
+          // Synthesize the exact raw line shape handleLayoutChange parses:
+          //   %layout-change @<winId> <layoutString>\n
+          const rawLine = new TextEncoder().encode(
+            `%layout-change @${tmuxWindowId} ${layoutStr}\n`,
+          );
+          this.injectNotification({ kind: "unknown", keyword: "layout-change", rawLine });
+          return;
+        }
+        // Window vanished between %window-add and the reply (e.g. instantly
+        // killed) — nothing to reconcile; %window-close handles removal.
+      },
+      (err: unknown) => {
+        console.warn("[pipeline] tc-fx4 window-add layout reconcile failed:", err);
+      },
+    );
   }
 
   /**

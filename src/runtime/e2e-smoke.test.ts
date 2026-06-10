@@ -598,6 +598,84 @@ if (isMain) describe(
     );
 
     // -----------------------------------------------------------------------
+    // tc-fx4. New window — open-window → onPaneOpened for the NEW window's pane
+    //
+    // tmux 3.4 emits %window-add WITHOUT a following %layout-change for a
+    // freshly created window, so the window's pane(s) are invisible to the
+    // model unless the pipeline queries the layout explicitly
+    // (RuntimePipelineImpl._reconcileNewWindowLayout).  This is the daemon
+    // half of the tc-fx4 "user ran tmuxcc.newWindow and saw nothing" bug:
+    // without the reconcile, no pane.opened delta reaches the client and no
+    // VS Code terminal tab is ever created.
+    // -----------------------------------------------------------------------
+
+    it(
+      "tc-fx4: sendCommand(open-window) → onWindowAdded AND onPaneOpened for the new window's pane",
+      { timeout: 30_000 },
+      async () => {
+        const session = await setupE2E("openwin");
+        after(() => killServer(session.socketName));
+        try {
+          const { hook, controller, paneId: pane1Id } = session;
+          const calls: RenderHookCall[] = hook.calls as RenderHookCall[];
+
+          assert.equal(
+            calls.filter((c: RenderHookCall) => c.type === "paneOpened").length,
+            1,
+            "must start with exactly 1 pane opened",
+          );
+          const initialWindowIds = new Set(
+            calls
+              .filter((c: RenderHookCall) => c.type === "windowAdded")
+              .map((c) => (c as { type: "windowAdded"; window: { windowId: string } }).window.windowId),
+          );
+
+          // Open a new window (the tmuxcc.newWindow wire command).
+          controller.sendCommand({ kind: "open-window" });
+
+          // The new window must surface...
+          const newWindow = await waitFor(
+            () => {
+              const added = calls.filter((c: RenderHookCall) => c.type === "windowAdded");
+              for (const c of added) {
+                const w = (c as { type: "windowAdded"; window: { windowId: string } }).window;
+                if (!initialWindowIds.has(w.windowId)) return w;
+              }
+              return undefined;
+            },
+            12_000,
+            "onWindowAdded did not fire for the new window after open-window",
+          );
+
+          // ...AND its first pane must surface as pane.opened — this is the
+          // assertion that fails without the %window-add layout reconcile.
+          const pane2Info = await waitFor(
+            () => {
+              const opened = calls.filter((c: RenderHookCall) => c.type === "paneOpened");
+              for (const c of opened) {
+                const p = (c as { type: "paneOpened"; pane: PaneInfo }).pane;
+                if (p.paneId !== pane1Id && p.windowId === newWindow.windowId) {
+                  return p as PaneInfo;
+                }
+              }
+              return undefined;
+            },
+            12_000,
+            "onPaneOpened did not fire for the new window's pane after open-window " +
+              "(tc-fx4: %window-add layout reconcile missing?)",
+          );
+
+          // The new pane must be usable: round-trip output through it.
+          const pane2Id: PaneId = pane2Info.paneId as PaneId;
+          controller.sendInput(pane2Id, "echo newwin-marker\n");
+          await session.waitForOutput(pane2Id, "newwin-marker", 12_000);
+        } finally {
+          await session.teardown();
+        }
+      },
+    );
+
+    // -----------------------------------------------------------------------
     // E4. Resize — resizePane round-trip; daemon stays alive after resize
     //
     // resizePane() sends resize.request → daemon issues refresh-client -C WxH

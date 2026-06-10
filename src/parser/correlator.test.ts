@@ -256,12 +256,14 @@ describe("block-body: % lines inside a block are body, not notifications", () =>
     const r1 = await p1;
     assert.deepStrictEqual(captured, [], "no notifications from body lines");
 
-    // Both % lines are accumulated into body (concatenated, no separator)
+    // Both % lines are accumulated into body, joined by \n (tc-fx4: the
+    // CommandResult.body contract — line-oriented parsers split on \n).
     const expectedBody = concat(
       bytes("%session-changed foo"),
+      bytes("\n"),
       bytes("%window-add @99"),
     );
-    assertBytesEqual(r1.body, expectedBody, "concatenated % body lines");
+    assertBytesEqual(r1.body, expectedBody, "newline-joined % body lines");
   });
 });
 
@@ -447,7 +449,7 @@ describe("integration: ControlTokenizer → CommandCorrelator", () => {
     assert.strictEqual(r1.body.length, 0, "empty body");
   });
 
-  it("multi-line body accumulates all lines concatenated", async () => {
+  it("multi-line body accumulates all lines joined by \\n", async () => {
     const corr = new CommandCorrelator();
     const p1 = corr.expectCommand();
 
@@ -458,9 +460,11 @@ describe("integration: ControlTokenizer → CommandCorrelator", () => {
 
     const r1 = await p1;
     // Each block-body token's bytes are the line content (no trailing newline).
-    // Correlator concatenates them directly.
-    const expected = concat(bytes("line-a"), bytes("line-b"), bytes("line-c"));
-    assertBytesEqual(r1.body, expected, "multi-line body concatenated");
+    // tc-fx4: the correlator joins lines with \n (no trailing \n) so that
+    // line-oriented reply parsers (bootstrap, window-add layout reconcile)
+    // can recover the rows.
+    const expected = bytes("line-a\nline-b\nline-c");
+    assertBytesEqual(r1.body, expected, "multi-line body newline-joined");
   });
 });
 
