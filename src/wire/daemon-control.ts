@@ -387,7 +387,7 @@ export interface WindowMonitorSilenceChangedMessage extends MessageBase {
  *
  * Sent by the ControlServer whenever a client connects or disconnects so that
  * every still-connected client can update its "Attached clients: K" tooltip
- * line without waiting for the next snapshot (tc-44wu0 / ux-design.md §11.4).
+ * line without waiting for the next snapshot (tc-44wu0 / ux-design.md [deleted; map: ux-design-v2 §8] §11.4).
  *
  * `count` is the authoritative connected-client count at the moment the event
  * is sent:
@@ -553,7 +553,7 @@ export interface ResizePaneCommand {
 /**
  * Kill the tmux session entirely.
  *
- * Used when `tmuxcc.killSessionOnLastWindowClose: true` (ux-design.md §13)
+ * Used when `tmuxcc.killSessionOnLastWindowClose: true` (ux-design.md [deleted; map: ux-design-v2 §8] §13)
  * and the last window of the session is closed. The daemon emits
  * ErrorMessage{code:"session.unavailable"} and closes all client connections.
  *

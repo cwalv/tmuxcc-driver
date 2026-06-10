@@ -2,8 +2,16 @@
 
 Per-session bridge between `tmux -CC` (control mode) and the language-neutral
 daemon wire. One daemon process is bound to exactly one tmux session for its
-lifetime; lifecycle and discovery are owned by a sibling **session broker**
+lifetime; lifecycle and discovery are owned by the **broker (server-proxy)**
 (see `SCHEMA.md` for the broker spec).
+
+The daemon is a **stateless translation layer** — every value it holds
+(parser state, layout reducer, snapshot, client transports) is derivable
+from tmux on a fresh `-CC attach`.  Tmux is the only persistence layer in
+the system; this daemon is a view of one of tmux's sessions.  See
+`projects/tmuxcc/docs/ext-a-design-context.md` Part 6 for the full
+component-lifetime model.  The intended new name is **`session-proxy`**;
+`daemon` is retained in code pending rename.
 
 **Modules (single-consumer, kept internal — not separate repos):**
 - `-CC` parser: control-mode stream → typed events; command serializer.
@@ -26,7 +34,7 @@ Part of the `tmuxcc` repoweave project.
 ```
 [ tmux server (one socket) ]
        ↕
-[ session broker ]   ← discovery + lifecycle; this daemon's parent
+[ broker (server-proxy) ]   ← discovery + lifecycle; this daemon's parent
        ↓ spawns
 [ this daemon ]      ← attached to ONE tmux session via -CC attach -t <name>
        ↕ daemon wire
@@ -34,10 +42,38 @@ Part of the `tmuxcc` repoweave project.
 ```
 
 Daemons are spawned by the broker on `session.claim`. A daemon never
-discovers sessions on its own and never creates or destroys them. If its
-bound session goes away (`%session-changed` to another session or
-`kill-session`), the daemon emits an `ErrorMessage{code:"session.unavailable"}`
-and closes its connections; the broker reaps it.
+discovers sessions on its own and never creates or destroys them.
+
+## Lifetime
+
+Daemons are spawned as regular (non-detached) child processes of the
+broker and **explicitly enforce** die-with-parent — process-group
+mechanics alone do not deliver it (a SIGKILLed parent's children are
+reparented to init, not signalled).  Mechanism: on Linux the daemon
+installs `prctl(PR_SET_PDEATHSIG, SIGTERM)` at startup; on macOS it polls
+`getppid()` every 1 s and exits when reparented to launchd (ppid 1).
+When the broker dies (clean exit, crash, SIGKILL), all daemons die with
+it.  There is **no** orphan-and-reclaim mechanism.
+
+Recovery from broker death is therefore: client launcher detects no broker
+→ spawns a fresh broker → fresh broker discovers tmux sessions → spawns
+fresh daemons on next `session.claim` → fresh `-CC attach` to each
+surviving tmux session.  No daemon state is lost in this path because the
+daemon never held any state worth preserving — tmux is the truth.
+
+Additional exit triggers besides parent death:
+
+- The bound session goes away (`%session-changed` to another session or
+  `kill-session`).  The daemon emits an
+  `ErrorMessage{code:"session.unavailable"}`, closes its client
+  transports, and exits.  The broker reaps the entry.
+- The broker explicitly reaps the daemon (e.g. user-initiated
+  `kill-session`).
+
+If the daemon crashes while the broker survives, the broker reaps the
+registry entry and re-spawns a fresh daemon on the next `session.claim`
+for the same session — no client-visible state is lost (tmux is the
+truth).
 
 ## Socket conventions
 

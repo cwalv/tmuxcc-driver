@@ -1,7 +1,7 @@
 /**
  * dependency-cruiser configuration for tmuxcc-daemon.
  *
- * Enforces the polyrepo boundary invariant from decision-review §5 T1:
+ * Enforces the polyrepo boundary invariant:
  *
  *   parser-no-wire: src/parser/ must NOT import from src/wire/
  *
@@ -16,8 +16,7 @@ module.exports = {
       name: "parser-no-wire",
       comment:
         "src/parser/ must not import from src/wire/ — parser is south-facing " +
-        "(byte streams → events); wire is north-facing (protocol framing). " +
-        "See decision-review.md §5 T1.",
+        "(byte streams → events); wire is north-facing (protocol framing).",
       severity: "error",
       from: { path: "^src/parser/" },
       to: { path: "^src/wire/" },

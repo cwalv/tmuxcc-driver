@@ -471,7 +471,7 @@ export function createInputPath(
           case "kill-session": {
             // kill-session -t =<sessionName>
             // Terminates the tmux session and all its windows/panes.
-            // Used when tmuxcc.killSessionOnLastWindowClose=true (ux-design.md §13).
+            // Used when tmuxcc.killSessionOnLastWindowClose=true (ux-design.md [deleted; map: ux-design-v2 §8] §13).
             // The daemon will receive a session exit notification from tmux;
             // callers should expect the connection to close shortly after.
             //

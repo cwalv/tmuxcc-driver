@@ -388,20 +388,19 @@ strings.
 
 ### Broker lifecycle
 
-Broker process supervision (when the broker starts, how it's restarted,
-how orphaned daemons are reaped after a broker crash) is out of scope
-for the v3 spec — it is an implementation concern of whatever launcher
-ships with each client.
+Broker lifecycle is specified by the component-lifetime model
+(`projects/tmuxcc/docs/ext-a-design-context.md` Part 6) and the broker
+README ("Lifecycle" section):
 
-Working assumptions the spec relies on but does not enforce:
-
-- A broker is launched lazily on first client connection attempt (e.g.,
-  via a small launcher binary or by the client opening a unix socket
-  with autospawn semantics).
-- A broker dying mid-session leaves orphaned daemons. Implementations
-  MAY reap them on broker restart or MAY allow them to continue serving
-  existing client connections until they exit naturally. Either is
-  consistent with the spec.
+- A broker is spawned lazily (detached) by the first client launcher
+  that finds no broker socket; thereafter it manages its own exit —
+  immediate on tmux-server death, 5-minute hysteresis on zero
+  IPC-connected clients.
+- Daemons are non-detached broker children and MUST die with the broker
+  (PDEATHSIG on Linux, getppid-poll on macOS — enforcement: tc-2c5). A
+  dead broker never leaves serving orphans; recovery is a fresh broker +
+  fresh daemons against the surviving tmux state. There is no
+  orphan-and-reclaim path.
 - The broker is responsible for its own socket file's lifecycle; on
   exit it removes the socket.
 
