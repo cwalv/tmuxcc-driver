@@ -12,7 +12,7 @@
  * Per the component-lifetime model (ext-a-design-context.md §6.3) there is no
  * orphan-and-reclaim path: tmux is the only persistence layer and the session-proxy
  * holds no state worth preserving.  Recovery from server-proxy death is: client
- * launcher respawns a fresh server-proxy → fresh server-proxy spawns fresh daemons on the
+ * launcher respawns a fresh server-proxy → fresh server-proxy spawns fresh session-proxies on the
  * next `session.claim` → fresh `-CC attach` to the surviving tmux sessions.
  *
  * # Mechanism: getppid() poll (both platforms)

@@ -57,7 +57,7 @@ then opens a session-proxy-wire connection on that endpoint.
 The server-proxy is **stateless about pane content** — it shells out to
 `tmux list-sessions` / `tmux new-session` / `tmux kill-session` for state,
 and holds a single thin `tmux -CC` connection to receive
-`%sessions-changed` push notifications. Per-session daemons are children
+`%sessions-changed` push notifications. Per-session session-proxies are children
 of the serverProxy; they hold the fat `tmux -CC attach -t <session>`
 connections that carry pane events.
 
@@ -70,8 +70,8 @@ connections that carry pane events.
 - **Discovery and lifecycle live above sessions**, not inside them. The
   set of sessions on a tmux socket, "create new session", and "is there
   already a session-proxy for session X?" don't belong in the per-session wire.
-- **Test/production parity.** A server-proxy owns one socket. Production brokers
-  use socket name `tmuxcc`; test brokers use `tmuxcc-test-<id>`. Socket
+- **Test/production parity.** A server-proxy owns one socket. Production server-proxies
+  use socket name `tmuxcc`; test server-proxies use `tmuxcc-test-<id>`. Socket
   naming becomes a single server-proxy constructor argument — no env-var
   threading, no defense-in-depth assertions, no hardcoded names in
   specs.
@@ -143,7 +143,7 @@ are mapped to these and never appear on either wire.
 - **`WindowId`** and **`PaneId`** flow through the session-proxy wire as normal.
 - A server-proxy mints a stable `SessionId` for each session it observes. The
   id is stable across the lifetime of the serverProxy, and is reused by all
-  daemons spawned for that session.
+  session-proxies spawned for that session.
 
 ### Envelope
 
@@ -398,7 +398,7 @@ name counts as taken). Only `session.claim` can resolve either way.
 **Per-name atomicity:** concurrent `session.claim` requests with the
 same `name` receive identical `{ sessionId, endpoint }` responses. The
 server-proxy serializes session creation and session-proxy spawn against the name so
-that two clients racing each other do not produce two daemons. Requests
+that two clients racing each other do not produce two session-proxies. Requests
 that join an in-flight claim receive `created: false` — exactly one
 claimant observes `created: true` per session creation, so create-time
 behaviour (profile apply) runs at most once even under racing claims.
@@ -409,7 +409,7 @@ Read-only diagnostics snapshot for debug surfaces (the VS Code
 `tmuxcc.showServerProxyInfo` command). The server-proxy answers from its in-memory
 state plus cheap synchronous tmux queries (`list-sessions`,
 `list-panes -a`); nothing is mutated. Additive and non-breaking: older
-brokers respond `protocol.unknown-message`.
+server-proxies respond `protocol.unknown-message`.
 
 **`ServerProxyInfoPayload`:**
 
@@ -437,7 +437,7 @@ See `ServerProxySessionInfo.attachedClientCount` above for full semantics.
 the process's stderr into an append-only log file at
 `<runtime>/<socketName>/server-proxy.log` (mode 0600, no rotation — tc-k6v).
 `server-proxy.info` reports the path as `logPath`; in-process/programmatic
-brokers that skip the entry point have no log file (`logPath: null`).
+server-proxies that skip the entry point have no log file (`logPath: null`).
 
 ### ServerProxy errors
 
@@ -472,7 +472,7 @@ README ("Lifecycle" section):
 - SessionProxys are non-detached server-proxy children and MUST die with the serverProxy
   (PDEATHSIG on Linux, getppid-poll on macOS — enforcement: tc-2c5). A
   dead server-proxy never leaves serving orphans; recovery is a fresh server-proxy +
-  fresh daemons against the surviving tmux state. There is no
+  fresh session-proxies against the surviving tmux state. There is no
   orphan-and-reclaim path.
 - The server-proxy is responsible for its own socket file's lifecycle; on
   exit it removes the socket.

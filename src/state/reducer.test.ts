@@ -496,7 +496,7 @@ describe("reducer: switch-client narrowing (tc-j9c.7)", () => {
   // tc-3y8.8: %client-session-changed is delivered only to clients OTHER than
   // the one whose session changed (tmux control-notify.c) — it says nothing
   // about OUR client and must NEVER trigger switch-client narrowing.  The old
-  // behavior (treating it like %session-changed) made N≥2 daemons on one
+  // behavior (treating it like %session-changed) made N≥2 session-proxies on one
   // socket reattach in response to each other's reattach notifications — a
   // mutual storm that drove the tmux server CPU-bound (~350-400 ms/command).
   it("client-session-changed: foreign session → NO narrowing callback, model unchanged (tc-3y8.8)", () => {

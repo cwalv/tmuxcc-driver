@@ -63,7 +63,7 @@ export { createTmuxHost } from "./runtime/tmux-host.js";
 export type { TmuxHost, TmuxHostOptions } from "./runtime/tmux-host.js";
 
 // Die-with-parent watchdog (tc-2c5) — session-proxy entry points (e.g. @tmuxcc/server-proxy's
-// session-proxy-entry.ts) install this at startup to enforce ext-a §6.3: daemons die
+// session-proxy-entry.ts) install this at startup to enforce ext-a §6.3: session-proxies die
 // with the serverProxy; there is no orphan-and-reclaim path.
 export { installDieWithParent } from "./runtime/die-with-parent.js";
 export type { DieWithParentOptions } from "./runtime/die-with-parent.js";

@@ -52,12 +52,12 @@ mechanics alone do not deliver it (a SIGKILLed parent's children are
 reparented to init, not signalled).  Mechanism: on Linux the session-proxy
 installs `prctl(PR_SET_PDEATHSIG, SIGTERM)` at startup; on macOS it polls
 `getppid()` every 1 s and exits when reparented to launchd (ppid 1).
-When the server-proxy dies (clean exit, crash, SIGKILL), all daemons die with
+When the server-proxy dies (clean exit, crash, SIGKILL), all session-proxies die with
 it.  There is **no** orphan-and-reclaim mechanism.
 
 Recovery from server-proxy death is therefore: client launcher detects no server-proxy
 → spawns a fresh server-proxy → fresh server-proxy discovers tmux sessions → spawns
-fresh daemons on next `session.claim` → fresh `-CC attach` to each
+fresh session-proxies on next `session.claim` → fresh `-CC attach` to each
 surviving tmux session.  No session-proxy state is lost in this path because the
 session-proxy never held any state worth preserving — tmux is the truth.
 
@@ -90,6 +90,6 @@ socket files at mode 0600. There is no cryptographic authentication;
 any local process the kernel grants socket access is trusted.
 
 The **tmux** socket (where `tmux -CC attach` connects) is owned by the
-server-proxy. Test brokers use `tmuxcc-test-<id>` socket names; production
-brokers use `tmuxcc`. Socket naming is a single server-proxy constructor
+server-proxy. Test server-proxies use `tmuxcc-test-<id>` socket names; production
+server-proxies use `tmuxcc`. Socket naming is a single server-proxy constructor
 argument with no env-var threading.

@@ -558,7 +558,7 @@ export function reduce(
     // %client-session-changed on EVERY attach-session — including a
     // same-session re-attach (server-client.c server_client_set_session calls
     // notify_client unconditionally, plus recalculate_sizes + redraw). With
-    // N≥2 daemons on one socket each session-proxy's "reattach" re-triggered every
+    // N≥2 session-proxies on one socket each session-proxy's "reattach" re-triggered every
     // other session-proxy's, a mutual notification storm (~8000 notifications/s at
     // N=3) that drove the tmux server CPU-bound: ~350-400 ms per command,
     // the epic's headline latency bug. N=1 was stable only because there was

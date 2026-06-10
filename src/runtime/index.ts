@@ -40,6 +40,6 @@ export { createSessionProxy } from "./session-proxy.js";
 export type { SessionProxy, SessionProxyOptions } from "./session-proxy.js";
 
 // tc-2c5: die-with-parent watchdog — entry points install this at startup so a
-// SIGKILLed server-proxy never leaves orphan daemons (ext-a §6.3)
+// SIGKILLed server-proxy never leaves orphan session-proxies (ext-a §6.3)
 export { installDieWithParent } from "./die-with-parent.js";
 export type { DieWithParentOptions } from "./die-with-parent.js";

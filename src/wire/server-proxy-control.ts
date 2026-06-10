@@ -152,7 +152,7 @@ export interface ServerProxySessionRenamedMessage extends MessageBase {
  *   - If `name` exists but no session-proxy is bound, spawn one and return.
  *
  * Per-name atomicity: concurrent claims for the same name are serialized.
- * Two racing clients receive identical responses without producing two daemons.
+ * Two racing clients receive identical responses without producing two session-proxies.
  *
  * The response payload's `created` flag reports whether THIS claim minted the
  * tmux session (`true`) or attached to a pre-existing one (`false`).  The
@@ -189,7 +189,7 @@ export interface SessionDestroyCommand {
  *
  * Semantics:
  *   - Same session-proxy endpoint as `session.claim` is returned — the server-proxy does NOT
- *     spawn per-pane daemons, and the data plane is unchanged.
+ *     spawn per-pane session-proxies, and the data plane is unchanged.
  *   - `paneId` is an opaque hint that the server-proxy echoes back in the response
  *     payload.  The client uses it to drive its render-level decision of
  *     "which pane should the host pty bind to" (vs. the default first-pane-wins).
@@ -217,7 +217,7 @@ export interface SessionDestroyCommand {
  *   - The server-proxy does not pump pane bytes — `paneId` is an identifier, not
  *     pane-level data — so the wire contract invariant is preserved.
  *
- * Additive addition — non-breaking per the versioning policy.  Older brokers
+ * Additive addition — non-breaking per the versioning policy.  Older server-proxies
  * will respond with `protocol.unknown-message`; clients fall back to
  * `session.claim` in that case.
  */
@@ -241,7 +241,7 @@ export interface PaneAttachCommand {
  * only (names, counts, pids) — no pane content, no south-side vocabulary —
  * so the server-proxy-wire invariant is preserved.
  *
- * Additive addition — non-breaking per the versioning policy.  Older brokers
+ * Additive addition — non-breaking per the versioning policy.  Older server-proxies
  * respond with `protocol.unknown-message`; clients surface "server-proxy does not
  * support server-proxy.info" in that case.
  */
@@ -312,7 +312,7 @@ export interface ServerProxyInfoPayload {
   /**
    * Absolute path of the server-proxy's append-only log file
    * (`<runtime>/<socketName>/server-proxy.log`), or `null` when the server-proxy was
-   * started without log redirection (programmatic/in-process brokers).
+   * started without log redirection (programmatic/in-process server-proxies).
    */
   readonly logPath: string | null;
   /** Per-session diagnostics rows. */
