@@ -167,7 +167,7 @@ describe("tc-1elae: attached-client count via applySnapshot", () => {
   });
 
   it("missing attachedClientCount (older sessionProxy) → undefined in ClientModel", () => {
-    // Older daemons do not send attachedClientCount; the field is optional.
+    // Older session-proxies do not send attachedClientCount; the field is optional.
     const model = buildBaseModel();
     // projectSnapshot without attachedClientCount = no field in snapshot.
     const snapshot: SnapshotMessage = projectSnapshot(model, { seq: 1 });

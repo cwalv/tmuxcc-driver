@@ -262,9 +262,9 @@ export function applySnapshot(snapshot: SnapshotMessage): {
       name: w.name,
       active: w.active,
       layout: w.layout,
-      // tc-7xv.12: snapshot carries synchronizePanes; default false for older daemons.
+      // tc-7xv.12: snapshot carries synchronizePanes; default false for older session-proxies.
       synchronizePanes: w.synchronizePanes ?? false,
-      // tc-7xv.15: snapshot carries monitor state; defaults for older daemons.
+      // tc-7xv.15: snapshot carries monitor state; defaults for older session-proxies.
       monitorActivity: w.monitorActivity ?? true,
       monitorSilence: w.monitorSilence ?? 0,
     });
