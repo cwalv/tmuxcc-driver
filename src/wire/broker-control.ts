@@ -153,6 +153,14 @@ export interface BrokerSessionRenamedMessage extends MessageBase {
  *
  * Per-name atomicity: concurrent claims for the same name are serialized.
  * Two racing clients receive identical responses without producing two daemons.
+ *
+ * The response payload's `created` flag reports whether THIS claim minted the
+ * tmux session (`true`) or attached to a pre-existing one (`false`).  The
+ * broker is the system's single create-or-attach point, so this flag is the
+ * authority clients use for create-time-only behaviour (e.g. profile apply,
+ * tc-3y8.2).  Claims that join an in-flight claim for the same name receive
+ * `created: false` — exactly one claimant observes `created: true` per
+ * session creation.
  */
 export interface SessionClaimCommand {
   readonly kind: "session.claim";
@@ -250,7 +258,7 @@ export interface BrokerCommandRequestMessage extends MessageBase {
  * Successful broker command result payload.
  *
  * Per-kind payloads:
- *   session.claim / session.create → { sessionId, endpoint }
+ *   session.claim / session.create → { sessionId, endpoint, created }
  *   session.destroy                → { ok: true }
  *   pane.attach                    → { sessionId, endpoint, paneId }
  */
@@ -269,6 +277,20 @@ export interface BrokerCommandOkPayload {
    * existence — see `PaneAttachCommand` notes.
    */
   readonly paneId?: PaneId;
+  /**
+   * Whether this `session.claim` / `session.create` minted the tmux session
+   * (tc-3y8.2).
+   *
+   * `true`  — the session did not exist; this command created it.
+   * `false` — the command attached to a pre-existing session (or joined an
+   *           in-flight claim that another client initiated).
+   *
+   * Clients use this as the authority for create-time-only behaviour —
+   * notably the profile applicator, which runs exactly once per session,
+   * at creation.  Absent on `session.destroy` / `pane.attach` responses;
+   * treat absent as `false`.
+   */
+  readonly created?: boolean;
 }
 
 /**

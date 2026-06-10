@@ -329,8 +329,8 @@ direction: client→broker
 
 | `kind`              | Extra fields              | Response payload                                          |
 |---------------------|---------------------------|-----------------------------------------------------------|
-| `"session.claim"`   | `name: string`            | `{ sessionId, endpoint }` — creates daemon if absent      |
-| `"session.create"`  | `name: string`            | `{ sessionId, endpoint }` — fails if name in use          |
+| `"session.claim"`   | `name: string`            | `{ sessionId, endpoint, created }` — creates session + daemon if absent |
+| `"session.create"`  | `name: string`            | `{ sessionId, endpoint, created }` — fails if name in use |
 | `"session.destroy"` | `sessionId: SessionId`    | `{ ok: true }` — destroys session + reaps daemon          |
 
 #### `command.response` — `BrokerCommandResponseMessage`
@@ -344,27 +344,42 @@ direction: broker→client
 
 **`BrokerCommandOkPayload`** (per-kind):
 
-| Kind                | Payload                                       |
-|---------------------|-----------------------------------------------|
-| `"session.claim"`   | `{ sessionId: SessionId; endpoint: string }`  |
-| `"session.create"`  | `{ sessionId: SessionId; endpoint: string }`  |
-| `"session.destroy"` | `{ ok: true }`                                |
+| Kind                | Payload                                                         |
+|---------------------|-----------------------------------------------------------------|
+| `"session.claim"`   | `{ sessionId: SessionId; endpoint: string; created: boolean }`  |
+| `"session.create"`  | `{ sessionId: SessionId; endpoint: string; created: boolean }`  |
+| `"session.destroy"` | `{ ok: true }`                                                  |
 
 `endpoint` is an opaque connection string (unix socket path under the
 v3 trust model). Clients pass it to `createDaemonTransport(endpoint)`.
 
+`created` reports whether THIS command minted the tmux session (`true`)
+or attached to a pre-existing one (`false`). The broker is the system's
+single create-or-attach point, so this flag is the authority for
+create-time-only client behaviour — notably profile apply (tc-3y8.2):
+profiles apply exactly once, at session creation, never on attach.
+A successful `session.create` always reports `created: true` (it either
+mints or fails `session.name-taken`; an in-flight claim for the same
+name counts as taken). Only `session.claim` can resolve either way.
+
 #### `session.claim` semantics
 
-- If a daemon for `name` already exists, return its endpoint.
+- If a daemon for `name` already exists, return its endpoint
+  (`created: false`).
 - If `name` does not exist as a tmux session, mint one (`tmux new-session
-  -d -s <name>`), then spawn a daemon bound to it, then return.
+  -d -s <name>`), then spawn a daemon bound to it, then return
+  (`created: true`).
 - If `name` exists as a tmux session but no daemon is bound, spawn one
-  and return.
+  and return (`created: false` — the session pre-existed; only the
+  daemon is new).
 
 **Per-name atomicity:** concurrent `session.claim` requests with the
-same `name` receive identical responses. The broker serializes
-session creation and daemon spawn against the name so that two clients
-racing each other do not produce two daemons.
+same `name` receive identical `{ sessionId, endpoint }` responses. The
+broker serializes session creation and daemon spawn against the name so
+that two clients racing each other do not produce two daemons. Requests
+that join an in-flight claim receive `created: false` — exactly one
+claimant observes `created: true` per session creation, so create-time
+behaviour (profile apply) runs at most once even under racing claims.
 
 ### Broker errors
 
