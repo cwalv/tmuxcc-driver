@@ -1223,7 +1223,7 @@ describe("tc-93a: createSessionProxy assembly — fake-tmux smoke", () => {
     // the sessionProxy (kill is called below). The trackSocket call is cheap and
     // covers the case where createSessionProxy evolves to do eager work later.
     // tc-bpn — shape: tmuxcc-test-<pid>-<suffix> required by test-tmux-cleanup.
-    const asmSock = `tmuxcc-test-${process.pid}-daemon-asm-${Date.now()}`;
+    const asmSock = `tmuxcc-test-${process.pid}-sp-asm-${Date.now()}`;
     trackSocket(asmSock);
     const sessionProxy = createSessionProxy({
       host: {

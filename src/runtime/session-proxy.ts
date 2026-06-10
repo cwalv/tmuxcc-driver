@@ -35,7 +35,7 @@
  * (to avoid a chicken-and-egg cycle) and passed to createRuntimePipeline as
  * `buffers`.
  *
- * @module runtime/daemon
+ * @module runtime/session-proxy
  */
 
 import { createTmuxHost } from "./tmux-host.js";

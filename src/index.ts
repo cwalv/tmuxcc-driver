@@ -58,7 +58,7 @@ export type { SessionProxy, SessionProxyOptions } from "./runtime/session-proxy.
 // server-proxy's tmux-death exit trigger, §6.2), and tmux's client calls tcgetattr()
 // on stdin even in control mode — so the watcher needs the same PTY bridge
 // the session-proxy uses. The barrel is the only sanctioned import path for the
-// serverProxy (see tmuxcc-broker/.dependency-cruiser.cjs server-proxy-no-daemon-runtime).
+// serverProxy (see tmuxcc-broker/.dependency-cruiser.cjs server-proxy-no-session-proxy-runtime).
 export { createTmuxHost } from "./runtime/tmux-host.js";
 export type { TmuxHost, TmuxHostOptions } from "./runtime/tmux-host.js";
 
