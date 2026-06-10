@@ -53,7 +53,7 @@ const __dir = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = join(__dir, "..", "..");
 const PARENT_FIXTURE = join(__dir, "fixtures", "dwp-parent.mjs");
 const CHILD_FIXTURE = join(__dir, "fixtures", "dwp-child.mjs");
-const BRIDGE_SCRIPT = join(__dir, "fixtures", "tmux-pty-bridge.py");
+const BRIDGE_SCRIPT = join(__dir, "tmux-pty-bridge.py");
 
 /**
  * URL of the module under test, handed to dwp-child.mjs for dynamic import.

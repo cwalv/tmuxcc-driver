@@ -11,10 +11,10 @@
  * tcgetattr fails with ENXIO and tmux exits immediately with:
  *   "tcgetattr failed: Inappropriate ioctl for device"
  *
- * The bridge script (fixtures/tmux-pty-bridge.py) allocates a POSIX PTY pair,
- * spawns tmux with the slave end, and bridges the master end to its own
- * stdin/stdout — which ARE plain pipes to our Node process. Result: tmux sees
- * a tty; we see a pipe.
+ * The bridge script (tmux-pty-bridge.py, a sibling of this file) allocates a
+ * POSIX PTY pair, spawns tmux with the slave end, and bridges the master end
+ * to its own stdin/stdout — which ARE plain pipes to our Node process.
+ * Result: tmux sees a tty; we see a pipe.
  *
  * # Spawn invocation defaults
  *
@@ -202,9 +202,20 @@ export interface TmuxHost {
 // Implementation
 // ---------------------------------------------------------------------------
 
+// tmux-pty-bridge.py lives in src/runtime/ — a direct sibling of this module —
+// NOT under fixtures/ (it is production runtime code on the hot path of every
+// keystroke, not a test artifact; tc-nkz). Sibling placement is load-bearing:
+// the script is resolved relative to the module that spawns it, and that
+// resolution must hold in BOTH dist layouts —
+//   - daemon standalone: dist/runtime/tmux-host.js → dist/runtime/tmux-pty-bridge.py
+//     (the build step copies it there),
+//   - vscode bundle: import.meta.url collapses to the single bundle file
+//     (dist/extension.cjs / dist/daemon-entry.js) → dist/tmux-pty-bridge.py
+//     (the extension's esbuild step copies it there).
+// A separate src/bridge/ home would need a `../bridge` hop that escapes dist/
+// in the flattened bundle, so the flat sibling is the cleaner invariant.
 const BRIDGE_SCRIPT_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
-  "fixtures",
   "tmux-pty-bridge.py",
 );
 
@@ -501,7 +512,7 @@ class TmuxHostImpl implements TmuxHost {
  * Default spawn invocation:
  *   python3 <bridge> tmux -L <socketName> -CC new-session -s <sessionName>
  *
- * where <bridge> is fixtures/tmux-pty-bridge.py (bundled alongside this file).
+ * where <bridge> is tmux-pty-bridge.py (bundled alongside this file).
  *
  * @example
  * ```ts
