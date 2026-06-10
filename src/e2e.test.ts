@@ -1,7 +1,7 @@
 /**
- * End-to-end client tests — scripted mock daemon over createInMemoryTransportPair.
+ * End-to-end client tests — scripted mock session-proxy over createInMemoryTransportPair.
  *
- * These tests drive a scripted mock daemon (daemon-side of the in-memory
+ * These tests drive a scripted mock sessionProxy (session-proxy-side of the in-memory
  * transport) against the full headless client stack (createClient) and assert
  * that the EchoRenderHook records the right callbacks and that the Mirror
  * reflects the correct model state.
@@ -10,21 +10,21 @@
  *   1. Handshake + snapshot — client connects, mirror reflects snapshot,
  *      render hook fires onWindowAdded / onPaneOpened / onFocusChanged /
  *      onConnected.
- *   2. Deltas — daemon sends pane.resized, window.renamed, focus.changed,
+ *   2. Deltas — session-proxy sends pane.resized, window.renamed, focus.changed,
  *      pane.closed; mirror updates and hook fires in order.
- *   3. %output byte streams — daemon sends data-plane frames for two panes
+ *   3. %output byte streams — session-proxy sends data-plane frames for two panes
  *      including a NON-UTF-8 payload; hook.onPaneOutput receives byte-exact
  *      Uint8Array per pane in order.
- *   4. Resync / seq gap — daemon sends a delta with a skipped seq; mirror
- *      detects the gap and fires onResyncNeeded; then the daemon re-sends a
+ *   4. Resync / seq gap — session-proxy sends a delta with a skipped seq; mirror
+ *      detects the gap and fires onResyncNeeded; then the session-proxy re-sends a
  *      fresh snapshot and the mirror recovers.
- *   5. Input/resize round-trip — controller.sendInput / resizePane; daemon end
+ *   5. Input/resize round-trip — controller.sendInput / resizePane; session-proxy end
  *      receives the correct wire InputMessage / ResizeRequestMessage.
  *
  * # Timing note
  *
  * The in-memory transport delivers synchronously, but the handshake defers
- * the daemon's first message by one microtask (Promise.resolve().then(...))
+ * the session-proxy's first message by one microtask (Promise.resolve().then(...))
  * so both sides have a chance to register handlers. As a result, the snapshot
  * is sent AFTER await client.connect() returns: both handshake promises resolve
  * inside the same microtask, and only after both awaits settle do we send the
@@ -32,7 +32,7 @@
  *
  * Because of this ordering, createClient's driver.start() fires onConnected
  * against an EMPTY model first (the snapshot hasn't arrived yet). The snapshot
- * then arrives via daemonTransport.sendControl() and triggers the mirror's
+ * then arrives via sessionProxyTransport.sendControl() and triggers the mirror's
  * onModelChange, which drives the driver's diff loop (onWindowAdded,
  * onPaneOpened, onFocusChanged). Tests assert on the combined call log.
  *
@@ -47,7 +47,7 @@
  * then a layout.updated delta; asserts onLayoutChanged fires with geometry.
  *
  * Reuses E1's round-trip harness: createInMemoryTransportPair +
- * runDaemonHandshake from @tmuxcc/daemon.
+ * runSessionProxyHandshake from @tmuxcc/session-proxy.
  */
 
 import { describe, it } from "node:test";
@@ -55,7 +55,7 @@ import assert from "node:assert/strict";
 
 import {
   createInMemoryTransportPair,
-  runDaemonHandshake,
+  runSessionProxyHandshake,
   paneId,
   windowId,
   sessionId,
@@ -69,17 +69,17 @@ import {
   // Projection helpers
   projectSnapshot,
   diffModel,
-} from "@tmuxcc/daemon";
+} from "@tmuxcc/session-proxy";
 
 import type {
   PaneId,
   WindowId,
   SessionId,
   SnapshotMessage,
-  DaemonMessage,
+  SessionProxyMessage,
   WindowLayout,
   Capabilities,
-} from "@tmuxcc/daemon";
+} from "@tmuxcc/session-proxy";
 
 import { EchoRenderHook } from "./render-hook.js";
 import { Mirror } from "./mirror.js";
@@ -96,7 +96,7 @@ const P1: PaneId = paneId("p1");
 const W0: WindowId = windowId("w0");
 const S0: SessionId = sessionId("s0");
 
-const DAEMON_CAPS: Capabilities = {
+const SESSION_PROXY_CAPS: Capabilities = {
   protocolVersion: WIRE_PROTOCOL_VERSION,
   features: ["pane-lifecycle", "layout-updates", "focus-events", "input-forwarding"],
 };
@@ -159,9 +159,9 @@ function buildBaseModel() {
 
 /**
  * Stamp real seq values onto diffModel deltas (diffModel returns seq=0
- * placeholders; the daemon runtime normally does this).
+ * placeholders; the session-proxy runtime normally does this).
  */
-function stampSeqs(deltas: DaemonMessage[], startSeq: number): DaemonMessage[] {
+function stampSeqs(deltas: SessionProxyMessage[], startSeq: number): SessionProxyMessage[] {
   let seq = startSeq;
   return deltas.map((d) => ({ ...d, seq: seq++ }));
 }
@@ -176,19 +176,19 @@ function stampSeqs(deltas: DaemonMessage[], startSeq: number): DaemonMessage[] {
  * a model-change event (same ordering as the old driver.start() flow).
  */
 async function connectAndSnapshot(
-  daemonTransport: import("@tmuxcc/daemon").Transport,
-  clientTransport: import("@tmuxcc/daemon").Transport,
+  sessionProxyTransport: import("@tmuxcc/session-proxy").Transport,
+  clientTransport: import("@tmuxcc/session-proxy").Transport,
   hook: EchoRenderHook,
   snapshot: SnapshotMessage,
-): Promise<{ handle: ClientHandle; session: import("@tmuxcc/daemon").NegotiatedSession }> {
-  // Start handshake on both sides concurrently (daemon doesn't need to await).
-  const daemonHandshake = runDaemonHandshake(daemonTransport, DAEMON_CAPS);
+): Promise<{ handle: ClientHandle; session: import("@tmuxcc/session-proxy").NegotiatedSession }> {
+  // Start handshake on both sides concurrently (session-proxy doesn't need to await).
+  const sessionProxyHandshake = runSessionProxyHandshake(sessionProxyTransport, SESSION_PROXY_CAPS);
 
   // Await the client — this completes both sides of the handshake.
   const handle = await connectClient(clientTransport);
 
-  // Ensure daemon promise has resolved (it must have by now; just drain).
-  await daemonHandshake;
+  // Ensure session-proxy promise has resolved (it must have by now; just drain).
+  await sessionProxyHandshake;
 
   // Attach the hook before sending the snapshot, so the ordering matches
   // the old driver.start() behavior: onConnected fires with empty model,
@@ -196,7 +196,7 @@ async function connectAndSnapshot(
   handle.mirror.attach(hook);
 
   // Send the snapshot NOW — client post-handshake routing is installed.
-  daemonTransport.sendControl(snapshot);
+  sessionProxyTransport.sendControl(snapshot);
 
   return { handle, session: handle.session };
 }
@@ -207,7 +207,7 @@ async function connectAndSnapshot(
 
 describe("e2e — scenario 1: handshake + snapshot", () => {
   it("client connects, mirror reflects snapshot, render hook fires windowAdded/paneOpened/focusChanged/connected", async () => {
-    const { daemon: daemonTransport, client: clientTransport } =
+    const { sessionProxy: sessionProxyTransport, client: clientTransport } =
       createInMemoryTransportPair();
 
     const echo = new EchoRenderHook();
@@ -216,7 +216,7 @@ describe("e2e — scenario 1: handshake + snapshot", () => {
     const model = buildBaseModel();
     const snapshot: SnapshotMessage = projectSnapshot(model, { seq: 2 });
 
-    const { handle, session: clientSession } = await connectAndSnapshot(daemonTransport, clientTransport, echo, snapshot);
+    const { handle, session: clientSession } = await connectAndSnapshot(sessionProxyTransport, clientTransport, echo, snapshot);
 
     // Verify negotiated session.
     assert.equal(clientSession.protocolVersion, WIRE_PROTOCOL_VERSION);
@@ -282,7 +282,7 @@ describe("e2e — scenario 1: handshake + snapshot", () => {
     assert.ok(windowAddedIdx < firstPaneOpenedIdx, "windowAdded must come before paneOpened");
 
     handle.disconnect();
-    daemonTransport.close();
+    sessionProxyTransport.close();
   });
 });
 
@@ -291,8 +291,8 @@ describe("e2e — scenario 1: handshake + snapshot", () => {
 // ---------------------------------------------------------------------------
 
 describe("e2e — scenario 2: deltas", () => {
-  it("daemon sends a sequence of deltas; hook fires in order with correct args", async () => {
-    const { daemon: daemonTransport, client: clientTransport } =
+  it("session-proxy sends a sequence of deltas; hook fires in order with correct args", async () => {
+    const { sessionProxy: sessionProxyTransport, client: clientTransport } =
       createInMemoryTransportPair();
 
     const echo = new EchoRenderHook();
@@ -301,7 +301,7 @@ describe("e2e — scenario 2: deltas", () => {
     const baseModel = buildBaseModel();
     const snapshot: SnapshotMessage = projectSnapshot(baseModel, { seq: 2 });
 
-    const { handle } = await connectAndSnapshot(daemonTransport, clientTransport, echo, snapshot);
+    const { handle } = await connectAndSnapshot(sessionProxyTransport, clientTransport, echo, snapshot);
     echo.clear(); // clear initial snapshot calls; focus only on delta calls
 
     // Build updated model:
@@ -338,7 +338,7 @@ describe("e2e — scenario 2: deltas", () => {
 
     // Send all deltas synchronously.
     for (const delta of deltas) {
-      daemonTransport.sendControl(delta);
+      sessionProxyTransport.sendControl(delta);
     }
 
     // pane.resized → onPaneResized for P1
@@ -378,7 +378,7 @@ describe("e2e — scenario 2: deltas", () => {
     assert.ok(resizeIdx < closeIdx, "paneResized must come before paneClosed");
 
     handle.disconnect();
-    daemonTransport.close();
+    sessionProxyTransport.close();
   });
 });
 
@@ -387,8 +387,8 @@ describe("e2e — scenario 2: deltas", () => {
 // ---------------------------------------------------------------------------
 
 describe("e2e — scenario 3: %output byte streams", () => {
-  it("daemon sends data-plane frames (incl. non-UTF-8); hook receives byte-exact Uint8Array per pane in order", async () => {
-    const { daemon: daemonTransport, client: clientTransport } =
+  it("session-proxy sends data-plane frames (incl. non-UTF-8); hook receives byte-exact Uint8Array per pane in order", async () => {
+    const { sessionProxy: sessionProxyTransport, client: clientTransport } =
       createInMemoryTransportPair();
 
     const echo = new EchoRenderHook();
@@ -396,7 +396,7 @@ describe("e2e — scenario 3: %output byte streams", () => {
     const model = buildBaseModel();
     const snapshot: SnapshotMessage = projectSnapshot(model, { seq: 2 });
 
-    const { handle } = await connectAndSnapshot(daemonTransport, clientTransport, echo, snapshot);
+    const { handle } = await connectAndSnapshot(sessionProxyTransport, clientTransport, echo, snapshot);
 
     // Payloads — including non-UTF-8 bytes.
     const p0Chunk1 = new TextEncoder().encode("hello ");
@@ -404,9 +404,9 @@ describe("e2e — scenario 3: %output byte streams", () => {
     const p1ChunkNonUtf8 = Uint8Array.from([0xff, 0x00, 0xfe, 0x80, 0x42]);
 
     // Send data frames after snapshot (panes are now open).
-    daemonTransport.sendData(P0, p0Chunk1);
-    daemonTransport.sendData(P0, p0Chunk2);
-    daemonTransport.sendData(P1, p1ChunkNonUtf8);
+    sessionProxyTransport.sendData(P0, p0Chunk1);
+    sessionProxyTransport.sendData(P0, p0Chunk2);
+    sessionProxyTransport.sendData(P1, p1ChunkNonUtf8);
 
     // Collect all paneOutput calls (type-safe via explicit narrowing).
     const allOutputCalls = echo.calls.filter(
@@ -443,7 +443,7 @@ describe("e2e — scenario 3: %output byte streams", () => {
     assert.ok(p0LastIdx < p1FirstIdx, "P0 outputs must arrive before P1");
 
     handle.disconnect();
-    daemonTransport.close();
+    sessionProxyTransport.close();
   });
 });
 
@@ -453,7 +453,7 @@ describe("e2e — scenario 3: %output byte streams", () => {
 
 describe("e2e — scenario 4: resync — seq gap detection and recovery", () => {
   it("mirror detects seq gap and fires resync; model is not updated; after re-snapshot mirror recovers", async () => {
-    const { daemon: daemonTransport, client: clientTransport } =
+    const { sessionProxy: sessionProxyTransport, client: clientTransport } =
       createInMemoryTransportPair();
 
     const echo = new EchoRenderHook();
@@ -468,10 +468,10 @@ describe("e2e — scenario 4: resync — seq gap detection and recovery", () => 
     const model = buildBaseModel();
     const snapshot: SnapshotMessage = projectSnapshot(model, { seq: 2 });
 
-    const { handle } = await connectAndSnapshot(daemonTransport, clientTransport, echo, snapshot);
+    const { handle } = await connectAndSnapshot(sessionProxyTransport, clientTransport, echo, snapshot);
 
     // Build a delta with a GAP: snapshot seq=2, next expected=3, but we send seq=5.
-    const gapDelta: DaemonMessage = {
+    const gapDelta: SessionProxyMessage = {
       type: "pane.resized",
       seq: 5, // GAP: expected 3
       paneId: P0,
@@ -479,7 +479,7 @@ describe("e2e — scenario 4: resync — seq gap detection and recovery", () => 
       rows: 60,
     };
 
-    // After the gap, daemon re-sends a fresh snapshot (resync recovery).
+    // After the gap, session-proxy re-sends a fresh snapshot (resync recovery).
     const model2 = (() => {
       const panes = new Map(model.panes);
       panes.set(P0, { ...model.panes.get(P0)!, cols: 200, rows: 60 });
@@ -513,8 +513,8 @@ describe("e2e — scenario 4: resync — seq gap detection and recovery", () => 
 
     // ── Client-side: send gap delta + re-snapshot, verify client recovers ────
 
-    daemonTransport.sendControl(gapDelta);   // gap detected by client's mirror
-    daemonTransport.sendControl(snapshot2);  // re-snapshot → client recovers
+    sessionProxyTransport.sendControl(gapDelta);   // gap detected by client's mirror
+    sessionProxyTransport.sendControl(snapshot2);  // re-snapshot → client recovers
 
     // Client's render hook should have received at least the initial events.
     const types = echo.calls.map((c) => c.type);
@@ -533,7 +533,7 @@ describe("e2e — scenario 4: resync — seq gap detection and recovery", () => 
     assert.equal(lastResize.rows, 60);
 
     handle.disconnect();
-    daemonTransport.close();
+    sessionProxyTransport.close();
   });
 });
 
@@ -542,8 +542,8 @@ describe("e2e — scenario 4: resync — seq gap detection and recovery", () => 
 // ---------------------------------------------------------------------------
 
 describe("e2e — scenario 5: input/resize round-trip", () => {
-  it("controller.sendInput sends InputMessage to daemon; controller.resizePane sends ResizeRequestMessage", async () => {
-    const { daemon: daemonTransport, client: clientTransport } =
+  it("controller.sendInput sends InputMessage to sessionProxy; controller.resizePane sends ResizeRequestMessage", async () => {
+    const { sessionProxy: sessionProxyTransport, client: clientTransport } =
       createInMemoryTransportPair();
 
     const echo = new EchoRenderHook();
@@ -551,28 +551,28 @@ describe("e2e — scenario 5: input/resize round-trip", () => {
     const model = buildBaseModel();
     const snapshot: SnapshotMessage = projectSnapshot(model, { seq: 2 });
 
-    // Capture messages received by the daemon side after the handshake.
-    const daemonReceived: unknown[] = [];
+    // Capture messages received by the session-proxy side after the handshake.
+    const sessionProxyReceived: unknown[] = [];
 
     // Start handshake concurrently.
-    const daemonHandshake = runDaemonHandshake(daemonTransport, DAEMON_CAPS);
+    const sessionProxyHandshake = runSessionProxyHandshake(sessionProxyTransport, SESSION_PROXY_CAPS);
 
     // Connect the client (coalesceResizes: false so resize is sent immediately).
     const handle = await connectClient(clientTransport, { input: { coalesceResizes: false } });
 
-    // After connectClient(), daemon side must also have resolved.
-    await daemonHandshake;
+    // After connectClient(), session-proxy side must also have resolved.
+    await sessionProxyHandshake;
 
     // Attach hook before sending snapshot.
     handle.mirror.attach(echo);
 
-    // Install daemon-side handler NOW (handshake no-op has settled).
-    daemonTransport.onControl((msg) => {
-      daemonReceived.push(msg);
+    // Install session-proxy-side handler NOW (handshake no-op has settled).
+    sessionProxyTransport.onControl((msg) => {
+      sessionProxyReceived.push(msg);
     });
 
     // Send the snapshot.
-    daemonTransport.sendControl(snapshot);
+    sessionProxyTransport.sendControl(snapshot);
 
     // Send input via controller.
     handle.controller.sendInput(P0, "ls -la\r");
@@ -583,17 +583,17 @@ describe("e2e — scenario 5: input/resize round-trip", () => {
     // The in-memory transport delivers synchronously.
 
     // Find the InputMessage.
-    const inputMsg = daemonReceived.find(
+    const inputMsg = sessionProxyReceived.find(
       (m): m is { type: "input"; paneId: PaneId; data: string; seq: number } =>
         typeof m === "object" && m !== null && (m as { type?: string }).type === "input",
     );
-    assert.ok(inputMsg !== undefined, "daemon must have received an input message");
+    assert.ok(inputMsg !== undefined, "session-proxy must have received an input message");
     assert.equal(inputMsg.type, "input");
     assert.equal(inputMsg.paneId, P0);
     assert.equal(inputMsg.data, "ls -la\r");
 
     // Find the ResizeRequestMessage.
-    const resizeMsg = daemonReceived.find(
+    const resizeMsg = sessionProxyReceived.find(
       (
         m,
       ): m is { type: "resize.request"; paneId: PaneId; cols: number; rows: number; seq: number } =>
@@ -601,7 +601,7 @@ describe("e2e — scenario 5: input/resize round-trip", () => {
         m !== null &&
         (m as { type?: string }).type === "resize.request",
     );
-    assert.ok(resizeMsg !== undefined, "daemon must have received a resize.request message");
+    assert.ok(resizeMsg !== undefined, "session-proxy must have received a resize.request message");
     assert.equal(resizeMsg.type, "resize.request");
     assert.equal(resizeMsg.paneId, P0);
     assert.equal(resizeMsg.cols, 220);
@@ -613,7 +613,7 @@ describe("e2e — scenario 5: input/resize round-trip", () => {
     assert.ok(inputMsg.seq < resizeMsg.seq, "input must be sent before resize");
 
     handle.disconnect();
-    daemonTransport.close();
+    sessionProxyTransport.close();
   });
 });
 
@@ -623,7 +623,7 @@ describe("e2e — scenario 5: input/resize round-trip", () => {
 
 describe("e2e — scenario 6: onLayoutChanged delivers split-tree geometry", () => {
   it("snapshot with a split layout fires onLayoutChanged with non-empty geometry; layout.updated delta fires it again", async () => {
-    const { daemon: daemonTransport, client: clientTransport } =
+    const { sessionProxy: sessionProxyTransport, client: clientTransport } =
       createInMemoryTransportPair();
 
     const echo = new EchoRenderHook();
@@ -632,7 +632,7 @@ describe("e2e — scenario 6: onLayoutChanged delivers split-tree geometry", () 
     const model = buildBaseModel(); // W0 carries SAMPLE_LAYOUT (hsplit, 2 panes)
     const snapshot: SnapshotMessage = projectSnapshot(model, { seq: 2 });
 
-    const { handle } = await connectAndSnapshot(daemonTransport, clientTransport, echo, snapshot);
+    const { handle } = await connectAndSnapshot(sessionProxyTransport, clientTransport, echo, snapshot);
 
     // ── Part 1: snapshot replay fires onLayoutChanged with the split layout ──
     const layoutCalls = echo.calls.filter(
@@ -673,7 +673,7 @@ describe("e2e — scenario 6: onLayoutChanged delivers split-tree geometry", () 
       },
     };
 
-    const layoutUpdatedDelta: DaemonMessage = {
+    const layoutUpdatedDelta: SessionProxyMessage = {
       type: "layout.updated",
       seq: 3,
       windowId: W0,
@@ -681,7 +681,7 @@ describe("e2e — scenario 6: onLayoutChanged delivers split-tree geometry", () 
     };
 
     echo.clear(); // reset — focus only on the delta-driven call
-    daemonTransport.sendControl(layoutUpdatedDelta);
+    sessionProxyTransport.sendControl(layoutUpdatedDelta);
 
     const deltaLayoutCalls = echo.calls.filter(
       (c): c is Extract<typeof c, { type: "layoutChanged" }> => c.type === "layoutChanged",
@@ -696,7 +696,7 @@ describe("e2e — scenario 6: onLayoutChanged delivers split-tree geometry", () 
     }
 
     handle.disconnect();
-    daemonTransport.close();
+    sessionProxyTransport.close();
   });
 });
 
@@ -726,7 +726,7 @@ describe("mirror seq tracking — complementary unit assertions", () => {
     mirror.receiveSnapshot(snapshot);
 
     // Apply a pane.resized delta (seq=3).
-    const resizeDelta: DaemonMessage = {
+    const resizeDelta: SessionProxyMessage = {
       type: "pane.resized",
       seq: 3,
       paneId: P0,
@@ -752,7 +752,7 @@ describe("mirror seq tracking — complementary unit assertions", () => {
     });
 
     // Gap: expected seq=3 but send seq=10.
-    const outOfOrderDelta: DaemonMessage = {
+    const outOfOrderDelta: SessionProxyMessage = {
       type: "pane.resized",
       seq: 10,
       paneId: P0,

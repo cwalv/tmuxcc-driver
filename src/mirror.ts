@@ -1,9 +1,9 @@
 /**
  * Client-side model mirror — tc-eots
  *
- * Maintains a client-side mirror of the daemon's session model by consuming
+ * Maintains a client-side mirror of the session-proxy's session model by consuming
  * a SnapshotMessage (full-state baseline) followed by incremental delta
- * messages from the DaemonConnection.onControl stream.
+ * messages from the SessionProxyConnection.onControl stream.
  *
  * # Architecture
  *
@@ -14,12 +14,12 @@
  *   2. `Mirror` class: thin stateful wrapper that holds the current model,
  *      manages seq-gap detection, fires change/resync callbacks, and provides
  *      `getModel()` for renderers. `Mirror.connectTo(connection)` wires a
- *      DaemonConnection to the mirror automatically.
+ *      SessionProxyConnection to the mirror automatically.
  *
  * # Client model shape
  *
- * The `ClientModel` is intentionally simpler than the daemon's `SessionModel`:
- *   - No scrollback handles (daemon-internal).
+ * The `ClientModel` is intentionally simpler than the session-proxy's `SessionModel`:
+ *   - No scrollback handles (session-proxy-internal).
  *   - No invariant-checking overhead.
  *   - Flat maps keyed by the same branded id types the wire uses.
  *   - `ClientPane` includes `mode` (rendered by tc-7v9 as visual indicator).
@@ -55,7 +55,7 @@
 
 import type {
   SnapshotMessage,
-  DaemonMessage,
+  SessionProxyMessage,
   ClientMessage,
   ResyncRequestMessage,
   PaneId,
@@ -63,8 +63,8 @@ import type {
   SessionId,
   WindowLayout,
   PaneMode,
-} from "@tmuxcc/daemon";
-import type { DaemonConnection } from "./connection.js";
+} from "@tmuxcc/session-proxy";
+import type { SessionProxyConnection } from "./connection.js";
 import type { RenderHook, ByteSource } from "./render-hook.js";
 
 // ---------------------------------------------------------------------------
@@ -78,7 +78,7 @@ import type { RenderHook, ByteSource } from "./render-hook.js";
  * SnapshotPane / delta messages. `mode` is tracked from pane.mode-changed
  * deltas (defaults to "normal" at snapshot time since SnapshotPane has no mode).
  *
- * v3: sessionId is absent — the daemon wire is single-session and does not
+ * v3: sessionId is absent — the session-proxy wire is single-session and does not
  * carry sessionId on pane messages.
  */
 export interface ClientPane {
@@ -99,7 +99,7 @@ export interface ClientPane {
  * zero-placeholder if no layout.updated has arrived yet — matches projection.ts
  * semantics for window.added).
  *
- * v3: sessionId is absent — the daemon wire is single-session and does not
+ * v3: sessionId is absent — the session-proxy wire is single-session and does not
  * carry sessionId on window messages.
  */
 export interface ClientWindow {
@@ -130,7 +130,7 @@ export interface ClientWindow {
 /**
  * A session as tracked by the client mirror.
  *
- * v3: the daemon wire is single-session. `ClientModel.session` holds this
+ * v3: the session-proxy wire is single-session. `ClientModel.session` holds this
  * scalar directly (not a map).
  */
 export interface ClientSession {
@@ -141,7 +141,7 @@ export interface ClientSession {
 /**
  * Global focus pair. Both are null when no pane is focused.
  *
- * v3: sessionId is absent from focus — the daemon wire is single-session.
+ * v3: sessionId is absent from focus — the session-proxy wire is single-session.
  */
 export interface ClientFocus {
   readonly paneId: PaneId | null;
@@ -149,7 +149,7 @@ export interface ClientFocus {
 }
 
 /**
- * The client-side model — a flat, normalized view of the daemon's session state.
+ * The client-side model — a flat, normalized view of the session-proxy's session state.
  *
  * Maps are keyed by the same branded id types the wire uses. This model is
  * replaced atomically by `applySnapshot` / `applyDelta`; renderers should call
@@ -182,17 +182,17 @@ export interface ClientModel {
    */
   readonly exitCodes: ReadonlyMap<PaneId, number>;
   /**
-   * Number of daemon-protocol clients currently connected to this session.
+   * Number of session-proxy-protocol clients currently connected to this session.
    *
    * tc-1elae (Phase 2 — §11.4): initially populated from
    * `SnapshotMessage.attachedClientCount` (static baseline at connect time).
    *
    * tc-44wu0 (Phase 4): subsequently kept live by `client-count.changed`
-   * delta messages, which the daemon broadcasts whenever a client connects
+   * delta messages, which the session-proxy broadcasts whenever a client connects
    * or disconnects. After tc-44wu0 lands this value reflects the real-time
    * count, not merely the snapshot-time count.
    *
-   * Absent (undefined) when the snapshot did not carry this field (older daemon
+   * Absent (undefined) when the snapshot did not carry this field (older session-proxy
    * predating Phase 2) or before the first snapshot arrives. The status bar
    * falls back to 1 when absent.
    */
@@ -309,15 +309,15 @@ export function applySnapshot(snapshot: SnapshotMessage): {
  *
  * Exhaustively handles every delta type via TypeScript `never` exhaustiveness
  * check. Messages not relevant to model state (command.response, error,
- * daemon.capabilities, snapshot) are returned as-is (no model change).
+ * session-proxy.capabilities, snapshot) are returned as-is (no model change).
  *
  * Returns the updated model (or the same model reference if no change is
  * needed for this message type).
  *
- * Mirror semantics follow the daemon's `applyDeltas` reference implementation
- * in `projection.test.ts`, so client and daemon agree on round-trip consistency.
+ * Mirror semantics follow the session-proxy's `applyDeltas` reference implementation
+ * in `projection.test.ts`, so client and session-proxy agree on round-trip consistency.
  */
-export function applyDelta(model: ClientModel, msg: DaemonMessage): ClientModel {
+export function applyDelta(model: ClientModel, msg: SessionProxyMessage): ClientModel {
   switch (msg.type) {
     // ── Pane lifecycle ───────────────────────────────────────────────────────
 
@@ -337,7 +337,7 @@ export function applyDelta(model: ClientModel, msg: DaemonMessage): ClientModel 
       if (!model.panes.has(msg.paneId)) return model;
       const panes = new Map(model.panes);
       panes.delete(msg.paneId);
-      // Record the exit code if the daemon provided one.
+      // Record the exit code if the session-proxy provided one.
       if (msg.exitCode !== undefined) {
         const exitCodes = new Map(model.exitCodes);
         exitCodes.set(msg.paneId, msg.exitCode);
@@ -477,17 +477,17 @@ export function applyDelta(model: ClientModel, msg: DaemonMessage): ClientModel 
       return { ...model, windows, focus };
     }
 
-    // ── Session lifecycle (v3: only session.renamed on daemon wire) ───────────
+    // ── Session lifecycle (v3: only session.renamed on session-proxy wire) ───────────
 
     case "session.renamed": {
-      // v3: DaemonSessionRenamedMessage has no sessionId — updates the bound session.
+      // v3: SessionProxySessionRenamedMessage has no sessionId — updates the bound session.
       return { ...model, session: { ...model.session, name: msg.newName } };
     }
 
     // ── Client-count delta (tc-44wu0) ────────────────────────────────────────
 
     case "client-count.changed": {
-      // Live update from the daemon when a client attaches or detaches.
+      // Live update from the session-proxy when a client attaches or detaches.
       // Updates attachedClientCount so the status-bar tooltip reflects the
       // current count without requiring a full resync.
       return { ...model, attachedClientCount: msg.count };
@@ -499,7 +499,7 @@ export function applyDelta(model: ClientModel, msg: DaemonMessage): ClientModel 
       // Full snapshot — call applySnapshot() instead.
       return model;
 
-    case "daemon.capabilities":
+    case "session-proxy.capabilities":
     case "command.response":
     case "error":
       // Not state-bearing for the mirror.
@@ -507,7 +507,7 @@ export function applyDelta(model: ClientModel, msg: DaemonMessage): ClientModel 
 
     // ── Exhaustiveness check ─────────────────────────────────────────────────
     default: {
-      // TypeScript will error here if a new DaemonMessage variant is added but
+      // TypeScript will error here if a new SessionProxyMessage variant is added but
       // not handled above.
       const _exhaustive: never = msg;
       return _exhaustive;
@@ -526,14 +526,14 @@ export type ModelChangeHandler = (model: ClientModel) => void;
 export type ResyncNeededHandler = (gap: SeqGapInfo) => void;
 
 /**
- * Stateful client-side mirror of the daemon session model.
+ * Stateful client-side mirror of the session-proxy session model.
  *
  * Usage (pure manual drive):
  * ```ts
  * const mirror = new Mirror();
  * mirror.onModelChange((m) => render(m));
  * mirror.onResyncNeeded(({ expected, received }) => {
- *   // request a fresh snapshot from the daemon
+ *   // request a fresh snapshot from the session-proxy
  * });
  * // On connection established — snapshot arrives first:
  * connection.onControl((msg) => {
@@ -556,7 +556,7 @@ export class Mirror {
 
   // ── Resync-request state (tc-7ml.4) ───────────────────────────────────────
   //
-  // When a seq gap is detected the mirror sends `resync.request` to the daemon
+  // When a seq gap is detected the mirror sends `resync.request` to the session-proxy
   // and sets #resyncRequested = true.  On snapshot arrival the flag is cleared.
   //
   // While the flag is set, further gap signals are suppressed (dedup: only one
@@ -567,7 +567,7 @@ export class Mirror {
   // the mirror escalates by calling transport.close() via #closeFn.
   //
   // #clientSeq is the outbound sequence counter for resync.request messages
-  // (and any other client→daemon messages the mirror may send in the future).
+  // (and any other client→session-proxy messages the mirror may send in the future).
   // It is independent of the inbound #lastSeq counter.
   #resyncRequested = false;
   #resyncDelivered = false; // true after the first resync snapshot was received
@@ -645,7 +645,7 @@ export class Mirror {
    *
    * A seq gap means a delta arrived with a non-consecutive seq (skipped or
    * out-of-order). The mirror does NOT apply the offending delta. The caller
-   * should request a fresh snapshot from the daemon and call `receiveSnapshot`
+   * should request a fresh snapshot from the session-proxy and call `receiveSnapshot`
    * again.
    *
    * Handlers are APPENDED. Returns an unsubscribe function.
@@ -696,12 +696,12 @@ export class Mirror {
    *   - All `onResyncNeeded` handlers are called with the gap info.
    *   - The mirror stays at the last known-good state.
    *
-   * If the message type is not a delta (snapshot, daemon.capabilities,
+   * If the message type is not a delta (snapshot, session-proxy.capabilities,
    * command.response, error), it is silently ignored.
    *
    * Fires `onModelChange` handlers on successful apply.
    */
-  receiveDelta(msg: DaemonMessage): void {
+  receiveDelta(msg: SessionProxyMessage): void {
     // Not yet initialized — ignore.
     if (!this.#initialized || this.#lastSeq === null) return;
 
@@ -710,7 +710,7 @@ export class Mirror {
 
     // Non-state-bearing messages — skip seq check and silently ignore.
     if (
-      msg.type === "daemon.capabilities" ||
+      msg.type === "session-proxy.capabilities" ||
       msg.type === "command.response" ||
       msg.type === "error"
     ) {
@@ -756,7 +756,7 @@ export class Mirror {
   // ── Connection wiring ─────────────────────────────────────────────────────
 
   /**
-   * Wire this mirror to a `DaemonConnection`.
+   * Wire this mirror to a `SessionProxyConnection`.
    *
    * Registers a single `onControl` handler that routes:
    *   - `snapshot` messages → `receiveSnapshot()`
@@ -767,19 +767,19 @@ export class Mirror {
    *
    * Returns an unsubscribe function that deregisters the handler (setting
    * the connection's control handler to null is not possible with the current
-   * DaemonConnection API, so the unsubscribe replaces it with a no-op).
+   * SessionProxyConnection API, so the unsubscribe replaces it with a no-op).
    *
-   * NOTE: `DaemonConnection.onControl` is a single-slot handler (replace
+   * NOTE: `SessionProxyConnection.onControl` is a single-slot handler (replace
    * semantics, not append). If another consumer also calls `onControl`, it
    * will replace this mirror's handler. In that case, route messages manually
    * via `receiveSnapshot` / `receiveDelta` instead.
    *
    * Call AFTER `await connection.connect()` so buffered messages are delivered.
    */
-  connectTo(connection: DaemonConnection): () => void {
+  connectTo(connection: SessionProxyConnection): () => void {
     // Inject the send/close capabilities for autonomous resync-request (tc-7ml.4).
     this.#sendFn = (msg: ResyncRequestMessage) => {
-      // DaemonConnection.send() accepts ClientMessage; ResyncRequestMessage
+      // SessionProxyConnection.send() accepts ClientMessage; ResyncRequestMessage
       // is a member of ClientMessage, so this cast is safe.
       connection.send(msg as ClientMessage);
     };
@@ -787,7 +787,7 @@ export class Mirror {
       connection.close();
     };
 
-    const handler = (msg: DaemonMessage): void => {
+    const handler = (msg: SessionProxyMessage): void => {
       if (msg.type === "snapshot") {
         this.receiveSnapshot(msg);
       } else {
@@ -795,7 +795,7 @@ export class Mirror {
       }
     };
     connection.onControl(handler);
-    // Return a no-op unsubscribe (DaemonConnection.onControl is replace-only;
+    // Return a no-op unsubscribe (SessionProxyConnection.onControl is replace-only;
     // to truly unsubscribe you'd have to install a new handler).
     return () => {
       // Replace with a no-op to stop routing to this mirror.
@@ -931,7 +931,7 @@ export class Mirror {
       }
       for (const [pid] of prev.panes) {
         if (!curr.panes.has(pid)) {
-          // Pass the exit code if the daemon provided one (carried in exitCodes).
+          // Pass the exit code if the session-proxy provided one (carried in exitCodes).
           const exitCode = curr.exitCodes.get(pid);
           hook.onPaneClosed(pid, exitCode);
           unsubscribeBytes(pid);
@@ -1064,7 +1064,7 @@ export class Mirror {
 // ---------------------------------------------------------------------------
 
 /**
- * Create a `Mirror` already wired to a `DaemonConnection`.
+ * Create a `Mirror` already wired to a `SessionProxyConnection`.
  *
  * Convenience wrapper around `new Mirror()` + `mirror.connectTo(connection)`.
  * Call after `await connection.connect()`.
@@ -1075,7 +1075,7 @@ export class Mirror {
  * mirror.onModelChange((m) => render(m));
  * ```
  */
-export function createMirror(connection: DaemonConnection): Mirror {
+export function createMirror(connection: SessionProxyConnection): Mirror {
   const mirror = new Mirror();
   mirror.connectTo(connection);
   return mirror;

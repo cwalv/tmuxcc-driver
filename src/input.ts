@@ -1,10 +1,10 @@
 /**
- * Input / resize API — client→daemon direction.
+ * Input / resize API — client→session-proxy direction.
  *
  * # Responsibilities
  *
  * This module provides the `InputApi` interface and its `createInputApi`
- * factory, which sits on top of `DaemonConnection.send()`:
+ * factory, which sits on top of `SessionProxyConnection.send()`:
  *
  *   - `sendInput(paneId, data)` — wraps a string payload in a wire
  *     `InputMessage` (type: "input") and fires it immediately.  Input bytes
@@ -15,13 +15,13 @@
  *     `ResizeRequestMessage` (type: "resize.request").  With the default
  *     options, resize requests for the same pane are debounced within a
  *     single async tick (via `Promise.resolve()`) to avoid flooding the
- *     daemon during rapid viewport drags.  Only the LAST resize for a given
+ *     session-proxy during rapid viewport drags.  Only the LAST resize for a given
  *     pane within a tick is sent; the final value is never dropped.
  *
  * # Coalescing policy
  *
  * Resize events can fire at display-refresh rates when a user drags a pane
- * border.  Flooding the daemon with hundreds of resize messages per second
+ * border.  Flooding the session-proxy with hundreds of resize messages per second
  * risks congesting the control plane.  The coalescer keeps only the most
  * recent `{cols, rows}` per pane and flushes after one microtask boundary:
  *
@@ -46,7 +46,7 @@
  * The wire `MessageBase` requires a `seq: number` on every message.  The
  * spec says the SENDER increments the counter per connection (per control.ts
  * line 107: "Per-connection sequence number … incremented by the SENDER for
- * each message").  `DaemonConnection.send()` calls `transport.sendControl()`
+ * each message").  `SessionProxyConnection.send()` calls `transport.sendControl()`
  * directly without stamping a seq, so the seq counter must be managed HERE,
  * at the message-construction level.
  *
@@ -61,7 +61,7 @@
  * # NO DOM, NO vscode, NO host API, NO Pseudoterminal
  */
 
-import type { PaneId, InputMessage, ResizeRequestMessage, CommandRequestMessage, WireCommand } from "@tmuxcc/daemon";
+import type { PaneId, InputMessage, ResizeRequestMessage, CommandRequestMessage, WireCommand } from "@tmuxcc/session-proxy";
 
 // ---------------------------------------------------------------------------
 // Public interface
@@ -132,7 +132,7 @@ export interface InputApi {
   flush(): void;
 
   /**
-   * Send a model-level command to the daemon (VS Code → tmux direction).
+   * Send a model-level command to the sessionProxy (VS Code → tmux direction).
    *
    * Wraps `cmd` in a `command.request` wire message with a unique
    * correlationId (monotonic counter string) and fires it immediately.
@@ -151,11 +151,11 @@ export interface InputApi {
 }
 
 // ---------------------------------------------------------------------------
-// Minimal send seam (subset of DaemonConnection used here)
+// Minimal send seam (subset of SessionProxyConnection used here)
 // ---------------------------------------------------------------------------
 
 /**
- * The only method of `DaemonConnection` this module depends on.
+ * The only method of `SessionProxyConnection` this module depends on.
  * Accepting an interface (rather than the concrete class) keeps `InputApi`
  * testable without a full handshake — a mock `{ send }` suffices.
  */
@@ -168,7 +168,7 @@ export interface InputSender {
 // ---------------------------------------------------------------------------
 
 /**
- * Create an `InputApi` bound to a `DaemonConnection` (or any `InputSender`).
+ * Create an `InputApi` bound to a `SessionProxyConnection` (or any `InputSender`).
  *
  * ```ts
  * const api = createInputApi(connection);
@@ -176,7 +176,7 @@ export interface InputSender {
  * api.resizePane("p0", 220, 50);
  * ```
  *
- * @param sender - A `DaemonConnection` or any object with a `send()` method.
+ * @param sender - A `SessionProxyConnection` or any object with a `send()` method.
  * @param opts   - Optional tuning; see `InputApiOptions`.
  */
 export function createInputApi(

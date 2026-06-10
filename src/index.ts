@@ -12,11 +12,11 @@ export const CLIENT_PLACEHOLDER = true;
 // Connection + handshake (tc-ahh — E5 serial head)
 // ---------------------------------------------------------------------------
 
-export { DaemonConnection } from "./connection.js";
+export { SessionProxyConnection } from "./connection.js";
 export type {
   ConnectionState,
-  DaemonConnectionOptions,
-  DaemonMessageHandler,
+  SessionProxyConnectionOptions,
+  SessionProxyMessageHandler,
   DataFrameHandler,
   StateChangeHandler,
 } from "./connection.js";
@@ -44,7 +44,7 @@ export type {
 export * from "./pane-stream.js";
 
 // ---------------------------------------------------------------------------
-// Input/resize API (tc-6jf) — client→daemon wire messages
+// Input/resize API (tc-6jf) — client→session-proxy wire messages
 // ---------------------------------------------------------------------------
 
 export * from "./input.js";
@@ -55,8 +55,8 @@ export * from "./input.js";
 
 export * from "./render-hook.js";
 
-// WireCommand is re-exported from render-hook.js (imported from @tmuxcc/daemon).
-// Consumers can also import it directly from @tmuxcc/daemon if they need the
+// WireCommand is re-exported from render-hook.js (imported from @tmuxcc/session-proxy).
+// Consumers can also import it directly from @tmuxcc/session-proxy if they need the
 // full command type union (OpenWindowCommand, SplitPaneCommand, etc.).
 
 // ---------------------------------------------------------------------------

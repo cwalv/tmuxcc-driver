@@ -19,8 +19,8 @@
  * # NO DOM, NO vscode, NO host API, NO Pseudoterminal
  */
 
-import type { Transport, NegotiatedSession, PaneId, WireCommand } from "@tmuxcc/daemon";
-import { DaemonConnection } from "./connection.js";
+import type { Transport, NegotiatedSession, PaneId, WireCommand } from "@tmuxcc/session-proxy";
+import { SessionProxyConnection } from "./connection.js";
 import { Mirror } from "./mirror.js";
 import { PaneStreamConsumer, connectPaneStream } from "./pane-stream.js";
 import { createInputApi } from "./input.js";
@@ -74,8 +74,8 @@ export interface ConnectClientOptions {
  * All four fields are real and usable immediately — no placeholder, no late
  * assignment.  After `await connectClient(transport)` resolves:
  *   - `controller.sendInput` / `resizePane` / `sendCommand` are wired to the
- *     daemon.
- *   - `mirror` is initialized from the daemon's snapshot.
+ *     session-proxy.
+ *   - `mirror` is initialized from the session-proxy's snapshot.
  *   - `session` contains the negotiated protocol version + features.
  *   - `disconnect()` tears down byte subscriptions, detaches the hook, and
  *     closes the transport.
@@ -94,7 +94,7 @@ export interface ClientHandle {
   readonly controller: ClientController;
 
   /**
-   * The mirror — initialized from the daemon snapshot.
+   * The mirror — initialized from the session-proxy snapshot.
    * Call `mirror.attach(hook)` to catch up and subscribe.
    */
   readonly mirror: Mirror;
@@ -116,16 +116,16 @@ export interface ClientHandle {
 // ---------------------------------------------------------------------------
 
 /**
- * Connect to a daemon via the given transport and return a fully-built handle.
+ * Connect to a session-proxy via the given transport and return a fully-built handle.
  *
  * Builds:
- *   - DaemonConnection  (over `transport`)
+ *   - SessionProxyConnection  (over `transport`)
  *   - Mirror            (wired to connection.onControl via connectTo)
  *   - PaneStreamConsumer (wired to connection.onData via connectPaneStream)
  *   - InputApi          (wired to connection.send)
  *   - ClientController  (delegates to InputApi)
  *
- * Runs the wire handshake and waits for the daemon snapshot before resolving.
+ * Runs the wire handshake and waits for the session-proxy snapshot before resolving.
  * After this promise resolves, `handle.mirror` is initialized and
  * `handle.controller` is usable.
  *
@@ -140,7 +140,7 @@ export async function connectClient(
 ): Promise<ClientHandle> {
   // ── Construct modules ────────────────────────────────────────────────────────
 
-  const connection = new DaemonConnection(transport);
+  const connection = new SessionProxyConnection(transport);
   const mirror = new Mirror();
   const paneConsumer = new PaneStreamConsumer();
   const inputApi = createInputApi(connection, opts.input);

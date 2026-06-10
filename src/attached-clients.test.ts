@@ -11,7 +11,7 @@
  *         - first client snapshot: count = 1 (only this client)
  *         - second client snapshot: count = 2 (both clients)
  *   (4) Mirror.getModel().attachedClientCount reflects the snapshot value.
- *   (5) A snapshot without attachedClientCount (older daemon) leaves the field
+ *   (5) A snapshot without attachedClientCount (older sessionProxy) leaves the field
  *       undefined in ClientModel.
  *
  * These tests use createInMemoryTransportPair + createControlServer for a
@@ -38,14 +38,14 @@ import {
   setFocus,
   projectSnapshot,
   createControlServer,
-} from "@tmuxcc/daemon";
+} from "@tmuxcc/session-proxy";
 import type {
   SnapshotMessage,
   Capabilities,
   Transport,
   ControlMessage,
   ControlServer,
-} from "@tmuxcc/daemon";
+} from "@tmuxcc/session-proxy";
 
 import { applySnapshot } from "./mirror.js";
 import type { ClientModel } from "./mirror.js";
@@ -90,7 +90,7 @@ function buildBaseModel() {
   return m;
 }
 
-const DAEMON_CAPS: Capabilities = {
+const SESSION_PROXY_CAPS: Capabilities = {
   protocolVersion: WIRE_PROTOCOL_VERSION,
   features: ["pane-lifecycle", "layout-updates", "focus-events", "input-forwarding"],
 };
@@ -105,28 +105,28 @@ const CLIENT_CAPS: Capabilities = {
 // ---------------------------------------------------------------------------
 
 /**
- * Connect a single client to the given daemon-side transport pair, capture
- * all control messages received (excluding daemon.capabilities), and return
+ * Connect a single client to the given session-proxy-side transport pair, capture
+ * all control messages received (excluding session-proxy.capabilities), and return
  * them along with the ClientModel built from the first snapshot.
  */
 async function connectClientViaServer(
   server: ControlServer,
-): Promise<{ received: ControlMessage[]; model: ClientModel; daemonTransport: Transport }> {
-  const { daemon: daemonTransport, client: clientTransport } = createInMemoryTransportPair();
+): Promise<{ received: ControlMessage[]; model: ClientModel; sessionProxyTransport: Transport }> {
+  const { sessionProxy: sessionProxyTransport, client: clientTransport } = createInMemoryTransportPair();
 
   const received: ControlMessage[] = [];
 
-  // Spy on daemon-side sends (exclude handshake messages).
-  const origSendControl = daemonTransport.sendControl.bind(daemonTransport);
-  daemonTransport.sendControl = function (msg: ControlMessage) {
-    if (msg.type !== "daemon.capabilities") {
+  // Spy on session-proxy-side sends (exclude handshake messages).
+  const origSendControl = sessionProxyTransport.sendControl.bind(sessionProxyTransport);
+  sessionProxyTransport.sendControl = function (msg: ControlMessage) {
+    if (msg.type !== "session-proxy.capabilities") {
       received.push(msg);
     }
     return origSendControl(msg);
   };
 
   await Promise.all([
-    server.addClient(daemonTransport),
+    server.addClient(sessionProxyTransport),
     runClientHandshake(clientTransport, CLIENT_CAPS),
   ]);
 
@@ -134,7 +134,7 @@ async function connectClientViaServer(
   const snapMsg = received[0] as SnapshotMessage;
   const { model } = applySnapshot(snapMsg);
 
-  return { received, model, daemonTransport };
+  return { received, model, sessionProxyTransport };
 }
 
 // ---------------------------------------------------------------------------
@@ -166,7 +166,7 @@ describe("tc-1elae: attached-client count via applySnapshot", () => {
     assert.equal(clientModel.attachedClientCount, 1);
   });
 
-  it("missing attachedClientCount (older daemon) → undefined in ClientModel", () => {
+  it("missing attachedClientCount (older sessionProxy) → undefined in ClientModel", () => {
     // Older daemons do not send attachedClientCount; the field is optional.
     const model = buildBaseModel();
     // projectSnapshot without attachedClientCount = no field in snapshot.
@@ -235,7 +235,7 @@ describe("tc-1elae: ControlServer stamps attachedClientCount in snapshots", () =
 
     const server = createControlServer(pipeline);
 
-    const { model: clientModel1, daemonTransport: t1 } = await connectClientViaServer(server);
+    const { model: clientModel1, sessionProxyTransport: t1 } = await connectClientViaServer(server);
 
     assert.equal(
       clientModel1.attachedClientCount,
@@ -268,7 +268,7 @@ describe("tc-1elae: ControlServer stamps attachedClientCount in snapshots", () =
     const server = createControlServer(pipeline);
 
     // Connect client 1 (count becomes 1).
-    const { model: model1, daemonTransport: t1 } = await connectClientViaServer(server);
+    const { model: model1, sessionProxyTransport: t1 } = await connectClientViaServer(server);
     assert.equal(
       model1.attachedClientCount,
       1,
@@ -276,7 +276,7 @@ describe("tc-1elae: ControlServer stamps attachedClientCount in snapshots", () =
     );
 
     // Connect client 2 while client 1 is still connected (count becomes 2).
-    const { model: model2, daemonTransport: t2 } = await connectClientViaServer(server);
+    const { model: model2, sessionProxyTransport: t2 } = await connectClientViaServer(server);
     assert.equal(
       model2.attachedClientCount,
       2,
@@ -310,8 +310,8 @@ describe("tc-1elae: ControlServer stamps attachedClientCount in snapshots", () =
     // This is the core §8.2 multi-client verification scenario:
     // three VS Code windows (or mix of tmuxcc + other clients) all connecting
     // to the same session. The third to connect sees count=3.
-    const { daemonTransport: t1 } = await connectClientViaServer(server);
-    const { daemonTransport: t2 } = await connectClientViaServer(server);
+    const { sessionProxyTransport: t1 } = await connectClientViaServer(server);
+    const { sessionProxyTransport: t2 } = await connectClientViaServer(server);
     const { model: model3 } = await connectClientViaServer(server);
 
     assert.equal(
@@ -403,7 +403,7 @@ describe("tc-1elae: end-to-end via connectClient", () => {
     const server = createControlServer(pipeline);
 
     // Client A connects first.
-    const { daemon: dA, client: cA } = createInMemoryTransportPair();
+    const { sessionProxy: dA, client: cA } = createInMemoryTransportPair();
     const clientA = await Promise.all([
       server.addClient(dA),
       connectClient(cA),
@@ -413,7 +413,7 @@ describe("tc-1elae: end-to-end via connectClient", () => {
     assert.equal(countA, 1, "client A (first) must see attachedClientCount=1");
 
     // Client B connects while A is still connected.
-    const { daemon: dB, client: cB } = createInMemoryTransportPair();
+    const { sessionProxy: dB, client: cB } = createInMemoryTransportPair();
     const clientB = await Promise.all([
       server.addClient(dB),
       connectClient(cB),
@@ -478,14 +478,14 @@ function buildLivePipeline() {
 describe("tc-44wu0: applyDelta handles client-count.changed", () => {
   it("updates attachedClientCount in ClientModel", () => {
     const model = buildBaseModel();
-    const snap: import("@tmuxcc/daemon").SnapshotMessage = projectSnapshot(model, {
+    const snap: import("@tmuxcc/session-proxy").SnapshotMessage = projectSnapshot(model, {
       seq: 1,
       attachedClientCount: 1,
     });
     const { model: clientModel } = applySnapshot(snap);
 
     // Simulate a client-count.changed delta arriving (a second client connected).
-    const delta: import("@tmuxcc/daemon").DaemonMessage = {
+    const delta: import("@tmuxcc/session-proxy").SessionProxyMessage = {
       type: "client-count.changed",
       seq: 2,
       count: 2,
@@ -501,13 +501,13 @@ describe("tc-44wu0: applyDelta handles client-count.changed", () => {
 
   it("decrements attachedClientCount when a client detaches", () => {
     const model = buildBaseModel();
-    const snap: import("@tmuxcc/daemon").SnapshotMessage = projectSnapshot(model, {
+    const snap: import("@tmuxcc/session-proxy").SnapshotMessage = projectSnapshot(model, {
       seq: 1,
       attachedClientCount: 3,
     });
     const { model: clientModel } = applySnapshot(snap);
 
-    const delta: import("@tmuxcc/daemon").DaemonMessage = {
+    const delta: import("@tmuxcc/session-proxy").SessionProxyMessage = {
       type: "client-count.changed",
       seq: 2,
       count: 2,
@@ -518,13 +518,13 @@ describe("tc-44wu0: applyDelta handles client-count.changed", () => {
 
   it("does not affect other model fields", () => {
     const model = buildBaseModel();
-    const snap: import("@tmuxcc/daemon").SnapshotMessage = projectSnapshot(model, {
+    const snap: import("@tmuxcc/session-proxy").SnapshotMessage = projectSnapshot(model, {
       seq: 1,
       attachedClientCount: 1,
     });
     const { model: clientModel } = applySnapshot(snap);
 
-    const delta: import("@tmuxcc/daemon").DaemonMessage = {
+    const delta: import("@tmuxcc/session-proxy").SessionProxyMessage = {
       type: "client-count.changed",
       seq: 2,
       count: 5,
@@ -545,10 +545,10 @@ describe("tc-44wu0: ControlServer broadcasts client-count.changed on attach", ()
     const server = createControlServer(pipeline);
 
     // Track all control messages received by client A (after snapshot).
-    const receivedByA: import("@tmuxcc/daemon").ControlMessage[] = [];
+    const receivedByA: import("@tmuxcc/session-proxy").ControlMessage[] = [];
 
     // Connect client A.
-    const { daemon: dA, client: cA } = createInMemoryTransportPair();
+    const { sessionProxy: dA, client: cA } = createInMemoryTransportPair();
     await Promise.all([
       server.addClient(dA),
       runClientHandshake(cA, CLIENT_CAPS),
@@ -556,13 +556,13 @@ describe("tc-44wu0: ControlServer broadcasts client-count.changed on attach", ()
 
     // Snapshot for A is already received (seq=1). Now spy on subsequent messages.
     const origSend = dA.sendControl.bind(dA);
-    dA.sendControl = function (msg: import("@tmuxcc/daemon").ControlMessage) {
+    dA.sendControl = function (msg: import("@tmuxcc/session-proxy").ControlMessage) {
       receivedByA.push(msg);
       return origSend(msg);
     };
 
     // Connect client B — this should trigger a client-count.changed broadcast.
-    const { daemon: dB, client: cB } = createInMemoryTransportPair();
+    const { sessionProxy: dB, client: cB } = createInMemoryTransportPair();
     await Promise.all([
       server.addClient(dB),
       runClientHandshake(cB, CLIENT_CAPS),
@@ -578,7 +578,7 @@ describe("tc-44wu0: ControlServer broadcasts client-count.changed on attach", ()
     );
 
     // The last one (or only one) should have count=2.
-    const last = countMsgs[countMsgs.length - 1] as import("@tmuxcc/daemon").ClientCountChangedMessage;
+    const last = countMsgs[countMsgs.length - 1] as import("@tmuxcc/session-proxy").ClientCountChangedMessage;
     assert.equal(
       last.count,
       2,
@@ -594,23 +594,23 @@ describe("tc-44wu0: ControlServer broadcasts client-count.changed on attach", ()
     const server = createControlServer(pipeline);
 
     // Connect client A.
-    const { daemon: dA, client: cA } = createInMemoryTransportPair();
+    const { sessionProxy: dA, client: cA } = createInMemoryTransportPair();
     await Promise.all([
       server.addClient(dA),
       runClientHandshake(cA, CLIENT_CAPS),
     ]);
 
     // Connect client B.
-    const { daemon: dB, client: cB } = createInMemoryTransportPair();
+    const { sessionProxy: dB, client: cB } = createInMemoryTransportPair();
     await Promise.all([
       server.addClient(dB),
       runClientHandshake(cB, CLIENT_CAPS),
     ]);
 
     // Now spy on messages to client A.
-    const receivedByA: import("@tmuxcc/daemon").ControlMessage[] = [];
+    const receivedByA: import("@tmuxcc/session-proxy").ControlMessage[] = [];
     const origSend = dA.sendControl.bind(dA);
-    dA.sendControl = function (msg: import("@tmuxcc/daemon").ControlMessage) {
+    dA.sendControl = function (msg: import("@tmuxcc/session-proxy").ControlMessage) {
       receivedByA.push(msg);
       return origSend(msg);
     };
@@ -629,7 +629,7 @@ describe("tc-44wu0: ControlServer broadcasts client-count.changed on attach", ()
       "client A must receive a client-count.changed after client B disconnects",
     );
 
-    const last = countMsgs[countMsgs.length - 1] as import("@tmuxcc/daemon").ClientCountChangedMessage;
+    const last = countMsgs[countMsgs.length - 1] as import("@tmuxcc/session-proxy").ClientCountChangedMessage;
     assert.equal(
       last.count,
       1,
@@ -646,7 +646,7 @@ describe("tc-44wu0: end-to-end live count updates via connectClient + Mirror", (
     const server = createControlServer(pipeline);
 
     // Connect client A via full connectClient path.
-    const { daemon: dA, client: cA } = createInMemoryTransportPair();
+    const { sessionProxy: dA, client: cA } = createInMemoryTransportPair();
     const [, clientA] = await Promise.all([
       server.addClient(dA),
       connectClient(cA),
@@ -659,8 +659,8 @@ describe("tc-44wu0: end-to-end live count updates via connectClient + Mirror", (
       "client A must start with attachedClientCount=1",
     );
 
-    // Connect client B — daemon broadcasts client-count.changed to A.
-    const { daemon: dB, client: cB } = createInMemoryTransportPair();
+    // Connect client B — session-proxy broadcasts client-count.changed to A.
+    const { sessionProxy: dB, client: cB } = createInMemoryTransportPair();
     await Promise.all([
       server.addClient(dB),
       connectClient(cB),
@@ -673,7 +673,7 @@ describe("tc-44wu0: end-to-end live count updates via connectClient + Mirror", (
       "client A must see attachedClientCount=2 after B connects",
     );
 
-    // Disconnect B — daemon broadcasts client-count.changed to A.
+    // Disconnect B — session-proxy broadcasts client-count.changed to A.
     dB.close();
 
     // After B disconnects, A should see count=1.
@@ -692,14 +692,14 @@ describe("tc-44wu0: end-to-end live count updates via connectClient + Mirror", (
     const server = createControlServer(pipeline);
 
     // Connect client A.
-    const { daemon: dA, client: cA } = createInMemoryTransportPair();
+    const { sessionProxy: dA, client: cA } = createInMemoryTransportPair();
     await Promise.all([
       server.addClient(dA),
       connectClient(cA),
     ]);
 
     // Connect client B.
-    const { daemon: dB, client: cB } = createInMemoryTransportPair();
+    const { sessionProxy: dB, client: cB } = createInMemoryTransportPair();
     const [, clientB] = await Promise.all([
       server.addClient(dB),
       connectClient(cB),

@@ -13,8 +13,8 @@
  *   6. Multiple per-pane handlers: all receive each chunk.
  *   7. Unsubscribe: after unsub(), no more delivery.
  *   8. getBuffered(): returns concatenated pre-subscription bytes.
- *   9. End-to-end via DaemonConnection + createInMemoryTransportPair:
- *      daemon.sendData → consumer delivers to pane handler.
+ *   9. End-to-end via SessionProxyConnection + createInMemoryTransportPair:
+ *      sessionProxy.sendData → consumer delivers to pane handler.
  *  10. Pre-subscription buffer cap (overflow):
  *      drop-oldest policy evicts front chunks when byte budget is exceeded.
  */
@@ -24,13 +24,13 @@ import assert from "node:assert/strict";
 
 import {
   createInMemoryTransportPair,
-  runDaemonHandshake,
+  runSessionProxyHandshake,
   WIRE_PROTOCOL_VERSION,
   paneId,
-} from "@tmuxcc/daemon";
-import type { PaneId } from "@tmuxcc/daemon";
+} from "@tmuxcc/session-proxy";
+import type { PaneId } from "@tmuxcc/session-proxy";
 
-import { DaemonConnection } from "./connection.js";
+import { SessionProxyConnection } from "./connection.js";
 import { PaneStreamConsumer, connectPaneStream } from "./pane-stream.js";
 import type { PaneStreamConsumerOptions } from "./pane-stream.js";
 
@@ -45,19 +45,19 @@ function text(s: string): Uint8Array {
   return new TextEncoder().encode(s);
 }
 
-/** Set up a handshook DaemonConnection pair for integration tests. */
+/** Set up a handshook SessionProxyConnection pair for integration tests. */
 async function makeConnectedPair() {
-  const { daemon: daemonTransport, client: clientTransport } =
+  const { sessionProxy: sessionProxyTransport, client: clientTransport } =
     createInMemoryTransportPair();
-  const conn = new DaemonConnection(clientTransport);
+  const conn = new SessionProxyConnection(clientTransport);
   const caps = {
     protocolVersion: WIRE_PROTOCOL_VERSION,
     features: ["pane-lifecycle"] as string[],
   } as const;
-  const daemonHandshake = runDaemonHandshake(daemonTransport, caps);
+  const sessionProxyHandshake = runSessionProxyHandshake(sessionProxyTransport, caps);
   await conn.connect();
-  await daemonHandshake;
-  return { conn, daemonTransport };
+  await sessionProxyHandshake;
+  return { conn, sessionProxyTransport };
 }
 
 // ---------------------------------------------------------------------------
@@ -542,12 +542,12 @@ describe("PaneStreamConsumer — pre-subscription buffer cap (overflow)", () => 
 });
 
 // ---------------------------------------------------------------------------
-// 9. End-to-end via DaemonConnection + createInMemoryTransportPair
+// 9. End-to-end via SessionProxyConnection + createInMemoryTransportPair
 // ---------------------------------------------------------------------------
 
-describe("PaneStreamConsumer — end-to-end via DaemonConnection", () => {
-  it("daemon.sendData → consumer delivers to per-pane handler", async () => {
-    const { conn, daemonTransport } = await makeConnectedPair();
+describe("PaneStreamConsumer — end-to-end via SessionProxyConnection", () => {
+  it("sessionProxy.sendData → consumer delivers to per-pane handler", async () => {
+    const { conn, sessionProxyTransport } = await makeConnectedPair();
     const consumer = new PaneStreamConsumer();
 
     const received: Uint8Array[] = [];
@@ -556,8 +556,8 @@ describe("PaneStreamConsumer — end-to-end via DaemonConnection", () => {
     // Wire consumer AFTER connect() — safe per the connector contract.
     connectPaneStream(conn, consumer);
 
-    const chunk = text("hello from daemon");
-    daemonTransport.sendData(PA, chunk);
+    const chunk = text("hello from session-proxy");
+    sessionProxyTransport.sendData(PA, chunk);
 
     assert.equal(received.length, 1);
     assert.deepEqual(received[0], chunk);
@@ -565,8 +565,8 @@ describe("PaneStreamConsumer — end-to-end via DaemonConnection", () => {
     conn.close();
   });
 
-  it("non-UTF-8 bytes survive the full DaemonConnection path", async () => {
-    const { conn, daemonTransport } = await makeConnectedPair();
+  it("non-UTF-8 bytes survive the full SessionProxyConnection path", async () => {
+    const { conn, sessionProxyTransport } = await makeConnectedPair();
     const consumer = new PaneStreamConsumer();
 
     const received: Uint8Array[] = [];
@@ -574,7 +574,7 @@ describe("PaneStreamConsumer — end-to-end via DaemonConnection", () => {
     connectPaneStream(conn, consumer);
 
     const nonUtf8 = Uint8Array.from([0xff, 0x00, 0xfe, 0x80]);
-    daemonTransport.sendData(PA, nonUtf8);
+    sessionProxyTransport.sendData(PA, nonUtf8);
 
     assert.equal(received.length, 1);
     assert.deepEqual(received[0], nonUtf8);
@@ -583,7 +583,7 @@ describe("PaneStreamConsumer — end-to-end via DaemonConnection", () => {
   });
 
   it("multiple panes via one connection are demuxed correctly", async () => {
-    const { conn, daemonTransport } = await makeConnectedPair();
+    const { conn, sessionProxyTransport } = await makeConnectedPair();
     const consumer = new PaneStreamConsumer();
 
     const aReceived: Uint8Array[] = [];
@@ -592,9 +592,9 @@ describe("PaneStreamConsumer — end-to-end via DaemonConnection", () => {
     consumer.onPaneOutput(PB, (b) => bReceived.push(b));
     connectPaneStream(conn, consumer);
 
-    daemonTransport.sendData(PA, text("A1"));
-    daemonTransport.sendData(PB, text("B1"));
-    daemonTransport.sendData(PA, text("A2"));
+    sessionProxyTransport.sendData(PA, text("A1"));
+    sessionProxyTransport.sendData(PB, text("B1"));
+    sessionProxyTransport.sendData(PA, text("A2"));
 
     assert.equal(aReceived.length, 2);
     assert.deepEqual(aReceived[0], text("A1"));
@@ -606,8 +606,8 @@ describe("PaneStreamConsumer — end-to-end via DaemonConnection", () => {
   });
 
   it("pre-subscription bytes buffered before connectPaneStream are flushed to handler", async () => {
-    // This test exercises the DaemonConnection's own pending-data buffer:
-    // bytes sent by the daemon arrive in conn's #pendingData during the handshake
+    // This test exercises the SessionProxyConnection's own pending-data buffer:
+    // bytes sent by the session-proxy arrive in conn's #pendingData during the handshake
     // settlement window, then are drained into the consumer when the consumer's
     // push is installed via connectPaneStream.
     //
@@ -615,14 +615,14 @@ describe("PaneStreamConsumer — end-to-end via DaemonConnection", () => {
     // conn.connect() resolves go directly to the installed handler.  We test
     // that messages sent right after connect() — before connectPaneStream is
     // called — are buffered in the consumer and flushed on handler registration.
-    const { conn, daemonTransport } = await makeConnectedPair();
+    const { conn, sessionProxyTransport } = await makeConnectedPair();
     const consumer = new PaneStreamConsumer();
 
     // Wire BEFORE registering the pane handler — so consumer buffers them.
     connectPaneStream(conn, consumer);
 
-    // Daemon sends data before we've registered a per-pane handler.
-    daemonTransport.sendData(PA, text("before-handler"));
+    // SessionProxy sends data before we've registered a per-pane handler.
+    sessionProxyTransport.sendData(PA, text("before-handler"));
 
     // Verify consumer has buffered it.
     const preReg = consumer.getBuffered(PA);
@@ -640,7 +640,7 @@ describe("PaneStreamConsumer — end-to-end via DaemonConnection", () => {
     assert.equal(consumer.getBuffered(PA), undefined);
 
     // Live bytes still arrive.
-    daemonTransport.sendData(PA, text("after-handler"));
+    sessionProxyTransport.sendData(PA, text("after-handler"));
     assert.equal(received.length, 2);
     assert.deepEqual(received[1], text("after-handler"));
 

@@ -1,19 +1,19 @@
 /**
  * Wire protocol round-trip test — cross-package proof.
  *
- * Imports everything from "@tmuxcc/daemon" by package name (workspace resolution).
+ * Imports everything from "@tmuxcc/session-proxy" by package name (workspace resolution).
  * This is the monorepo ergonomics proof: the client imports all wire types and
- * utilities from the daemon package without a publish step.
+ * utilities from the session-proxy package without a publish step.
  *
  * Coverage:
  *   Control plane: JSON round-trip (stringify → parse → deep-equal + type guard)
  *     for EVERY ControlMessage variant:
- *       Daemon→Client: daemon.capabilities, snapshot, pane.opened, pane.closed,
+ *       SessionProxy→Client: session-proxy.capabilities, snapshot, pane.opened, pane.closed,
  *         pane.resized, pane.mode-changed, window.added, window.closed,
  *         window.renamed, layout.updated, focus.changed, session.added,
  *         session.closed, session.changed, session.renamed, command.response
  *         (ok), command.response (err), error
- *       Client→Daemon: input, resize.request, client.capabilities,
+ *       Client→SessionProxy: input, resize.request, client.capabilities,
  *         command.request (open-window), command.request (split-pane),
  *         command.request (close-pane), command.request (rename-window),
  *         command.request (select-pane), command.request (resize-pane)
@@ -36,7 +36,7 @@ import {
   sessionId,
   // Control guards
   isControlMessage,
-  isDaemonMessage,
+  isSessionProxyMessage,
   isClientMessage,
   // Wire constant
   WIRE_PROTOCOL_VERSION,
@@ -46,17 +46,17 @@ import {
   encodeFrame,
   decodeFrame,
   FrameDecoder,
-} from "@tmuxcc/daemon";
+} from "@tmuxcc/session-proxy";
 
 import type {
   PaneId,
   WindowId,
   SessionId,
   ControlMessage,
-  DaemonMessage,
+  SessionProxyMessage,
   ClientMessage,
-  // All concrete message types — daemon→client
-  DaemonCapabilitiesMessage,
+  // All concrete message types — session-proxy→client
+  SessionProxyCapabilitiesMessage,
   SnapshotMessage,
   PaneOpenedMessage,
   PaneClosedMessage,
@@ -67,17 +67,17 @@ import type {
   WindowRenamedMessage,
   LayoutUpdatedMessage,
   FocusChangedMessage,
-  DaemonSessionRenamedMessage,
+  SessionProxySessionRenamedMessage,
   CommandResponseMessage,
   ErrorMessage,
-  // All concrete message types — client→daemon
+  // All concrete message types — client→session-proxy
   InputMessage,
   ResizeRequestMessage,
   ClientCapabilitiesMessage,
   CommandRequestMessage,
   // Layout types (used in snapshot / layout.updated)
   WindowLayout,
-} from "@tmuxcc/daemon";
+} from "@tmuxcc/session-proxy";
 
 // ---------------------------------------------------------------------------
 // Shared test fixtures
@@ -105,10 +105,10 @@ const sampleLayout: WindowLayout = {
 // Message factories — one instance of every variant
 // ---------------------------------------------------------------------------
 
-/** Build one instance of each DaemonMessage variant. */
-function buildDaemonMessages(): DaemonMessage[] {
-  const daemonCaps: DaemonCapabilitiesMessage = {
-    type: "daemon.capabilities",
+/** Build one instance of each SessionProxyMessage variant. */
+function buildSessionProxyMessages(): SessionProxyMessage[] {
+  const sessionProxyCaps: SessionProxyCapabilitiesMessage = {
+    type: "session-proxy.capabilities",
     seq: 1,
     capabilities: {
       protocolVersion: WIRE_PROTOCOL_VERSION,
@@ -212,7 +212,7 @@ function buildDaemonMessages(): DaemonMessage[] {
     windowId: null,
   };
 
-  const sessionRenamed: DaemonSessionRenamedMessage = {
+  const sessionRenamed: SessionProxySessionRenamedMessage = {
     type: "session.renamed",
     seq: 13,
     newName: "work",
@@ -248,7 +248,7 @@ function buildDaemonMessages(): DaemonMessage[] {
   };
 
   return [
-    daemonCaps,
+    sessionProxyCaps,
     snapshot,
     paneOpened,
     paneClosed,
@@ -350,11 +350,11 @@ function buildClientMessages(): ClientMessage[] {
 }
 
 /**
- * Build one instance of every ControlMessage variant (daemon + client).
+ * Build one instance of every ControlMessage variant (session-proxy + client).
  * Exported for reuse in mock-daemon setups in later epics.
  */
 export function buildRepresentativeMessages(): ControlMessage[] {
-  return [...buildDaemonMessages(), ...buildClientMessages()];
+  return [...buildSessionProxyMessages(), ...buildClientMessages()];
 }
 
 // ---------------------------------------------------------------------------
@@ -369,13 +369,13 @@ function jsonRoundTrip<T>(value: T): T {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe("wire round-trip — cross-package import from @tmuxcc/daemon", () => {
-  // ── Control plane: daemon→client ──────────────────────────────────────────
+describe("wire round-trip — cross-package import from @tmuxcc/session-proxy", () => {
+  // ── Control plane: session-proxy→client ──────────────────────────────────────────
 
-  describe("control plane — daemon→client JSON round-trips", () => {
-    const daemonMessages = buildDaemonMessages();
+  describe("control plane — session-proxy→client JSON round-trips", () => {
+    const sessionProxyMessages = buildSessionProxyMessages();
 
-    for (const original of daemonMessages) {
+    for (const original of sessionProxyMessages) {
       it(`round-trips ${original.type} (seq=${original.seq})`, () => {
         const parsed = jsonRoundTrip(original);
 
@@ -388,25 +388,25 @@ describe("wire round-trip — cross-package import from @tmuxcc/daemon", () => {
           `isControlMessage returned false for ${original.type}`,
         );
 
-        // isDaemonMessage narrows correctly
+        // isSessionProxyMessage narrows correctly
         assert.ok(
-          isDaemonMessage(parsed as ControlMessage),
-          `isDaemonMessage returned false for ${original.type}`,
+          isSessionProxyMessage(parsed as ControlMessage),
+          `isSessionProxyMessage returned false for ${original.type}`,
         );
 
-        // isClientMessage must NOT match daemon messages
+        // isClientMessage must NOT match session-proxy messages
         assert.equal(
           isClientMessage(parsed as ControlMessage),
           false,
-          `isClientMessage incorrectly returned true for daemon message ${original.type}`,
+          `isClientMessage incorrectly returned true for session-proxy message ${original.type}`,
         );
       });
     }
   });
 
-  // ── Control plane: client→daemon ──────────────────────────────────────────
+  // ── Control plane: client→session-proxy ──────────────────────────────────────────
 
-  describe("control plane — client→daemon JSON round-trips", () => {
+  describe("control plane — client→session-proxy JSON round-trips", () => {
     const clientMessages = buildClientMessages();
 
     for (const original of clientMessages) {
@@ -428,11 +428,11 @@ describe("wire round-trip — cross-package import from @tmuxcc/daemon", () => {
           `isClientMessage returned false for ${original.type}`,
         );
 
-        // isDaemonMessage must NOT match client messages
+        // isSessionProxyMessage must NOT match client messages
         assert.equal(
-          isDaemonMessage(parsed as ControlMessage),
+          isSessionProxyMessage(parsed as ControlMessage),
           false,
-          `isDaemonMessage incorrectly returned true for client message ${original.type}`,
+          `isSessionProxyMessage incorrectly returned true for client message ${original.type}`,
         );
       });
     }
@@ -441,10 +441,10 @@ describe("wire round-trip — cross-package import from @tmuxcc/daemon", () => {
   // ── Transport round-trip via InMemoryTransportPair ────────────────────────
 
   describe("transport — InMemoryTransportPair control-plane send/receive", () => {
-    it("daemon sendControl → client onControl handler fires with equal message", () => {
-      const { daemon, client } = createInMemoryTransportPair();
+    it("session-proxy sendControl → client onControl handler fires with equal message", () => {
+      const { sessionProxy, client } = createInMemoryTransportPair();
 
-      const sent: DaemonMessage = {
+      const sent: SessionProxyMessage = {
         type: "pane.opened",
         seq: 1,
         paneId: P0,
@@ -459,18 +459,18 @@ describe("wire round-trip — cross-package import from @tmuxcc/daemon", () => {
         received = msg;
       });
 
-      daemon.sendControl(sent);
+      sessionProxy.sendControl(sent);
 
       assert.ok(received !== undefined, "onControl handler was not called");
       assert.deepEqual(received, sent);
       assert.ok(isControlMessage(received));
-      assert.ok(isDaemonMessage(received));
+      assert.ok(isSessionProxyMessage(received));
 
-      daemon.close();
+      sessionProxy.close();
     });
 
-    it("client sendControl → daemon onControl handler fires with equal message", () => {
-      const { daemon, client } = createInMemoryTransportPair();
+    it("client sendControl → session-proxy onControl handler fires with equal message", () => {
+      const { sessionProxy, client } = createInMemoryTransportPair();
 
       const sent: ClientMessage = {
         type: "input",
@@ -480,7 +480,7 @@ describe("wire round-trip — cross-package import from @tmuxcc/daemon", () => {
       };
 
       let received: ControlMessage | undefined;
-      daemon.onControl((msg) => {
+      sessionProxy.onControl((msg) => {
         received = msg;
       });
 
@@ -495,36 +495,36 @@ describe("wire round-trip — cross-package import from @tmuxcc/daemon", () => {
     });
 
     it("close propagates to remote onClose handler", () => {
-      const { daemon, client } = createInMemoryTransportPair();
+      const { sessionProxy, client } = createInMemoryTransportPair();
 
-      let daemonGotClose = false;
+      let sessionProxyGotClose = false;
       let clientGotClose = false;
 
-      daemon.onClose(() => {
-        daemonGotClose = true;
+      sessionProxy.onClose(() => {
+        sessionProxyGotClose = true;
       });
       client.onClose(() => {
         clientGotClose = true;
       });
 
-      // Close from daemon side — should notify both endpoints
-      daemon.close();
+      // Close from session-proxy side — should notify both endpoints
+      sessionProxy.close();
 
-      assert.ok(clientGotClose, "client onClose was not called after daemon.close()");
-      assert.ok(daemonGotClose, "daemon onClose was not called after daemon.close()");
+      assert.ok(clientGotClose, "client onClose was not called after sessionProxy.close()");
+      assert.ok(sessionProxyGotClose, "session-proxy onClose was not called after sessionProxy.close()");
     });
 
     it("sendControl on closed transport does not invoke handler (no-op)", () => {
-      const { daemon, client } = createInMemoryTransportPair();
+      const { sessionProxy, client } = createInMemoryTransportPair();
 
       let callCount = 0;
       client.onControl(() => {
         callCount++;
       });
 
-      daemon.close();
+      sessionProxy.close();
       // This send should be silently dropped — transport is already closed.
-      daemon.sendControl({ type: "pane.closed", seq: 1, paneId: P0, windowId: W0 });
+      sessionProxy.sendControl({ type: "pane.closed", seq: 1, paneId: P0, windowId: W0 });
 
       assert.equal(callCount, 0, "handler should not fire after transport close");
     });

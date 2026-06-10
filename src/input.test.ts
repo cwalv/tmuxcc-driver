@@ -15,7 +15,7 @@
  *     dispatched before the coalesced resize (ordering guarantee).
  *
  * Test strategy: use a mock InputSender (captures messages into an array)
- * rather than a full DaemonConnection so tests are fast and deterministic.
+ * rather than a full SessionProxyConnection so tests are fast and deterministic.
  * Coalesce tests use flush() for synchronous draining instead of awaiting
  * microtasks.
  */
@@ -23,8 +23,8 @@
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
-import { paneId } from "@tmuxcc/daemon";
-import type { InputMessage, ResizeRequestMessage, PaneId } from "@tmuxcc/daemon";
+import { paneId } from "@tmuxcc/session-proxy";
+import type { InputMessage, ResizeRequestMessage, PaneId } from "@tmuxcc/session-proxy";
 
 import { createInputApi } from "./input.js";
 import type { InputApi, InputSender } from "./input.js";

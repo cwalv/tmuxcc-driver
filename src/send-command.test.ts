@@ -7,7 +7,7 @@
  * Two layers are tested:
  *   1. InputApi.sendCommand — unit test via a mock InputSender (no transport).
  *   2. ClientHandle.controller.sendCommand via createInMemoryTransportPair —
- *      end-to-end: the daemon end of the in-memory transport must receive a
+ *      end-to-end: the session-proxy end of the in-memory transport must receive a
  *      well-formed CommandRequestMessage.
  *
  * NO DOM, NO vscode.  Plain Node `node --test`.
@@ -20,15 +20,15 @@ import {
   paneId,
   sessionId,
   createInMemoryTransportPair,
-  runDaemonHandshake,
+  runSessionProxyHandshake,
   WIRE_PROTOCOL_VERSION,
-} from "@tmuxcc/daemon";
+} from "@tmuxcc/session-proxy";
 import type {
   CommandRequestMessage,
   WireCommand,
   ClientMessage,
   SnapshotMessage,
-} from "@tmuxcc/daemon";
+} from "@tmuxcc/session-proxy";
 
 import { createInputApi } from "./input.js";
 import type { InputSender } from "./input.js";
@@ -105,20 +105,20 @@ describe("InputApi.sendCommand — unit", () => {
 
 describe("ClientHandle.controller.sendCommand — via in-memory transport", () => {
   /**
-   * Run the daemon side of the handshake and collect control messages.
-   * Returns a promise that resolves with all client→daemon messages received
+   * Run the session-proxy side of the handshake and collect control messages.
+   * Returns a promise that resolves with all client→session-proxy messages received
    * after the handshake, up until the first setTimeout(0) tick.
    */
-  async function setupWithDaemonSide(): Promise<{
-    receivedByDaemon: ClientMessage[];
+  async function setupWithSessionProxySide(): Promise<{
+    receivedBySessionProxy: ClientMessage[];
     sendSnapshotAndStart: () => void;
   }> {
-    const { daemon: daemonTransport, client: clientTransport } = createInMemoryTransportPair();
+    const { sessionProxy: sessionProxyTransport, client: clientTransport } = createInMemoryTransportPair();
 
-    const receivedByDaemon: ClientMessage[] = [];
+    const receivedBySessionProxy: ClientMessage[] = [];
 
-    // Daemon handshake: send DaemonCapabilities, wait for ClientCapabilities.
-    const daemonHandshakePromise = runDaemonHandshake(daemonTransport, {
+    // SessionProxy handshake: send SessionProxyCapabilities, wait for ClientCapabilities.
+    const sessionProxyHandshakePromise = runSessionProxyHandshake(sessionProxyTransport, {
       protocolVersion: WIRE_PROTOCOL_VERSION,
       features: ["pane-lifecycle"],
     });
@@ -126,17 +126,17 @@ describe("ClientHandle.controller.sendCommand — via in-memory transport", () =
     // Connect client (runs handshake).
     const handle = await connectClient(clientTransport);
 
-    await daemonHandshakePromise;
+    await sessionProxyHandshakePromise;
 
     // Attach no-op hook (required to complete the setup).
     handle.mirror.attach(NoOpRenderHook);
 
-    // After handshake, install a control handler on the daemon side.
-    daemonTransport.onControl((msg) => {
-      receivedByDaemon.push(msg as ClientMessage);
+    // After handshake, install a control handler on the session-proxy side.
+    sessionProxyTransport.onControl((msg) => {
+      receivedBySessionProxy.push(msg as ClientMessage);
     });
 
-    // Daemon sends an empty snapshot so the mirror catches up.
+    // SessionProxy sends an empty snapshot so the mirror catches up.
     function sendSnapshotAndStart(): void {
       const snapshot: SnapshotMessage = {
         type: "snapshot",
@@ -146,18 +146,18 @@ describe("ClientHandle.controller.sendCommand — via in-memory transport", () =
         panes: [],
         focus: { paneId: null, windowId: null },
       };
-      daemonTransport.sendControl(snapshot);
+      sessionProxyTransport.sendControl(snapshot);
     }
 
-    return { receivedByDaemon, sendSnapshotAndStart };
+    return { receivedBySessionProxy, sendSnapshotAndStart };
   }
 
-  it("controller.sendCommand(open-window) → daemon receives CommandRequestMessage", async () => {
-    const { client: clientTransport, daemon: daemonTransport } = createInMemoryTransportPair();
-    const receivedByDaemon: ClientMessage[] = [];
+  it("controller.sendCommand(open-window) → session-proxy receives CommandRequestMessage", async () => {
+    const { client: clientTransport, sessionProxy: sessionProxyTransport } = createInMemoryTransportPair();
+    const receivedBySessionProxy: ClientMessage[] = [];
 
-    // Run daemon handshake.
-    const daemonHandshakeP = runDaemonHandshake(daemonTransport, {
+    // Run session-proxy handshake.
+    const sessionProxyHandshakeP = runSessionProxyHandshake(sessionProxyTransport, {
       protocolVersion: WIRE_PROTOCOL_VERSION,
       features: ["pane-lifecycle"],
     });
@@ -165,11 +165,11 @@ describe("ClientHandle.controller.sendCommand — via in-memory transport", () =
     const handle = await connectClient(clientTransport);
     handle.mirror.attach(NoOpRenderHook);
 
-    await daemonHandshakeP;
+    await sessionProxyHandshakeP;
 
-    // Install control handler on daemon side AFTER handshake.
-    daemonTransport.onControl((msg) => {
-      receivedByDaemon.push(msg as ClientMessage);
+    // Install control handler on session-proxy side AFTER handshake.
+    sessionProxyTransport.onControl((msg) => {
+      receivedBySessionProxy.push(msg as ClientMessage);
     });
 
     // Issue the command via the controller.
@@ -177,8 +177,8 @@ describe("ClientHandle.controller.sendCommand — via in-memory transport", () =
     handle.controller.sendCommand(cmd);
 
     // The in-memory transport delivers synchronously.
-    assert.equal(receivedByDaemon.length, 1, "daemon should receive exactly one message");
-    const received = receivedByDaemon[0]! as CommandRequestMessage;
+    assert.equal(receivedBySessionProxy.length, 1, "session-proxy should receive exactly one message");
+    const received = receivedBySessionProxy[0]! as CommandRequestMessage;
     assert.equal(received.type, "command.request", "type should be command.request");
     assert.deepEqual(received.command, cmd, "command payload should match");
     assert.ok(typeof received.correlationId === "string", "correlationId should be a string");
@@ -187,20 +187,20 @@ describe("ClientHandle.controller.sendCommand — via in-memory transport", () =
     handle.disconnect();
   });
 
-  it("controller.sendCommand(split-pane) → daemon receives correct CommandRequestMessage", async () => {
-    const { client: clientTransport, daemon: daemonTransport } = createInMemoryTransportPair();
-    const receivedByDaemon: ClientMessage[] = [];
+  it("controller.sendCommand(split-pane) → session-proxy receives correct CommandRequestMessage", async () => {
+    const { client: clientTransport, sessionProxy: sessionProxyTransport } = createInMemoryTransportPair();
+    const receivedBySessionProxy: ClientMessage[] = [];
 
-    const daemonHandshakeP = runDaemonHandshake(daemonTransport, {
+    const sessionProxyHandshakeP = runSessionProxyHandshake(sessionProxyTransport, {
       protocolVersion: WIRE_PROTOCOL_VERSION,
       features: ["pane-lifecycle"],
     });
     const handle = await connectClient(clientTransport);
     handle.mirror.attach(NoOpRenderHook);
-    await daemonHandshakeP;
+    await sessionProxyHandshakeP;
 
-    daemonTransport.onControl((msg) => {
-      receivedByDaemon.push(msg as ClientMessage);
+    sessionProxyTransport.onControl((msg) => {
+      receivedBySessionProxy.push(msg as ClientMessage);
     });
 
     const cmd: WireCommand = {
@@ -210,8 +210,8 @@ describe("ClientHandle.controller.sendCommand — via in-memory transport", () =
     };
     handle.controller.sendCommand(cmd);
 
-    assert.equal(receivedByDaemon.length, 1);
-    const received = receivedByDaemon[0]! as CommandRequestMessage;
+    assert.equal(receivedBySessionProxy.length, 1);
+    const received = receivedBySessionProxy[0]! as CommandRequestMessage;
     assert.equal(received.type, "command.request");
     assert.deepEqual(received.command, cmd);
 

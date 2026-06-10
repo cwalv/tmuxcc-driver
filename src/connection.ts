@@ -1,5 +1,5 @@
 /**
- * DaemonConnection — headless client connection + wire handshake + lifecycle.
+ * SessionProxyConnection — headless client connection + wire handshake + lifecycle.
  *
  * # Architecture
  *
@@ -45,8 +45,8 @@
  * tc-3fb (pane byte-stream), tc-fpf (input/resize), and tc-7v9
  * (render hooks) build on:
  *
- *   onControl(handler: (msg: DaemonMessage) => void): void
- *     Receives all post-handshake daemon→client control messages:
+ *   onControl(handler: (msg: SessionProxyMessage) => void): void
+ *     Receives all post-handshake session-proxy→client control messages:
  *     snapshot, pane/window/session/layout deltas, command responses,
  *     unsolicited errors.  tc-eots registers here.
  *
@@ -54,7 +54,7 @@
  *     Receives all post-handshake data-plane frames.  tc-3fb registers here.
  *
  *   send(msg: ClientMessage): void
- *     Low-level client→daemon control send.  tc-fpf uses this for input
+ *     Low-level client→session-proxy control send.  tc-fpf uses this for input
  *     and resize.request messages; tc-eots may use it for command.request.
  *
  *   state: ConnectionState
@@ -74,22 +74,22 @@
 import {
   runClientHandshake,
   WIRE_PROTOCOL_VERSION,
-} from "@tmuxcc/daemon";
+} from "@tmuxcc/session-proxy";
 import type {
   Transport,
-  DaemonMessage,
+  SessionProxyMessage,
   ClientMessage,
   NegotiatedSession,
   WireFeature,
   PaneId,
-} from "@tmuxcc/daemon";
+} from "@tmuxcc/session-proxy";
 
 // ---------------------------------------------------------------------------
 // Lifecycle state
 // ---------------------------------------------------------------------------
 
 /**
- * Lifecycle state of a DaemonConnection.
+ * Lifecycle state of a SessionProxyConnection.
  *
  * "connecting" — connect() called; handshake in flight.
  * "ready"      — handshake complete; post-handshake messages are routed.
@@ -103,21 +103,21 @@ export type ConnectionState = "connecting" | "ready" | "failed" | "closed";
 // ---------------------------------------------------------------------------
 
 /**
- * Options for DaemonConnection.
+ * Options for SessionProxyConnection.
  *
  * `features` — WireFeature array this client advertises during the handshake.
  *   Defaults to all known stable features.  The effective set is the
- *   intersection with what the daemon advertises.
+ *   intersection with what the session-proxy advertises.
  */
-export interface DaemonConnectionOptions {
+export interface SessionProxyConnectionOptions {
   features?: WireFeature[];
 }
 
 /**
- * Handler for post-handshake daemon→client control messages.
+ * Handler for post-handshake session-proxy→client control messages.
  * Registered via onControl().
  */
-export type DaemonMessageHandler = (msg: DaemonMessage) => void;
+export type SessionProxyMessageHandler = (msg: SessionProxyMessage) => void;
 
 /**
  * Handler for post-handshake data-plane frames.
@@ -134,16 +134,16 @@ export type DataFrameHandler = (paneId: PaneId, bytes: Uint8Array) => void;
 export type StateChangeHandler = (state: ConnectionState) => void;
 
 // ---------------------------------------------------------------------------
-// DaemonConnection
+// SessionProxyConnection
 // ---------------------------------------------------------------------------
 
 /**
- * Headless client connection to the tmuxcc daemon.
+ * Headless client connection to the tmuxcc session-proxy.
  *
  * Usage:
  * ```ts
- * const { daemon, client } = createInMemoryTransportPair();
- * const conn = new DaemonConnection(client, { features: ["pane-lifecycle"] });
+ * const { sessionProxy, client } = createInMemoryTransportPair();
+ * const conn = new SessionProxyConnection(client, { features: ["pane-lifecycle"] });
  *
  * conn.onStateChange((s) => console.log("state →", s));
  * conn.onControl((msg) => { ... });  // snapshot/deltas/responses/errors
@@ -154,9 +154,9 @@ export type StateChangeHandler = (state: ConnectionState) => void;
  * ```
  *
  * Transport is injected by the caller; the connection never creates one.
- * For tests use createInMemoryTransportPair() from @tmuxcc/daemon.
+ * For tests use createInMemoryTransportPair() from @tmuxcc/session-proxy.
  */
-export class DaemonConnection {
+export class SessionProxyConnection {
   // ── Injected transport ────────────────────────────────────────────────────
 
   readonly #transport: Transport;
@@ -175,14 +175,14 @@ export class DaemonConnection {
   // ── Post-handshake message routing ────────────────────────────────────────
 
   // Single replaceable control handler (mirrors transport.onControl convention).
-  #controlHandler: DaemonMessageHandler | null = null;
+  #controlHandler: SessionProxyMessageHandler | null = null;
 
   // Single replaceable data handler.
   #dataHandler: DataFrameHandler | null = null;
 
   // Buffer for control messages that arrive after handshake settles but before
   // the caller has a chance to install their own handler.
-  readonly #pendingControl: DaemonMessage[] = [];
+  readonly #pendingControl: SessionProxyMessage[] = [];
 
   // Buffer for data frames arriving in the same window.
   readonly #pendingData: Array<{ paneId: PaneId; bytes: Uint8Array }> = [];
@@ -199,14 +199,14 @@ export class DaemonConnection {
   // ── Constructor ───────────────────────────────────────────────────────────
 
   /**
-   * Create a DaemonConnection over an injected transport.
+   * Create a SessionProxyConnection over an injected transport.
    *
    * Does NOT initiate a connection.  Call connect() to start the handshake.
    *
    * @param transport - Wire transport (pipe/socket/in-memory).  Caller owns it.
    * @param opts      - Optional: WireFeature[] to advertise.
    */
-  constructor(transport: Transport, opts?: DaemonConnectionOptions) {
+  constructor(transport: Transport, opts?: SessionProxyConnectionOptions) {
     this.#transport = transport;
     this.#features = opts?.features ?? [
       "pane-lifecycle",
@@ -258,7 +258,7 @@ export class DaemonConnection {
    */
   async connect(): Promise<NegotiatedSession> {
     if (this.#connectCalled) {
-      throw new Error("DaemonConnection.connect() must be called exactly once");
+      throw new Error("SessionProxyConnection.connect() must be called exactly once");
     }
     this.#connectCalled = true;
 
@@ -306,7 +306,7 @@ export class DaemonConnection {
   }
 
   /**
-   * Register a handler for post-handshake daemon→client control messages.
+   * Register a handler for post-handshake session-proxy→client control messages.
    *
    * Replaces any previously registered handler (mirrors transport.onControl
    * convention).  Messages buffered before this handler is installed are
@@ -322,7 +322,7 @@ export class DaemonConnection {
    *
    * Siblings: tc-eots registers here to apply snapshot + deltas.
    */
-  onControl(handler: DaemonMessageHandler): void {
+  onControl(handler: SessionProxyMessageHandler): void {
     this.#controlHandler = handler;
     // Drain any messages buffered while no handler was registered.  This
     // covers the common pattern of calling mirror.connectTo(conn) after
@@ -356,7 +356,7 @@ export class DaemonConnection {
   }
 
   /**
-   * Send a client→daemon control message over the wire.
+   * Send a client→session-proxy control message over the wire.
    *
    * Low-level primitive.  Callers should only send ClientMessage shapes.
    * Throws if the connection is not in the "ready" state.
@@ -367,7 +367,7 @@ export class DaemonConnection {
   send(msg: ClientMessage): void {
     if (this.#state !== "ready") {
       throw new Error(
-        `DaemonConnection.send() called in state "${this.#state}"; must be "ready"`,
+        `SessionProxyConnection.send() called in state "${this.#state}"; must be "ready"`,
       );
     }
     this.#transport.sendControl(msg);
@@ -406,13 +406,13 @@ export class DaemonConnection {
    */
   #installPostHandshakeRouting(): void {
     this.#transport.onControl((msg) => {
-      // Only route DaemonMessage shapes.  ClientMessage types should never
+      // Only route SessionProxyMessage shapes.  ClientMessage types should never
       // arrive on the client-side transport, but guard just in case.
       if (this.#state === "ready") {
         if (this.#controlHandler !== null) {
-          this.#controlHandler(msg as DaemonMessage);
+          this.#controlHandler(msg as SessionProxyMessage);
         } else {
-          this.#pendingControl.push(msg as DaemonMessage);
+          this.#pendingControl.push(msg as SessionProxyMessage);
         }
       }
     });
@@ -429,7 +429,7 @@ export class DaemonConnection {
 
     // Re-install the close handler AFTER the handshake settled.
     // runClientHandshake's settle() cleared it; we need it back for
-    // post-handshake transport closure events (e.g. daemon disconnects).
+    // post-handshake transport closure events (e.g. session-proxy disconnects).
     this.#transport.onClose((err) => {
       this.#handleTransportClose(err);
     });

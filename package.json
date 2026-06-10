@@ -24,7 +24,7 @@
     "format": "prettier --write src"
   },
   "dependencies": {
-    "@tmuxcc/daemon": "*"
+    "@tmuxcc/session-proxy": "*"
   },
   "devDependencies": {
     "@types/node": "^22.19.19",

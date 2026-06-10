@@ -13,7 +13,7 @@
  *
  *   Renderer → Client (pull):
  *     The renderer holds a ClientController and calls sendInput / resizePane
- *     to forward user input and viewport resize events to the daemon.
+ *     to forward user input and viewport resize events to the session-proxy.
  *
  * Usage (from the renderer side):
  * ```ts
@@ -36,7 +36,7 @@
  * lives in tmuxcc-vscode, not here.
  */
 
-import type { PaneId, WindowId, SessionId, WindowLayout, PaneMode, WireCommand } from "@tmuxcc/daemon";
+import type { PaneId, WindowId, SessionId, WindowLayout, PaneMode, WireCommand } from "@tmuxcc/session-proxy";
 
 // ---------------------------------------------------------------------------
 // Re-export wire primitives that renderers reference (convenience)
@@ -52,7 +52,7 @@ export type { PaneId, WindowId, SessionId, WindowLayout, PaneMode, WireCommand }
  * Snapshot of a single pane's identity and geometry at the time of an event.
  * Passed to onPaneOpened and onPaneResized callbacks.
  *
- * v3: sessionId is absent — the daemon wire is single-session.
+ * v3: sessionId is absent — the session-proxy wire is single-session.
  */
 export interface PaneInfo {
   readonly paneId: PaneId;
@@ -72,7 +72,7 @@ export interface PaneInfo {
  * Current focus state: which pane and window are active.
  * Both are null when no pane is focused.
  *
- * v3: sessionId is absent — the daemon wire is single-session.
+ * v3: sessionId is absent — the session-proxy wire is single-session.
  */
 export interface FocusInfo {
   readonly paneId: PaneId | null;
@@ -82,7 +82,7 @@ export interface FocusInfo {
 /**
  * Snapshot of a window's identity and geometry at the time of an event.
  *
- * v3: sessionId is absent — the daemon wire is single-session.
+ * v3: sessionId is absent — the session-proxy wire is single-session.
  */
 export interface WindowInfo {
   readonly windowId: WindowId;
@@ -151,7 +151,7 @@ export interface RenderHook {
   // ── Pane lifecycle ──────────────────────────────────────────────────────
 
   /**
-   * A new pane appeared (new window, split, or daemon snapshot replay).
+   * A new pane appeared (new window, split, or session-proxy snapshot replay).
    *
    * Called once per pane on initial snapshot load (during driver.start()) and
    * thereafter whenever a pane.opened event arrives.
@@ -168,9 +168,9 @@ export interface RenderHook {
    * Called when a pane.closed event arrives.  After this, no further
    * onPaneOutput / onPaneResized callbacks will fire for this paneId.
    *
-   * `exitCode` is the process exit code if the daemon captured it.  It is
+   * `exitCode` is the process exit code if the session-proxy captured it.  It is
    * absent when the underlying tmux notification did not carry exit status
-   * (the most common case — see PaneClosedMessage in @tmuxcc/daemon).
+   * (the most common case — see PaneClosedMessage in @tmuxcc/session-proxy).
    *
    * Renderers should show an exit message and mark the terminal as exited here.
    * The tab MUST NOT auto-close; that is a user-driven action.
@@ -180,7 +180,7 @@ export interface RenderHook {
   /**
    * A pane's dimensions changed.
    *
-   * Called when a pane.resized event confirms the daemon applied a resize.
+   * Called when a pane.resized event confirms the session-proxy applied a resize.
    * This is the authoritative size; renderers should update their viewport.
    */
   onPaneResized(paneId: PaneId, cols: number, rows: number): void;
@@ -207,7 +207,7 @@ export interface RenderHook {
    * received from the byte source.  Renderers must handle it efficiently.
    *
    * NOTE: this callback may be called BEFORE onPaneOpened if the first byte
-   * chunk races the lifecycle event (daemon implementation detail).  Renderers
+   * chunk races the lifecycle event (session-proxy implementation detail).  Renderers
    * should tolerate this gracefully (buffer or discard).
    */
   onPaneOutput(paneId: PaneId, bytes: Uint8Array): void;
@@ -243,7 +243,7 @@ export interface RenderHook {
    * The layout of a window changed (panes added, removed, or resized).
    *
    * `layout` is the complete current geometry as a structured tree (see
-   * WindowLayout in @tmuxcc/daemon).  Renderers should apply the layout
+   * WindowLayout in @tmuxcc/session-proxy).  Renderers should apply the layout
    * ATOMICALLY: update all pane rects in one pass to avoid flicker.
    *
    * This callback fires both from snapshot replay (one call per window that
@@ -267,7 +267,7 @@ export interface RenderHook {
   // ── Connection ──────────────────────────────────────────────────────────
 
   /**
-   * The client successfully connected to the daemon and the initial snapshot
+   * The client successfully connected to the session-proxy and the initial snapshot
    * has been applied.
    *
    * Fired once at the start of driver.start(), AFTER onPaneOpened /
@@ -277,7 +277,7 @@ export interface RenderHook {
   onConnected(): void;
 
   /**
-   * The connection to the daemon was lost (clean close or error).
+   * The connection to the session-proxy was lost (clean close or error).
    *
    * `reason` is a human-readable string for display/logging.  After this
    * callback no further pane/window/layout/focus/output callbacks will fire
@@ -292,7 +292,7 @@ export interface RenderHook {
 
 /**
  * The handle the renderer uses to send input and resize requests toward the
- * daemon.  The renderer CALLS these methods; the client IMPLEMENTS them.
+ * session-proxy.  The renderer CALLS these methods; the client IMPLEMENTS them.
  *
  * Obtained from `connectClient(transport).controller`.
  *
@@ -303,7 +303,7 @@ export interface ClientController {
   /**
    * Send text/key input to a pane.
    *
-   * `data` is a UTF-8 string.  The client forwards it to the daemon's input
+   * `data` is a UTF-8 string.  The client forwards it to the session-proxy's input
    * message, which writes bytes directly to the pane's pty.  Special keys
    * (escape sequences, function keys) should be pre-encoded as their byte
    * sequences before calling sendInput.
@@ -311,16 +311,16 @@ export interface ClientController {
   sendInput(paneId: PaneId, data: string): void;
 
   /**
-   * Notify the daemon that the renderer's viewport for a pane changed size.
+   * Notify the session-proxy that the renderer's viewport for a pane changed size.
    *
-   * Called when the host UI resizes (e.g. VS Code panel resized).  The daemon
+   * Called when the host UI resizes (e.g. VS Code panel resized).  The session-proxy
    * applies the resize to tmux and confirms with a pane.resized event, which
    * the driver will translate into an onPaneResized callback.
    */
   resizePane(paneId: PaneId, cols: number, rows: number): void;
 
   /**
-   * Send a model-level command to the daemon (VS Code → tmux direction).
+   * Send a model-level command to the sessionProxy (VS Code → tmux direction).
    *
    * Wraps `cmd` in a `command.request` wire message with a monotonically-
    * increasing correlationId and sends it over the connection.  The resulting
@@ -328,8 +328,8 @@ export interface ClientController {
    * normal `onWindowAdded` / `onPaneOpened` / `onPaneClosed` callbacks.
    *
    * Fire-and-forget: this does not wait for the matching `command.response`.
-   * Errors from the daemon (malformed command, unknown pane id, etc.) arrive
-   * as `onDisconnected` or are silently ignored by the daemon depending on the
+   * Errors from the sessionProxy (malformed command, unknown pane id, etc.) arrive
+   * as `onDisconnected` or are silently ignored by the session-proxy depending on the
    * error type.
    *
    * Common commands:

@@ -4,7 +4,7 @@
  * Covers:
  *   1. Snapshot initializes the mirror.
  *   2. Each delta type updates the mirror correctly.
- *   3. Round-trip vs daemon: apply snapshot(prev) + diff(prev, next) to the
+ *   3. Round-trip vs sessionProxy: apply snapshot(prev) + diff(prev, next) to the
  *      client mirror → mirror matches snapshot(next). Proves client/daemon
  *      consistency.
  *   4. Seq-gap detection: out-of-order delta fires onResyncNeeded; in-order
@@ -15,7 +15,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  // State model helpers — imported from @tmuxcc/daemon by package name.
+  // State model helpers — imported from @tmuxcc/session-proxy by package name.
   paneId,
   windowId,
   sessionId,
@@ -29,7 +29,7 @@ import {
   setFocus,
   projectSnapshot,
   diffModel,
-} from "@tmuxcc/daemon";
+} from "@tmuxcc/session-proxy";
 
 import type {
   SessionModel,
@@ -37,9 +37,9 @@ import type {
   WindowId,
   SessionId,
   SnapshotMessage,
-  DaemonMessage,
+  SessionProxyMessage,
   WindowLayout,
-} from "@tmuxcc/daemon";
+} from "@tmuxcc/session-proxy";
 
 import { Mirror, applySnapshot, applyDelta } from "./mirror.js";
 import type { ClientModel } from "./mirror.js";
@@ -101,7 +101,7 @@ function makeSnapshot(seq = 2): SnapshotMessage {
 }
 
 // ---------------------------------------------------------------------------
-// Daemon-side model builders (for round-trip test)
+// SessionProxy-side model builders (for round-trip test)
 // ---------------------------------------------------------------------------
 
 function makeSession(
@@ -109,7 +109,7 @@ function makeSession(
   windowIds: readonly WindowId[],
   activeWindowId: WindowId | null,
   name = "test-session",
-): import("@tmuxcc/daemon").Session {
+): import("@tmuxcc/session-proxy").Session {
   return { sessionId: id, name, windowIds, activeWindowId };
 }
 
@@ -123,7 +123,7 @@ function makeWindow(
   synchronizePanes = false,
   monitorActivity = true,   // ── tc-7xv.15 ──
   monitorSilence = 0,       // ── tc-7xv.15 ──
-): import("@tmuxcc/daemon").Window {
+): import("@tmuxcc/session-proxy").Window {
   return { windowId: id, sessionId: sessId, name, paneIds, activePaneId, layout, synchronizePanes, monitorActivity, monitorSilence }; // ── tc-7xv.15 ──
 }
 
@@ -133,7 +133,7 @@ function makePane(
   sessId: SessionId,
   cols = 80,
   rows = 24,
-): import("@tmuxcc/daemon").Pane {
+): import("@tmuxcc/session-proxy").Pane {
   return {
     paneId: id,
     windowId: winId,
@@ -299,7 +299,7 @@ describe("applySnapshot — initializes mirror", () => {
 describe("applyDelta — pane deltas", () => {
   it("pane.opened adds a new pane with mode=normal", () => {
     const { model: init } = applySnapshot(makeSnapshot(2));
-    const msg: DaemonMessage = {
+    const msg: SessionProxyMessage = {
       type: "pane.opened",
       seq: 3,
       paneId: P3,
@@ -320,7 +320,7 @@ describe("applyDelta — pane deltas", () => {
 
   it("pane.closed removes a pane", () => {
     const { model: init } = applySnapshot(makeSnapshot(2));
-    const msg: DaemonMessage = {
+    const msg: SessionProxyMessage = {
       type: "pane.closed",
       seq: 3,
       paneId: P2,
@@ -334,7 +334,7 @@ describe("applyDelta — pane deltas", () => {
 
   it("pane.resized updates cols and rows", () => {
     const { model: init } = applySnapshot(makeSnapshot(1));
-    const msg: DaemonMessage = {
+    const msg: SessionProxyMessage = {
       type: "pane.resized",
       seq: 2,
       paneId: P1,
@@ -352,7 +352,7 @@ describe("applyDelta — pane deltas", () => {
 
   it("pane.mode-changed updates mode on the pane", () => {
     const { model: init } = applySnapshot(makeSnapshot(1));
-    const msg: DaemonMessage = {
+    const msg: SessionProxyMessage = {
       type: "pane.mode-changed",
       seq: 2,
       paneId: P1,
@@ -367,7 +367,7 @@ describe("applyDelta — pane deltas", () => {
 describe("applyDelta — window deltas", () => {
   it("window.added adds a new window with zero-layout placeholder", () => {
     const { model: init } = applySnapshot(makeSnapshot(2));
-    const msg: DaemonMessage = {
+    const msg: SessionProxyMessage = {
       type: "window.added",
       seq: 3,
       windowId: W2,
@@ -387,7 +387,7 @@ describe("applyDelta — window deltas", () => {
     const { model: init } = applySnapshot(makeSnapshot(2));
     assert.equal(init.windows.get(W1)!.active, true);
 
-    const msg: DaemonMessage = {
+    const msg: SessionProxyMessage = {
       type: "window.added",
       seq: 3,
       windowId: W2,
@@ -401,7 +401,7 @@ describe("applyDelta — window deltas", () => {
 
   it("window.closed removes the window", () => {
     const { model: init } = applySnapshot(makeSnapshot(2));
-    const msg: DaemonMessage = {
+    const msg: SessionProxyMessage = {
       type: "window.closed",
       seq: 3,
       windowId: W1,
@@ -413,7 +413,7 @@ describe("applyDelta — window deltas", () => {
 
   it("window.renamed updates the window name", () => {
     const { model: init } = applySnapshot(makeSnapshot(1));
-    const msg: DaemonMessage = {
+    const msg: SessionProxyMessage = {
       type: "window.renamed",
       seq: 2,
       windowId: W1,
@@ -428,7 +428,7 @@ describe("applyDelta — window deltas", () => {
     const { model: init } = applySnapshot(makeSnapshot(1));
     assert.equal(init.windows.get(W1)!.synchronizePanes, false); // default
 
-    const msg: DaemonMessage = {
+    const msg: SessionProxyMessage = {
       type: "window.sync.changed",
       seq: 2,
       windowId: W1,
@@ -449,7 +449,7 @@ describe("applyDelta — window deltas", () => {
     const { model: init } = applySnapshot(snap);
     assert.equal(init.windows.get(W1)!.synchronizePanes, true);
 
-    const msg: DaemonMessage = {
+    const msg: SessionProxyMessage = {
       type: "window.sync.changed",
       seq: 2,
       windowId: W1,
@@ -461,7 +461,7 @@ describe("applyDelta — window deltas", () => {
 
   it("window.sync.changed is no-op when value unchanged", () => {
     const { model: init } = applySnapshot(makeSnapshot(1));
-    const msg: DaemonMessage = {
+    const msg: SessionProxyMessage = {
       type: "window.sync.changed",
       seq: 2,
       windowId: W1,
@@ -474,7 +474,7 @@ describe("applyDelta — window deltas", () => {
 
   it("window.sync.changed is no-op for unknown window", () => {
     const { model: init } = applySnapshot(makeSnapshot(1));
-    const msg: DaemonMessage = {
+    const msg: SessionProxyMessage = {
       type: "window.sync.changed",
       seq: 2,
       windowId: W2, // not in model
@@ -495,7 +495,7 @@ describe("applyDelta — window deltas", () => {
 
   it("window.added defaults synchronizePanes to false", () => {
     const { model: init } = applySnapshot(makeSnapshot(1));
-    const msg: DaemonMessage = {
+    const msg: SessionProxyMessage = {
       type: "window.added",
       seq: 2,
       windowId: W2,
@@ -514,7 +514,7 @@ describe("applyDelta — window.monitor.activity.changed (tc-7xv.15)", () => {
     const { model: init } = applySnapshot(makeSnapshot(1));
     assert.equal(init.windows.get(W1)!.monitorActivity, true); // snapshot default
 
-    const msg: DaemonMessage = {
+    const msg: SessionProxyMessage = {
       type: "window.monitor.activity.changed",
       seq: 2,
       windowId: W1,
@@ -535,7 +535,7 @@ describe("applyDelta — window.monitor.activity.changed (tc-7xv.15)", () => {
     const { model: init } = applySnapshot(snap);
     assert.equal(init.windows.get(W1)!.monitorActivity, false);
 
-    const msg: DaemonMessage = {
+    const msg: SessionProxyMessage = {
       type: "window.monitor.activity.changed",
       seq: 2,
       windowId: W1,
@@ -548,7 +548,7 @@ describe("applyDelta — window.monitor.activity.changed (tc-7xv.15)", () => {
   it("is no-op when value unchanged (reference equality)", () => {
     const { model: init } = applySnapshot(makeSnapshot(1));
     // monitorActivity is already true in default snapshot
-    const msg: DaemonMessage = {
+    const msg: SessionProxyMessage = {
       type: "window.monitor.activity.changed",
       seq: 2,
       windowId: W1,
@@ -560,7 +560,7 @@ describe("applyDelta — window.monitor.activity.changed (tc-7xv.15)", () => {
 
   it("is no-op for unknown window", () => {
     const { model: init } = applySnapshot(makeSnapshot(1));
-    const msg: DaemonMessage = {
+    const msg: SessionProxyMessage = {
       type: "window.monitor.activity.changed",
       seq: 2,
       windowId: W2, // not in model
@@ -581,7 +581,7 @@ describe("applyDelta — window.monitor.activity.changed (tc-7xv.15)", () => {
 
   it("window.added defaults monitorActivity to true", () => {
     const { model: init } = applySnapshot(makeSnapshot(1));
-    const msg: DaemonMessage = {
+    const msg: SessionProxyMessage = {
       type: "window.added",
       seq: 2,
       windowId: W2,
@@ -598,7 +598,7 @@ describe("applyDelta — window.monitor.silence.changed (tc-7xv.15)", () => {
     const { model: init } = applySnapshot(makeSnapshot(1));
     assert.equal(init.windows.get(W1)!.monitorSilence, 0); // default is 0 (off)
 
-    const msg: DaemonMessage = {
+    const msg: SessionProxyMessage = {
       type: "window.monitor.silence.changed",
       seq: 2,
       windowId: W1,
@@ -619,7 +619,7 @@ describe("applyDelta — window.monitor.silence.changed (tc-7xv.15)", () => {
     const { model: init } = applySnapshot(snap);
     assert.equal(init.windows.get(W1)!.monitorSilence, 60);
 
-    const msg: DaemonMessage = {
+    const msg: SessionProxyMessage = {
       type: "window.monitor.silence.changed",
       seq: 2,
       windowId: W1,
@@ -632,7 +632,7 @@ describe("applyDelta — window.monitor.silence.changed (tc-7xv.15)", () => {
   it("is no-op when value unchanged (reference equality)", () => {
     const { model: init } = applySnapshot(makeSnapshot(1));
     // monitorSilence is already 0 in default snapshot
-    const msg: DaemonMessage = {
+    const msg: SessionProxyMessage = {
       type: "window.monitor.silence.changed",
       seq: 2,
       windowId: W1,
@@ -644,7 +644,7 @@ describe("applyDelta — window.monitor.silence.changed (tc-7xv.15)", () => {
 
   it("is no-op for unknown window", () => {
     const { model: init } = applySnapshot(makeSnapshot(1));
-    const msg: DaemonMessage = {
+    const msg: SessionProxyMessage = {
       type: "window.monitor.silence.changed",
       seq: 2,
       windowId: W2, // not in model
@@ -665,7 +665,7 @@ describe("applyDelta — window.monitor.silence.changed (tc-7xv.15)", () => {
 
   it("window.added defaults monitorSilence to 0", () => {
     const { model: init } = applySnapshot(makeSnapshot(1));
-    const msg: DaemonMessage = {
+    const msg: SessionProxyMessage = {
       type: "window.added",
       seq: 2,
       windowId: W2,
@@ -684,7 +684,7 @@ describe("applyDelta — layout delta", () => {
     const { model: init } = applySnapshot(makeSnapshot(2));
     assert.deepEqual(init.windows.get(W1)!.layout, LAYOUT_2);
 
-    const msg: DaemonMessage = {
+    const msg: SessionProxyMessage = {
       type: "layout.updated",
       seq: 3,
       windowId: W1,
@@ -714,7 +714,7 @@ describe("applyDelta — focus delta", () => {
     };
     const { model: init } = applySnapshot(snap);
 
-    const msg: DaemonMessage = {
+    const msg: SessionProxyMessage = {
       type: "focus.changed",
       seq: 3,
       paneId: P2,
@@ -730,12 +730,12 @@ describe("applyDelta — focus delta", () => {
   });
 });
 
-describe("applyDelta — session deltas (v3: only session.renamed on daemon wire)", () => {
+describe("applyDelta — session deltas (v3: only session.renamed on session-proxy wire)", () => {
   it("session.renamed updates the bound session name (no sessionId in v3)", () => {
     const { model: init } = applySnapshot(makeSnapshot(2));
     assert.equal(init.session.name, "main");
 
-    const msg: DaemonMessage = {
+    const msg: SessionProxyMessage = {
       type: "session.renamed",
       seq: 3,
       newName: "production",
@@ -747,30 +747,30 @@ describe("applyDelta — session deltas (v3: only session.renamed on daemon wire
 });
 
 // ---------------------------------------------------------------------------
-// 3. Round-trip vs daemon
+// 3. Round-trip vs session-proxy
 //
-// Build two daemon-side SessionModels (prev/next), compute:
+// Build two session-proxy-side SessionModels (prev/next), compute:
 //   snapshot = projectSnapshot(prev)
 //   deltas   = diffModel(prev, next)
 // Apply snapshot to client mirror, then apply each delta.
 // Assert that the final client mirror matches projectSnapshot(next).
 //
-// This proves client and daemon agree on the round-trip consistency property.
+// This proves client and session-proxy agree on the round-trip consistency property.
 // ---------------------------------------------------------------------------
 
-describe("round-trip vs daemon: client mirror == projectSnapshot(next)", () => {
+describe("round-trip vs sessionProxy: client mirror == projectSnapshot(next)", () => {
   /**
    * Run a round-trip: prev → client mirror after snapshot+deltas == next's snapshot.
    */
   function roundTrip(prev: SessionModel, next: SessionModel): void {
-    // Daemon side: produce snapshot + deltas
+    // SessionProxy side: produce snapshot + deltas
     const snapPrev = projectSnapshot(prev, { seq: 1 });
     const deltas = diffModel(prev, next);
 
     // Stamp sequential seq values onto the deltas (diffModel returns seq:0
     // placeholders; the E4 runtime would stamp real values).
     let seq = snapPrev.seq;
-    const stampedDeltas: DaemonMessage[] = deltas.map((d) => ({
+    const stampedDeltas: SessionProxyMessage[] = deltas.map((d) => ({
       ...d,
       seq: ++seq,
     }));
@@ -782,7 +782,7 @@ describe("round-trip vs daemon: client mirror == projectSnapshot(next)", () => {
       mirror.receiveDelta(delta);
     }
 
-    // Ground truth: what the daemon would send as a fresh snapshot for `next`
+    // Ground truth: what the session-proxy would send as a fresh snapshot for `next`
     const snapNext = projectSnapshot(next, { seq: 1 });
 
     // Compare (normalized, without mode — SnapshotPane has no mode field)

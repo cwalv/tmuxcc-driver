@@ -13,7 +13,7 @@
  *
  * Key differences from the driver:
  *   - Model state is driven via mirror.receiveSnapshot() + mirror.receiveDelta()
- *     using real DaemonMessage types (pane.opened, pane.closed, etc.).
+ *     using real SessionProxyMessage types (pane.opened, pane.closed, etc.).
  *   - mirror.wireDataSources(byteSource) is called before mirror.attach(hook).
  *   - mirror.detachHook() replaces session.stop().
  *   - Mirror.attach is idempotent (second call is no-op).
@@ -44,10 +44,10 @@ import type {
 } from "./render-hook.js";
 import { NoOpRenderHook, EchoRenderHook } from "./render-hook.js";
 import { Mirror } from "./mirror.js";
-import type { SnapshotMessage, DaemonMessage } from "@tmuxcc/daemon";
+import type { SnapshotMessage, SessionProxyMessage } from "@tmuxcc/session-proxy";
 
 // ---------------------------------------------------------------------------
-// Helpers — mint branded ids without importing daemon internals
+// Helpers — mint branded ids without importing session-proxy internals
 // ---------------------------------------------------------------------------
 
 function pid(s: string): PaneId {
@@ -392,7 +392,7 @@ describe("Mirror.attach — snapshot replay", () => {
 // Tests: Mirror.attach — model change events
 //
 // Ported from "createRenderHookDriver — model changes".
-// Model changes are driven via mirror.receiveDelta() with proper DaemonMessage
+// Model changes are driven via mirror.receiveDelta() with proper SessionProxyMessage
 // types and sequential seq numbers (seq starts at 2 after a seq=1 snapshot).
 // ---------------------------------------------------------------------------
 
@@ -414,7 +414,7 @@ describe("Mirror.attach — model changes", () => {
     echo.clear();
 
     // New pane appears
-    const delta: DaemonMessage = {
+    const delta: SessionProxyMessage = {
       type: "pane.opened",
       seq: 2,
       paneId: p1,
@@ -451,7 +451,7 @@ describe("Mirror.attach — model changes", () => {
     echo.clear();
 
     // p1 closes
-    const delta: DaemonMessage = {
+    const delta: SessionProxyMessage = {
       type: "pane.closed",
       seq: 2,
       paneId: p1,
@@ -482,7 +482,7 @@ describe("Mirror.attach — model changes", () => {
     mirror.attach(echo);
     echo.clear();
 
-    const delta: DaemonMessage = {
+    const delta: SessionProxyMessage = {
       type: "pane.resized",
       seq: 2,
       paneId: p0,
@@ -517,7 +517,7 @@ describe("Mirror.attach — model changes", () => {
     mirror.attach(echo);
     echo.clear();
 
-    const delta: DaemonMessage = {
+    const delta: SessionProxyMessage = {
       type: "focus.changed",
       seq: 2,
       paneId: p1,
@@ -547,7 +547,7 @@ describe("Mirror.attach — model changes", () => {
     mirror.attach(echo);
     echo.clear();
 
-    const delta: DaemonMessage = {
+    const delta: SessionProxyMessage = {
       type: "window.added",
       seq: 2,
       windowId: w1,
@@ -578,7 +578,7 @@ describe("Mirror.attach — model changes", () => {
     mirror.attach(echo);
     echo.clear();
 
-    const delta: DaemonMessage = {
+    const delta: SessionProxyMessage = {
       type: "window.closed",
       seq: 2,
       windowId: w1,
@@ -606,7 +606,7 @@ describe("Mirror.attach — model changes", () => {
     mirror.attach(echo);
     echo.clear();
 
-    const delta: DaemonMessage = {
+    const delta: SessionProxyMessage = {
       type: "window.renamed",
       seq: 2,
       windowId: w0,
@@ -678,7 +678,7 @@ describe("Mirror.attach — byte events", () => {
     echo.clear();
 
     // p1 opens
-    const delta: DaemonMessage = {
+    const delta: SessionProxyMessage = {
       type: "pane.opened",
       seq: 2,
       paneId: p1,
@@ -717,7 +717,7 @@ describe("Mirror.attach — byte events", () => {
     mirror.attach(echo);
 
     // Close p1
-    const delta: DaemonMessage = {
+    const delta: SessionProxyMessage = {
       type: "pane.closed",
       seq: 2,
       paneId: p1,

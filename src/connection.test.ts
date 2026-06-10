@@ -1,23 +1,23 @@
 /**
- * DaemonConnection tests — acceptance criteria for tc-ahh.
+ * SessionProxyConnection tests — acceptance criteria for tc-ahh.
  *
  * All tests use createInMemoryTransportPair() for deterministic, synchronous
- * delivery.  The daemon-side end of the pair simulates the real daemon:
- *   - runDaemonHandshake drives the daemon side of the capabilities exchange.
- *   - After the handshake, daemon.sendControl / daemon.sendData push messages.
+ * delivery.  The session-proxy-side end of the pair simulates the real sessionProxy:
+ *   - runSessionProxyHandshake drives the session-proxy side of the capabilities exchange.
+ *   - After the handshake, sessionProxy.sendControl / sessionProxy.sendData push messages.
  *
  * Coverage:
  *   1. Happy path: connect() resolves to a NegotiatedSession with the correct
  *      protocolVersion and intersected features; state goes connecting→ready.
  *   2. Handshake failure (version mismatch): connect() rejects with
  *      HandshakeError (code "protocol.version-mismatch"), state → "failed".
- *   3. Close after ready: daemon.close() → client state → "closed",
+ *   3. Close after ready: sessionProxy.close() → client state → "closed",
  *      onStateChange fires.
- *   4. Post-handshake control routing: a daemon→client control message sent
+ *   4. Post-handshake control routing: a session-proxy→client control message sent
  *      after ready is surfaced via onControl.
  *   5. Post-handshake data routing: a data frame sent after ready is surfaced
  *      via onData.
- *   6. send() in ready state delivers the message to the daemon.
+ *   6. send() in ready state delivers the message to the session-proxy.
  *   7. send() in non-ready state throws.
  *   8. Buffering: messages arriving synchronously after handshake but before
  *      connect() resolves are delivered after connect() resolves.
@@ -30,18 +30,18 @@ import assert from "node:assert/strict";
 
 import {
   createInMemoryTransportPair,
-  runDaemonHandshake,
+  runSessionProxyHandshake,
   HandshakeError,
   WIRE_PROTOCOL_VERSION,
   paneId,
-} from "@tmuxcc/daemon";
+} from "@tmuxcc/session-proxy";
 import type {
-  DaemonMessage,
+  SessionProxyMessage,
   NegotiatedSession,
   PaneId,
-} from "@tmuxcc/daemon";
+} from "@tmuxcc/session-proxy";
 
-import { DaemonConnection } from "./connection.js";
+import { SessionProxyConnection } from "./connection.js";
 import type { ConnectionState } from "./connection.js";
 
 // ---------------------------------------------------------------------------
@@ -67,27 +67,27 @@ function caps(features = ALL_FEATURES as unknown as string[]) {
 
 /**
  * Wire up a connected pair ready for a handshake test.
- * Returns { conn, daemonTransport } where:
- *   - conn is the DaemonConnection under test.
- *   - daemonTransport is the other end for driving the daemon side.
+ * Returns { conn, sessionProxyTransport } where:
+ *   - conn is the SessionProxyConnection under test.
+ *   - sessionProxyTransport is the other end for driving the session-proxy side.
  */
 function makePair(clientFeatures?: string[]) {
-  const { daemon: daemonTransport, client: clientTransport } =
+  const { sessionProxy: sessionProxyTransport, client: clientTransport } =
     createInMemoryTransportPair();
-  const conn = new DaemonConnection(
+  const conn = new SessionProxyConnection(
     clientTransport,
     clientFeatures !== undefined ? { features: clientFeatures } : undefined,
   );
-  return { conn, daemonTransport };
+  return { conn, sessionProxyTransport };
 }
 
 // ---------------------------------------------------------------------------
 // 1. Happy path — connect() resolves; state goes connecting → ready
 // ---------------------------------------------------------------------------
 
-describe("DaemonConnection — happy path", () => {
+describe("SessionProxyConnection — happy path", () => {
   it("connect() resolves with a NegotiatedSession (matching version + intersected features)", async () => {
-    const { conn, daemonTransport } = makePair([
+    const { conn, sessionProxyTransport } = makePair([
       "pane-lifecycle",
       "focus-events",
     ]);
@@ -96,17 +96,17 @@ describe("DaemonConnection — happy path", () => {
     const states: ConnectionState[] = [];
     conn.onStateChange((s) => states.push(s));
 
-    // Run daemon side concurrently.  runDaemonHandshake sends daemon.capabilities
+    // Run session-proxy side concurrently.  runSessionProxyHandshake sends session-proxy.capabilities
     // and waits for client.capabilities.
-    const daemonHandshake = runDaemonHandshake(
-      daemonTransport,
+    const sessionProxyHandshake = runSessionProxyHandshake(
+      sessionProxyTransport,
       caps(["pane-lifecycle", "layout-updates", "focus-events"]),
     );
 
     const session = await conn.connect();
 
-    // Daemon side should also resolve.
-    const daemonSession = await daemonHandshake;
+    // SessionProxy side should also resolve.
+    const sessionProxySession = await sessionProxyHandshake;
 
     // Both sides agree on the session.
     assert.equal(session.protocolVersion, WIRE_PROTOCOL_VERSION);
@@ -115,7 +115,7 @@ describe("DaemonConnection — happy path", () => {
       ["focus-events", "pane-lifecycle"], // intersection
     );
     assert.deepEqual(
-      [...daemonSession.features].sort(),
+      [...sessionProxySession.features].sort(),
       ["focus-events", "pane-lifecycle"],
     );
 
@@ -129,11 +129,11 @@ describe("DaemonConnection — happy path", () => {
   });
 
   it("session getter is defined after connect()", async () => {
-    const { conn, daemonTransport } = makePair();
+    const { conn, sessionProxyTransport } = makePair();
 
-    const daemonHandshake = runDaemonHandshake(daemonTransport, caps());
+    const sessionProxyHandshake = runSessionProxyHandshake(sessionProxyTransport, caps());
     await conn.connect();
-    await daemonHandshake;
+    await sessionProxyHandshake;
 
     const s: NegotiatedSession | undefined = conn.session;
     assert.ok(s !== undefined);
@@ -145,23 +145,23 @@ describe("DaemonConnection — happy path", () => {
 // 2. Handshake failure — version mismatch → state "failed", rejects HandshakeError
 // ---------------------------------------------------------------------------
 
-describe("DaemonConnection — handshake failure", () => {
-  it("connect() rejects with HandshakeError when daemon advertises a different version", async () => {
-    const { conn, daemonTransport } = makePair();
+describe("SessionProxyConnection — handshake failure", () => {
+  it("connect() rejects with HandshakeError when session-proxy advertises a different version", async () => {
+    const { conn, sessionProxyTransport } = makePair();
 
     const states: ConnectionState[] = [];
     conn.onStateChange((s) => states.push(s));
 
-    // Advertise a mismatched version from the daemon side.
+    // Advertise a mismatched version from the session-proxy side.
     const mismatchedCaps = {
       protocolVersion: (WIRE_PROTOCOL_VERSION + 1) as typeof WIRE_PROTOCOL_VERSION,
       features: [] as string[],
     };
 
-    // The daemon handshake will reject too (version mismatch on its end),
+    // The session-proxy handshake will reject too (version mismatch on its end),
     // so we swallow that error.
-    const daemonHandshake = runDaemonHandshake(
-      daemonTransport,
+    const sessionProxyHandshake = runSessionProxyHandshake(
+      sessionProxyTransport,
       mismatchedCaps,
     ).catch(() => {
       /* expected */
@@ -176,7 +176,7 @@ describe("DaemonConnection — handshake failure", () => {
       },
     );
 
-    await daemonHandshake;
+    await sessionProxyHandshake;
 
     // State should be "failed".
     assert.equal(conn.state, "failed");
@@ -186,16 +186,16 @@ describe("DaemonConnection — handshake failure", () => {
     assert.equal(conn.session, undefined);
   });
 
-  it("connect() rejects with HandshakeError when daemon closes transport before handshake", async () => {
-    const { conn, daemonTransport } = makePair();
+  it("connect() rejects with HandshakeError when session-proxy closes transport before handshake", async () => {
+    const { conn, sessionProxyTransport } = makePair();
 
     const states: ConnectionState[] = [];
     conn.onStateChange((s) => states.push(s));
 
-    // Close the daemon transport immediately — client should see transport.closed.
+    // Close the session-proxy transport immediately — client should see transport.closed.
     // We use a microtask deferral so connect() installs its handlers first.
     const connectPromise = conn.connect();
-    daemonTransport.close();
+    sessionProxyTransport.close();
 
     await assert.rejects(
       () => connectPromise,
@@ -214,22 +214,22 @@ describe("DaemonConnection — handshake failure", () => {
 // 3. Close after ready — transport.close() → state "closed", onStateChange fires
 // ---------------------------------------------------------------------------
 
-describe("DaemonConnection — close after ready", () => {
-  it("daemon closing the transport after ready transitions state to 'closed'", async () => {
-    const { conn, daemonTransport } = makePair();
+describe("SessionProxyConnection — close after ready", () => {
+  it("session-proxy closing the transport after ready transitions state to 'closed'", async () => {
+    const { conn, sessionProxyTransport } = makePair();
 
     const states: ConnectionState[] = [];
     conn.onStateChange((s) => states.push(s));
 
     // Complete handshake.
-    const daemonHandshake = runDaemonHandshake(daemonTransport, caps());
+    const sessionProxyHandshake = runSessionProxyHandshake(sessionProxyTransport, caps());
     await conn.connect();
-    await daemonHandshake;
+    await sessionProxyHandshake;
 
     assert.equal(conn.state, "ready");
 
-    // Daemon closes — client should transition to "closed".
-    daemonTransport.close();
+    // SessionProxy closes — client should transition to "closed".
+    sessionProxyTransport.close();
 
     assert.equal(conn.state, "closed");
     // The last emitted state is "closed".
@@ -237,14 +237,14 @@ describe("DaemonConnection — close after ready", () => {
   });
 
   it("explicit conn.close() in ready state transitions to 'closed'", async () => {
-    const { conn, daemonTransport } = makePair();
+    const { conn, sessionProxyTransport } = makePair();
 
     const states: ConnectionState[] = [];
     conn.onStateChange((s) => states.push(s));
 
-    const daemonHandshake = runDaemonHandshake(daemonTransport, caps());
+    const sessionProxyHandshake = runSessionProxyHandshake(sessionProxyTransport, caps());
     await conn.connect();
-    await daemonHandshake;
+    await sessionProxyHandshake;
 
     conn.close();
 
@@ -253,11 +253,11 @@ describe("DaemonConnection — close after ready", () => {
   });
 
   it("conn.close() is idempotent (safe to call twice)", async () => {
-    const { conn, daemonTransport } = makePair();
+    const { conn, sessionProxyTransport } = makePair();
 
-    const daemonHandshake = runDaemonHandshake(daemonTransport, caps());
+    const sessionProxyHandshake = runSessionProxyHandshake(sessionProxyTransport, caps());
     await conn.connect();
-    await daemonHandshake;
+    await sessionProxyHandshake;
 
     conn.close();
     assert.doesNotThrow(() => conn.close());
@@ -266,52 +266,52 @@ describe("DaemonConnection — close after ready", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 4. Post-handshake control routing — onControl receives daemon→client messages
+// 4. Post-handshake control routing — onControl receives session-proxy→client messages
 // ---------------------------------------------------------------------------
 
-describe("DaemonConnection — post-handshake control routing", () => {
-  it("daemon control message after ready is surfaced via onControl", async () => {
-    const { conn, daemonTransport } = makePair();
+describe("SessionProxyConnection — post-handshake control routing", () => {
+  it("session-proxy control message after ready is surfaced via onControl", async () => {
+    const { conn, sessionProxyTransport } = makePair();
 
-    const received: DaemonMessage[] = [];
+    const received: SessionProxyMessage[] = [];
     conn.onControl((msg) => received.push(msg));
 
-    const daemonHandshake = runDaemonHandshake(daemonTransport, caps());
+    const sessionProxyHandshake = runSessionProxyHandshake(sessionProxyTransport, caps());
     await conn.connect();
-    await daemonHandshake;
+    await sessionProxyHandshake;
 
-    // Daemon sends a pane.opened message after handshake.
-    const msg: DaemonMessage = {
+    // SessionProxy sends a pane.opened message after handshake.
+    const msg: SessionProxyMessage = {
       type: "pane.opened",
       seq: 2,
       paneId: P0,
-      windowId: "w0" as import("@tmuxcc/daemon").WindowId,
+      windowId: "w0" as import("@tmuxcc/session-proxy").WindowId,
       cols: 80,
       rows: 24,
       active: true,
     };
-    daemonTransport.sendControl(msg);
+    sessionProxyTransport.sendControl(msg);
 
     assert.equal(received.length, 1);
     assert.deepEqual(received[0], msg);
   });
 
-  it("multiple daemon control messages are all routed to onControl", async () => {
-    const { conn, daemonTransport } = makePair();
+  it("multiple session-proxy control messages are all routed to onControl", async () => {
+    const { conn, sessionProxyTransport } = makePair();
 
-    const received: DaemonMessage[] = [];
+    const received: SessionProxyMessage[] = [];
     conn.onControl((msg) => received.push(msg));
 
-    const daemonHandshake = runDaemonHandshake(daemonTransport, caps());
+    const sessionProxyHandshake = runSessionProxyHandshake(sessionProxyTransport, caps());
     await conn.connect();
-    await daemonHandshake;
+    await sessionProxyHandshake;
 
-    const msgs: DaemonMessage[] = [
+    const msgs: SessionProxyMessage[] = [
       {
         type: "pane.opened",
         seq: 2,
         paneId: P0,
-        windowId: "w0" as import("@tmuxcc/daemon").WindowId,
+        windowId: "w0" as import("@tmuxcc/session-proxy").WindowId,
         cols: 80,
         rows: 24,
         active: true,
@@ -320,12 +320,12 @@ describe("DaemonConnection — post-handshake control routing", () => {
         type: "pane.closed",
         seq: 3,
         paneId: P0,
-        windowId: "w0" as import("@tmuxcc/daemon").WindowId,
+        windowId: "w0" as import("@tmuxcc/session-proxy").WindowId,
       },
     ];
 
     for (const m of msgs) {
-      daemonTransport.sendControl(m);
+      sessionProxyTransport.sendControl(m);
     }
 
     assert.equal(received.length, 2);
@@ -338,19 +338,19 @@ describe("DaemonConnection — post-handshake control routing", () => {
 // 5. Post-handshake data routing — onData receives raw pane bytes
 // ---------------------------------------------------------------------------
 
-describe("DaemonConnection — post-handshake data routing", () => {
-  it("daemon data frame after ready is surfaced via onData", async () => {
-    const { conn, daemonTransport } = makePair();
+describe("SessionProxyConnection — post-handshake data routing", () => {
+  it("session-proxy data frame after ready is surfaced via onData", async () => {
+    const { conn, sessionProxyTransport } = makePair();
 
     const receivedData: Array<{ paneId: PaneId; bytes: Uint8Array }> = [];
     conn.onData((pid, bytes) => receivedData.push({ paneId: pid, bytes }));
 
-    const daemonHandshake = runDaemonHandshake(daemonTransport, caps());
+    const sessionProxyHandshake = runSessionProxyHandshake(sessionProxyTransport, caps());
     await conn.connect();
-    await daemonHandshake;
+    await sessionProxyHandshake;
 
     const bytes = new TextEncoder().encode("hello pane");
-    daemonTransport.sendData(P0, bytes);
+    sessionProxyTransport.sendData(P0, bytes);
 
     assert.equal(receivedData.length, 1);
     assert.equal(receivedData[0]?.paneId, P0);
@@ -358,17 +358,17 @@ describe("DaemonConnection — post-handshake data routing", () => {
   });
 
   it("binary (non-UTF-8) data frames are delivered intact", async () => {
-    const { conn, daemonTransport } = makePair();
+    const { conn, sessionProxyTransport } = makePair();
 
     const receivedData: Array<{ paneId: PaneId; bytes: Uint8Array }> = [];
     conn.onData((pid, bytes) => receivedData.push({ paneId: pid, bytes }));
 
-    const daemonHandshake = runDaemonHandshake(daemonTransport, caps());
+    const sessionProxyHandshake = runSessionProxyHandshake(sessionProxyTransport, caps());
     await conn.connect();
-    await daemonHandshake;
+    await sessionProxyHandshake;
 
     const bytes = Uint8Array.from([0xff, 0x00, 0xfe, 0x80]);
-    daemonTransport.sendData(P0, bytes);
+    sessionProxyTransport.sendData(P0, bytes);
 
     assert.equal(receivedData.length, 1);
     assert.deepEqual(receivedData[0]?.bytes, bytes);
@@ -376,25 +376,25 @@ describe("DaemonConnection — post-handshake data routing", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 6. send() in ready state — client→daemon message delivery
+// 6. send() in ready state — client→session-proxy message delivery
 // ---------------------------------------------------------------------------
 
-describe("DaemonConnection — send() in ready state", () => {
-  it("send() delivers a ClientMessage to the daemon transport", async () => {
-    const { conn, daemonTransport } = makePair();
+describe("SessionProxyConnection — send() in ready state", () => {
+  it("send() delivers a ClientMessage to the session-proxy transport", async () => {
+    const { conn, sessionProxyTransport } = makePair();
 
-    const daemonReceived: import("@tmuxcc/daemon").ControlMessage[] = [];
-    daemonTransport.onControl((msg) => daemonReceived.push(msg));
+    const sessionProxyReceived: import("@tmuxcc/session-proxy").ControlMessage[] = [];
+    sessionProxyTransport.onControl((msg) => sessionProxyReceived.push(msg));
 
-    const daemonHandshake = runDaemonHandshake(daemonTransport, caps());
+    const sessionProxyHandshake = runSessionProxyHandshake(sessionProxyTransport, caps());
     await conn.connect();
-    await daemonHandshake;
+    await sessionProxyHandshake;
 
-    // The daemon.onControl was replaced by runDaemonHandshake and then
+    // The sessionProxy.onControl was replaced by runSessionProxyHandshake and then
     // cleared when it settled.  Re-install it for this test.
-    daemonTransport.onControl((msg) => daemonReceived.push(msg));
+    sessionProxyTransport.onControl((msg) => sessionProxyReceived.push(msg));
 
-    const inputMsg: import("@tmuxcc/daemon").InputMessage = {
+    const inputMsg: import("@tmuxcc/session-proxy").InputMessage = {
       type: "input",
       seq: 1,
       paneId: P0,
@@ -403,8 +403,8 @@ describe("DaemonConnection — send() in ready state", () => {
 
     conn.send(inputMsg);
 
-    assert.equal(daemonReceived.length, 1);
-    assert.deepEqual(daemonReceived[0], inputMsg);
+    assert.equal(sessionProxyReceived.length, 1);
+    assert.deepEqual(sessionProxyReceived[0], inputMsg);
   });
 });
 
@@ -412,7 +412,7 @@ describe("DaemonConnection — send() in ready state", () => {
 // 7. send() in non-ready state — throws
 // ---------------------------------------------------------------------------
 
-describe("DaemonConnection — send() guards", () => {
+describe("SessionProxyConnection — send() guards", () => {
   it("send() throws if called before connect()", () => {
     const { conn } = makePair();
     assert.throws(
@@ -428,11 +428,11 @@ describe("DaemonConnection — send() guards", () => {
   });
 
   it("send() throws after close()", async () => {
-    const { conn, daemonTransport } = makePair();
+    const { conn, sessionProxyTransport } = makePair();
 
-    const daemonHandshake = runDaemonHandshake(daemonTransport, caps());
+    const sessionProxyHandshake = runSessionProxyHandshake(sessionProxyTransport, caps());
     await conn.connect();
-    await daemonHandshake;
+    await sessionProxyHandshake;
 
     conn.close();
 
@@ -453,31 +453,31 @@ describe("DaemonConnection — send() guards", () => {
 // 8. Buffering — messages arriving before onControl is installed
 // ---------------------------------------------------------------------------
 
-describe("DaemonConnection — message buffering", () => {
+describe("SessionProxyConnection — message buffering", () => {
   it("control messages arriving before onControl is registered are buffered and delivered when handler is installed after connect()", async () => {
-    const { conn, daemonTransport } = makePair();
+    const { conn, sessionProxyTransport } = makePair();
 
     // Do NOT install onControl before connect().
-    const daemonHandshake = runDaemonHandshake(daemonTransport, caps());
+    const sessionProxyHandshake = runSessionProxyHandshake(sessionProxyTransport, caps());
 
     // connect() installs post-handshake routing internally.
     // After connect() resolves, send a message — but install onControl AFTER.
     await conn.connect();
-    await daemonHandshake;
+    await sessionProxyHandshake;
 
     // Send a message while no control handler is installed on the connection.
-    const msg: DaemonMessage = {
+    const msg: SessionProxyMessage = {
       type: "focus.changed",
       seq: 2,
       paneId: P0,
-      windowId: "w0" as import("@tmuxcc/daemon").WindowId,
+      windowId: "w0" as import("@tmuxcc/session-proxy").WindowId,
     };
-    daemonTransport.sendControl(msg);
+    sessionProxyTransport.sendControl(msg);
 
     // Now install the handler — the buffered message is drained immediately on
     // handler install (tc-7ml.4: drain-on-register so Mirror.connectTo() after
     // await connect() receives buffered snapshots reliably).
-    const received: DaemonMessage[] = [];
+    const received: SessionProxyMessage[] = [];
     conn.onControl((m) => received.push(m));
 
     // msg was buffered while no handler was registered; it is delivered
@@ -486,42 +486,42 @@ describe("DaemonConnection — message buffering", () => {
     assert.deepEqual(received[0], msg);
 
     // Messages sent AFTER the handler is registered arrive directly.
-    const msg2: DaemonMessage = {
+    const msg2: SessionProxyMessage = {
       type: "pane.opened",
       seq: 3,
       paneId: P0,
-      windowId: "w0" as import("@tmuxcc/daemon").WindowId,
+      windowId: "w0" as import("@tmuxcc/session-proxy").WindowId,
       cols: 80,
       rows: 24,
       active: false,
     };
-    daemonTransport.sendControl(msg2);
+    sessionProxyTransport.sendControl(msg2);
 
     assert.equal(received.length, 2);
     assert.deepEqual(received[1], msg2);
   });
 
   it("handler registered BEFORE connect() receives all messages without buffering", async () => {
-    const { conn, daemonTransport } = makePair();
+    const { conn, sessionProxyTransport } = makePair();
 
-    const received: DaemonMessage[] = [];
+    const received: SessionProxyMessage[] = [];
     // Register BEFORE connect().
     conn.onControl((msg) => received.push(msg));
 
-    const daemonHandshake = runDaemonHandshake(daemonTransport, caps());
+    const sessionProxyHandshake = runSessionProxyHandshake(sessionProxyTransport, caps());
     await conn.connect();
-    await daemonHandshake;
+    await sessionProxyHandshake;
 
-    const msg: DaemonMessage = {
+    const msg: SessionProxyMessage = {
       type: "pane.opened",
       seq: 2,
       paneId: P0,
-      windowId: "w0" as import("@tmuxcc/daemon").WindowId,
+      windowId: "w0" as import("@tmuxcc/session-proxy").WindowId,
       cols: 80,
       rows: 24,
       active: true,
     };
-    daemonTransport.sendControl(msg);
+    sessionProxyTransport.sendControl(msg);
 
     assert.equal(received.length, 1);
     assert.deepEqual(received[0], msg);
@@ -532,13 +532,13 @@ describe("DaemonConnection — message buffering", () => {
 // 9. Double-connect guard
 // ---------------------------------------------------------------------------
 
-describe("DaemonConnection — double-connect guard", () => {
+describe("SessionProxyConnection — double-connect guard", () => {
   it("calling connect() twice throws synchronously on the second call", async () => {
-    const { conn, daemonTransport } = makePair();
+    const { conn, sessionProxyTransport } = makePair();
 
-    const daemonHandshake = runDaemonHandshake(daemonTransport, caps());
+    const sessionProxyHandshake = runSessionProxyHandshake(sessionProxyTransport, caps());
     await conn.connect();
-    await daemonHandshake;
+    await sessionProxyHandshake;
 
     await assert.rejects(
       () => conn.connect(),
@@ -551,9 +551,9 @@ describe("DaemonConnection — double-connect guard", () => {
 // 10. Multiple onStateChange handlers — all fire
 // ---------------------------------------------------------------------------
 
-describe("DaemonConnection — multiple onStateChange handlers", () => {
+describe("SessionProxyConnection — multiple onStateChange handlers", () => {
   it("all registered state-change handlers fire on each transition", async () => {
-    const { conn, daemonTransport } = makePair();
+    const { conn, sessionProxyTransport } = makePair();
 
     const eventsA: ConnectionState[] = [];
     const eventsB: ConnectionState[] = [];
@@ -561,9 +561,9 @@ describe("DaemonConnection — multiple onStateChange handlers", () => {
     conn.onStateChange((s) => eventsA.push(s));
     conn.onStateChange((s) => eventsB.push(s));
 
-    const daemonHandshake = runDaemonHandshake(daemonTransport, caps());
+    const sessionProxyHandshake = runSessionProxyHandshake(sessionProxyTransport, caps());
     await conn.connect();
-    await daemonHandshake;
+    await sessionProxyHandshake;
 
     conn.close();
 

@@ -3,7 +3,7 @@
  *
  * # Purpose
  *
- * Sits between the `DaemonConnection.onData` seam and the renderer layer
+ * Sits between the `SessionProxyConnection.onData` seam and the renderer layer
  * (tc-y8d render-hook).  Routes decoded `(paneId, bytes)` frames to per-pane
  * and/or global handlers, maintaining FIFO ordering per pane and buffering
  * output that arrives before a renderer subscribes.
@@ -13,7 +13,7 @@
  * ```ts
  * const consumer = new PaneStreamConsumer();
  *
- * // Connect to a live DaemonConnection (after await conn.connect()):
+ * // Connect to a live SessionProxyConnection (after await conn.connect()):
  * const unsub = connectPaneStream(conn, consumer);
  *
  * // Subscribe to a specific pane:
@@ -77,8 +77,8 @@
  * ## True backpressure
  *
  * This consumer is synchronous.  It does not implement flow-control signalling
- * back to the daemon.  The bead spec notes that client-side back-pressure to
- * the daemon is a flow-control concern handled elsewhere (tc-1ho / future bead).
+ * back to the session-proxy.  The bead spec notes that client-side back-pressure to
+ * the session-proxy is a flow-control concern handled elsewhere (tc-1ho / future bead).
  * Handlers that cannot keep up with the data rate must do their own buffering.
  *
  * # Non-UTF-8 safety
@@ -92,8 +92,8 @@
  * @module pane-stream
  */
 
-import type { PaneId } from "@tmuxcc/daemon";
-import type { DaemonConnection } from "./connection.js";
+import type { PaneId } from "@tmuxcc/session-proxy";
+import type { SessionProxyConnection } from "./connection.js";
 
 // ---------------------------------------------------------------------------
 // Buffer cap
@@ -159,10 +159,10 @@ export type GlobalOutputHandler = (paneId: PaneId, bytes: Uint8Array) => void;
 /**
  * Per-pane byte-stream consumer.
  *
- * Routes decoded `(paneId, bytes)` frames delivered by `DaemonConnection.onData`
+ * Routes decoded `(paneId, bytes)` frames delivered by `SessionProxyConnection.onData`
  * to per-pane handlers and/or a global output handler.
  *
- * Construct one, then wire it to a connected `DaemonConnection` using
+ * Construct one, then wire it to a connected `SessionProxyConnection` using
  * `connectPaneStream(conn, consumer)`.
  *
  * Thread model: synchronous / single-threaded.  All method calls must come from
@@ -381,11 +381,11 @@ export class PaneStreamConsumer {
 }
 
 // ---------------------------------------------------------------------------
-// Connector — wires a DaemonConnection to a PaneStreamConsumer
+// Connector — wires a SessionProxyConnection to a PaneStreamConsumer
 // ---------------------------------------------------------------------------
 
 /**
- * Wire a `DaemonConnection` to a `PaneStreamConsumer`.
+ * Wire a `SessionProxyConnection` to a `PaneStreamConsumer`.
  *
  * Registers `consumer.push` as the connection's `onData` handler so that all
  * post-handshake data-plane frames are routed through the consumer.
@@ -395,18 +395,18 @@ export class PaneStreamConsumer {
  * drained synchronously inside `connect()` before it resolves; they will be
  * delivered to the consumer immediately via `push`.
  *
- * Note: `DaemonConnection.onData` replaces any previously registered handler.
+ * Note: `SessionProxyConnection.onData` replaces any previously registered handler.
  * Call `disconnect()` (the returned function) before registering a different
  * handler on the same connection, or use only one consumer per connection.
  *
- * @param conn     - A connected `DaemonConnection` (state must be "ready").
+ * @param conn     - A connected `SessionProxyConnection` (state must be "ready").
  * @param consumer - The `PaneStreamConsumer` to receive frames.
  * @returns A disconnect function.  Call it to stop routing frames to `consumer`.
  *          After disconnect, the connection's `onData` handler is replaced with
  *          a no-op so it no longer buffers internally either.
  */
 export function connectPaneStream(
-  conn: DaemonConnection,
+  conn: SessionProxyConnection,
   consumer: PaneStreamConsumer,
 ): () => void {
   conn.onData((paneId, bytes) => {
