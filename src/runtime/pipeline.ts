@@ -521,8 +521,9 @@ class RuntimePipelineImpl implements RuntimePipeline {
   }
 
   /**
-   * tc-fx4: fetch the layout of a newly-added window and inject a synthetic
-   * `%layout-change` so the reducer registers the window's pane(s).
+   * tc-fx4: fetch the layout AND name of a newly-added window and inject
+   * synthetic `%window-renamed` + `%layout-change` notifications so the
+   * reducer registers the window's name and pane(s).
    *
    * Uses the documented expectCommand()-before-write pattern (same FIFO
    * pairing as bootstrap and input-path's optimistic updates; safe because
@@ -533,6 +534,14 @@ class RuntimePipelineImpl implements RuntimePipeline {
    * bootstrap query shape and is immune to target-resolution quirks; we pick
    * the line for our window from the reply.
    *
+   * Why the name too (tc-3y8.9): %window-add carries no name and the reducer
+   * creates the window with `name: ""`.  tmux only sends %window-renamed
+   * later, when automatic-rename kicks in — so a quick-pick / tab label
+   * rendered right after the pane.opened delta shows a blank window name
+   * ("1:  · 1 pane").  The reconcile reply already contains the authoritative
+   * name; injecting it closes the gap.  Idempotent with a real
+   * %window-renamed arriving afterwards (last write wins, same value).
+   *
    * Idempotent with a real %layout-change arriving for the same window (e.g.
    * a later split): handleLayoutChange reconciles authoritatively, so a
    * duplicate apply is a no-op.
@@ -541,7 +550,7 @@ class RuntimePipelineImpl implements RuntimePipeline {
    */
   private _reconcileNewWindowLayout(tmuxWindowId: number): void {
     const resultPromise = this._correlator.expectCommand();
-    this._host.write(`list-windows -a -F "#{window_id}\t#{window_layout}"\n`);
+    this._host.write(`list-windows -a -F "#{window_id}\t#{window_name}\t#{window_layout}"\n`);
 
     void resultPromise.then(
       (result: CommandResult) => {
@@ -550,11 +559,26 @@ class RuntimePipelineImpl implements RuntimePipeline {
         for (const line of text.split("\n")) {
           const trimmed = line.trim();
           if (trimmed === "") continue;
-          const tabIdx = trimmed.indexOf("\t");
-          if (tabIdx === -1) continue;
-          const winIdStr = trimmed.slice(0, tabIdx);
-          const layoutStr = trimmed.slice(tabIdx + 1).trim();
+          // Three tab-separated fields.  The layout never contains a tab, so
+          // split at the FIRST tab (id|rest) and the LAST tab (name|layout) —
+          // robust even if the window name itself contains a tab.
+          const firstTab = trimmed.indexOf("\t");
+          const lastTab = trimmed.lastIndexOf("\t");
+          if (firstTab === -1 || lastTab === firstTab) continue;
+          const winIdStr = trimmed.slice(0, firstTab);
+          const nameStr = trimmed.slice(firstTab + 1, lastTab);
+          const layoutStr = trimmed.slice(lastTab + 1).trim();
           if (winIdStr !== `@${tmuxWindowId}` || layoutStr === "") continue;
+          // Name first so window.renamed precedes the pane.opened delta —
+          // a client rendering on pane.opened already sees the final name.
+          if (nameStr !== "") {
+            this.injectNotification({
+              kind: "window-renamed",
+              windowId: tmuxWindowId,
+              name: nameStr,
+              unlinked: false,
+            });
+          }
           // Synthesize the exact raw line shape handleLayoutChange parses:
           //   %layout-change @<winId> <layoutString>\n
           const rawLine = new TextEncoder().encode(

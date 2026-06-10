@@ -469,6 +469,48 @@ describe("Pipeline: bootstrap path (canned list-windows + list-panes replies)", 
     pipeline.stop();
   });
 
+  it("tc-fx4/tc-3y8.9: %window-add reconcile injects the window NAME and layout from the list-windows reply", async () => {
+    const host = new FakeTmuxHost();
+    const pipeline = createRuntimePipeline(host);
+
+    const startPromise = pipeline.start();
+    host.pushData(buildBootstrapStream());
+    await startPromise;
+    host.popWritten(); // discard bootstrap queries
+
+    // Live %window-add for @2 — tmux 3.4 sends NO layout and NO name with it.
+    host.pushData(bytes("%window-add @2\r\n"));
+
+    // The pipeline must reconcile by querying id + NAME + layout (tc-3y8.9:
+    // without the name the window renders as "" until automatic-rename fires).
+    const written = host.popWritten().join("");
+    assert.ok(
+      written.includes('list-windows -a -F "#{window_id}\t#{window_name}\t#{window_layout}"'),
+      `expected the reconcile list-windows query, got: ${JSON.stringify(written)}`,
+    );
+
+    // Reply: both windows; @2 carries name "newwin" and a 1-pane layout (%9).
+    const reply =
+      `@1\tbootwin\taaaa,80x24,0,0,1\n` +
+      `@2\tnewwin\tbbbb,80x24,0,0,9\n`;
+    host.pushData(bytes(makeCommandBlock(102, reply)));
+
+    // The reconcile applies via promise continuations — yield one macrotask.
+    await new Promise((r) => setImmediate(r));
+
+    const model = pipeline.getModel();
+    const win = model.windows.get(windowId("w2"));
+    assert.ok(win !== undefined, "window w2 must exist after %window-add");
+    assert.equal(win!.name, "newwin", "reconcile must inject the window name (tc-3y8.9)");
+    assert.ok(
+      model.panes.has(paneId("p9")),
+      "reconcile must register the new window's pane from the layout (tc-fx4)",
+    );
+    assert.deepEqual(checkInvariants(model), []);
+
+    pipeline.stop();
+  });
+
   it("bootstrap: notifications that arrive DURING bootstrap are buffered and replayed", async () => {
     const host = new FakeTmuxHost();
     const pipeline = createRuntimePipeline(host);
