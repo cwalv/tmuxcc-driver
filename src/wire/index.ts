@@ -133,7 +133,7 @@ export type {
 export { isDaemonMessage, isClientMessage } from "./daemon-control.js";
 
 // Data-plane binary frame format (tc-2mq)
-export { FRAME_MAGIC, encodeFrame, decodeFrame, FrameDecoder } from "./framing.js";
+export { FRAME_MAGIC, MAX_FRAME, encodeFrame, decodeFrame, FrameDecoder } from "./framing.js";
 export type { DataFrame } from "./framing.js";
 
 // Handshake sequence and negotiation (tc-666)
