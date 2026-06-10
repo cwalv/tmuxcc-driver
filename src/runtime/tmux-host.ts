@@ -38,6 +38,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { appendFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
 
@@ -219,8 +220,44 @@ const BRIDGE_SCRIPT_PATH = join(
   "tmux-pty-bridge.py",
 );
 
+// ---------------------------------------------------------------------------
+// Wire trace (tc-3y8.9 forensics aid)
+//
+// When TMUXCC_WIRE_TRACE is set to a directory path, every byte written to
+// tmux stdin (`>>>`) and every stdout chunk received (`<<<`) is appended to
+//   <dir>/tmux-wire-<pid>-<session>.log
+// with a millisecond timestamp.  This is the ground truth for command/reply/
+// notification interleaving on the -CC stream — exactly the evidence needed
+// for correlator-pairing investigations.  Zero cost when the env var is
+// unset.  Chunks are JSON-escaped and capped so %output floods stay readable.
+// ---------------------------------------------------------------------------
+
+const WIRE_TRACE_DIR = process.env["TMUXCC_WIRE_TRACE"];
+const WIRE_TRACE_CAP = 4_000;
+
+function wireTrace(file: string, dir: ">>>" | "<<<", data: string | Uint8Array | Buffer): void {
+  try {
+    let text: string;
+    if (typeof data === "string") {
+      text = data;
+    } else {
+      text = new TextDecoder("utf8", { fatal: false }).decode(data);
+    }
+    let escaped = JSON.stringify(text);
+    if (escaped.length > WIRE_TRACE_CAP) {
+      escaped = `${escaped.slice(0, WIRE_TRACE_CAP)}…(+${escaped.length - WIRE_TRACE_CAP} chars)`;
+    }
+    appendFileSync(file, `${new Date().toISOString()} ${dir} ${escaped}\n`);
+  } catch {
+    // Tracing must never interfere with the host.
+  }
+}
+
 class TmuxHostImpl implements TmuxHost {
   private readonly opts: Required<TmuxHostOptions>;
+
+  /** Wire-trace file path, or null when TMUXCC_WIRE_TRACE is unset. */
+  private _traceFile: string | null = null;
 
   private _proc: ChildProcess | null = null;
   private _pid: number | undefined = undefined;
@@ -315,8 +352,16 @@ class TmuxHostImpl implements TmuxHost {
         this._emitError(err);
       });
 
+      if (WIRE_TRACE_DIR !== undefined && WIRE_TRACE_DIR !== "") {
+        this._traceFile = join(
+          WIRE_TRACE_DIR,
+          `tmux-wire-${process.pid}-${sessionName.replace(/[^\w.-]/g, "_")}.log`,
+        );
+      }
+
       proc.stdout!.on("data", (chunk: Buffer) => {
         const bytes = new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+        if (this._traceFile !== null) wireTrace(this._traceFile, "<<<", bytes);
         for (const handler of this._dataHandlers) {
           try {
             handler(bytes);
@@ -373,6 +418,8 @@ class TmuxHostImpl implements TmuxHost {
     if (!proc || !proc.stdin) {
       throw new Error("TmuxHost: stdin not available");
     }
+
+    if (this._traceFile !== null) wireTrace(this._traceFile, ">>>", data);
 
     if (typeof data === "string") {
       proc.stdin.write(data, "utf8");
