@@ -1,7 +1,7 @@
 /**
  * dependency-cruiser configuration for tmuxcc-client.
  *
- * Enforces the polyrepo boundary invariant from decision-review §5 T1:
+ * Enforces the polyrepo boundary invariant:
  *
  *   client-no-daemon-runtime: client/src/ must not import @tmuxcc/daemon
  *   internal sub-paths (e.g. @tmuxcc/daemon/src/runtime/…).  Only the
@@ -20,8 +20,7 @@ module.exports = {
       comment:
         "client/src/ must only import from the @tmuxcc/daemon barrel. " +
         "Sub-path imports like @tmuxcc/daemon/src/runtime/… bypass the " +
-        "exports map and couple the client to daemon internals. " +
-        "See decision-review.md §5 T1.",
+        "exports map and couple the client to daemon internals.",
       severity: "error",
       from: { path: "^src/" },
       to: {
