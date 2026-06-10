@@ -53,6 +53,13 @@ export type { ProjectSnapshotOpts } from "./state/projection.js";
 // without reaching into internal sub-paths.
 export { createDaemon } from "./runtime/daemon.js";
 export type { Daemon, DaemonOptions } from "./runtime/daemon.js";
+// createTmuxHost is exported for @tmuxcc/broker (tc-3iv): the broker's thin
+// `-CC` watcher must hold a LIVE control-mode connection (its EOF is the
+// broker's tmux-death exit trigger, §6.2), and tmux's client calls tcgetattr()
+// on stdin even in control mode — so the watcher needs the same PTY bridge
+// the daemon uses. The barrel is the only sanctioned import path for the
+// broker (see tmuxcc-broker/.dependency-cruiser.cjs broker-no-daemon-runtime).
+export { createTmuxHost } from "./runtime/tmux-host.js";
 export type { TmuxHost, TmuxHostOptions } from "./runtime/tmux-host.js";
 
 // Die-with-parent watchdog (tc-2c5) — daemon entry points (e.g. @tmuxcc/broker's
