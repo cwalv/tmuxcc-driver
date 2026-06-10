@@ -55,6 +55,12 @@ export { createDaemon } from "./runtime/daemon.js";
 export type { Daemon, DaemonOptions } from "./runtime/daemon.js";
 export type { TmuxHost, TmuxHostOptions } from "./runtime/tmux-host.js";
 
+// Die-with-parent watchdog (tc-2c5) — daemon entry points (e.g. @tmuxcc/broker's
+// daemon-entry.ts) install this at startup to enforce ext-a §6.3: daemons die
+// with the broker; there is no orphan-and-reclaim path.
+export { installDieWithParent } from "./runtime/die-with-parent.js";
+export type { DieWithParentOptions } from "./runtime/die-with-parent.js";
+
 // Flow-control + output-demux primitives — exported so tc-7xv.6/tc-7xv.24
 // regression tests in @tmuxcc/broker can drive a real SocketTransport through
 // the same daemon-side wiring without booting a full Daemon.

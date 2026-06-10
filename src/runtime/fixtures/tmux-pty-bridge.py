@@ -20,6 +20,20 @@ Protocol:
   - SIGTERM/SIGINT: forward to the child, then clean up and exit.
   - Child exit: exit with the same code.
 
+Die-with-parent (tc-2c5, ext-a design §6.3):
+  The bridge must never outlive the daemon that spawned it.  A SIGKILLed
+  daemon delivers NO signal here — the bridge is silently reparented.  The
+  stdin-EOF path usually catches that (the daemon's death closes the pipe),
+  but it is not sufficient on its own: the child may ignore the master-close
+  EOF (then the old unbounded proc.wait() hung forever), and a leaked stdin
+  write-end would suppress the EOF entirely.  Enforcement, same mechanism as
+  the daemon itself:
+  - poll getppid() each loop tick; if it differs from the ppid captured at
+    startup, the parent died (reparented to init/subreaper) → shut down.
+  - child teardown is bounded: 2 s grace after master close, then SIGTERM,
+    then 1 s, then SIGKILL.  The tmux server is untouched — only the -CC
+    client dies; tmux is the persistence layer.
+
 Usage:
   python3 tmux-pty-bridge.py <command> [args...]
 
@@ -31,6 +45,7 @@ import os
 import pty
 import select
 import signal
+import subprocess
 import sys
 
 
@@ -39,9 +54,13 @@ def main() -> None:
         print("usage: tmux-pty-bridge.py <command> [args...]", file=sys.stderr)
         sys.exit(1)
 
-    master_fd, slave_fd = pty.openpty()
+    # tc-2c5 die-with-parent: capture the spawning daemon's pid.  getppid()
+    # returning anything else later means the daemon died and we were
+    # reparented (to init on classic systems, possibly a subreaper elsewhere —
+    # comparing against the initial value covers both, unlike a "== 1" check).
+    initial_ppid = os.getppid()
 
-    import subprocess
+    master_fd, slave_fd = pty.openpty()
 
     proc = subprocess.Popen(
         sys.argv[1:],
@@ -66,6 +85,13 @@ def main() -> None:
 
     try:
         while True:
+            # tc-2c5 die-with-parent: the daemon was SIGKILLed (or otherwise
+            # died without closing our stdin).  Stop bridging; the bounded
+            # teardown below reaps the child.  Checked every loop tick — the
+            # select timeout caps detection latency at ~50 ms when idle.
+            if os.getppid() != initial_ppid:
+                break
+
             poll_fds = [master_fd]
             try:
                 # Only poll stdin if child is still alive
@@ -126,7 +152,30 @@ def main() -> None:
         except OSError:
             pass
 
-    ret = proc.wait() if proc.poll() is None else proc.returncode
+    # Bounded child teardown (tc-2c5).  The old unconditional proc.wait()
+    # blocked forever when the child ignored the master-close EOF — exactly
+    # how a bridge could outlive a SIGKILLed daemon.  Escalate instead:
+    #   master closed (above) → 2 s grace → SIGTERM → 1 s → SIGKILL.
+    # A tmux -CC client exits on the EOF within milliseconds, so the happy
+    # path never waits; the escalation only fires for wedged/EOF-deaf children.
+    if proc.poll() is None:
+        try:
+            proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                proc.wait()
+
+    ret = proc.returncode
     sys.exit(ret if ret is not None else 0)
 
 
