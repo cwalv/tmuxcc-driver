@@ -20,7 +20,7 @@ import * as path from "node:path";
 import { openServerProxyLog, installStderrMirror } from "./server-proxy-log.js";
 
 function tempLogPath(label: string): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `tmuxcc-test-brokerlog-${label}-`));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `tmuxcc-test-splog-${label}-`));
   return path.join(dir, "server-proxy.log");
 }
 

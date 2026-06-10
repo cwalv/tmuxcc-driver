@@ -26,7 +26,7 @@
  * # Cleanup
  *
  * Each test creates its own server-proxy with a unique test socket name
- * (tmuxcc-test-broker-<N>-<ts>) and calls serverProxy.shutdown() in afterEach.
+ * (tmuxcc-test-sp-<N>-<ts>) and calls serverProxy.shutdown() in afterEach.
  *
  * @module serverProxy.test
  */
@@ -61,7 +61,7 @@ import type {
 let testCounter = 0;
 
 function nextSocketName(): string {
-  return `tmuxcc-test-broker-${process.pid}-${++testCounter}-${Date.now()}`;
+  return `tmuxcc-test-sp-${process.pid}-${++testCounter}-${Date.now()}`;
 }
 
 function tmuxAvailable(): boolean {
