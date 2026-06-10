@@ -230,6 +230,96 @@ export interface PaneAttachCommand {
 }
 
 /**
+ * Read-only broker diagnostics snapshot (tc-k6v).
+ *
+ * Issued by debug surfaces (the VS Code `tmuxcc.showBrokerInfo` command) to
+ * render a triage panel without shelling out to pgrep/ls.  The broker answers
+ * from its in-memory state plus cheap synchronous tmux queries; nothing is
+ * mutated.
+ *
+ * Wire-contract note: the per-session entries carry session-level METADATA
+ * only (names, counts, pids) — no pane content, no south-side vocabulary —
+ * so the broker-wire invariant is preserved.
+ *
+ * Additive addition — non-breaking per the versioning policy.  Older brokers
+ * respond with `protocol.unknown-message`; clients surface "broker does not
+ * support broker.info" in that case.
+ */
+export interface BrokerInfoCommand {
+  readonly kind: "broker.info";
+}
+
+/**
+ * One session row in a `broker.info` response (tc-k6v).
+ */
+export interface BrokerInfoSession {
+  readonly sessionId: SessionId;
+  readonly name: string;
+  /**
+   * PID of the per-session daemon child, or `null` when no daemon is
+   * currently running for this session (not yet claimed, or crashed and
+   * awaiting lazy respawn on the next claim).
+   */
+  readonly daemonPid: number | null;
+  /** Number of windows in the session (from `tmux list-sessions`). */
+  readonly windowCount: number;
+  /** Number of panes across all windows (from `tmux list-panes -a`). */
+  readonly paneCount: number;
+  /**
+   * Raw tmux `session_attached` count.  NOTE: this includes tmuxcc's own
+   * `-CC` clients (the per-session daemon and possibly the broker's thin
+   * watcher), so it overstates "real" attached clients — open bead tc-3y8.7
+   * owns fixing the semantics.  Display surfaces should label it as raw.
+   */
+  readonly attachedClientCount: number;
+}
+
+/**
+ * Payload of a successful `broker.info` response (tc-k6v).
+ */
+export interface BrokerInfoPayload {
+  /**
+   * The tmux socket name this broker serves (`-L <socketName>`).  Also the
+   * broker's runtime sub-directory name — broker socket name and tmux socket
+   * name are the same value by construction (tc-5kv).
+   */
+  readonly socketName: string;
+  /** Absolute path of the broker's unix socket. */
+  readonly brokerSocketPath: string;
+  /** The broker process's PID. */
+  readonly brokerPid: number;
+  /** Milliseconds since the broker's `start()` completed. */
+  readonly uptimeMs: number;
+  /**
+   * PID of the tmux server on `socketName`, or `null` when the server is not
+   * running (or has no sessions to report through).
+   */
+  readonly tmuxServerPid: number | null;
+  /**
+   * Whether the broker attached to a PRE-EXISTING tmux server at start
+   * (ext-a §6.2 "adopted server"): true iff sessions already existed on the
+   * socket when the broker started.  False when the broker started against
+   * an empty socket (server minted later by the first session.claim).
+   */
+  readonly adoptedExistingServer: boolean;
+  /**
+   * Number of currently open IPC connections to the broker socket (raw
+   * socket-level count, pre-handshake — same value that drives the tc-3iv
+   * idle-exit hysteresis).  Includes the connection carrying this very
+   * `broker.info` request.
+   */
+  readonly connectedClientCount: number;
+  /**
+   * Absolute path of the broker's append-only log file
+   * (`<runtime>/<socketName>/broker.log`), or `null` when the broker was
+   * started without log redirection (programmatic/in-process brokers).
+   */
+  readonly logPath: string | null;
+  /** Per-session diagnostics rows. */
+  readonly sessions: readonly BrokerInfoSession[];
+}
+
+/**
  * Discriminated union of all broker commands a client may issue.
  * Narrow with `cmd.kind`.
  */
@@ -237,7 +327,8 @@ export type BrokerCommand =
   | SessionClaimCommand
   | SessionCreateCommand
   | SessionDestroyCommand
-  | PaneAttachCommand;
+  | PaneAttachCommand
+  | BrokerInfoCommand;
 
 /**
  * Client issues a broker-level command.
@@ -261,6 +352,7 @@ export interface BrokerCommandRequestMessage extends MessageBase {
  *   session.claim / session.create → { sessionId, endpoint, created }
  *   session.destroy                → { ok: true }
  *   pane.attach                    → { sessionId, endpoint, paneId }
+ *   broker.info                    → { info }
  */
 export interface BrokerCommandOkPayload {
   readonly sessionId?: SessionId;
@@ -291,6 +383,11 @@ export interface BrokerCommandOkPayload {
    * treat absent as `false`.
    */
   readonly created?: boolean;
+  /**
+   * Diagnostics snapshot for a `broker.info` response (tc-k6v).
+   * Absent on all other command kinds.
+   */
+  readonly info?: BrokerInfoPayload;
 }
 
 /**

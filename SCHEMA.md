@@ -332,6 +332,7 @@ direction: client→broker
 | `"session.claim"`   | `name: string`            | `{ sessionId, endpoint, created }` — creates session + daemon if absent |
 | `"session.create"`  | `name: string`            | `{ sessionId, endpoint, created }` — fails if name in use |
 | `"session.destroy"` | `sessionId: SessionId`    | `{ ok: true }` — destroys session + reaps daemon          |
+| `"broker.info"`     | —                         | `{ info: BrokerInfoPayload }` — read-only diagnostics snapshot (tc-k6v) |
 
 #### `command.response` — `BrokerCommandResponseMessage`
 
@@ -349,6 +350,7 @@ direction: broker→client
 | `"session.claim"`   | `{ sessionId: SessionId; endpoint: string; created: boolean }`  |
 | `"session.create"`  | `{ sessionId: SessionId; endpoint: string; created: boolean }`  |
 | `"session.destroy"` | `{ ok: true }`                                                  |
+| `"broker.info"`     | `{ info: BrokerInfoPayload }`                                   |
 
 `endpoint` is an opaque connection string (unix socket path under the
 v3 trust model). Clients pass it to `createDaemonTransport(endpoint)`.
@@ -380,6 +382,42 @@ that two clients racing each other do not produce two daemons. Requests
 that join an in-flight claim receive `created: false` — exactly one
 claimant observes `created: true` per session creation, so create-time
 behaviour (profile apply) runs at most once even under racing claims.
+
+#### `broker.info` semantics (tc-k6v)
+
+Read-only diagnostics snapshot for debug surfaces (the VS Code
+`tmuxcc.showBrokerInfo` command). The broker answers from its in-memory
+state plus cheap synchronous tmux queries (`list-sessions`,
+`list-panes -a`); nothing is mutated. Additive and non-breaking: older
+brokers respond `protocol.unknown-message`.
+
+**`BrokerInfoPayload`:**
+
+| Field                  | Type                          | Description                                                       |
+|------------------------|-------------------------------|-------------------------------------------------------------------|
+| `socketName`           | `string`                      | tmux socket name the broker serves (= broker runtime-dir name).   |
+| `brokerSocketPath`     | `string`                      | Absolute path of the broker's unix socket.                        |
+| `brokerPid`            | `number`                      | Broker process PID.                                               |
+| `uptimeMs`             | `number`                      | Milliseconds since the broker's `start()` completed.              |
+| `tmuxServerPid`        | `number \| null`              | tmux server PID, or `null` if no server is running.               |
+| `adoptedExistingServer`| `boolean`                     | `true` iff sessions already existed at broker start (ext-a §6.2 "adopted server"). |
+| `connectedClientCount` | `number`                      | Raw IPC connection count (incl. the requesting connection).       |
+| `logPath`              | `string \| null`              | Broker log file path, or `null` when started without log redirection. |
+| `sessions`             | `BrokerInfoSession[]`         | Per-session diagnostics rows.                                     |
+
+**`BrokerInfoSession`:** `{ sessionId, name, daemonPid, windowCount,
+paneCount, attachedClientCount }`. `daemonPid` is `null` when no daemon
+is currently running for the session (unclaimed, or crashed pending lazy
+respawn). `attachedClientCount` is the raw tmux `session_attached`
+value, which includes tmuxcc's own `-CC` clients (daemon + watcher) —
+display surfaces must label it as raw; fixing the semantics is owned by
+tc-3y8.7.
+
+**Broker log file:** the broker entry point (`broker-entry.ts`) mirrors
+the process's stderr into an append-only log file at
+`<runtime>/<socketName>/broker.log` (mode 0600, no rotation — tc-k6v).
+`broker.info` reports the path as `logPath`; in-process/programmatic
+brokers that skip the entry point have no log file (`logPath: null`).
 
 ### Broker errors
 

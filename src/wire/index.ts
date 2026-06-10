@@ -54,6 +54,10 @@ export type {
   SessionDestroyCommand,
   // tc-7xv.36: targeted-pane attach
   PaneAttachCommand,
+  // tc-k6v: broker diagnostics snapshot
+  BrokerInfoCommand,
+  BrokerInfoSession,
+  BrokerInfoPayload,
   BrokerCommandRequestMessage,
   BrokerCommandOkPayload,
   BrokerCommandResponseMessage,
