@@ -5,7 +5,7 @@
  *   1. Snapshot initializes the mirror.
  *   2. Each delta type updates the mirror correctly.
  *   3. Round-trip vs sessionProxy: apply snapshot(prev) + diff(prev, next) to the
- *      client mirror → mirror matches snapshot(next). Proves client/daemon
+ *      client mirror → mirror matches snapshot(next). Proves client/session-proxy
  *      consistency.
  *   4. Seq-gap detection: out-of-order delta fires onResyncNeeded; in-order
  *      deltas do not.

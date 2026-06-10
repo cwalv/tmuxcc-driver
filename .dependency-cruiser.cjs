@@ -3,7 +3,7 @@
  *
  * Enforces the polyrepo boundary invariant:
  *
- *   client-no-daemon-runtime: client/src/ must not import @tmuxcc/session-proxy
+ *   client-no-session-proxy-runtime: client/src/ must not import @tmuxcc/session-proxy
  *   internal sub-paths (e.g. @tmuxcc/session-proxy/src/runtime/…).  Only the
  *   package barrel (@tmuxcc/session-proxy) is allowed.
  *
