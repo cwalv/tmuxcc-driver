@@ -101,6 +101,15 @@ export interface CommandResult {
  */
 export type NotificationHandler = (token: NotificationToken) => void;
 
+/**
+ * Write the given bytes to the underlying transport (tmux stdin).
+ *
+ * Supplied via `CommandCorrelatorOptions.write` so the correlator can atomically
+ * register a slot AND emit the command in one operation (`send` / `sendBatch`).
+ * The pipeline wires this to `host.write` (tc-3si.1).
+ */
+export type CommandWriter = (data: string | Uint8Array) => void;
+
 /** Options for `CommandCorrelator`. */
 export interface CommandCorrelatorOptions {
   /**
@@ -108,6 +117,16 @@ export interface CommandCorrelatorOptions {
    * command block. Optional; if omitted, notifications are silently discarded.
    */
   onNotification?: NotificationHandler;
+
+  /**
+   * Underlying byte writer (tmux stdin). When supplied, the correlator's
+   * `send` / `sendBatch` methods are usable — they register one or more slots
+   * BEFORE emitting the command bytes so the FIFO queue stays in sync with
+   * tmux's reply order. When omitted, callers must use `expectCommand()` and
+   * write through some other path (used by parser-level unit tests that only
+   * inject reply tokens without driving real writes).
+   */
+  write?: CommandWriter;
 }
 
 // ---------------------------------------------------------------------------
@@ -143,6 +162,7 @@ interface PendingCommand {
  */
 export class CommandCorrelator {
   private readonly _onNotification: NotificationHandler | undefined;
+  private readonly _write: CommandWriter | undefined;
 
   /**
    * FIFO queue of pending commands registered by the caller.
@@ -165,6 +185,7 @@ export class CommandCorrelator {
 
   constructor(options: CommandCorrelatorOptions = {}) {
     this._onNotification = options.onNotification;
+    this._write = options.write;
   }
 
   // -------------------------------------------------------------------------
@@ -198,6 +219,65 @@ export class CommandCorrelator {
         reject,
       });
     });
+  }
+
+  /**
+   * Atomically register a slot AND write the command (tc-3si.1).
+   *
+   * This is the only legal command-send path under the requery pipeline: the
+   * slot registration and the host write happen together so the FIFO pairing
+   * stays in sync regardless of what other writers (the requery engine, flow
+   * control, input path) are doing concurrently. Without that pairing the
+   * command's `%end` reply could mis-bind to a concurrent requery's
+   * `list-*` slot, corrupting the engine's topology snapshot (see tc-128.4).
+   *
+   * The returned Promise resolves with the matching `CommandResult` once tmux's
+   * reply block completes (`ok=true` on `%end`, `ok=false` on `%error`).
+   * Fire-and-forget callers may ignore it — the slot is still registered so
+   * the FIFO sequence stays correct.
+   *
+   * Throws if the correlator was constructed without a `write` callback (i.e.
+   * configured for parser-level testing only).
+   */
+  send(command: string): Promise<CommandResult> {
+    if (this._write === undefined) {
+      throw new Error("CommandCorrelator.send called without a `write` callback");
+    }
+    const promise = this.expectCommand();
+    this._write(command + "\n");
+    return promise;
+  }
+
+  /**
+   * Atomically register N slots AND write N command lines as ONE chunk
+   * (tc-3si.1).
+   *
+   * Use when a caller needs tmux to process several command lines without
+   * permitting another writer to interleave between them (e.g. the
+   * resize-managed-window transaction in input-path: window-size manual →
+   * resize-window → resize-pane×N, where an intervening %layout-change
+   * notification between resize-window and the pane resizes would corrupt the
+   * layout). Each command line still gets its own `%begin/%end` block; the
+   * returned Promises resolve in submission order.
+   *
+   * Equivalent to N individual `send()` calls except for the atomicity: this
+   * method emits ONE `write()` call with all lines joined by `\n`, so no other
+   * writer can land bytes in between (the writer is a synchronous handle to a
+   * single-producer stream).
+   *
+   * Throws if the correlator was constructed without a `write` callback.
+   */
+  sendBatch(commands: readonly string[]): Promise<CommandResult>[] {
+    if (this._write === undefined) {
+      throw new Error("CommandCorrelator.sendBatch called without a `write` callback");
+    }
+    if (commands.length === 0) return [];
+    const promises: Promise<CommandResult>[] = [];
+    for (let i = 0; i < commands.length; i++) {
+      promises.push(this.expectCommand());
+    }
+    this._write(commands.map((c) => c + "\n").join(""));
+    return promises;
   }
 
   /**

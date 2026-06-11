@@ -81,6 +81,11 @@ export {
   DEFAULT_LOW_WATER_BYTES,
 } from "./runtime/flow-control.js";
 export type { FlowController, FlowControllerOptions } from "./runtime/flow-control.js";
+// CommandResult is the resolved shape of `pipeline.send` / `correlator.send`.
+// Re-exported so server-proxy regression tests can declare the `send`
+// callback's Promise return type without reaching into internal sub-paths
+// (tc-3si.1).
+export type { CommandResult } from "./parser/correlator.js";
 
 // Control server — re-exported so Layer A tests in @remux/client can
 // instantiate ControlServer without reaching into internal sub-paths.

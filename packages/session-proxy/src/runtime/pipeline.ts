@@ -328,41 +328,42 @@ export interface RuntimePipeline {
   readonly buffers: PaneBufferStore;
 
   /**
-   * Register a pending tmux command slot on the underlying CommandCorrelator
-   * (tc-7xv.37).
+   * Atomically register a correlator slot AND write the command (tc-3si.1).
    *
-   * Callers issuing a tmux command directly (bypassing the bootstrap path)
-   * should call `expectCommand()` BEFORE sending the bytes so that the
-   * correlator's FIFO queue stays in sync with tmux's reply order. The
-   * returned Promise resolves when the matching `%end` or `%error` block is
-   * fully received: `result.ok === true` on `%end`, `false` on `%error`.
+   * This is the ONLY legal command-send path under the requery pipeline: the
+   * slot registration and the host write happen together so the FIFO pairing
+   * stays in sync regardless of what other writers are doing concurrently.
+   * Without the pairing, a command's `%end` reply could mis-bind to a
+   * concurrent requery's `list-*` slot, corrupting the engine's topology
+   * snapshot (see tc-128.4 / tc-3si).
    *
-   * Used by input-path.ts to observe set-option command outcomes for the
-   * optimistic-update error-reversal pattern.
+   * The returned Promise resolves with the matching `CommandResult` once tmux's
+   * reply block completes (`ok=true` on `%end`, `false` on `%error`).
+   * Fire-and-forget callers may ignore it — the slot is still registered, so
+   * the FIFO sequence stays correct. Awaiting callers (e.g. input-path's
+   * optimistic-update error reversal) observe the result.
    *
-   * Note: the pipeline does not write the command itself — that remains the
-   * caller's responsibility (e.g. via `host.write()` from input-path).
+   * No production caller may write a tmux command outside this method; the
+   * `runtime-command-seam` dependency-cruiser rule rejects `tmux-host.ts`
+   * imports from modules that would tempt them to bypass it.
    */
-  expectCommand(): Promise<CommandResult>;
+  send(command: string): Promise<CommandResult>;
 
   /**
-   * Fire-and-forget slotted command writer (tc-128.4): registers a throwaway
-   * CommandCorrelator slot, writes `command + "\n"` to the host, and ignores
-   * the result (logs %error). This is the shared seam every fire-and-forget
-   * tmux command MUST go through under the requery pipeline — without the
-   * slot, the command's %end reply mis-binds to whatever requery list-* slot
-   * was registered in the meantime, corrupting the engine's topology snapshot.
+   * Atomically register N slots AND write N command lines as ONE chunk
+   * (tc-3si.1).
    *
-   * Used by:
-   *   - flow-control.ts pause/continue refresh-client writes (via the
-   *     `writeCommand` option threaded through session-proxy.ts).
-   *   - session-proxy.ts bell set-options and attach-session writes.
-   *   - the pipeline itself for its post-bootstrap setup commands.
+   * Use when a caller needs tmux to process several command lines without
+   * permitting another writer to interleave between them (e.g. the
+   * resize-managed-window transaction in input-path: window-size manual →
+   * resize-window → resize-pane×N). Each command line still gets its own
+   * `%begin/%end` block; the returned Promises resolve in submission order.
    *
-   * Callers that need the result (e.g. input-path's optimistic-update
-   * reversal) use `expectCommand()` + their own `host.write()` instead.
+   * Equivalent to N individual `send()` calls except for the atomicity: this
+   * method emits ONE host write with all lines joined by `\n`, so no other
+   * writer can land bytes in between.
    */
-  writeCommand(command: string): void;
+  sendBatch(commands: readonly string[]): Promise<CommandResult>[];
 }
 
 // ---------------------------------------------------------------------------
@@ -433,8 +434,17 @@ class RuntimePipelineImpl implements RuntimePipeline {
 
     // The correlator routes notification tokens back to _onNotificationToken
     // synchronously (called within the correlator's push() handler).
+    //
+    // tc-3si.1: wire the correlator's `write` callback to host.write — this is
+    // what gives `correlator.send` its atomic "register slot + write" property.
+    // Once the pipeline is stopped we drop writes (matches the previous
+    // _writeSlottedCommand stop-gate behaviour).
     this._correlator = new CommandCorrelator({
       onNotification: (token: NotificationToken) => this._onNotificationToken(token),
+      write: (data) => {
+        if (this._stopped) return;
+        this._host.write(data);
+      },
     });
 
     this._tokenizer = new ControlTokenizer();
@@ -457,16 +467,9 @@ class RuntimePipelineImpl implements RuntimePipeline {
       }
     });
 
-    // Build the engine's submit: register a correlator slot BEFORE the host
-    // write so the FIFO pairing stays in sync (the next %begin/%end binds to
-    // our slot). See requery.ts's SubmitCommand docs.
-    const submit: SubmitCommand = (command: string) => {
-      const promise = this._correlator.expectCommand();
-      if (!this._stopped) {
-        this._host.write(command + "\n");
-      }
-      return promise;
-    };
+    // Build the engine's submit: the correlator's atomic `send` (slot + write
+    // together) is exactly the right primitive. tc-3si.1.
+    const submit: SubmitCommand = (command: string) => this._correlator.send(command);
 
     const engineOpts: Parameters<typeof createRequeryEngine>[0] = { submit };
     if (this._opts.sessionName !== undefined) {
@@ -551,29 +554,25 @@ class RuntimePipelineImpl implements RuntimePipeline {
     // default) so that tmux tracks pane activity.
     //
     // The setup commands are written BEFORE the drain below. With correlator
-    // slots registered (see _writeSlottedCommand) production correctness is
+    // slots registered (correlator.send is atomic) production correctness is
     // order-independent — replies bind to slots in write order either way —
     // but writing setup first means a test harness that acks each command as
     // it is written stays reply-order == write-order relative to the healing
     // requery the drain may fire.
-    if (!this._stopped) {
-      this._writeSlottedCommand(
-        setOption("window-global", "monitor-activity", "on"),
-        "set-option monitor-activity",
-      );
-    }
+    this._sendSetup(
+      setOption("window-global", "monitor-activity", "on"),
+      "set-option monitor-activity",
+    );
 
     // tc-7xv.28: register a per-window subscription so the runtime detects
     // synchronize-panes changes made by external tmux clients.
-    if (!this._stopped) {
-      this._writeSlottedCommand(
-        refreshClientSubscribeWindows(
-          SYNC_WATCH_SUBSCRIPTION_NAME,
-          "#{?synchronize-panes,1,0}",
-        ),
-        "refresh-client sync-watch subscribe",
-      );
-    }
+    this._sendSetup(
+      refreshClientSubscribeWindows(
+        SYNC_WATCH_SUBSCRIPTION_NAME,
+        "#{?synchronize-panes,1,0}",
+      ),
+      "refresh-client sync-watch subscribe",
+    );
 
     // Drain notifications buffered during bootstrap. Replay every buffered event
     // uniformly through _dispatchEvent. Topology events route to the normal
@@ -601,20 +600,13 @@ class RuntimePipelineImpl implements RuntimePipeline {
   }
 
   /**
-   * Write a fire-and-forget command WITH a correlator slot registered first.
-   *
-   * The correlator binds %begin/%end blocks to expectCommand() slots in FIFO
-   * order. A slot-less write therefore plants a fuse: its response block is
-   * harmless only while no slot is pending, but any slot registered between
-   * the write and the response (e.g. a requery's list-* pair — common now
-   * that every topology notification can trigger one) mis-binds the setup
-   * response to that slot and corrupts the requery result. Registering a
-   * throwaway slot keeps the FIFO aligned no matter when the response lands.
-   * The result is ignored; %error is logged.
+   * Fire-and-forget setup write. The correlator's `send` is the atomic
+   * primitive (slot + write together); we just attach a logger to the
+   * Promise so `%error` replies for setup commands surface to the operator.
    */
-  private _writeSlottedCommand(command: string, label: string): void {
+  private _sendSetup(command: string, label: string): void {
     if (this._stopped) return;
-    void this._correlator.expectCommand().then(
+    void this._correlator.send(command).then(
       (result) => {
         if (!result.ok) {
           console.warn(`[pipeline] ${label} failed: %error`);
@@ -625,7 +617,6 @@ class RuntimePipelineImpl implements RuntimePipeline {
         // for a fire-and-forget setup command.
       },
     );
-    this._host.write(command + "\n");
   }
 
   stop(): void {
@@ -676,12 +667,12 @@ class RuntimePipelineImpl implements RuntimePipeline {
     this._dispatchEvent(event);
   }
 
-  expectCommand(): Promise<CommandResult> {
-    return this._correlator.expectCommand();
+  send(command: string): Promise<CommandResult> {
+    return this._correlator.send(command);
   }
 
-  writeCommand(command: string): void {
-    this._writeSlottedCommand(command, command);
+  sendBatch(commands: readonly string[]): Promise<CommandResult>[] {
+    return this._correlator.sendBatch(commands);
   }
 
   // -------------------------------------------------------------------------
