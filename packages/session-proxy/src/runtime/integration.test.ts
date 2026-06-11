@@ -64,6 +64,7 @@ import { createInputPath } from "./input-path.js";
 import { createFlowController } from "./flow-control.js";
 import { createSessionProxy } from "./session-proxy.js";
 import { createSessionProxyRegistry } from "../metrics/index.js";
+import type { Clock, TimeoutHandle } from "../state/coalescer.js";
 
 // ---------------------------------------------------------------------------
 // Wire utilities
@@ -1749,6 +1750,55 @@ describe(
         check.status !== 0,
         "tmux server should not be running after stop() + kill-server",
       );
+    });
+
+    // -------------------------------------------------------------------------
+    // R6 (tc-3si.11). Unexpected host exit must stop the storm alarm metronome
+    // -------------------------------------------------------------------------
+
+    it("R6: unexpected host exit stops the storm alarm (no leaked timer pins the process)", async () => {
+      const sock = realSockName("alarmstop");
+      after(() => killRealServer(sock));
+
+      // Counting clock injected into the storm alarm: tracks armed timers so
+      // the test can assert none survive teardown. The host-exit path used to
+      // stop only the pipeline; the alarm's self-re-arming 1s tick then kept
+      // the embedding process alive forever (wedged the vscode unit suite).
+      const live = new Set<TimeoutHandle>();
+      const countingClock: Clock = {
+        now: () => Date.now(),
+        setTimeout: (fn, ms) => {
+          const h = globalThis.setTimeout(() => {
+            live.delete(h);
+            fn();
+          }, ms);
+          live.add(h);
+          return h;
+        },
+        clearTimeout: (h) => {
+          live.delete(h);
+          globalThis.clearTimeout(h as Parameters<typeof globalThis.clearTimeout>[0]);
+        },
+      };
+
+      const sessionProxy = createSessionProxy({
+        host: { socketName: sock, sessionName: "r6session", cols: 80, rows: 24 },
+        stormAlarm: { clock: countingClock },
+      });
+      sessionProxy.host.onError(() => {});
+
+      await sessionProxy.start();
+      assert.ok(live.size >= 1, "storm alarm tick must be armed after start()");
+
+      // Kill the tmux SERVER externally — teardown must flow through
+      // host.onExit, NOT stop()/kill() (the leak was specific to that path).
+      killRealServer(sock);
+      await new Promise<void>((r) => { sessionProxy.host.onExit(() => r()); });
+      // Our onExit handler may run before the session-proxy's own; yield so
+      // the proxy's exit teardown (alarm/registry/pipeline stop) completes.
+      await new Promise((r) => setTimeout(r, 100));
+
+      assert.equal(live.size, 0, "no storm-alarm timer may remain armed after host exit");
     });
   },
 );

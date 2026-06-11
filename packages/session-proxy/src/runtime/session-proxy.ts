@@ -441,8 +441,14 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
       // Subscribe to host.onExit so that when tmux dies unexpectedly the
       // session-proxy tears down its pipeline and notifies all connected clients.
       host.onExit(() => {
-        // Stop the pipeline (mirrors stop() but without waiting for host exit
-        // since we're already in the exit handler).
+        // Mirror stop() — except host.stop(), since we're already in the exit
+        // handler. tc-3si.11: the alarm and registry metronomes MUST stop
+        // here too; this path used to stop only the pipeline, and the leaked
+        // 1s alarm tick pinned any embedding process forever (wedged the
+        // vscode unit suite at exit; would be a timer leak in the collapsed
+        // single-process server after tc-2x3 Stage 2).
+        stormAlarm.stop();
+        metricsRegistry.stop();
         pipeline.stop();
 
         // Push session.unavailable to every connected client so they know the
