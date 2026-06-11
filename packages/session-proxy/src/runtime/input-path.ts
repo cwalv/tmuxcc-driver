@@ -53,14 +53,17 @@
  * decoded ClientMessage to `handleClientMessage`.  Example wiring:
  *
  * ```ts
- * const path = createInputPath(host);
+ * const path = createInputPath({
+ *   send: (cmd) => pipeline.send(cmd),
+ *   sendBatch: (cmds) => pipeline.sendBatch(cmds),
+ * });
  * transport.onControl(msg => path.handleClientMessage(msg));
  * ```
  */
 
-import type { TmuxHost } from "./tmux-host.js";
 import type { ClientMessage } from "../wire/index.js";
 import type { PaneId, WindowId } from "../wire/index.js";
+import type { CommandResult } from "../parser/correlator.js";
 import {
   sendKeysHex,
   refreshClientSize,
@@ -154,6 +157,25 @@ export interface InputPathCommandResult {
   readonly ok: boolean;
 }
 
+/** Required dependencies for createInputPath. */
+export interface InputPathDeps {
+  /**
+   * Atomic slot+write callback (typically `pipeline.send`). The ONLY way
+   * input-path may emit a tmux command — under the requery pipeline every
+   * write must register a correlator slot in the same step or its %end reply
+   * mis-binds (tc-3si.1).
+   */
+  send: (command: string) => Promise<CommandResult>;
+
+  /**
+   * Atomic slot+write callback for transactional N-line batches (typically
+   * `pipeline.sendBatch`). Used by the resize-managed-window path
+   * (window-size manual → resize-window → resize-pane×N) where intervening
+   * commands from another writer would corrupt the layout transaction.
+   */
+  sendBatch: (commands: readonly string[]) => Promise<CommandResult>[];
+}
+
 /** Options for createInputPath. */
 export interface InputPathOptions {
   /**
@@ -189,25 +211,6 @@ export interface InputPathOptions {
   dispatchSynthetic?: (event: NotificationEvent) => void;
 
   /**
-   * Register a pending tmux command slot on the correlator (tc-7xv.37).
-   *
-   * Called by input-path BEFORE sending an optimistic-update command (set
-   * synchronize-panes / monitor-activity / monitor-silence) so that the
-   * matching %end/%error block can be observed.  The returned Promise resolves
-   * with `{ ok }` once tmux's reply block completes: `ok=true` on `%end`
-   * (accepted) and `ok=false` on `%error` (rejected — e.g. no such window).
-   *
-   * On rejection, input-path dispatches a compensating synthetic event via
-   * `dispatchSynthetic` to roll the model back to the captured before-value,
-   * keeping the model and tmux's truth in sync.
-   *
-   * Omitting this option disables error reversal: the optimistic update is
-   * applied without observation (legacy fire-and-forget behaviour, safe for
-   * tests that mock the host without a real pipeline).
-   */
-  expectCommand?: () => Promise<InputPathCommandResult>;
-
-  /**
    * Snapshot the current SessionModel (tc-7xv.37).
    *
    * Called by input-path immediately BEFORE an optimistic-update command is
@@ -218,8 +221,8 @@ export interface InputPathOptions {
    * The returned model must reflect the live pipeline's current state at the
    * moment of the call (i.e. `pipeline.getModel()`).
    *
-   * Omitting this option disables reversal capture (same effect as omitting
-   * `expectCommand`).  Both options should be supplied together.
+   * Omitting this option disables reversal capture (the optimistic update
+   * still fires but no rollback is performed on tmux %error).
    */
   getModel?: () => SessionModel;
 }
@@ -245,49 +248,45 @@ export interface InputPath {
 /**
  * Create an InputPath that routes ClientMessages to tmux commands.
  *
- * @param host  The TmuxHost to write commands to (must have been started by
- *              the caller before messages are routed here).
+ * @param deps  Required dependencies: `send` and `sendBatch` callbacks
+ *              (typically `pipeline.send` and `pipeline.sendBatch`).
  * @param opts  Optional id-mapping overrides and future extension points.
  * @returns     An InputPath whose `handleClientMessage` method the serve layer
  *              (tc-dv3) should call for each decoded ClientMessage.
  *
  * @example
  * ```ts
- * const host = createTmuxHost({ socketName: "myapp" });
- * await host.start();
- * const inputPath = createInputPath(host);
+ * const pipeline = createRuntimePipeline(host);
+ * await pipeline.start();
+ * const inputPath = createInputPath({
+ *   send: (cmd) => pipeline.send(cmd),
+ *   sendBatch: (cmds) => pipeline.sendBatch(cmds),
+ * });
  * transport.onControl(msg => inputPath.handleClientMessage(msg));
  * ```
  */
 export function createInputPath(
-  host: TmuxHost,
+  deps: InputPathDeps,
   opts: InputPathOptions = {},
 ): InputPath {
+  const send = deps.send;
+  const sendBatch = deps.sendBatch;
   const toTmuxPane = opts.paneIdToTmux ?? defaultPaneIdToTmux;
   const toTmuxWindow = opts.windowIdToTmux ?? defaultWindowIdToTmux;
   const dispatchSynthetic = opts.dispatchSynthetic;
-  const expectCommand = opts.expectCommand;
   const getModel = opts.getModel;
 
   /**
-   * Write a tmux command line (appends \n).
+   * Atomically register a correlator slot AND write the command (tc-3si.1).
    *
-   * Registers a correlator slot BEFORE the write when `expectCommand` is wired
-   * (tc-128.4): the requery pipeline registers slots constantly, so every
-   * command write MUST be slotted in FIFO write order or its %end reply mis-
-   * binds to a requery's list-* slot, corrupting the topology snapshot. The
-   * returned Promise is consumed by `sendCommandWithReversal` for the
-   * optimistic-update error-reversal path; plain fire-and-forget callers
-   * discard it (the throwaway slot keeps the correlator FIFO aligned).
-   *
-   * When `expectCommand` is omitted (e.g. unit tests with a fake host and no
-   * pipeline), this degrades to a plain `host.write` — correctness still holds
-   * because no requery engine is registering slots concurrently.
+   * Fire-and-forget callers ignore the returned Promise; the slot is still
+   * registered so the FIFO stays in sync with tmux's reply order regardless
+   * of what other writers (the requery engine, flow control) are doing
+   * concurrently. The returned Promise is consumed by `sendCommandWithReversal`
+   * for the optimistic-update error-reversal path.
    */
-  function sendCommand(cmd: string): Promise<InputPathCommandResult> | undefined {
-    const result = expectCommand?.();
-    host.write(cmd + "\n");
-    return result;
+  function sendCommand(cmd: string): Promise<InputPathCommandResult> {
+    return send(cmd);
   }
 
   /**
@@ -327,18 +326,18 @@ export function createInputPath(
     // even if onModelChange handlers mutate downstream views inline.
     const before = getModel?.();
 
-    // sendCommand registers the correlator slot BEFORE host.write (tc-128.4),
-    // so the next %begin/%end tmux emits binds to our slot. The returned Promise
-    // is the result observation we need for error reversal — no need to register
-    // a second slot.
+    // sendCommand atomically registers the correlator slot AND writes (tc-3si.1).
+    // The returned Promise is the result observation we need for error reversal —
+    // no need to register a second slot.
     const resultPromise = sendCommand(cmd);
 
     // Optimistic apply: the model updates immediately so deltas flow to clients
     // without waiting for tmux confirmation.
     dispatchSynthetic?.(optimistic);
 
-    // Error reversal: if any wiring is missing we fall back to fire-and-forget.
-    if (resultPromise === undefined || dispatchSynthetic === undefined || before === undefined) {
+    // Error reversal: if any wiring is missing we skip rollback (the optimistic
+    // model is left in place; the next bootstrap or external event corrects it).
+    if (dispatchSynthetic === undefined || before === undefined) {
       return;
     }
 
@@ -355,7 +354,7 @@ export function createInputPath(
         // Protocol error (e.g. cmdnum mismatch) — log and leave the model in
         // its optimistic state.  This is rare and not a tmux rejection; the
         // next bootstrap or external event will eventually correct the model.
-        console.warn("[input-path] expectCommand rejected for optimistic update:", err);
+        console.warn("[input-path] send rejected for optimistic update:", err);
       },
     );
   }
@@ -499,9 +498,12 @@ export function createInputPath(
             //   2. resize-window -t @<wid> -x <cols> -y <rows>
             //   3. resize-pane  -t %<pid> -x <c> -y <r>  for each pane
             //
-            // All three are issued in one host.write batch so tmux processes
-            // the transaction atomically (no intermediate %layout-change
-            // notifications between the window resize and the pane resizes).
+            // All three are issued via `sendBatch` so tmux processes the
+            // transaction atomically: ONE host write of all lines, with N
+            // correlator slots registered in submission order (tc-3si.1).
+            // No %layout-change notification can interleave between the
+            // window resize and the pane resizes, and the trailing acks
+            // cannot mis-bind to any concurrent requery's list-* slot.
             //
             // The blanket resize.request → refresh-client -C path remains
             // available for unmanaged windows (single-pane tabs, editor-area).
@@ -513,20 +515,7 @@ export function createInputPath(
               const tmuxPaneNum = toTmuxPane(pane.paneId);
               lines.push(resizePaneCmd(tmuxPaneNum, pane.cols, pane.rows));
             }
-            // tc-128.4: the batch is ONE host.write of N command lines, but
-            // tmux acks each line with its own %begin/%end block. Register N
-            // throwaway correlator slots BEFORE the write so each reply binds
-            // to our slots in FIFO order — otherwise the trailing acks would
-            // mis-bind to whatever requery slot lands in the meantime,
-            // corrupting the engine's topology snapshot.
-            if (expectCommand !== undefined) {
-              for (let i = 0; i < lines.length; i++) {
-                void expectCommand();
-              }
-            }
-            // Single host.write so tmux receives one contiguous chunk.  Each
-            // line is its own command; tmux executes them in order.
-            host.write(lines.map((l) => l + "\n").join(""));
+            sendBatch(lines);
             break;
           }
 

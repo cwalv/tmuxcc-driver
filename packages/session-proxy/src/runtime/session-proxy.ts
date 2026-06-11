@@ -182,23 +182,25 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
   // 2. Demux
   const demux = createOutputDemux();
 
-  // 3. Flow controller — needs host + demux; pipeline not yet created.
+  // 3. Flow controller — needs the pipeline's atomic `send` (slot + write)
+  //    callback; pipeline not yet created.
   //
-  // tc-128.4: the pause/continue refresh-client writes MUST be slotted under
-  // the requery pipeline (every command write goes through the correlator
-  // FIFO or its %end reply mis-binds to a concurrent requery's list-* slot).
-  // We don't have the pipeline yet, so we forward `writeCommand` via a
-  // late-binding closure patched after pipeline construction below.
+  // tc-3si.1: every tmux command write under the requery pipeline must be
+  // slot+write atomic — there is no raw-host fallback. The flow controller
+  // therefore takes a `send` callback rather than a host. We forward to the
+  // pipeline through a late-binding closure (the pipeline doesn't exist yet,
+  // but the first pause/continue cannot fire until the pipeline is live).
   let pipelineRef: RuntimePipeline | null = null;
-  const fc = createFlowController(host, demux, {
-    ...opts.flow,
-    writeCommand: (command) => {
-      // pipelineRef is patched immediately after createRuntimePipeline below,
-      // well before any pause/continue can fire (which require a live
-      // pipeline + active host data flow).
-      pipelineRef?.writeCommand(command);
-    },
-  });
+  const fcSend = (command: string): Promise<import("../parser/correlator.js").CommandResult> => {
+    if (pipelineRef === null) {
+      // Should not happen: flow control requires live data flow, which only
+      // starts after pipeline.start() resolves. Defensive: the unresolved
+      // Promise would otherwise hang silently.
+      throw new Error("[session-proxy] flow controller fired before pipeline was wired");
+    }
+    return pipelineRef.send(command);
+  };
+  const fc = createFlowController(fcSend, demux, opts.flow);
 
   // 4. Wrap the demux store so the flow controller is notified of every append.
   //    The wrapper delegates everything to demux.store and additionally calls
@@ -252,13 +254,12 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
         // The bound session is still alive but the -CC client drifted away.
         // Silently issue attach-session to pull it back.  No wire emission.
         //
-        // tc-128.4: slot the write — this fires AFTER pipeline.start(), so the
-        // requery engine is live and registering list-* slots; an unslotted
-        // attach-session write plants a fuse that mis-binds its %end reply to
-        // the next requery's slot, corrupting the topology snapshot. The
-        // pipeline is the safe seam (writeCommand handles slot + write).
+        // tc-3si.1: pipeline.send atomically registers a correlator slot and
+        // writes — this fires AFTER pipeline.start(), so the requery engine is
+        // live; without the slot the attach-session %end reply would mis-bind
+        // to the next requery's list-* slot, corrupting the topology snapshot.
         if (!host.exited) {
-          pipelineRef?.writeCommand("attach-session -t " + opts.host.sessionName);
+          void pipelineRef?.send("attach-session -t " + opts.host.sessionName);
         }
       } else {
         // outcome === "unavailable": the bound session is gone.
@@ -290,16 +291,21 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
   //    optimistic model updates (e.g. set-synchronize-panes, tc-7xv.12) are
   //    applied immediately without waiting for a tmux notification.
   //
-  //    expectCommand + getModel are also wired so that tc-7xv.37 error
-  //    reversal can observe %error replies from tmux and roll the model back
-  //    to the captured before-value when the underlying set-option command
-  //    is rejected (e.g. window vanished between dispatch and tmux apply).
-  const inputPath = createInputPath(host, {
-    ...opts.input,
-    dispatchSynthetic: (event) => pipeline.injectNotification(event),
-    expectCommand: () => pipeline.expectCommand(),
-    getModel: () => pipeline.getModel(),
-  });
+  //    send + sendBatch are the only command-write paths (tc-3si.1): each
+  //    atomically registers a correlator slot before writing. getModel is
+  //    also wired so that tc-7xv.37 error reversal can capture the
+  //    before-state for rollback when tmux replies with %error.
+  const inputPath = createInputPath(
+    {
+      send: (cmd) => pipeline.send(cmd),
+      sendBatch: (cmds) => pipeline.sendBatch(cmds),
+    },
+    {
+      ...opts.input,
+      dispatchSynthetic: (event) => pipeline.injectNotification(event),
+      getModel: () => pipeline.getModel(),
+    },
+  );
 
   // 8. Route %pause / %continue notifications from the pipeline to the
   //    FlowController.  These are content-plane signals, not topology — they
@@ -391,13 +397,12 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
       // try to ring that terminal's bell (it would go nowhere in control mode,
       // but this is clean hygiene).
       //
-      // tc-128.4: both writes go through pipeline.writeCommand so each
-      // registers a throwaway correlator slot — required under the requery
-      // pipeline so the %end replies don't mis-bind to a concurrent requery's
-      // list-* slot.
+      // tc-3si.1: both writes go through pipeline.send so each atomically
+      // registers a correlator slot — required under the requery pipeline so
+      // the %end replies don't mis-bind to a concurrent requery's list-* slot.
       if (!host.exited) {
-        pipeline.writeCommand("set-option -g monitor-bell on");
-        pipeline.writeCommand("set-option -g bell-action none");
+        void pipeline.send("set-option -g monitor-bell on");
+        void pipeline.send("set-option -g bell-action none");
       }
 
       // Subscribe to host.onExit so that when tmux dies unexpectedly the

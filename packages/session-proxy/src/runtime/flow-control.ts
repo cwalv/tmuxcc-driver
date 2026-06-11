@@ -23,7 +23,8 @@
  *    Each time `onPaneBytes(paneId, n)` is called (by whoever appends to the
  *    demux store), buffered bytes are incremented.  When a pane crosses the
  *    HIGH-WATER mark the controller:
- *      a. Sends `refresh-client -A '%<tmuxN>:pause'` to tmux via `host.write`.
+ *      a. Sends `refresh-client -A '%<tmuxN>:pause'` to tmux via the
+ *         slot-write `send` callback (typically `pipeline.send`).
  *      b. Calls `demux.pausePane(paneId)` to gate fan-out immediately, before
  *         tmux's `%pause` notification arrives (eliminates the notification
  *         round-trip from the gate path).
@@ -64,7 +65,7 @@
  *
  *   tc-93a drives a flood via the pipeline's notification path:
  *     1. Call `fc.onPaneBytes(paneId, byteCount)` for each append.
- *     2. Observe `host.write()` calls for pause/continue commands.
+ *     2. Observe the `send` callback's recorded commands for pause/continue.
  *     3. Call `fc.noteDrained(paneId, byteCount)` to simulate client drain.
  *     4. Observe resume command + demux gate state.
  *
@@ -73,16 +74,17 @@
  *
  * ## Testability
  *
- *   The controller works with any object that satisfies the TmuxHost interface
- *   (use a simple fake that records `write()` calls) and any OutputDemux (use
- *   a real `createOutputDemux()` with fake transports).  No real tmux needed.
+ *   The controller works with any `send` callback that returns a
+ *   `Promise<CommandResult>` (tests inject one that records the issued
+ *   command strings) and any OutputDemux (use a real `createOutputDemux()`
+ *   with fake transports).  No real tmux needed.
  *
  * @module runtime/flow-control
  */
 
-import type { TmuxHost } from "./tmux-host.js";
 import type { OutputDemux } from "./output-demux.js";
 import type { PaneId } from "../wire/ids.js";
+import type { CommandResult } from "../parser/correlator.js";
 import { refreshClientFlow } from "../parser/commands.js";
 import { defaultPaneIdToTmux } from "./input-path.js";
 
@@ -123,22 +125,6 @@ export interface FlowControllerOptions {
    * Supply a registry-backed function for multi-session namespacing.
    */
   paneIdToTmux?: (id: PaneId) => number;
-
-  /**
-   * Slotted command writer (tc-128.4): registers a CommandCorrelator slot
-   * BEFORE writing the pause/continue `refresh-client -A` line so the next
-   * %begin/%end tmux emits binds to our throwaway slot — not to whatever
-   * requery `list-*` slot landed in the meantime. Without this, a flood-time
-   * pause command's %end mis-binds to a concurrent requery's slot, the engine
-   * parses pause-ack bytes as a windows reply, and the model commits with
-   * panes missing.
-   *
-   * Wired by `runtime/session-proxy.ts` to `pipeline.writeCommand`. When
-   * omitted (e.g. unit tests with no pipeline), the controller falls back to
-   * raw `host.write` — correctness still holds because no engine is
-   * registering slots concurrently.
-   */
-  writeCommand?: (command: string) => void;
 }
 
 /**
@@ -214,12 +200,11 @@ export interface FlowController {
 // ---------------------------------------------------------------------------
 
 class FlowControllerImpl implements FlowController {
-  private readonly _host: TmuxHost;
+  private readonly _send: (command: string) => Promise<CommandResult>;
   private readonly _demux: OutputDemux;
   private readonly _highWater: number;
   private readonly _lowWater: number;
   private readonly _toTmux: (id: PaneId) => number;
-  private readonly _writeCommand: ((command: string) => void) | undefined;
 
   /** Per-pane buffered byte counter. */
   private readonly _buffered = new Map<PaneId, number>();
@@ -227,13 +212,16 @@ class FlowControllerImpl implements FlowController {
   /** Tracks which panes are currently paused (by any source). */
   private readonly _paused = new Set<PaneId>();
 
-  constructor(host: TmuxHost, demux: OutputDemux, opts: FlowControllerOptions = {}) {
-    this._host = host;
+  constructor(
+    send: (command: string) => Promise<CommandResult>,
+    demux: OutputDemux,
+    opts: FlowControllerOptions = {},
+  ) {
+    this._send = send;
     this._demux = demux;
     this._highWater = opts.highWaterBytes ?? DEFAULT_HIGH_WATER_BYTES;
     this._lowWater = opts.lowWaterBytes ?? DEFAULT_LOW_WATER_BYTES;
     this._toTmux = opts.paneIdToTmux ?? defaultPaneIdToTmux;
-    this._writeCommand = opts.writeCommand;
 
     if (this._lowWater >= this._highWater) {
       throw new Error(
@@ -319,10 +307,10 @@ class FlowControllerImpl implements FlowController {
     this._paused.add(paneId);
     this._demux.pausePane(paneId);
     // Tell tmux to stop emitting %output for this pane.
-    // tc-128.4: slot the write so the %end reply binds to a throwaway slot,
-    // not to a concurrent requery's list-* slot (FIFO correctness under the
-    // requery pipeline).
-    this._writeCommandLine(refreshClientFlow(tmuxN, "pause"));
+    // tc-3si.1: `send` atomically registers a correlator slot and writes the
+    // command, so the %end reply can never mis-bind to a concurrent requery's
+    // list-* slot. The Promise is discarded (fire-and-forget).
+    void this._send(refreshClientFlow(tmuxN, "pause"));
   }
 
   private _resume(paneId: PaneId): void {
@@ -331,22 +319,7 @@ class FlowControllerImpl implements FlowController {
     this._paused.delete(paneId);
     this._demux.resumePane(paneId);
     // Tell tmux to resume output for this pane (slotted — see _pause).
-    this._writeCommandLine(refreshClientFlow(tmuxN, "continue"));
-  }
-
-  /**
-   * Write a tmux command line via the slotted seam (tc-128.4) when wired,
-   * else fall back to raw host.write. The slotted path is required in the
-   * production assembly where the requery engine is constantly registering
-   * list-* slots; the raw fallback is for unit tests that mock a host without
-   * a pipeline.
-   */
-  private _writeCommandLine(command: string): void {
-    if (this._writeCommand !== undefined) {
-      this._writeCommand(command);
-    } else {
-      this._host.write(command + "\n");
-    }
+    void this._send(refreshClientFlow(tmuxN, "continue"));
   }
 }
 
@@ -360,11 +333,14 @@ class FlowControllerImpl implements FlowController {
  *
  * # Wiring
  *
- * The controller must be notified about bytes entering and leaving the system:
+ * The controller takes a slot+write `send` callback (typically
+ * `pipeline.send`) — under the requery pipeline EVERY tmux command write must
+ * be slotted by construction, so there is no raw-host fallback (tc-3si.1).
+ * Tests inject a fake `send` that captures the issued commands.
  *
  * ```ts
  * const demux = createOutputDemux();
- * const fc = createFlowController(host, demux, {
+ * const fc = createFlowController(pipeline.send.bind(pipeline), demux, {
  *   highWaterBytes: 262_144,
  *   lowWaterBytes:  65_536,
  * });
@@ -399,14 +375,14 @@ class FlowControllerImpl implements FlowController {
  *                                   (only after a pause).
  *   Hysteresis gap = 192 KiB — prevents rapid pause/resume oscillation.
  *
- * @param host  TmuxHost to write `refresh-client -A` commands to.
+ * @param send  Atomic slot+write callback (typically `pipeline.send`).
  * @param demux OutputDemux whose `pausePane`/`resumePane` gate client fan-out.
  * @param opts  Optional water-mark overrides and id-mapping override.
  */
 export function createFlowController(
-  host: TmuxHost,
+  send: (command: string) => Promise<CommandResult>,
   demux: OutputDemux,
   opts?: FlowControllerOptions,
 ): FlowController {
-  return new FlowControllerImpl(host, demux, opts);
+  return new FlowControllerImpl(send, demux, opts);
 }
