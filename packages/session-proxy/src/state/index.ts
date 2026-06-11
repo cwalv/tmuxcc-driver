@@ -83,3 +83,12 @@ export type {
   BootstrapCoordinatorOptions,
   BootstrapPhase,
 } from "./bootstrap.js";
+
+// tc-128.1: requery engine + diff-to-deltas
+export { requeryDiff, createRequeryEngine } from "./requery.js";
+export type {
+  RequeryResult,
+  RequeryEngine,
+  RequeryEngineOptions,
+  SubmitCommand,
+} from "./requery.js";
