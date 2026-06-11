@@ -21,7 +21,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import { createRequeryEngine, requeryDiff } from "./requery.js";
-import type { SubmitCommand } from "./requery.js";
+import type { RequeryEngine, SubmitCommand } from "./requery.js";
 import { diffModel } from "./projection.js";
 import {
   emptyModel,
@@ -531,6 +531,73 @@ describe("RequeryEngine: dirty mid-flight → re-run", () => {
     assert.ok(!deltas.some((d) => d.type === "pane.closed"));
   });
 
+  it("commit-only-clean (tc-128.5): mid-flight dirty discards intermediate model — getModel() stays unchanged until clean", async () => {
+    // Drive cycle 1 to completion with a successful reply pair WHILE dirty,
+    // then resolve cycle 2 clean. The engine's `_model` MUST stay at the
+    // pre-call snapshot through cycle 1 (the candidate must not be
+    // committed — it's possibly-torn). Only cycle 2's clean candidate
+    // becomes the new `_model`. This is the "commit only clean snapshots"
+    // invariant: clients never observe an intermediate model.
+    const win1 = winLine({
+      sessNum: 0,
+      sessName: "main",
+      winNum: 1,
+      winName: "shell",
+      layout: SINGLE_PANE_LAYOUT(1),
+      active: true,
+    });
+    const pane1 = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true });
+    const win2 = winLine({
+      sessNum: 0,
+      sessName: "main",
+      winNum: 1,
+      winName: "shell",
+      layout: TWO_PANE_HSPLIT_LAYOUT(1, 2),
+      active: true,
+    });
+    const pane2 =
+      paneLine({ paneNum: 1, winNum: 1, sessNum: 0, width: 40, active: true }) +
+      paneLine({ paneNum: 2, winNum: 1, sessNum: 0, width: 39, left: 41 });
+
+    const d = deferredSubmit();
+    const engine = createRequeryEngine({ submit: d.submit });
+    const preCallModel = engine.getModel();
+
+    const inflight = engine.requery();
+    assert.equal(d.callCount(), 2);
+
+    // Notification arrives mid-flight; engine becomes dirty before cycle 1
+    // can complete.
+    engine.markDirty();
+
+    // Resolve cycle 1. The engine parses but must NOT commit (dirty was set).
+    d.resolveNext(okResult(win1));
+    d.resolveNext(okResult(pane1));
+
+    // After microtask drain: cycle 1's candidate (one pane) was discarded.
+    // getModel() is STILL the pre-call model (empty).
+    await new Promise((r) => setImmediate(r));
+    assert.equal(
+      engine.getModel(),
+      preCallModel,
+      "engine.getModel() must stay at pre-call model while cycle is dirty mid-flight",
+    );
+    assert.equal(d.callCount(), 4, "engine launched cycle 2 because cycle 1 was dirty");
+
+    // Resolve cycle 2 clean. This is the cycle that commits.
+    d.resolveNext(okResult(win2));
+    d.resolveNext(okResult(pane2));
+
+    const { next, deltas } = await inflight;
+    assert.equal(next.panes.size, 2, "committed model is cycle 2's two-pane state");
+    assert.equal(engine.getModel(), next);
+    // Cumulative deltas against the pre-call (empty) model: both panes
+    // opened, no flicker of the intermediate one-pane state.
+    const opened = deltas.filter((dlt) => dlt.type === "pane.opened");
+    assert.equal(opened.length, 2);
+    assert.ok(!deltas.some((dlt) => dlt.type === "pane.closed"));
+  });
+
   it("concurrent requery() calls share the same in-flight Promise", async () => {
     const win = winLine({
       sessNum: 0,
@@ -554,6 +621,229 @@ describe("RequeryEngine: dirty mid-flight → re-run", () => {
     d.resolveNext(okResult(pane));
 
     await p1;
+  });
+});
+
+describe("RequeryEngine: storm / convergence-budget (tc-128.5)", () => {
+  it("storm during every cycle → loop exits within budget, returns failed:true, model unchanged", async () => {
+    // Simulate a notification storm: every in-flight cycle is dirtied before
+    // its replies land. Without a budget the engine would loop at cycle-rate
+    // forever (and starve the caller of any resolution). With a budget of N
+    // the loop must exit in at most N cycles and return failed:true.
+    //
+    // The exact N is an implementation detail; we exercise the contract by
+    // (a) bounding observed submit() calls per requery() to a small constant,
+    // (b) asserting the engine returns failed:true with the model unchanged.
+    const win = winLine({
+      sessNum: 0,
+      sessName: "main",
+      winNum: 1,
+      winName: "shell",
+      layout: SINGLE_PANE_LAYOUT(1),
+      active: true,
+    });
+    const pane = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true });
+
+    // Synthesize many ok replies — enough to satisfy any reasonable budget.
+    const replies: CommandResult[] = [];
+    for (let i = 0; i < 100; i++) replies.push(okResult(win), okResult(pane));
+    const { submit, pendingCount } = queueSubmit(replies);
+
+    // Monkey-wrap submit so we can re-dirty the engine after every cycle's
+    // FIRST submit (call number 1, 3, 5, ...) — that way each cycle is
+    // dirty before its replies are even awaited.
+    let engineRef: { ref: RequeryEngine } | null = null;
+    let callCount = 0;
+    const wrappedSubmit: SubmitCommand = (cmd) => {
+      callCount += 1;
+      // Re-dirty AFTER cycle's first submit but before either resolves.
+      // This guarantees the dirty bit is set when the cycle's await resolves.
+      if (engineRef !== null && callCount % 2 === 1) {
+        engineRef.ref.markDirty();
+      }
+      return submit(cmd);
+    };
+
+    const engine = createRequeryEngine({ submit: wrappedSubmit });
+    engineRef = { ref: engine };
+    const preCallModel = engine.getModel();
+
+    const result = await engine.requery();
+
+    // Failure contract: failed:true, no deltas, model unchanged.
+    assert.equal(result.failed, true, "storm must surface as failed cycle");
+    assert.deepEqual(result.deltas, []);
+    assert.equal(result.next, preCallModel, "next must be the pre-call (start) model");
+    assert.equal(
+      engine.getModel(),
+      preCallModel,
+      "engine.getModel() must NOT have advanced to any intermediate candidate",
+    );
+
+    // Bounded cycle count: must be small (the budget is meant to be ~5; we
+    // tolerate up to 20 to allow the implementation room to tune without
+    // breaking the test, but explicitly NOT cycle-rate / unbounded).
+    const submitCalls = 100 * 2 - pendingCount();
+    const cyclesRun = submitCalls / 2;
+    assert.ok(
+      cyclesRun > 0 && cyclesRun <= 20,
+      `expected bounded cycles (≤20), got ${cyclesRun}`,
+    );
+
+    // Engine must be dirty so the coalescer's failed-path can schedule a retry.
+    assert.equal(engine.isDirty(), true, "engine must re-arm dirty after storm-exit");
+  });
+
+  it("failure-after-progress (problem 2): success-then-error must NOT desync model — getModel() stays at pre-call snapshot and a subsequent successful requery emits the full cumulative deltas", async () => {
+    // Reproduction of the desync described in the bead:
+    //   - Cycle 1 succeeds (M0 → M1 candidate)
+    //   - Mid-flight dirty triggers cycle 2
+    //   - Cycle 2 hits %error
+    // OLD behavior: this._model was swapped to M1 at cycle 1's end (the
+    // "commit on each cycle" model), but the failed return reported
+    // { next: startModel, deltas: [], failed: true } — so the caller
+    // (and the wire) never saw M0→M1 deltas, while all future diffs were
+    // computed against M1. Permanent desync.
+    //
+    // NEW behavior: cycle 1's candidate is NOT committed (it was dirty
+    // mid-flight). Cycle 2 fails outright. _model stays at M0. The next
+    // successful requery() emits diff(M0, M2) — the full cumulative
+    // delta stream, no gap.
+    const winSplit = winLine({
+      sessNum: 0,
+      sessName: "main",
+      winNum: 1,
+      winName: "shell",
+      layout: TWO_PANE_HSPLIT_LAYOUT(1, 2),
+      active: true,
+    });
+    const paneSplit =
+      paneLine({ paneNum: 1, winNum: 1, sessNum: 0, width: 40, active: true }) +
+      paneLine({ paneNum: 2, winNum: 1, sessNum: 0, width: 39, left: 41 });
+
+    const d = deferredSubmit();
+    const engine = createRequeryEngine({ submit: d.submit });
+    const preCallModel = engine.getModel();
+    assert.equal(preCallModel.panes.size, 0, "pre-call M0 is empty");
+
+    // Cycle 1: kick off requery; reply pair will succeed.
+    const inflight = engine.requery();
+    assert.equal(d.callCount(), 2);
+
+    // Mid-flight notification — would cause cycle 2.
+    engine.markDirty();
+
+    // Resolve cycle 1 successfully — gives a one-pane candidate (M1).
+    // In the OLD code, this._model would be set to M1 right here.
+    // In the NEW code, M1 is held only as a local candidate; _model stays
+    // at the pre-call M0 because the dirty bit is set.
+    d.resolveNext(okResult(winSplit));
+    d.resolveNext(okResult(paneSplit));
+
+    await new Promise((r) => setImmediate(r));
+    assert.equal(d.callCount(), 4, "engine launched cycle 2 because dirty");
+    // The key assertion against the OLD bug: getModel() must still be M0.
+    assert.equal(
+      engine.getModel(),
+      preCallModel,
+      "PROBLEM 2 regression: getModel() must stay at pre-call M0 across mid-flight dirty",
+    );
+
+    // Resolve cycle 2 with %error.
+    d.resolveNext(errResult());
+    d.resolveNext(errResult());
+
+    const failed = await inflight;
+    assert.equal(failed.failed, true);
+    assert.deepEqual(failed.deltas, []);
+    assert.equal(failed.next, preCallModel);
+    assert.equal(
+      engine.getModel(),
+      preCallModel,
+      "after failed requery: getModel() still M0 (model never advanced)",
+    );
+    assert.equal(engine.isDirty(), true, "engine re-armed dirty for the coalescer's retry");
+
+    // Now: a subsequent successful requery() must emit the FULL cumulative
+    // M0→M2 deltas (in our setup M2 is the same two-pane split as M1, but
+    // structurally we're asserting the diff is computed against the pre-
+    // call baseline that the caller still believes is current).
+    const d2 = deferredSubmit();
+    const engine2 = createRequeryEngine({
+      // Carry over the (correctly unchanged) model from the failing engine.
+      initialModel: engine.getModel(),
+      submit: d2.submit,
+    });
+
+    const retry = engine2.requery();
+    d2.resolveNext(okResult(winSplit));
+    d2.resolveNext(okResult(paneSplit));
+    const { next: m2, deltas: cumulative } = await retry;
+
+    // Cumulative deltas must describe the M0→M2 transition the caller
+    // never saw — the same shape that would have come out of a single
+    // clean cycle from the start. Two pane.opened, no gap.
+    assert.equal(m2.panes.size, 2);
+    const opened = cumulative.filter((dlt) => dlt.type === "pane.opened");
+    assert.equal(
+      opened.length,
+      2,
+      `expected cumulative deltas to include both panes (no gap), got: ${cumulative.map((dlt) => dlt.type).join(", ")}`,
+    );
+    assert.ok(!cumulative.some((dlt) => dlt.type === "pane.closed"));
+  });
+
+  it("short-burst preserved (regression guard): one dirty mid-flight + next cycle clean → converges in-call with cumulative deltas", async () => {
+    // This case is the DESIGN KEYSTONE for splits/pane-death — the leading
+    // edge of a real topology change should be served immediately, even
+    // when followed by a second notification mid-flight. The fix for the
+    // storm/desync bugs must NOT regress this. Same shape as the existing
+    // "dirty mid-flight → re-run" test but asserted from the commit-only-
+    // clean perspective: cycle 2's candidate is the one that commits.
+    const win1 = winLine({
+      sessNum: 0,
+      sessName: "main",
+      winNum: 1,
+      winName: "shell",
+      layout: SINGLE_PANE_LAYOUT(1),
+      active: true,
+    });
+    const pane1 = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true });
+    const win2 = winLine({
+      sessNum: 0,
+      sessName: "main",
+      winNum: 1,
+      winName: "shell",
+      layout: TWO_PANE_HSPLIT_LAYOUT(1, 2),
+      active: true,
+    });
+    const pane2 =
+      paneLine({ paneNum: 1, winNum: 1, sessNum: 0, width: 40, active: true }) +
+      paneLine({ paneNum: 2, winNum: 1, sessNum: 0, width: 39, left: 41 });
+
+    const d = deferredSubmit();
+    const engine = createRequeryEngine({ submit: d.submit });
+
+    const inflight = engine.requery();
+    engine.markDirty();
+    d.resolveNext(okResult(win1));
+    d.resolveNext(okResult(pane1));
+
+    await new Promise((r) => setImmediate(r));
+    // Resolve cycle 2 clean — this is the one that commits.
+    d.resolveNext(okResult(win2));
+    d.resolveNext(okResult(pane2));
+
+    const { next, deltas } = await inflight;
+    assert.equal(next.panes.size, 2);
+    assert.equal(engine.getModel(), next);
+    // Cumulative deltas against pre-call empty: two pane.opened.
+    const opened = deltas.filter((dlt) => dlt.type === "pane.opened");
+    assert.equal(opened.length, 2);
+    // No spurious close for the cycle-1 candidate that was discarded.
+    assert.ok(!deltas.some((dlt) => dlt.type === "pane.closed"));
+    // Dirty bit cleared after a successful commit.
+    assert.equal(engine.isDirty(), false);
   });
 });
 

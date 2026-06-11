@@ -66,15 +66,41 @@
  * itself is unchanged on the wire, which is correct — clients keep its
  * scrollback. See the reparenting round-trip test in requery.test.ts.
  *
- * # Convergence under mid-flight dirties
+ * # Convergence under mid-flight dirties (commit-only-clean, tc-128.5)
  *
  * `requery()` issues two commands and awaits both. Between them, tmux may
  * emit notifications signalling further topology changes. The engine exposes
  * `markDirty()`: callers (the dirty-bit coalescer in tc-128.2 — for now the
  * pipeline or tests) flip the bit whenever a topology-relevant notification
- * arrives. If the bit is set when a cycle completes, the engine re-runs the
- * cycle. This converges as long as the dirty-event rate is finite (the rate
- * limiter in tc-128.2 makes that guarantee operational).
+ * arrives.
+ *
+ * The engine drives a BOUNDED convergence loop inside one `requery()` call,
+ * with two non-negotiable invariants:
+ *
+ * 1. **Commit only clean snapshots.** A candidate model is held in a local
+ *    until a cycle completes with BOTH replies ok AND the dirty bit still
+ *    clear. Only then is `this._model` swapped to the candidate and the
+ *    cumulative deltas (against the pre-call model) returned. Possibly-torn
+ *    intermediate models are never observable through `getModel()`, and the
+ *    served deltas always describe the exact `getModel()` transition.
+ * 2. **Bounded budget.** Convergence is capped at `CYCLE_BUDGET` iterations.
+ *    Under a sustained notification storm (every cycle dirties mid-flight)
+ *    the loop exits within the budget rather than spinning at cycle-rate.
+ *    On budget exhaustion the engine treats the call as failed (re-arms
+ *    dirty, returns `{ next: startModel, deltas: [], failed: true }`); the
+ *    coalescer's existing failed-path schedules a retry at the next ceiling
+ *    boundary and the heartbeat guarantees eventual convergence.
+ *
+ * On `%error` from either reply the cycle is also failed: model unchanged,
+ * dirty re-armed, `failed: true`. The pure-core `requeryDiff` retains its
+ * BOOTSTRAP semantic ("missing rows = empty rows"); the engine's driver path
+ * never wipes the model on a transient command failure.
+ *
+ * The short-burst case is preserved: a single mid-flight dirty followed by a
+ * clean cycle converges in-call and serves the cumulative deltas. Storms
+ * (the tc-3y8.8 class, ~8000 notif/s) are bounded operationally by the
+ * coalescer's 1 Hz ceiling and structurally by this engine's per-call
+ * cycle budget.
  */
 
 import type { CommandResult } from "../parser/correlator.js";
@@ -222,10 +248,15 @@ export interface RequeryEngineOptions {
  *
  * Convergence (the "two commands — not atomic" requirement): a `markDirty()`
  * call during an in-flight `requery()` is remembered; when the in-flight cycle
- * completes, `requery()` immediately runs another cycle and returns the
- * concatenation of all cycles' deltas it consumed. The caller sees one
- * `RequeryResult` whose `next` is the latest model and whose `deltas` are the
- * cumulative wire deltas from the engine's pre-call `prev`.
+ * completes, `requery()` immediately runs another cycle. The driver iterates
+ * (up to a small budget — see `CYCLE_BUDGET`) until a cycle completes with
+ * the dirty bit still clear, then commits the candidate model to
+ * `this._model` and returns the cumulative deltas against the engine's
+ * pre-call model. If the budget is exhausted or a cycle hits `%error`, the
+ * engine returns `{ next: startModel, deltas: [], failed: true }` with the
+ * model unchanged from the pre-call snapshot and the dirty bit re-armed.
+ * The caller sees one `RequeryResult` whose `next` is either the freshly
+ * converged model (success) or the engine's pre-call model (failure).
  *
  * Concurrent `requery()` calls return the SAME Promise — the engine never
  * runs two cycles in parallel. This matches the wire-contract expectation
@@ -255,23 +286,29 @@ export interface RequeryEngine {
   isDirty(): boolean;
 
   /**
-   * Run a requery cycle: issue both commands, parse, diff, swap in the new
-   * model. Returns the cumulative deltas from `getModel()` at call time to
-   * the final model after the cycle (and any re-runs caused by mid-flight
-   * dirties) settles.
+   * Run a requery cycle: issue both commands, parse, and — only if the cycle
+   * completes clean (both replies ok AND no `markDirty()` arrived mid-flight)
+   * — swap in the new model and return the deltas against the engine's
+   * pre-call model.
    *
    * If a cycle is already in flight, returns the in-flight Promise — the
-   * engine never runs two cycles in parallel. Callers that arrive while a
-   * cycle is running should treat their `RequeryResult` as "the result of
-   * the in-flight cycle plus any re-run it triggers".
+   * engine never runs two cycles in parallel.
    *
-   * Concurrency model: the engine uses a single in-flight slot. The
-   * `markDirty()` mid-flight case is handled by looping on cycle
-   * completion: if the dirty bit is set, run another cycle, accumulate
-   * deltas. Once the bit is clear at completion, the slot is freed and the
-   * accumulated `RequeryResult` returned. The dirty bit is cleared the
-   * MOMENT a cycle starts, so notifications that arrive AFTER both commands
-   * are sent but BEFORE both replies arrive correctly cause a re-run.
+   * Convergence model (tc-128.5, "commit-only-clean"): the driver loops on
+   * cycle completion up to a small budget (`CYCLE_BUDGET`). Each cycle holds
+   * its candidate model in a local; the engine's `_model` is written ONLY
+   * when a cycle completes clean. If `markDirty()` arrives mid-flight, the
+   * candidate is discarded and a fresh cycle is run. If the budget is
+   * exhausted (sustained notification storm) or any cycle's reply is
+   * `%error`, the engine returns `{ next: startModel, deltas: [], failed:
+   * true }` with `_model` unchanged from the pre-call snapshot and the dirty
+   * bit re-armed. The coalescer's existing failed-path schedules the retry
+   * at the next ceiling boundary; the heartbeat guarantees eventual
+   * convergence.
+   *
+   * The dirty bit is cleared the MOMENT a cycle starts, so notifications
+   * that arrive AFTER both commands are sent but BEFORE both replies arrive
+   * correctly cause a re-run (subject to the budget).
    */
   requery(): Promise<RequeryResult>;
 }
@@ -325,32 +362,40 @@ class RequeryEngineImpl implements RequeryEngine {
   }
 
   /**
-   * Run requery cycles until the dirty bit is clear at completion.
+   * Run requery cycles until one completes clean (replies ok AND no
+   * mid-flight dirty), then commit the candidate to `_model` and return
+   * cumulative deltas against `startModel`. Bounded by `CYCLE_BUDGET`.
    *
    * Each cycle:
    *   1. Clear the dirty bit (notifications during this cycle re-arm it).
    *   2. Issue both `list-*` commands and await both replies.
-   *   3. If either reply is `%error`, treat the cycle as failed: do NOT swap
-   *      the model, re-arm the dirty bit so the coalescer retries on the
-   *      next edge/heartbeat, and abandon the loop. Returns
-   *      `{ next: startModel, deltas: [], failed: true }`. This is the
-   *      TL design call (tc-128.2): steady-state `list-*` failure must not
-   *      wipe the model — that fallback is the BOOTSTRAP semantic of the
-   *      pure `requeryDiff` only.
-   *   4. Otherwise compute the fresh model via `buildInitialModel`; swap
-   *      `_model` to it.
-   *   5. If the bit is set (mid-flight dirty), go to 1; otherwise return.
+   *   3. If either reply is `%error` (regardless of mid-flight dirties):
+   *      treat the entire call as failed. Do NOT swap `_model`; re-arm the
+   *      dirty bit; return `{ next: startModel, deltas: [], failed: true }`.
+   *      The pure-core `requeryDiff` retains the BOOTSTRAP "missing rows =
+   *      empty rows" semantic; the engine driver must never wipe the model
+   *      on a transient command failure (a teardown burst that the next
+   *      successful cycle would have to undo).
+   *   4. Parse the replies into a CANDIDATE model held in a local. Do NOT
+   *      write `_model` yet.
+   *   5. If the dirty bit was set during this cycle: discard the candidate
+   *      and loop. Otherwise: commit `_model = candidate`, compute
+   *      `diffModel(startModel, _model)`, return success.
+   *   6. If the budget is exhausted without a clean cycle: treat as failed
+   *      (same shape as step 3). The coalescer's failed-path schedules a
+   *      retry at the next ceiling boundary, and the heartbeat guarantees
+   *      eventual convergence. Importantly, NO cycle of this call has
+   *      observably committed: `_model` is still `startModel`, so future
+   *      diffs are computed against the same baseline the caller knows.
    *
-   * `startModel` is the model the FIRST cycle started from. The accumulated
-   * deltas returned to the caller are `diffModel(startModel, finalModel)`,
-   * NOT the concatenation of per-cycle deltas — concatenating would emit
+   * The accumulated deltas are `diffModel(startModel, _model)`, NOT the
+   * concatenation of per-cycle deltas — concatenating would emit
    * pane.opened + pane.closed pairs for any pane that flickered through an
    * intermediate cycle. The diff against the original `startModel` gives
    * the minimal observable wire change, which is what clients want.
    */
   private async _runCycles(startModel: SessionModel): Promise<RequeryResult> {
-    // Run at least one cycle, then loop as long as the dirty bit is set.
-    do {
+    for (let attempt = 0; attempt < CYCLE_BUDGET; attempt++) {
       this._dirty = false;
       const [winCmd, paneCmd] = bootstrapCommands(this._sessionName);
 
@@ -363,26 +408,52 @@ class RequeryEngineImpl implements RequeryEngine {
 
       const [winResult, paneResult] = await Promise.all([winPromise, panePromise]);
 
-      // Steady-state failure policy (tc-128.2 TL call): if either list-*
-      // reply is %error, do NOT clobber the model — the bootstrap fallback
-      // of "missing rows = empty rows" would emit a full teardown delta
-      // burst, which is wrong here. Re-arm the dirty bit so the coalescer's
-      // next edge or heartbeat retries; the heartbeat guarantees eventual
-      // convergence.
+      // Steady-state failure policy: if either list-* reply is %error, do
+      // NOT clobber the model — re-arm the dirty bit so the coalescer's
+      // next edge or heartbeat retries. The candidate (if any) is
+      // discarded; _model is still startModel because we never wrote to it.
       if (!winResult.ok || !paneResult.ok) {
         this._dirty = true;
         return { next: startModel, deltas: [], failed: true };
       }
 
-      // Parse and build the fresh model directly (we don't need the
-      // per-cycle deltas because the caller-facing diff is against
-      // startModel — see method JSDoc).
+      // Parse into a CANDIDATE model held in a local. Crucially, do NOT
+      // write `this._model` yet — that's the commit-only-clean invariant.
+      // If a mid-flight notification dirtied us, this candidate is
+      // possibly-stale and must be discarded.
       const windowRows = parseWindowsReply(winResult.body);
       const paneRows = parsePanesReply(paneResult.body);
-      this._model = buildInitialModel(windowRows, paneRows);
-    } while (this._dirty);
+      const candidate = buildInitialModel(windowRows, paneRows);
 
-    const deltas = diffModel(startModel, this._model);
-    return { next: this._model, deltas };
+      if (!this._dirty) {
+        // Clean cycle: commit the candidate and serve deltas against the
+        // pre-call model. This is the ONLY place `_model` is written.
+        this._model = candidate;
+        const deltas = diffModel(startModel, candidate);
+        return { next: candidate, deltas };
+      }
+      // Dirty mid-flight: discard candidate, loop (subject to budget).
+    }
+
+    // Budget exhausted: sustained notification storm dirtied every cycle.
+    // Bound the loop, re-arm dirty so the coalescer retries at the next
+    // ceiling boundary, and report failure. `_model` is unchanged from the
+    // pre-call snapshot because no cycle ever committed.
+    this._dirty = true;
+    return { next: startModel, deltas: [], failed: true };
   }
 }
+
+/**
+ * Maximum convergence cycles per `requery()` call (tc-128.5).
+ *
+ * Each cycle is ~0.5-1 ms (two pipelined `list-*` round-trips against tmux);
+ * 5 comfortably covers the split-burst convergence case (one mid-flight
+ * dirty, occasionally two) while bounding storm latency to ~5 ms before the
+ * driver gives up and lets the coalescer's 1 Hz ceiling re-pace.
+ *
+ * Exported only via the module's internal contract; callers should not
+ * depend on the exact value. A future change MAY tune this number based on
+ * field observation, but the bound itself is structural.
+ */
+const CYCLE_BUDGET = 5;
