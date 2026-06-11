@@ -229,6 +229,13 @@ describe("tc-1elae: ControlServer stamps attachedClientCount in snapshots", () =
       },
       onNotification() { return () => {}; },
       injectNotification() {},
+      patchModel(updater: (m: typeof model) => typeof model) {
+        const prev = current;
+        const next = updater(prev);
+        if (next === prev) return;
+        current = next;
+        for (const h of handlers) h(next, prev);
+      },
       expectCommand() { return new Promise<never>(() => {}); },
       get buffers(): never { throw new Error("no buffers"); },
     };
@@ -261,6 +268,13 @@ describe("tc-1elae: ControlServer stamps attachedClientCount in snapshots", () =
       },
       onNotification() { return () => {}; },
       injectNotification() {},
+      patchModel(updater: (m: typeof model) => typeof model) {
+        const prev = current;
+        const next = updater(prev);
+        if (next === prev) return;
+        current = next;
+        for (const h of handlers) h(next, prev);
+      },
       expectCommand() { return new Promise<never>(() => {}); },
       get buffers(): never { throw new Error("no buffers"); },
     };
@@ -302,6 +316,13 @@ describe("tc-1elae: ControlServer stamps attachedClientCount in snapshots", () =
       },
       onNotification() { return () => {}; },
       injectNotification() {},
+      patchModel(updater: (m: typeof model) => typeof model) {
+        const prev = current;
+        const next = updater(prev);
+        if (next === prev) return;
+        current = next;
+        for (const h of handlers) h(next, prev);
+      },
       expectCommand() { return new Promise<never>(() => {}); },
       get buffers(): never { throw new Error("no buffers"); },
     };
@@ -397,6 +418,13 @@ describe("tc-1elae: end-to-end via connectClient", () => {
       },
       onNotification() { return () => {}; },
       injectNotification() {},
+      patchModel(updater: (m: typeof model) => typeof model) {
+        const prev = current;
+        const next = updater(prev);
+        if (next === prev) return;
+        current = next;
+        for (const h of handlers) h(next, prev);
+      },
       expectCommand() { return new Promise<never>(() => {}); },
       get buffers(): never { throw new Error("no buffers"); },
     };
@@ -468,6 +496,13 @@ function buildLivePipeline() {
       },
       onNotification() { return () => {}; },
       injectNotification() {},
+      patchModel(updater: (m: typeof model) => typeof model) {
+        const prev = current;
+        const next = updater(prev);
+        if (next === prev) return;
+        current = next;
+        for (const h of handlers) h(next, prev);
+      },
       expectCommand() { return new Promise<never>(() => {}); },
       get buffers(): never { throw new Error("no buffers"); },
     },
