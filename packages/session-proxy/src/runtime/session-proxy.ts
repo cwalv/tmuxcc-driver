@@ -249,6 +249,48 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
     }
   });
 
+  // 9. Output-before-topology buffering (tc-128.3).
+  //
+  // The demux holds fan-out for panes not yet known to the topology model (the
+  // "unknown-pane window" race: under requery a %output frame can arrive for a
+  // pane before the requery snapshot that reveals it).  We opt in via
+  // activatePaneTracking(), then sync the demux's known-pane set by watching
+  // model-change events: new panes → notifyPaneBound, removed panes →
+  // notifyPaneClosed.
+  //
+  // Ordering note: this subscription fires BEFORE per-client model-change
+  // subscriptions (which are registered in addClient(), called after factory
+  // time).  However, notifyPaneBound uses queueMicrotask to defer the flush
+  // so that control-plane `pane.opened` deltas reach clients before the
+  // flushed data bytes.  See output-demux.ts notifyPaneBound for details.
+  //
+  // Bootstrap path: pipeline.ts emits the initial model-change as
+  // (initialModel, initialModel) — same reference for both prev and next —
+  // so diffModel(prev, next) would yield zero deltas and miss the bootstrap
+  // panes.  We use demux.isPaneKnown() for addition detection (asks the demux
+  // whether it already knows the pane) so that ALL panes present in the next
+  // model are bound, including those that first appear in bootstrap.
+  // For removals we iterate prev.panes and check next.panes; at bootstrap
+  // prev === next so no false closures.
+  demux.activatePaneTracking();
+  pipeline.onModelChange((next, prev) => {
+    // Bind any pane in the new model that the demux doesn't yet know.
+    // Uses demux.isPaneKnown() instead of prev/next diff so bootstrap panes
+    // (where prev === next === initialModel) are not missed.
+    for (const pid of next.panes.keys()) {
+      if (!demux.isPaneKnown(pid)) {
+        demux.notifyPaneBound(pid);
+      }
+    }
+    // Close panes that are no longer in the model.  At bootstrap prev === next
+    // so this loop is a no-op; for genuine removals it fires once per pane.
+    for (const pid of prev.panes.keys()) {
+      if (!next.panes.has(pid)) {
+        demux.notifyPaneClosed(pid);
+      }
+    }
+  });
+
   // ---------------------------------------------------------------------------
   // SessionProxy handle
   // ---------------------------------------------------------------------------
