@@ -275,9 +275,9 @@ interface ClientState {
   unsubModelChange: (() => void) | null;
   /**
    * tc-3si.6: per-connection slot label for the
-   * `deltas_fanned_out_total{client}` counter. Assigned at addClient time
-   * from a monotonically-increasing counter on the server (so labels are
-   * bounded by the lifetime attached-client count). NOT a stable client
+   * `deltas_fanned_out_total{client}` counter. Minted from a reusable slot
+   * pool at addClient time and released on cleanup, so label cardinality is
+   * bounded by the max CONCURRENT client count. NOT a stable client
    * identity — just enough to attribute per-slot fan-out volume.
    */
   metricsClientLabel: string;
@@ -300,13 +300,20 @@ class ControlServerImpl implements ControlServer {
   private readonly _clients = new Map<Transport, ClientState>();
 
   /**
-   * tc-3si.6: monotonically-increasing counter used to mint per-connection
-   * client labels for the `deltas_fanned_out_total{client}` counter. Each
-   * addClient gets the next sequence label ("c1", "c2", …); removed
-   * clients do not "release" their label so per-slot history is preserved
-   * across reconnects.
+   * tc-3si.6: per-connection slot labels for the
+   * `deltas_fanned_out_total{client}` counter. Labels are a SLOT pool, not
+   * stable client identities: removeClient releases the label back to the
+   * free list and the next addClient reuses it, so label cardinality is
+   * bounded by the MAX CONCURRENT client count — a monotonic mint would grow
+   * the label set forever under reconnect churn (one new label per VS Code
+   * window reload, for the lifetime of the session-proxy).
    */
+  private readonly _freeClientLabels: string[] = [];
   private _nextClientLabelSeq = 1;
+
+  private _mintClientLabel(): string {
+    return this._freeClientLabels.pop() ?? `c${this._nextClientLabelSeq++}`;
+  }
 
   constructor(pipeline: RuntimePipeline, opts: ControlServerOptions = {}) {
     this._pipeline = pipeline;
@@ -352,7 +359,7 @@ class ControlServerImpl implements ControlServer {
       transport,
       nextSeq: 1,
       unsubModelChange: null,
-      metricsClientLabel: `c${this._nextClientLabelSeq++}`,
+      metricsClientLabel: this._mintClientLabel(),
     };
     this._clients.set(transport, state);
 
@@ -558,6 +565,7 @@ class ControlServerImpl implements ControlServer {
     state.unsubModelChange?.();
     state.unsubModelChange = null;
     this._clients.delete(transport);
+    this._freeClientLabels.push(state.metricsClientLabel);
 
     // tc-44wu0: notify remaining clients that the count has decreased.
     // Only broadcast if there are still clients to notify (no-op if the
