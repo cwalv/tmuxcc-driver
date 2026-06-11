@@ -19,6 +19,7 @@
     "build": "tsc -p tsconfig.json && cp src/runtime/tmux-pty-bridge.py dist/runtime/",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "clean": "rm -rf dist *.tsbuildinfo",
+    "pretest": "npm run build",
     "test": "node --import tsx --test --test-timeout=30000 \"src/**/*.test.ts\"",
     "lint:boundaries": "depcruise src/parser/ --config .dependency-cruiser.cjs --ts-pre-compilation-deps --output-type err",
     "lint:boundaries:verify": "bash scripts/verify-boundary-lint.sh",
