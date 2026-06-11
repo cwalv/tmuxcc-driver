@@ -25,7 +25,7 @@
  *
  *   client sendControl messages
  *     → transport.onControl → inputPath.handleClientMessage
- *         → host.write (send-keys / refresh-client)
+ *         → pipeline.send (send-keys / refresh-client) → correlator → host.write
  *
  * # Wiring the flow-controller byte accounting
  *
@@ -39,7 +39,7 @@
  */
 
 import { createTmuxHost } from "./tmux-host.js";
-import type { TmuxHost, TmuxHostOptions } from "./tmux-host.js";
+import type { TmuxHost, TmuxHostOptions, ExitHandler, ErrorHandler } from "./tmux-host.js";
 import { createOutputDemux } from "./output-demux.js";
 import type { OutputDemux } from "./output-demux.js";
 import { createRuntimePipeline } from "./pipeline.js";
@@ -57,10 +57,46 @@ import type { PaneBufferStore } from "../state/scrollback.js";
 import type { SwitchClientOutcome } from "../state/switch-client.js";
 import { createSessionProxyRegistry, createStormAlarm } from "../metrics/index.js";
 import type { SessionProxyRegistry, StormAlarmOptions } from "../metrics/index.js";
+import type { CommandResult } from "../parser/correlator.js";
 
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
+
+/**
+ * Read/event-only view of the underlying TmuxHost exposed on SessionProxy.host.
+ *
+ * External consumers (e.g. server-proxy-entry, tmuxcc-vscode) may legitimately
+ * need to observe host lifecycle events (onExit, onError) and read exit state
+ * (exited).  They must NOT write raw commands to the host — use
+ * `sessionProxy.send(command)` for all command sends so every write goes
+ * through the pipeline's slotted, instrumented path (tc-3si.9).
+ *
+ * Members intentionally absent: `write`, `onData`, `onStderr`, `stop`, `kill`,
+ * `start`, `pid`.  None of those are needed by legitimate external observers;
+ * `stop`/`kill` are on SessionProxy directly, and `write` is replaced by
+ * `sessionProxy.send`.
+ */
+export interface SessionProxyHostView {
+  /**
+   * Register a handler for process exit.
+   * Returns an unsubscribe function.
+   * If the process has already exited, the handler is called on the next tick.
+   */
+  onExit(handler: ExitHandler): () => void;
+
+  /**
+   * Register a handler for errors (spawn failure, stream errors).
+   * Returns an unsubscribe function.
+   */
+  onError(handler: ErrorHandler): () => void;
+
+  /**
+   * True if the underlying tmux process has exited (or was never started).
+   * False while running.
+   */
+  readonly exited: boolean;
+}
 
 /** Options for createSessionProxy. Each sub-group maps to the respective component. */
 export interface SessionProxyOptions {
@@ -95,8 +131,15 @@ export interface SessionProxyOptions {
  * Call `stop()` / `kill()` for shutdown.
  */
 export interface SessionProxy {
-  /** The underlying TmuxHost (useful for direct write() in tests). */
-  readonly host: TmuxHost;
+  /**
+   * Read/event-only view of the underlying TmuxHost (tc-3si.9).
+   *
+   * Exposes onExit, onError, and exited — the only members external consumers
+   * legitimately need.  Raw command writes are not available here; use
+   * `sessionProxy.send(command)` instead, which routes through the pipeline's
+   * slotted, instrumented path.
+   */
+  readonly host: SessionProxyHostView;
   /** The output demux (attach/detach transports, pause/resume panes). */
   readonly demux: OutputDemux;
   /** The live runtime pipeline (model, onModelChange). */
@@ -134,6 +177,22 @@ export interface SessionProxy {
    * Returns the NegotiatedSession from the handshake.
    */
   addClient(transport: Transport): Promise<import("../wire/handshake.js").NegotiatedSession>;
+
+  /**
+   * Send a tmux command through the pipeline's slotted, instrumented path (tc-3si.9).
+   *
+   * This is the only correct external command-send entry point: it delegates to
+   * `pipeline.send(command)`, which atomically registers a correlator slot and
+   * writes to the host — exactly the same slotted path used by input-path,
+   * flow-control, and the monitor-bell setup in start().
+   *
+   * Do NOT call `sessionProxy.host.write(...)` — the host view intentionally
+   * omits `write` to enforce this invariant.
+   *
+   * @param command - The tmux command string (without trailing newline).
+   * @returns A Promise resolving with the CommandResult when tmux replies.
+   */
+  send(command: string): Promise<CommandResult>;
 
   /**
    * Graceful shutdown: close stdin → wait for tmux to exit (up to 3 s, then SIGKILL).
@@ -400,8 +459,18 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
   // SessionProxy handle
   // ---------------------------------------------------------------------------
 
+  // tc-3si.9: Expose a read/event-only view of the host rather than the raw
+  // TmuxHost.  External consumers legitimately need onExit, onError, and
+  // exited — nothing else.  Raw write() is intentionally absent; callers must
+  // use sessionProxy.send(command) which routes through the slotted pipeline.
+  const hostView: SessionProxyHostView = {
+    onExit: (handler) => host.onExit(handler),
+    onError: (handler) => host.onError(handler),
+    get exited() { return host.exited; },
+  };
+
   return {
-    host,
+    host: hostView,
     demux,
     pipeline,
     server,
@@ -551,6 +620,10 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
       });
 
       return session;
+    },
+
+    send(command: string): Promise<CommandResult> {
+      return pipeline.send(command);
     },
 
     stop(): Promise<void> {

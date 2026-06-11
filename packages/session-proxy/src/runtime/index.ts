@@ -37,7 +37,7 @@ export type { FlowController, FlowControllerOptions } from "./flow-control.js";
 
 // tc-93a: full session-proxy assembly — wires host+pipeline+demux+server+inputPath+flowController
 export { createSessionProxy } from "./session-proxy.js";
-export type { SessionProxy, SessionProxyOptions } from "./session-proxy.js";
+export type { SessionProxy, SessionProxyOptions, SessionProxyHostView } from "./session-proxy.js";
 
 // tc-2c5: die-with-parent watchdog — entry points install this at startup so a
 // SIGKILLed server-proxy never leaves orphan session-proxies (ext-a §6.3)

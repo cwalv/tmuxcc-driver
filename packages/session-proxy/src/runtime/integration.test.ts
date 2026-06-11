@@ -1661,8 +1661,8 @@ describe(
       const wirePaneId = firstPane.paneId as string;
       const tmuxPaneNum = parseInt(wirePaneId.slice(1), 10);
 
-      // Send a visible command that produces output.
-      sessionProxy.host.write(`send-keys -H -t %${tmuxPaneNum} 68 69 0A\n`); // "hi\n" in hex
+      // Send a visible command that produces output through the slotted pipeline path (tc-3si.9).
+      void sessionProxy.send(`send-keys -H -t %${tmuxPaneNum} 68 69 0A`); // "hi\n" in hex
 
       // Wait for data frames to arrive (with a generous timeout for real tmux latency).
       await waitFor(
