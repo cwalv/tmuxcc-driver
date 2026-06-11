@@ -5,7 +5,7 @@
  * without dropping or corrupting bytes.
  *
  * Strategy:
- *   - Use a fake TmuxHost that captures write() calls without spawning a process.
+ *   - Use a fake `send` callback that captures issued commands (tc-3si.1).
  *   - Use a real createOutputDemux() with createInMemoryTransportPair() to
  *     assert client-side byte delivery is byte-exact.
  *   - Drive the controller directly (onPaneBytes / noteDrained /
@@ -26,27 +26,30 @@ import { createOutputDemux } from "./output-demux.js";
 import { createInMemoryTransportPair } from "../wire/transport.js";
 import { paneId } from "../wire/ids.js";
 import type { PaneId } from "../wire/ids.js";
+import type { CommandResult } from "../parser/correlator.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** A minimal fake TmuxHost that records write() calls. */
-function makeFakeHost(): { writes: string[]; host: import("./tmux-host.js").TmuxHost } {
+/**
+ * A minimal fake `send` callback that records the issued commands (tc-3si.1).
+ *
+ * The fake captures each command WITH the trailing "\n" so existing assertions
+ * that split-and-rejoin via `commands(writes)` keep working. The returned
+ * Promise never resolves — the flow controller fires-and-forgets pause/continue
+ * commands and ignores the result.
+ */
+function makeFakeSend(): {
+  writes: string[];
+  send: (command: string) => Promise<CommandResult>;
+} {
   const writes: string[] = [];
-  const host: import("./tmux-host.js").TmuxHost = {
-    start: () => Promise.resolve(),
-    stop: () => Promise.resolve(),
-    kill: () => {},
-    write: (data) => { writes.push(typeof data === "string" ? data : Buffer.from(data).toString("utf8")); },
-    onData: () => () => {},
-    onExit: () => () => {},
-    onError: () => () => {},
-    onStderr: () => () => {},
-    pid: undefined,
-    exited: false,
+  const send = (command: string): Promise<CommandResult> => {
+    writes.push(command + "\n");
+    return new Promise<CommandResult>(() => {});
   };
-  return { writes, host };
+  return { writes, send };
 }
 
 /** Convenience: make a Uint8Array of a given length filled with a value. */
@@ -69,9 +72,9 @@ const P5 = paneId("p5");
 
 describe("createFlowController — flood → pause", () => {
   it("issues refresh-client -A pause command when bytes exceed high-water mark", () => {
-    const { writes, host } = makeFakeHost();
+    const { writes, send } = makeFakeSend();
     const demux = createOutputDemux();
-    const fc = createFlowController(host, demux, {
+    const fc = createFlowController(send, demux, {
       highWaterBytes: 1_000,
       lowWaterBytes: 200,
     });
@@ -91,9 +94,9 @@ describe("createFlowController — flood → pause", () => {
   });
 
   it("maps pane 'p5' → %5 in the refresh-client command", () => {
-    const { writes, host } = makeFakeHost();
+    const { writes, send } = makeFakeSend();
     const demux = createOutputDemux();
-    const fc = createFlowController(host, demux, {
+    const fc = createFlowController(send, demux, {
       highWaterBytes: 100,
       lowWaterBytes: 20,
     });
@@ -104,9 +107,9 @@ describe("createFlowController — flood → pause", () => {
   });
 
   it("does not re-issue pause command when already paused", () => {
-    const { writes, host } = makeFakeHost();
+    const { writes, send } = makeFakeSend();
     const demux = createOutputDemux();
-    const fc = createFlowController(host, demux, {
+    const fc = createFlowController(send, demux, {
       highWaterBytes: 100,
       lowWaterBytes: 20,
     });
@@ -119,9 +122,9 @@ describe("createFlowController — flood → pause", () => {
   });
 
   it("isPanePaused returns true after flood exceeds high-water", () => {
-    const { host } = makeFakeHost();
+    const { send } = makeFakeSend();
     const demux = createOutputDemux();
-    const fc = createFlowController(host, demux, {
+    const fc = createFlowController(send, demux, {
       highWaterBytes: 500,
       lowWaterBytes: 100,
     });
@@ -137,9 +140,9 @@ describe("createFlowController — flood → pause", () => {
 
 describe("createFlowController — drain → continue", () => {
   it("issues refresh-client -A continue command when drained below low-water", () => {
-    const { writes, host } = makeFakeHost();
+    const { writes, send } = makeFakeSend();
     const demux = createOutputDemux();
-    const fc = createFlowController(host, demux, {
+    const fc = createFlowController(send, demux, {
       highWaterBytes: 1_000,
       lowWaterBytes: 200,
     });
@@ -163,9 +166,9 @@ describe("createFlowController — drain → continue", () => {
   });
 
   it("does not issue continue if not previously paused", () => {
-    const { writes, host } = makeFakeHost();
+    const { writes, send } = makeFakeSend();
     const demux = createOutputDemux();
-    const fc = createFlowController(host, demux, {
+    const fc = createFlowController(send, demux, {
       highWaterBytes: 1_000,
       lowWaterBytes: 200,
     });
@@ -176,9 +179,9 @@ describe("createFlowController — drain → continue", () => {
   });
 
   it("isPanePaused returns false after drain below low-water", () => {
-    const { host } = makeFakeHost();
+    const { send } = makeFakeSend();
     const demux = createOutputDemux();
-    const fc = createFlowController(host, demux, {
+    const fc = createFlowController(send, demux, {
       highWaterBytes: 100,
       lowWaterBytes: 20,
     });
@@ -191,9 +194,9 @@ describe("createFlowController — drain → continue", () => {
   });
 
   it("bufferedBytes tracks onPaneBytes minus noteDrained", () => {
-    const { host } = makeFakeHost();
+    const { send } = makeFakeSend();
     const demux = createOutputDemux();
-    const fc = createFlowController(host, demux, {
+    const fc = createFlowController(send, demux, {
       highWaterBytes: 10_000,
       lowWaterBytes: 1_000,
     });
@@ -213,9 +216,9 @@ describe("createFlowController — drain → continue", () => {
 
 describe("createFlowController — honor %pause / %continue notifications", () => {
   it("onPauseNotification gates the demux", () => {
-    const { host } = makeFakeHost();
+    const { send } = makeFakeSend();
     const demux = createOutputDemux();
-    const fc = createFlowController(host, demux);
+    const fc = createFlowController(send, demux);
 
     assert.equal(demux.isPanePaused(P3), false, "initially not paused");
     fc.onPauseNotification(P3);
@@ -223,9 +226,9 @@ describe("createFlowController — honor %pause / %continue notifications", () =
   });
 
   it("onContinueNotification opens the demux gate", () => {
-    const { host } = makeFakeHost();
+    const { send } = makeFakeSend();
     const demux = createOutputDemux();
-    const fc = createFlowController(host, demux);
+    const fc = createFlowController(send, demux);
 
     fc.onPauseNotification(P3);
     assert.equal(demux.isPanePaused(P3), true);
@@ -234,9 +237,9 @@ describe("createFlowController — honor %pause / %continue notifications", () =
   });
 
   it("onPauseNotification is idempotent when already paused by backpressure", () => {
-    const { writes, host } = makeFakeHost();
+    const { writes, send } = makeFakeSend();
     const demux = createOutputDemux();
-    const fc = createFlowController(host, demux, {
+    const fc = createFlowController(send, demux, {
       highWaterBytes: 100,
       lowWaterBytes: 20,
     });
@@ -251,9 +254,9 @@ describe("createFlowController — honor %pause / %continue notifications", () =
   });
 
   it("onContinueNotification is idempotent when not paused", () => {
-    const { writes, host } = makeFakeHost();
+    const { writes, send } = makeFakeSend();
     const demux = createOutputDemux();
-    const fc = createFlowController(host, demux);
+    const fc = createFlowController(send, demux);
 
     fc.onContinueNotification(P3); // not paused — should be a no-op
     assert.equal(writes.length, 0, "no command written for continue when not paused");
@@ -267,9 +270,9 @@ describe("createFlowController — honor %pause / %continue notifications", () =
 
 describe("createFlowController — %extended-output", () => {
   it("onExtendedOutput counts toward backpressure (triggers pause at high-water)", () => {
-    const { writes, host } = makeFakeHost();
+    const { writes, send } = makeFakeSend();
     const demux = createOutputDemux();
-    const fc = createFlowController(host, demux, {
+    const fc = createFlowController(send, demux, {
       highWaterBytes: 1_000,
       lowWaterBytes: 200,
     });
@@ -287,9 +290,9 @@ describe("createFlowController — %extended-output", () => {
 
 describe("createFlowController — pane id mapping", () => {
   it('pane "p3" maps to %3 in refresh-client -A command', () => {
-    const { writes, host } = makeFakeHost();
+    const { writes, send } = makeFakeSend();
     const demux = createOutputDemux();
-    const fc = createFlowController(host, demux, {
+    const fc = createFlowController(send, demux, {
       highWaterBytes: 10,
       lowWaterBytes: 2,
     });
@@ -300,9 +303,9 @@ describe("createFlowController — pane id mapping", () => {
   });
 
   it('pane "p5" maps to %5 in refresh-client -A continue command', () => {
-    const { writes, host } = makeFakeHost();
+    const { writes, send } = makeFakeSend();
     const demux = createOutputDemux();
-    const fc = createFlowController(host, demux, {
+    const fc = createFlowController(send, demux, {
       highWaterBytes: 10,
       lowWaterBytes: 2,
     });
@@ -315,9 +318,9 @@ describe("createFlowController — pane id mapping", () => {
   });
 
   it("throws TypeError for bad pane id rather than silently dropping", () => {
-    const { host } = makeFakeHost();
+    const { send } = makeFakeSend();
     const demux = createOutputDemux();
-    const fc = createFlowController(host, demux, {
+    const fc = createFlowController(send, demux, {
       highWaterBytes: 10,
       lowWaterBytes: 2,
     });
@@ -337,12 +340,12 @@ describe("createFlowController — pane id mapping", () => {
 
 describe("createFlowController — byte integrity", () => {
   it("delivers all bytes byte-exact before pause and does not deliver while paused", () => {
-    const { host } = makeFakeHost();
+    const { send } = makeFakeSend();
     const demux = createOutputDemux();
     const { sessionProxy, client } = createInMemoryTransportPair();
     demux.attachTransport(sessionProxy);
     demux.notifyPaneBound(P3);
-    const fc = createFlowController(host, demux, {
+    const fc = createFlowController(send, demux, {
       highWaterBytes: 1_000,
       lowWaterBytes: 200,
     });
@@ -390,12 +393,12 @@ describe("createFlowController — byte integrity", () => {
   });
 
   it("handles non-UTF-8 bytes without corruption", () => {
-    const { host } = makeFakeHost();
+    const { send } = makeFakeSend();
     const demux = createOutputDemux();
     const { sessionProxy, client } = createInMemoryTransportPair();
     demux.attachTransport(sessionProxy);
     demux.notifyPaneBound(P3);
-    const fc = createFlowController(host, demux, {
+    const fc = createFlowController(send, demux, {
       highWaterBytes: 10_000,
       lowWaterBytes: 1_000,
     });
@@ -413,12 +416,12 @@ describe("createFlowController — byte integrity", () => {
   });
 
   it("delivers bytes in order across multiple appends", () => {
-    const { host } = makeFakeHost();
+    const { send } = makeFakeSend();
     const demux = createOutputDemux();
     const { sessionProxy, client } = createInMemoryTransportPair();
     demux.attachTransport(sessionProxy);
     demux.notifyPaneBound(P3);
-    const fc = createFlowController(host, demux, {
+    const fc = createFlowController(send, demux, {
       highWaterBytes: 10_000,
       lowWaterBytes: 1_000,
     });
@@ -436,13 +439,13 @@ describe("createFlowController — byte integrity", () => {
   });
 
   it("independent pane state: pausing P3 does not affect P5", () => {
-    const { host } = makeFakeHost();
+    const { send } = makeFakeSend();
     const demux = createOutputDemux();
     const { sessionProxy, client } = createInMemoryTransportPair();
     demux.attachTransport(sessionProxy);
     demux.notifyPaneBound(P3);
     demux.notifyPaneBound(P5);
-    const fc = createFlowController(host, demux, {
+    const fc = createFlowController(send, demux, {
       highWaterBytes: 100,
       lowWaterBytes: 20,
     });
@@ -479,9 +482,9 @@ describe("createFlowController — defaults", () => {
   });
 
   it("uses defaults when no opts provided", () => {
-    const { host } = makeFakeHost();
+    const { send } = makeFakeSend();
     const demux = createOutputDemux();
-    const fc = createFlowController(host, demux);
+    const fc = createFlowController(send, demux);
 
     // Below default high-water: no pause.
     fc.onPaneBytes(P3, 262_144);
@@ -491,10 +494,10 @@ describe("createFlowController — defaults", () => {
   });
 
   it("throws if lowWaterBytes >= highWaterBytes", () => {
-    const { host } = makeFakeHost();
+    const { send } = makeFakeSend();
     const demux = createOutputDemux();
     assert.throws(
-      () => createFlowController(host, demux, { highWaterBytes: 100, lowWaterBytes: 100 }),
+      () => createFlowController(send, demux, { highWaterBytes: 100, lowWaterBytes: 100 }),
       /lowWaterBytes.*must be less than/,
     );
   });

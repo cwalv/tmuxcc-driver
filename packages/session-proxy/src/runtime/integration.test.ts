@@ -510,8 +510,12 @@ async function wireScriptedSession(
   // 3. Control server.
   const server = createControlServer(pipeline);
 
-  // 4. Input path.
-  const inputPath = createInputPath(host);
+  // 4. Input path. tc-3si.1: input-path takes `send`/`sendBatch` from the
+  // pipeline rather than the host directly — slot+write is atomic.
+  const inputPath = createInputPath({
+    send: (cmd) => pipeline.send(cmd),
+    sendBatch: (cmds) => pipeline.sendBatch(cmds),
+  });
 
   // 5. Start host + pipeline.
   await host.start();
@@ -787,10 +791,19 @@ describe("tc-93a: SessionProxy integration — fake-tmux harness", () => {
     const HIGH = 500;
     const LOW = 100;
 
-    const fc = createFlowController(host, demux, {
-      highWaterBytes: HIGH,
-      lowWaterBytes: LOW,
-    });
+    // tc-3si.1: flow controller takes `send` (atomic slot+write) rather than
+    // a host. We bind to the pipeline through a late-binding closure since the
+    // pipeline is constructed after the flow controller (the accounting store
+    // closes over fc, and pipeline closes over the store).
+    let pipelineRef: ReturnType<typeof createRuntimePipeline> | null = null;
+    const fc = createFlowController(
+      (cmd) => {
+        if (pipelineRef === null) throw new Error("pipeline not yet wired");
+        return pipelineRef.send(cmd);
+      },
+      demux,
+      { highWaterBytes: HIGH, lowWaterBytes: LOW },
+    );
 
     // Accounting store: demux.store + fc.onPaneBytes notification.
     const accountingStore = {
@@ -805,6 +818,7 @@ describe("tc-93a: SessionProxy integration — fake-tmux harness", () => {
     };
 
     const pipeline = createRuntimePipeline(host, { buffers: accountingStore });
+    pipelineRef = pipeline;
     const server = createControlServer(pipeline);
 
     // tc-128.4: pane tracking is always-on in the demux; wire model-change so
@@ -1081,7 +1095,16 @@ describe("tc-7ml.1: flow-control resume wiring — notification routing + noteDr
     }
 
     const demuxW1 = createOutputDemux();
-    const fcW1 = createFlowController(host2, demuxW1, { highWaterBytes: HIGH, lowWaterBytes: LOW });
+    // tc-3si.1: late-binding `send` (the pipeline is constructed below).
+    let pipelineW1Ref: ReturnType<typeof createRuntimePipeline> | null = null;
+    const fcW1 = createFlowController(
+      (cmd) => {
+        if (pipelineW1Ref === null) throw new Error("pipeline not yet wired");
+        return pipelineW1Ref.send(cmd);
+      },
+      demuxW1,
+      { highWaterBytes: HIGH, lowWaterBytes: LOW },
+    );
 
     // Accounting store: same as createSessionProxy's accountingStore.
     const accountingW1: typeof demuxW1.store = {
@@ -1096,6 +1119,7 @@ describe("tc-7ml.1: flow-control resume wiring — notification routing + noteDr
     };
 
     const pipelineW1 = createRuntimePipeline(host2, { buffers: accountingW1 });
+    pipelineW1Ref = pipelineW1;
 
     // Wire pipeline.onNotification → FC (this is the fix from createSessionProxy step 8).
     pipelineW1.onNotification((event) => {
@@ -1176,9 +1200,18 @@ describe("tc-7ml.1: flow-control resume wiring — notification routing + noteDr
     }
 
     const demuxW2 = createOutputDemux();
-    const fcW2 = createFlowController(host3, demuxW2);
+    // tc-3si.1: late-binding `send`.
+    let pipelineW2Ref: ReturnType<typeof createRuntimePipeline> | null = null;
+    const fcW2 = createFlowController(
+      (cmd) => {
+        if (pipelineW2Ref === null) throw new Error("pipeline not yet wired");
+        return pipelineW2Ref.send(cmd);
+      },
+      demuxW2,
+    );
 
     const pipelineW2 = createRuntimePipeline(host3, { buffers: demuxW2.store });
+    pipelineW2Ref = pipelineW2;
 
     // Wire pipeline.onNotification → FC.
     pipelineW2.onNotification((event) => {
@@ -1240,24 +1273,21 @@ describe("tc-7ml.1: flow-control resume wiring — notification routing + noteDr
   // -------------------------------------------------------------------------
 
   it("W3: drainingTransport pattern automatically calls fc.noteDrained on sendData", async () => {
-    const host4: TmuxHost = {
-      get pid(): number | undefined { return 99995; },
-      get exited(): boolean { return false; },
-      async start(): Promise<void> { /* no-op */ },
-      write(): void { /* no-op */ },
-      onData(): () => void { return () => {}; },
-      onExit(): () => void { return () => {}; },
-      onError(): () => void { return () => {}; },
-      onStderr(): () => void { return () => {}; },
-      async stop(): Promise<void> { /* no-op */ },
-      kill(): void { /* no-op */ },
-    };
+    // tc-3si.1: no host needed — the flow controller takes a `send` callback,
+    // and this test never exercises a path that would invoke it (the assertion
+    // surface is drain accounting + demux fan-out).
 
     const HIGH = 500;
     const LOW = 100;
 
     const demuxW3 = createOutputDemux();
-    const fcW3 = createFlowController(host4, demuxW3, { highWaterBytes: HIGH, lowWaterBytes: LOW });
+    // tc-3si.1: this test exercises drain accounting and never triggers a
+    // pause/continue command, so a never-resolving `send` stub is sufficient.
+    const fcW3 = createFlowController(
+      () => new Promise(() => {}),
+      demuxW3,
+      { highWaterBytes: HIGH, lowWaterBytes: LOW },
+    );
 
     // Create the accounting store (same as createSessionProxy's accountingStore).
     const accountingW3: typeof demuxW3.store = {

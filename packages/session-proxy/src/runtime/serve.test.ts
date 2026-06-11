@@ -83,14 +83,14 @@ function createFakePipeline(initialModel?: SessionModel): FakePipeline {
     patchModel(_updater: (m: SessionModel) => SessionModel) {
       // FakePipeline: no-op — serve.test.ts drives model changes via fireChange.
     },
-    expectCommand(): Promise<import("../parser/correlator.js").CommandResult> {
+    send(_command: string): Promise<import("../parser/correlator.js").CommandResult> {
       // FakePipeline: returns a never-resolving promise.  serve.test.ts does
-      // not exercise the optimistic-update / tc-7xv.37 reversal path.
+      // not exercise the atomic-send seam (tc-3si.1).
       return new Promise<import("../parser/correlator.js").CommandResult>(() => {});
     },
-    writeCommand(_command: string) {
-      // FakePipeline: no-op — serve.test.ts does not exercise the slotted
-      // command-write seam (tc-128.4).
+    sendBatch(_commands: readonly string[]): Promise<import("../parser/correlator.js").CommandResult>[] {
+      // FakePipeline: returns one never-resolving promise per command.
+      return _commands.map(() => new Promise<import("../parser/correlator.js").CommandResult>(() => {}));
     },
     get buffers(): never {
       throw new Error("FakePipeline has no buffers");

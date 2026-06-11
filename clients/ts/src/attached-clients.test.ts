@@ -236,8 +236,8 @@ describe("tc-1elae: ControlServer stamps attachedClientCount in snapshots", () =
         current = next;
         for (const h of handlers) h(next, prev);
       },
-      expectCommand() { return new Promise<never>(() => {}); },
-      writeCommand() {},
+      send() { return new Promise<never>(() => {}); },
+      sendBatch(cmds: readonly string[]) { return cmds.map(() => new Promise<never>(() => {})); },
       get buffers(): never { throw new Error("no buffers"); },
     };
 
@@ -276,8 +276,8 @@ describe("tc-1elae: ControlServer stamps attachedClientCount in snapshots", () =
         current = next;
         for (const h of handlers) h(next, prev);
       },
-      expectCommand() { return new Promise<never>(() => {}); },
-      writeCommand() {},
+      send() { return new Promise<never>(() => {}); },
+      sendBatch(cmds: readonly string[]) { return cmds.map(() => new Promise<never>(() => {})); },
       get buffers(): never { throw new Error("no buffers"); },
     };
 
@@ -325,8 +325,8 @@ describe("tc-1elae: ControlServer stamps attachedClientCount in snapshots", () =
         current = next;
         for (const h of handlers) h(next, prev);
       },
-      expectCommand() { return new Promise<never>(() => {}); },
-      writeCommand() {},
+      send() { return new Promise<never>(() => {}); },
+      sendBatch(cmds: readonly string[]) { return cmds.map(() => new Promise<never>(() => {})); },
       get buffers(): never { throw new Error("no buffers"); },
     };
     const server = createControlServer(pipeline);
@@ -428,8 +428,8 @@ describe("tc-1elae: end-to-end via connectClient", () => {
         current = next;
         for (const h of handlers) h(next, prev);
       },
-      expectCommand() { return new Promise<never>(() => {}); },
-      writeCommand() {},
+      send() { return new Promise<never>(() => {}); },
+      sendBatch(cmds: readonly string[]) { return cmds.map(() => new Promise<never>(() => {})); },
       get buffers(): never { throw new Error("no buffers"); },
     };
     const server = createControlServer(pipeline);
@@ -507,8 +507,8 @@ function buildLivePipeline() {
         current = next;
         for (const h of handlers) h(next, prev);
       },
-      expectCommand() { return new Promise<never>(() => {}); },
-      writeCommand() {},
+      send() { return new Promise<never>(() => {}); },
+      sendBatch(cmds: readonly string[]) { return cmds.map(() => new Promise<never>(() => {})); },
       get buffers(): never { throw new Error("no buffers"); },
     },
     setModel: (m: typeof model) => { current = m; },

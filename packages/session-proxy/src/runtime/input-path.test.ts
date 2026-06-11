@@ -8,15 +8,16 @@
  *   - Command.request messages map to the correct tmux serializer output.
  *   - Unknown / handshake messages are silently ignored (no throw).
  *
- * All tests use a FakeHost that captures write() calls — no real tmux process.
+ * All tests use a FakeDeps that captures send() / sendBatch() calls — no real
+ * tmux process (tc-3si.1).
  */
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import { createInputPath, defaultPaneIdToTmux, defaultWindowIdToTmux } from "./input-path.js";
-import type { InputPath } from "./input-path.js";
-import type { TmuxHost } from "./tmux-host.js";
+import type { InputPath, InputPathDeps } from "./input-path.js";
+import type { CommandResult } from "../parser/correlator.js";
 import type {
   InputMessage,
   ResizeRequestMessage,
@@ -26,41 +27,60 @@ import type {
 import { paneId, windowId, sessionId, WIRE_PROTOCOL_VERSION } from "../wire/index.js";
 
 // ---------------------------------------------------------------------------
-// FakeHost — captures write() calls for assertion
+// FakeDeps — captures sent commands for assertion (tc-3si.1)
+//
+// The input path's only command-write seam is `send` / `sendBatch` (the atomic
+// slot+write callbacks supplied by the pipeline in production). This fake
+// captures one entry per emitted command line WITH the trailing "\n" — same
+// shape the previous `host.write` capture used, so the existing assertions
+// (e.g. "send-keys -H -t %1 ...\n") continue to match.
 // ---------------------------------------------------------------------------
 
-interface FakeHost extends TmuxHost {
+interface FakeDeps extends InputPathDeps {
   readonly writes: string[];
   readonly lastWrite: string | undefined;
+  /**
+   * Queue a Promise to be returned by the NEXT `send()` call (FIFO across
+   * multiple queued promises). Used by the tc-7xv.37 reversal tests to wire a
+   * deferred resolution that the test controls. Accepts `Promise<{ ok }>`
+   * because input-path only reads the `ok` field — the test doesn't have to
+   * mock commandNumber/body.
+   */
+  enqueueSendResult(promise: Promise<{ ok: boolean }>): void;
 }
 
-function makeFakeHost(): FakeHost {
+function makeFakeDeps(): FakeDeps {
   const writes: string[] = [];
-
-  const host: FakeHost = {
+  const queue: Promise<{ ok: boolean }>[] = [];
+  // Default: when no test-supplied Promise is queued, `send` returns a
+  // never-resolving stub so the test isn't forced to await it.
+  const stubPromise = (): Promise<CommandResult> => new Promise<CommandResult>(() => {});
+  // Cast: input-path treats the resolved shape as InputPathCommandResult (just
+  // `{ ok }`), so a `{ ok }`-shaped Promise is structurally compatible for
+  // the test's purposes even though the formal CommandResult adds
+  // commandNumber/body.
+  const cast = (p: Promise<{ ok: boolean }>): Promise<CommandResult> => p as Promise<CommandResult>;
+  const deps: FakeDeps = {
     writes,
     get lastWrite() { return writes[writes.length - 1]; },
-
-    // InputPath only uses write() — stub the rest of TmuxHost.
-    write(data: string | Uint8Array | Buffer): void {
-      if (typeof data === "string") {
-        writes.push(data);
-      } else {
-        writes.push(Buffer.from(data).toString("utf8"));
-      }
+    send(command: string): Promise<CommandResult> {
+      writes.push(command + "\n");
+      const queued = queue.shift();
+      return queued !== undefined ? cast(queued) : stubPromise();
     },
-    start(): Promise<void> { return Promise.resolve(); },
-    onData() { return () => {}; },
-    onExit() { return () => {}; },
-    onError() { return () => {}; },
-    onStderr() { return () => {}; },
-    stop(): Promise<void> { return Promise.resolve(); },
-    kill() {},
-    get pid(): number | undefined { return undefined; },
-    get exited(): boolean { return false; },
+    sendBatch(commands: readonly string[]): Promise<CommandResult>[] {
+      writes.push(commands.map((c) => c + "\n").join(""));
+      return commands.map(() => {
+        const queued = queue.shift();
+        return queued !== undefined ? cast(queued) : stubPromise();
+      });
+    },
+    enqueueSendResult(promise: Promise<{ ok: boolean }>): void {
+      queue.push(promise);
+    },
   };
 
-  return host;
+  return deps;
 }
 
 // ---------------------------------------------------------------------------
@@ -162,7 +182,7 @@ describe("defaultWindowIdToTmux", () => {
 
 describe("createInputPath — InputMessage", () => {
   it("ASCII 'hello' produces correct send-keys -H hex for pane p1", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     path.handleClientMessage(makeInput("1", "hello"));
@@ -173,7 +193,7 @@ describe("createInputPath — InputMessage", () => {
   });
 
   it("pane id 'p3' maps to %3 in the command", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     path.handleClientMessage(makeInput("3", "hi"));
@@ -182,7 +202,7 @@ describe("createInputPath — InputMessage", () => {
   });
 
   it("pane id 'p0' maps to %0", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     path.handleClientMessage(makeInput("0", "a"));
@@ -191,7 +211,7 @@ describe("createInputPath — InputMessage", () => {
   });
 
   it("pane id 'p42' maps to %42", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     path.handleClientMessage(makeInput("42", "x"));
@@ -200,7 +220,7 @@ describe("createInputPath — InputMessage", () => {
   });
 
   it("single ASCII character 'a' → hex '61'", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     path.handleClientMessage(makeInput("1", "a"));
@@ -209,7 +229,7 @@ describe("createInputPath — InputMessage", () => {
   });
 
   it("empty data string produces send-keys -H with no byte args", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     path.handleClientMessage(makeInput("1", ""));
@@ -219,7 +239,7 @@ describe("createInputPath — InputMessage", () => {
   });
 
   it("newline character → 0a", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     path.handleClientMessage(makeInput("1", "\n"));
@@ -228,7 +248,7 @@ describe("createInputPath — InputMessage", () => {
   });
 
   it("ESC character → 1b", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     path.handleClientMessage(makeInput("2", "\x1b"));
@@ -237,7 +257,7 @@ describe("createInputPath — InputMessage", () => {
   });
 
   it("multibyte UTF-8 char '€' (U+20AC, 3 bytes) → e2 82 ac", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     // '€' encodes as: 0xE2 0x82 0xAC in UTF-8
@@ -247,7 +267,7 @@ describe("createInputPath — InputMessage", () => {
   });
 
   it("4-byte emoji '😀' (U+1F600) → f0 9f 98 80", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     path.handleClientMessage(makeInput("5", "😀"));
@@ -256,7 +276,7 @@ describe("createInputPath — InputMessage", () => {
   });
 
   it("mixed ASCII + multibyte: 'hi€' → correct hex sequence", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     // 'h'=68 'i'=69 '€'=e2 82 ac
@@ -266,7 +286,7 @@ describe("createInputPath — InputMessage", () => {
   });
 
   it("each input message is a separate write() call", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     path.handleClientMessage(makeInput("1", "a"));
@@ -278,7 +298,7 @@ describe("createInputPath — InputMessage", () => {
   });
 
   it("invalid pane id throws TypeError", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const badMsg: InputMessage = {
@@ -301,7 +321,7 @@ describe("createInputPath — InputMessage", () => {
 
 describe("createInputPath — ResizeRequestMessage", () => {
   it("80x24 → refresh-client -C 80x24", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     path.handleClientMessage(makeResize("1", 80, 24));
@@ -310,7 +330,7 @@ describe("createInputPath — ResizeRequestMessage", () => {
   });
 
   it("220x50 → refresh-client -C 220x50", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     path.handleClientMessage(makeResize("2", 220, 50));
@@ -319,7 +339,7 @@ describe("createInputPath — ResizeRequestMessage", () => {
   });
 
   it("resize uses cols × rows from the message (not the pane id)", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     // paneId is irrelevant to the output command (refresh-client -C is client-wide)
@@ -331,7 +351,7 @@ describe("createInputPath — ResizeRequestMessage", () => {
   });
 
   it("produces exactly one write per resize message", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     path.handleClientMessage(makeResize("1", 80, 24));
@@ -349,7 +369,7 @@ describe("createInputPath — ResizeRequestMessage", () => {
 
 describe("createInputPath — CommandRequestMessage", () => {
   it("split-pane horizontal → split-window -h -t %3", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const msg: CommandRequestMessage = {
@@ -368,7 +388,7 @@ describe("createInputPath — CommandRequestMessage", () => {
   });
 
   it("split-pane vertical → split-window -v -t %5", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const msg: CommandRequestMessage = {
@@ -387,7 +407,7 @@ describe("createInputPath — CommandRequestMessage", () => {
   });
 
   it("open-window without name → new-window", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const msg: CommandRequestMessage = {
@@ -404,7 +424,7 @@ describe("createInputPath — CommandRequestMessage", () => {
   });
 
   it("open-window with name → new-window -n <name>", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const msg: CommandRequestMessage = {
@@ -422,7 +442,7 @@ describe("createInputPath — CommandRequestMessage", () => {
   });
 
   it("close-pane → kill-pane -t %2", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const msg: CommandRequestMessage = {
@@ -440,7 +460,7 @@ describe("createInputPath — CommandRequestMessage", () => {
   });
 
   it("rename-window → rename-window -t @<N> <name>", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const msg: CommandRequestMessage = {
@@ -459,7 +479,7 @@ describe("createInputPath — CommandRequestMessage", () => {
   });
 
   it("select-pane → select-pane -t %7", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const msg: CommandRequestMessage = {
@@ -477,7 +497,7 @@ describe("createInputPath — CommandRequestMessage", () => {
   });
 
   it("resize-pane → refresh-client -C <cols>x<rows>", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const msg: CommandRequestMessage = {
@@ -498,7 +518,7 @@ describe("createInputPath — CommandRequestMessage", () => {
 
   // tc-zna.3: managed-window resize transaction.
   it("resize-managed-window → set-window-option manual + resize-window + per-pane resize-pane (batched)", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const msg: CommandRequestMessage = {
@@ -530,7 +550,7 @@ describe("createInputPath — CommandRequestMessage", () => {
   });
 
   it("resize-managed-window with one pane emits the single resize-pane line", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const msg: CommandRequestMessage = {
@@ -560,7 +580,7 @@ describe("createInputPath — CommandRequestMessage", () => {
     // Defensive: factory should never send an empty pane list, but the
     // protocol should not blow up if it happens (e.g. race where panes were
     // all closed between aggregation and dispatch).
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const msg: CommandRequestMessage = {
@@ -592,7 +612,7 @@ describe("createInputPath — CommandRequestMessage", () => {
 
 describe("createInputPath — client.capabilities", () => {
   it("does not write anything to the host", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const msg: ClientCapabilitiesMessage = {
@@ -615,7 +635,7 @@ describe("createInputPath — client.capabilities", () => {
 
 describe("createInputPath — custom paneIdToTmux option", () => {
   it("uses the provided mapping function instead of the default", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     // Registry-style: "p1" → tmux pane 100
     const path = createInputPath(host, {
       paneIdToTmux: (id) => {
@@ -630,7 +650,7 @@ describe("createInputPath — custom paneIdToTmux option", () => {
   });
 
   it("throws when custom mapping throws for unrecognized id", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host, {
       paneIdToTmux: () => { throw new TypeError("custom mapper: unknown id"); },
     });
@@ -649,7 +669,7 @@ describe("createInputPath — custom paneIdToTmux option", () => {
 
 describe("createInputPath — kill-session command", () => {
   it("kill-session → kill-session -t =<sessionName>", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const msg: CommandRequestMessage = {
@@ -667,7 +687,7 @@ describe("createInputPath — kill-session command", () => {
   });
 
   it("kill-session with name containing hyphens passes through correctly", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const msg: CommandRequestMessage = {
@@ -691,7 +711,7 @@ describe("createInputPath — kill-session command", () => {
 
 describe("createInputPath — mixed message sequence", () => {
   it("processes input then resize then input correctly", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     path.handleClientMessage(makeInput("1", "ab"));
@@ -711,7 +731,7 @@ describe("createInputPath — mixed message sequence", () => {
 
 describe("createInputPath — break-pane command (tc-7xv.9)", () => {
   it("break-pane → break-pane -d -t %<N>", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const msg: CommandRequestMessage = {
@@ -726,7 +746,7 @@ describe("createInputPath — break-pane command (tc-7xv.9)", () => {
   });
 
   it("invalid pane id throws TypeError", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const msg: CommandRequestMessage = {
@@ -745,7 +765,7 @@ describe("createInputPath — break-pane command (tc-7xv.9)", () => {
 
 describe("createInputPath — swap-pane command (tc-7xv.9)", () => {
   it("swap-pane without target → swap-pane -D -t %<N>", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const msg: CommandRequestMessage = {
@@ -760,7 +780,7 @@ describe("createInputPath — swap-pane command (tc-7xv.9)", () => {
   });
 
   it("swap-pane with explicit target → swap-pane -s %<src> -t %<tgt>", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const msg: CommandRequestMessage = {
@@ -779,7 +799,7 @@ describe("createInputPath — swap-pane command (tc-7xv.9)", () => {
   });
 
   it("swap-pane with invalid source throws TypeError", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const msg: CommandRequestMessage = {
@@ -796,7 +816,7 @@ describe("createInputPath — swap-pane command (tc-7xv.9)", () => {
   });
 
   it("swap-pane with invalid target throws TypeError", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const msg: CommandRequestMessage = {
@@ -819,7 +839,7 @@ describe("createInputPath — swap-pane command (tc-7xv.9)", () => {
 
 describe("createInputPath — rename-pane command (tc-7xv.9)", () => {
   it("rename-pane → select-pane -T '<title>' -t %<N>", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const msg: CommandRequestMessage = {
@@ -834,7 +854,7 @@ describe("createInputPath — rename-pane command (tc-7xv.9)", () => {
   });
 
   it("rename-pane with empty title clears the tmux title", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const msg: CommandRequestMessage = {
@@ -849,7 +869,7 @@ describe("createInputPath — rename-pane command (tc-7xv.9)", () => {
   });
 
   it("rename-pane with title containing single quotes escapes them", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const msg: CommandRequestMessage = {
@@ -864,7 +884,7 @@ describe("createInputPath — rename-pane command (tc-7xv.9)", () => {
   });
 
   it("rename-pane with title containing spaces works correctly", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const msg: CommandRequestMessage = {
@@ -879,7 +899,7 @@ describe("createInputPath — rename-pane command (tc-7xv.9)", () => {
   });
 
   it("rename-pane with invalid pane id throws TypeError", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const msg: CommandRequestMessage = {
@@ -904,7 +924,7 @@ import type { NotificationEvent } from "../parser/notifications.js";
 
 describe("createInputPath — set-monitor-activity (tc-7xv.15)", () => {
   it("set-monitor-activity on → set-option -wt @<N> monitor-activity on", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const msg: CommandRequestMessage = {
@@ -919,7 +939,7 @@ describe("createInputPath — set-monitor-activity (tc-7xv.15)", () => {
   });
 
   it("set-monitor-activity off → set-option -wt @<N> monitor-activity off", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const msg: CommandRequestMessage = {
@@ -934,7 +954,7 @@ describe("createInputPath — set-monitor-activity (tc-7xv.15)", () => {
   });
 
   it("set-monitor-activity dispatches synthetic internal event", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const dispatched: NotificationEvent[] = [];
     const path = createInputPath(host, {
       dispatchSynthetic: (ev) => { dispatched.push(ev); },
@@ -957,7 +977,7 @@ describe("createInputPath — set-monitor-activity (tc-7xv.15)", () => {
   });
 
   it("set-monitor-activity with invalid window id throws TypeError", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const dispatched: NotificationEvent[] = [];
     const path = createInputPath(host, {
       dispatchSynthetic: (ev) => { dispatched.push(ev); },
@@ -980,7 +1000,7 @@ describe("createInputPath — set-monitor-activity (tc-7xv.15)", () => {
 
 describe("createInputPath — set-monitor-silence (tc-7xv.15)", () => {
   it("set-monitor-silence 30 → set-option -wt @<N> monitor-silence 30", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const msg: CommandRequestMessage = {
@@ -995,7 +1015,7 @@ describe("createInputPath — set-monitor-silence (tc-7xv.15)", () => {
   });
 
   it("set-monitor-silence null → set-option -wt @<N> monitor-silence 0 (disable)", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const msg: CommandRequestMessage = {
@@ -1010,7 +1030,7 @@ describe("createInputPath — set-monitor-silence (tc-7xv.15)", () => {
   });
 
   it("set-monitor-silence 0 → set-option -wt @<N> monitor-silence 0 (disable)", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const path = createInputPath(host);
 
     const msg: CommandRequestMessage = {
@@ -1025,7 +1045,7 @@ describe("createInputPath — set-monitor-silence (tc-7xv.15)", () => {
   });
 
   it("set-monitor-silence dispatches synthetic internal event with normalised seconds", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const dispatched: NotificationEvent[] = [];
     const path = createInputPath(host, {
       dispatchSynthetic: (ev) => { dispatched.push(ev); },
@@ -1048,7 +1068,7 @@ describe("createInputPath — set-monitor-silence (tc-7xv.15)", () => {
   });
 
   it("set-monitor-silence null dispatches synthetic event with seconds=0", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const dispatched: NotificationEvent[] = [];
     const path = createInputPath(host, {
       dispatchSynthetic: (ev) => { dispatched.push(ev); },
@@ -1071,7 +1091,7 @@ describe("createInputPath — set-monitor-silence (tc-7xv.15)", () => {
   });
 
   it("set-monitor-silence with invalid window id throws TypeError", () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const dispatched: NotificationEvent[] = [];
     const path = createInputPath(host, {
       dispatchSynthetic: (ev) => { dispatched.push(ev); },
@@ -1101,8 +1121,8 @@ describe("createInputPath — set-monitor-silence (tc-7xv.15)", () => {
 // compensating synthetic carrying the captured before-value so the model
 // re-converges with tmux truth.
 //
-// These tests drive a fake `expectCommand` Promise + fake `getModel` snapshot
-// to verify reversal happens (or doesn't, when ok=true).
+// These tests drive a fake `send` Promise (via FakeDeps.enqueueSendResult) +
+// fake `getModel` snapshot to verify reversal happens (or doesn't, when ok=true).
 // ---------------------------------------------------------------------------
 
 import {
@@ -1177,7 +1197,7 @@ function defer<T>(): { promise: Promise<T>; resolve: (v: T) => void; reject: (e:
 
 describe("createInputPath — tc-7xv.37 reversal: set-synchronize-panes", () => {
   it("on %error reverts to captured before-value (was off, requested on, tmux rejected)", async () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const dispatched: NotificationEvent[] = [];
     const wid = windowId("w42");
 
@@ -1190,9 +1210,9 @@ describe("createInputPath — tc-7xv.37 reversal: set-synchronize-panes", () => 
     });
 
     const d = defer<InputPathCommandResult>();
+    host.enqueueSendResult(d.promise);
     const path = createInputPath(host, {
       dispatchSynthetic: (ev) => { dispatched.push(ev); },
-      expectCommand: () => d.promise,
       getModel: () => before,
     });
 
@@ -1219,7 +1239,7 @@ describe("createInputPath — tc-7xv.37 reversal: set-synchronize-panes", () => 
   });
 
   it("on %end does NOT dispatch a compensating event (tmux accepted)", async () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const dispatched: NotificationEvent[] = [];
     const wid = windowId("w7");
 
@@ -1231,9 +1251,9 @@ describe("createInputPath — tc-7xv.37 reversal: set-synchronize-panes", () => 
     });
 
     const d = defer<InputPathCommandResult>();
+    host.enqueueSendResult(d.promise);
     const path = createInputPath(host, {
       dispatchSynthetic: (ev) => { dispatched.push(ev); },
-      expectCommand: () => d.promise,
       getModel: () => before,
     });
 
@@ -1254,7 +1274,7 @@ describe("createInputPath — tc-7xv.37 reversal: set-synchronize-panes", () => 
   });
 
   it("reversal is skipped when window has vanished from the before-snapshot", async () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const dispatched: NotificationEvent[] = [];
     const wid = windowId("w99");
 
@@ -1267,9 +1287,9 @@ describe("createInputPath — tc-7xv.37 reversal: set-synchronize-panes", () => 
     });
 
     const d = defer<InputPathCommandResult>();
+    host.enqueueSendResult(d.promise);
     const path = createInputPath(host, {
       dispatchSynthetic: (ev) => { dispatched.push(ev); },
-      expectCommand: () => d.promise,
       getModel: () => before,
     });
 
@@ -1289,13 +1309,15 @@ describe("createInputPath — tc-7xv.37 reversal: set-synchronize-panes", () => 
     assert.deepEqual(dispatched[0], { kind: "internal:set-window-sync", windowId: wid, on: true });
   });
 
-  it("no expectCommand → fire-and-forget (no reversal even on tmux error)", () => {
-    const host = makeFakeHost();
+  it("no getModel → fire-and-forget (no reversal even on tmux error)", async () => {
+    const host = makeFakeDeps();
     const dispatched: NotificationEvent[] = [];
     const wid = windowId("w3");
 
-    // expectCommand is omitted; behaviour should match pre-tc-7xv.37: optimistic
-    // update fires, no observation of tmux %end/%error.
+    // tc-3si.1: getModel is omitted, so no before-snapshot is captured; the
+    // optimistic update still fires but reversal is skipped on %error.
+    const d = defer<InputPathCommandResult>();
+    host.enqueueSendResult(d.promise);
     const path = createInputPath(host, {
       dispatchSynthetic: (ev) => { dispatched.push(ev); },
     });
@@ -1307,6 +1329,9 @@ describe("createInputPath — tc-7xv.37 reversal: set-synchronize-panes", () => 
       command: { kind: "set-synchronize-panes", windowId: wid, on: true },
     });
 
+    d.resolve({ ok: false });
+    await Promise.resolve();
+
     assert.equal(dispatched.length, 1);
     assert.deepEqual(dispatched[0], { kind: "internal:set-window-sync", windowId: wid, on: true });
   });
@@ -1314,7 +1339,7 @@ describe("createInputPath — tc-7xv.37 reversal: set-synchronize-panes", () => 
 
 describe("createInputPath — tc-7xv.37 reversal: set-monitor-activity", () => {
   it("on %error reverts to captured before-value (was on, requested off, tmux rejected)", async () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const dispatched: NotificationEvent[] = [];
     const wid = windowId("w11");
 
@@ -1326,9 +1351,9 @@ describe("createInputPath — tc-7xv.37 reversal: set-monitor-activity", () => {
     });
 
     const d = defer<InputPathCommandResult>();
+    host.enqueueSendResult(d.promise);
     const path = createInputPath(host, {
       dispatchSynthetic: (ev) => { dispatched.push(ev); },
-      expectCommand: () => d.promise,
       getModel: () => before,
     });
 
@@ -1360,7 +1385,7 @@ describe("createInputPath — tc-7xv.37 reversal: set-monitor-activity", () => {
   });
 
   it("on %end does NOT dispatch a compensating event", async () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const dispatched: NotificationEvent[] = [];
     const wid = windowId("w12");
 
@@ -1372,9 +1397,9 @@ describe("createInputPath — tc-7xv.37 reversal: set-monitor-activity", () => {
     });
 
     const d = defer<InputPathCommandResult>();
+    host.enqueueSendResult(d.promise);
     const path = createInputPath(host, {
       dispatchSynthetic: (ev) => { dispatched.push(ev); },
-      expectCommand: () => d.promise,
       getModel: () => before,
     });
 
@@ -1394,7 +1419,7 @@ describe("createInputPath — tc-7xv.37 reversal: set-monitor-activity", () => {
 
 describe("createInputPath — tc-7xv.37 reversal: set-monitor-silence", () => {
   it("on %error reverts to captured before-value (was 0, requested 30, tmux rejected)", async () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const dispatched: NotificationEvent[] = [];
     const wid = windowId("w20");
 
@@ -1407,9 +1432,9 @@ describe("createInputPath — tc-7xv.37 reversal: set-monitor-silence", () => {
     });
 
     const d = defer<InputPathCommandResult>();
+    host.enqueueSendResult(d.promise);
     const path = createInputPath(host, {
       dispatchSynthetic: (ev) => { dispatched.push(ev); },
-      expectCommand: () => d.promise,
       getModel: () => before,
     });
 
@@ -1441,7 +1466,7 @@ describe("createInputPath — tc-7xv.37 reversal: set-monitor-silence", () => {
   });
 
   it("on %error reverts to captured before-value (was 60, requested null/0, tmux rejected)", async () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const dispatched: NotificationEvent[] = [];
     const wid = windowId("w21");
 
@@ -1454,9 +1479,9 @@ describe("createInputPath — tc-7xv.37 reversal: set-monitor-silence", () => {
     });
 
     const d = defer<InputPathCommandResult>();
+    host.enqueueSendResult(d.promise);
     const path = createInputPath(host, {
       dispatchSynthetic: (ev) => { dispatched.push(ev); },
-      expectCommand: () => d.promise,
       getModel: () => before,
     });
 
@@ -1489,7 +1514,7 @@ describe("createInputPath — tc-7xv.37 reversal: set-monitor-silence", () => {
   });
 
   it("on %end does NOT dispatch a compensating event", async () => {
-    const host = makeFakeHost();
+    const host = makeFakeDeps();
     const dispatched: NotificationEvent[] = [];
     const wid = windowId("w22");
 
@@ -1501,9 +1526,9 @@ describe("createInputPath — tc-7xv.37 reversal: set-monitor-silence", () => {
     });
 
     const d = defer<InputPathCommandResult>();
+    host.enqueueSendResult(d.promise);
     const path = createInputPath(host, {
       dispatchSynthetic: (ev) => { dispatched.push(ev); },
-      expectCommand: () => d.promise,
       getModel: () => before,
     });
 
@@ -1521,16 +1546,22 @@ describe("createInputPath — tc-7xv.37 reversal: set-monitor-silence", () => {
   });
 });
 
-describe("createInputPath — tc-7xv.37 expectCommand registration order", () => {
-  it("expectCommand is called BEFORE host.write so the correlator FIFO stays in sync", () => {
-    const host = makeFakeHost();
-    const events: string[] = [];
-
-    // Wrap host.write to record ordering.
-    const origWrite = host.write.bind(host);
-    (host as { write: (d: string | Uint8Array | Buffer) => void }).write = (data) => {
-      events.push("write");
-      origWrite(data);
+describe("createInputPath — tc-3si.1 atomic slot+write contract", () => {
+  it("send is the single atomic seam: input path emits exactly one send() per command", () => {
+    // Pre-tc-3si.1, input-path called `expectCommand()` and then `host.write()`
+    // as two separate steps; the test asserted ordering between them. After
+    // tc-3si.1 those collapse into a single `send(cmd)` call on the correlator
+    // (slot registration and the host write happen atomically inside `send`),
+    // so the ordering invariant becomes structural: there is no way to
+    // express a write without a slot. This test now asserts the count instead
+    // — one send per command — which is the property the pre-tc-3si.1
+    // ordering test was a proxy for.
+    const host = makeFakeDeps();
+    const sendCalls: string[] = [];
+    const wrappedSend = host.send.bind(host);
+    (host as { send: (cmd: string) => Promise<CommandResult> }).send = (cmd) => {
+      sendCalls.push(cmd);
+      return wrappedSend(cmd);
     };
 
     const before = makeReversalModel({
@@ -1541,12 +1572,9 @@ describe("createInputPath — tc-7xv.37 expectCommand registration order", () =>
     });
 
     const d = defer<InputPathCommandResult>();
+    host.enqueueSendResult(d.promise);
     const path = createInputPath(host, {
       dispatchSynthetic: () => {},
-      expectCommand: () => {
-        events.push("expectCommand");
-        return d.promise;
-      },
       getModel: () => before,
     });
 
@@ -1557,6 +1585,6 @@ describe("createInputPath — tc-7xv.37 expectCommand registration order", () =>
       command: { kind: "set-synchronize-panes", windowId: windowId("w30"), on: true },
     });
 
-    assert.deepEqual(events, ["expectCommand", "write"], "expectCommand fires before host.write");
+    assert.deepEqual(sendCalls, ["set-option -wt @30 synchronize-panes on"]);
   });
 });

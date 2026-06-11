@@ -61,7 +61,7 @@ import {
 } from "@remux/session-proxy";
 import type {
   PaneId,
-  TmuxHost,
+  CommandResult,
   Transport,
 } from "@remux/session-proxy";
 
@@ -77,29 +77,23 @@ function tmpSocketPath(label: string): string {
 }
 
 /**
- * Build a fake TmuxHost that records every write() call.  The FlowController
- * only invokes host.write() (to send refresh-client -A '%pane:pause' /
- * 'continue' commands), so we cast a minimal shape to TmuxHost via unknown —
- * no need to implement the unused process-lifecycle methods.
+ * Build a fake `send` callback that records every issued command (tc-3si.1).
+ *
+ * Under tc-3si.1 the FlowController takes a slot+write `send` callback rather
+ * than a host. Each captured entry includes the trailing "\n" so it matches
+ * the previous host.write contract (the test's assertions look for ":pause"
+ * substrings, which work either way).
  */
-function makeFakeHost(): { write(data: string): void; writes: string[] } & TmuxHost {
+function makeFakeSend(): {
+  writes: string[];
+  send: (command: string) => Promise<CommandResult>;
+} {
   const writes: string[] = [];
-  const stub = {
-    writes,
-    write(data: string | Uint8Array | Buffer): void {
-      writes.push(typeof data === "string" ? data : Buffer.from(data).toString("utf8"));
-    },
-    onError() { /* unused */ },
-    onExit() { /* unused */ },
-    onData(): () => void { return () => { /* unused */ }; },
-    onStderr(): () => void { return () => { /* unused */ }; },
-    pid: undefined,
-    exited: false,
-    async start(): Promise<void> { /* unused */ },
-    async stop(): Promise<void> { /* unused */ },
-    kill(): void { /* unused */ },
+  const send = (command: string) => {
+    writes.push(command + "\n");
+    return new Promise<CommandResult>(() => {});
   };
-  return stub as unknown as { write(data: string): void; writes: string[] } & TmuxHost;
+  return { writes, send };
 }
 
 /**
@@ -153,9 +147,9 @@ describe("tc-7xv.24 wedge regression — real-socket backpressure engages tmux p
     after(() => clientTransport.close());
 
     // SessionProxy-side wiring (mirrors session-proxy.ts createSessionProxy).
-    const host = makeFakeHost();
+    const { writes, send } = makeFakeSend();
     const demux = createOutputDemux();
-    const fc = createFlowController(host, demux);
+    const fc = createFlowController(send, demux);
 
     // Wrap demux.store with the same accounting tap that production uses.
     const baseStore = demux.store;
@@ -206,10 +200,10 @@ describe("tc-7xv.24 wedge regression — real-socket backpressure engages tmux p
     );
 
     // The host must have received a refresh-client -A '%1:pause' command.
-    const pauseCmd = host.writes.find((w) => w.includes(":pause"));
+    const pauseCmd = writes.find((w) => w.includes(":pause"));
     assert.ok(
       pauseCmd !== undefined,
-      `fake host must have received a pause command (got ${host.writes.length} writes)`,
+      `fake host must have received a pause command (got ${writes.length} writes)`,
     );
   });
 
@@ -231,9 +225,9 @@ describe("tc-7xv.24 wedge regression — real-socket backpressure engages tmux p
     const clientTransport = await connectSocketTransport(sockPath);
     after(() => clientTransport.close());
 
-    const host = makeFakeHost();
+    const { writes, send } = makeFakeSend();
     const demux = createOutputDemux();
-    const fc = createFlowController(host, demux);
+    const fc = createFlowController(send, demux);
 
     const baseStore = demux.store;
     const accountingStore = {
@@ -287,10 +281,10 @@ describe("tc-7xv.24 wedge regression — real-socket backpressure engages tmux p
     );
 
     // The host must have received a continue command.
-    const continueCmd = host.writes.find((w) => w.includes(":continue"));
+    const continueCmd = writes.find((w) => w.includes(":continue"));
     assert.ok(
       continueCmd !== undefined,
-      `fake host must have received a continue command after drain (got ${host.writes.length} writes)`,
+      `fake host must have received a continue command after drain (got ${writes.length} writes)`,
     );
   });
 });
