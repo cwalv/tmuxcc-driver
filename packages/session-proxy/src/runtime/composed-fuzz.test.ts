@@ -572,8 +572,14 @@ function generateSchedule(rng: Rng): Schedule {
 
   // Phase 3: steady-state. Burst structure modelled as a mix of singleton
   // notifications and short bursts (modelling layout-change drag streams /
-  // automation fan-outs). Roughly 5..50 events total over the run duration.
-  const totalSteady = 5 + rng.int(45);
+  // automation fan-outs). Most seeds: 5..50 events; ~20% of seeds: ZERO
+  // steady-state events, so any during-bootstrap notification must be
+  // reflected via the drain's healing requery — this is the path the
+  // drain-discard bug class breaks (re-introducing the bug fails
+  // convergence on such seeds because no later notification could heal
+  // the stale-bootstrap model).
+  const drainOnlySeed = rng.next() < 0.2;
+  const totalSteady = drainOnlySeed ? 0 : (5 + rng.int(45));
   for (let i = 0; i < totalSteady; i++) {
     // Some events fire as bursts (next-event close in time, modelling a
     // %layout-change drag): biased so ~30% land within 50ms of the previous.
