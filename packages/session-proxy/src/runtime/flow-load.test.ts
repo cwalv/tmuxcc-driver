@@ -118,6 +118,41 @@ function waitFor<T>(
 /** Delay helper. */
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/**
+ * Poll `read()` until it returns the same value for `stableTicks` consecutive
+ * samples, then resolve with that value.  Self-diagnosing precondition wait:
+ * use this (never a bare `delay`) when test arithmetic depends on a quiesced
+ * counter — per FC-5 (flow-control.ts), in-flight tmux output keeps arriving
+ * after a pause, so "the producer stopped" is a state to observe, not a
+ * timeout to guess (tc-cbh). See TESTING.md "Assertion conventions".
+ */
+function waitForQuiescent(
+  read: () => number,
+  timeoutMs: number,
+  msg: string,
+  stableTicks = 3,
+  intervalMs = 50,
+): Promise<number> {
+  return new Promise<number>((resolve, reject) => {
+    const deadline = Date.now() + timeoutMs;
+    let last = read();
+    let streak = 1;
+    const tick = () => {
+      const v = read();
+      streak = v === last ? streak + 1 : 1;
+      last = v;
+      if (streak >= stableTicks) return resolve(v);
+      if (Date.now() > deadline) {
+        return reject(new Error(
+          `waitForQuiescent timeout (${timeoutMs}ms): ${msg} (last=${v}, streak=${streak}/${stableTicks})`,
+        ));
+      }
+      setTimeout(tick, intervalMs);
+    };
+    setTimeout(tick, intervalMs);
+  });
+}
+
 // ===========================================================================
 // Suite: flow-control under load (real tmux)
 // ===========================================================================
@@ -184,7 +219,8 @@ describe(
             "demux must be gated (isPanePaused) while flow-controller is paused",
           );
 
-          // Buffered byte count must exceed the high-water mark at time of pause.
+          // Buffered byte count must exceed the high-water mark at time of
+          // pause (verifies FC-2: pause on strict-> crossing).
           const buffered = fc.bufferedBytes(paneId);
           assert.ok(
             buffered > DEFAULT_HIGH_WATER_BYTES,
@@ -206,9 +242,14 @@ describe(
     // F2. Resume after manual drain below low-water
     //
     // After the firehose has triggered a pause (F1 scenario):
-    //   - Call fc.noteDrained(paneId, n) to simulate the client draining enough
-    //     bytes to drop the buffered counter below the low-water mark (64 KiB).
-    //   - Assert: isPanePaused → false, demux gate opens, bufferedBytes < low-water.
+    //   - Quiesce the producer (Ctrl-C, then wait for the counter to stop
+    //     moving — per FC-5, in-flight tmux output keeps arriving and being
+    //     counted after the pause command, so the drain arithmetic MUST be
+    //     computed from a quiesced live value, never a snapshot. tc-cbh.
+    //   - Call fc.noteDrained(paneId, n) in the same synchronous block as the
+    //     counter read, draining to exactly one byte below low-water.
+    //   - Assert (all synchronous, so nothing can interleave):
+    //     resume fired (FC-3), demux gate open, residual exactly LOW−1 (FC-1).
     //
     // This confirms the pause/resume cycle works end-to-end: one full cycle of
     // pause (high-water hit) → resume (low-water drain) under real tmux output.
@@ -237,19 +278,33 @@ describe(
           );
 
           assert.equal(fc.isPanePaused(paneId), true, "must be paused before drain test");
-          const pausedBuffered = fc.bufferedBytes(paneId);
 
-          // Stop the firehose (Ctrl-C) before draining — avoids more bytes
-          // accumulating while we call noteDrained.
+          // Stop the firehose (Ctrl-C), then wait for the in-flight window to
+          // settle. delay() is not synchronization: bytes tmux flushed before
+          // honoring the pause still arrive and are counted (FC-4/FC-5), so we
+          // observe the quiesced state instead of guessing a timeout.
           controller.sendInput(paneId, "\x03");
-          await delay(300);
+          await waitForQuiescent(
+            () => fc.bufferedBytes(paneId),
+            10_000,
+            "producer did not quiesce after Ctrl-C; bufferedBytes still moving",
+          );
 
-          // Drain enough bytes to fall below low-water mark.
-          // We drain (pausedBuffered - lowWater + 1) bytes to guarantee sub-low-water.
-          const drainAmount = Math.max(pausedBuffered - DEFAULT_LOW_WATER_BYTES + 1, 1);
+          // Precondition for the drain arithmetic: still paused, counter above
+          // high-water (pause fired on a strict-> crossing and only grew since).
+          const buffered = fc.bufferedBytes(paneId);
+          assert.ok(
+            buffered > DEFAULT_HIGH_WATER_BYTES,
+            `quiesced bufferedBytes (${buffered}) must exceed highWater (${DEFAULT_HIGH_WATER_BYTES})`,
+          );
+
+          // Drain to exactly one byte below low-water.  Read and drain are in
+          // the same synchronous block — no event can interleave, so the
+          // residual is deterministic and asserted EXACTLY (verifies FC-1).
+          const drainAmount = buffered - DEFAULT_LOW_WATER_BYTES + 1;
           fc.noteDrained(paneId, drainAmount);
 
-          // Must have resumed.
+          // Must have resumed synchronously within noteDrained (verifies FC-3).
           assert.equal(
             fc.isPanePaused(paneId),
             false,
@@ -262,11 +317,13 @@ describe(
             "demux gate must be open after resume",
           );
 
-          // Buffered bytes must be below low-water.
+          // Residual must be exactly LOW−1 (verifies FC-1: ledger integrity —
+          // any deviation here is an accounting bug, not timing).
           const afterDrain = fc.bufferedBytes(paneId);
-          assert.ok(
-            afterDrain < DEFAULT_LOW_WATER_BYTES,
-            `bufferedBytes (${afterDrain}) must be < lowWater (${DEFAULT_LOW_WATER_BYTES}) after drain`,
+          assert.equal(
+            afterDrain,
+            DEFAULT_LOW_WATER_BYTES - 1,
+            `bufferedBytes (${afterDrain}) must be exactly lowWater−1 (${DEFAULT_LOW_WATER_BYTES - 1}) after quiesced drain`,
           );
 
           // Pane must still be alive: a subsequent echo must produce output.
@@ -625,6 +682,9 @@ describe(
             false,
             "demux gate must be open after resume",
           );
+          // Read+drain+assert are one synchronous block, so exact-0 is
+          // deterministic even if late in-flight bytes arrive in later ticks
+          // (verifies FC-1).
           assert.equal(
             fc.bufferedBytes(paneId),
             0,

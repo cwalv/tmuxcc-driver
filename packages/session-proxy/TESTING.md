@@ -77,6 +77,40 @@ cd github/cwalv/remux/packages/session-proxy
 SOAK_N=3 bash scripts/soak-real-tmux.sh
 ```
 
+## Assertion conventions (tc-cbh)
+
+These rules exist because of tc-cbh: a test computed drain arithmetic from a
+stale counter snapshot while real tmux output was still in flight, then failed
+with a message that pointed at the product. Two readers chased phantom product
+bugs (boundary direction, trigger lag) before the test's own unstated
+assumption was found. The conventions make required-vs-assumed legible:
+
+1. **A bare `assert` claims a synchronous product guarantee.** You must be
+   able to point at the synchronous code path that makes it true, and cite
+   the contract clause being verified (e.g. `// verifies FC-3` — see the
+   numbered FC-N invariants in `flow-control.ts`). Anything eventual or
+   environment-dependent uses `waitFor`. Asserting something no contract
+   clause promises is a test bug.
+
+2. **Assert exactly where deterministic; eventually where racing.** A
+   quiesced drain leaves *exactly* `LOW_WATER − 1` — assert equality, not
+   `<`. The sharper assert doubles as a free ledger check (FC-1). Inversely,
+   never assert exact values on state the environment can still move.
+
+3. **`delay()` is not synchronization.** If test arithmetic depends on a
+   state (producer stopped, counter stable), observe that state — e.g.
+   `waitForQuiescent` polls until the counter is stable across consecutive
+   ticks — never approximate it with a sleep. Any bare `delay()` standing in
+   for a state wait is a latent flake and a review flag.
+
+4. **Preconditions get asserted, not assumed.** If the math needs
+   "counter > HIGH_WATER" or "producer quiesced", assert it before the act.
+   A violated precondition then fails self-diagnosingly ("did not quiesce")
+   instead of misleadingly at the postcondition.
+
+Worked example: `flow-load.test.ts` F2 (quiesce → precondition assert →
+synchronous read+drain → exact residual).
+
 ### tmux socket hygiene
 
 These suites use unique `tmuxcc-test-<pid>-...` sockets and must **never** touch

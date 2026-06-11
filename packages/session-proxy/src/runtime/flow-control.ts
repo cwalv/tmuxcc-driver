@@ -15,6 +15,32 @@
  * tmux acknowledges with a `%pause %<pane>` / `%continue %<pane>` notification
  * when the pause/resume has taken effect on the tmux side.
  *
+ * # Contract — normative invariants (FC-N)
+ *
+ * Tests cite these by number (`// verifies FC-3`); a failing assertion should
+ * name the clause in dispute. Asserting anything STRONGER than these clauses
+ * is a test bug, not a product bug (see tc-cbh, where a test assumed FC-5's
+ * negation). Conventions: packages/session-proxy/TESTING.md.
+ *
+ *   FC-1  Ledger. bufferedBytes(p) = Σ onPaneBytes(p,n) − Σ noteDrained(p,n),
+ *         clamped at 0. Updates are synchronous, applied on-receipt.
+ *   FC-2  Pause edge. An upward crossing of HIGH_WATER (strict >) gates the
+ *         demux and issues `refresh-client -A '%N:pause'` synchronously
+ *         within the onPaneBytes call that crossed. No re-pause while paused.
+ *   FC-3  Resume edge. Resume is evaluated synchronously within noteDrained:
+ *         it fires iff the pane is backpressure-paused and the counter falls
+ *         to or at LOW_WATER (inclusive ≤; see the comment at the check).
+ *         isPanePaused() reflects the transition before noteDrained returns.
+ *   FC-4  Accounting never pauses. onPaneBytes counts regardless of pause
+ *         state — buffered means "held", and held bytes keep arriving while
+ *         the gate is closed.
+ *   FC-5  In-flight delivery. The pause command is asynchronous w.r.t. tmux:
+ *         bytes tmux flushed before honoring the pause still arrive and are
+ *         counted (FC-4). bufferedBytes may therefore legitimately RISE after
+ *         isPanePaused() flips true. The overshoot is bounded by tmux's
+ *         pipelining depth, not promised to be zero — tests must not assume
+ *         a frozen counter at the pause instant (root cause of tc-cbh).
+ *
  * # Design
  *
  * ## Two sources of pause/resume
