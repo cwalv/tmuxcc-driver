@@ -9,7 +9,7 @@
 # A flake found here MUST be filed as a P2 bug before retrying to green.
 # See: packages/session-proxy/TESTING.md
 #
-# Wall-clock budget: N=3 runs × ~12 s/run = ~36 s typical; limit hard-coded
+# Wall-clock budget: N=3 runs × ~18 s/run = ~54 s typical; limit hard-coded
 # below prevents silent bloat.  Increase SOAK_BUDGET_SECS if suites grow.
 #
 # Usage:
@@ -29,11 +29,18 @@ SOAK_BUDGET_SECS=120   # 2 minutes — fail if wall clock exceeds this
 # directly without a prior tsc compile step (though dist/ must already exist
 # for the imports inside the test to resolve — run `npm run build` first, or
 # use `npm run ci:soak` which includes the build step).
+#
+# tc-3si.8: topology-canary.test.ts is the targeted canary for the slot-less
+# %end mis-bind that corrupts the committed topology snapshot — flow-load and
+# resilience cover gate state / byte accounting / output delivery but no
+# existing real-tmux test had a flow-control command in flight concurrently
+# with a topology requery (the precise tc-e3m interleaving).
 NODE_TEST_CMD=(
   node --import tsx --test
   --test-timeout=60000
   src/runtime/flow-load.test.ts
   src/runtime/resilience.test.ts
+  src/runtime/topology-canary.test.ts
 )
 
 # ---------------------------------------------------------------------------
@@ -68,7 +75,7 @@ trap 'kill "${WATCHDOG_PID}" 2>/dev/null || true' EXIT
 # ---------------------------------------------------------------------------
 
 log "Starting soak: N=${SOAK_N}, budget=${SOAK_BUDGET_SECS}s"
-log "Suites: flow-load.test.ts, resilience.test.ts"
+log "Suites: flow-load.test.ts, resilience.test.ts, topology-canary.test.ts"
 log "Working dir: ${PACKAGE_DIR}"
 
 declare -a OUTCOMES=()   # "pass" or "fail" per run

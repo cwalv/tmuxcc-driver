@@ -2,15 +2,25 @@
 
 ## Real-tmux timing-sensitive suites
 
-`flow-load.test.ts` and `resilience.test.ts` exercise the full session-proxy stack
-against a real tmux process.  Their timing-sensitive assertions (pause/resume
-engagement, host-exit detection) make them the only suites with production-grade
-async-reply timing.  A flake in these suites is a **correctness signal**, not
-noise.
+`flow-load.test.ts`, `resilience.test.ts`, and `topology-canary.test.ts`
+exercise the full session-proxy stack against a real tmux process.  Their
+timing-sensitive assertions (pause/resume engagement, host-exit detection,
+committed-model topology under interleaved flow-control + requery) make them
+the only suites with production-grade async-reply timing.  A flake in these
+suites is a **correctness signal**, not noise.
+
+`topology-canary.test.ts` (tc-3si.8) is the targeted canary for the slot-less
+%end mis-bind that corrupts the committed topology snapshot: a firehose
+drives `refresh-client -A` pause/continue traffic AND a split-pane forces a
+`list-windows`/`list-panes` requery, then assertions read the **committed
+model** (panes.size, windows referencing real panes, well-formed pane ids) —
+not just gate state or byte counts.  Without this canary the soak step
+cannot catch the one bug class motivated by tc-e3m / tc-128.4.
 
 ### Flake-is-a-bug policy
 
-> **A flake in `flow-load.test.ts` or `resilience.test.ts` is a P2 bug by default.**
+> **A flake in `flow-load.test.ts`, `resilience.test.ts`, or
+> `topology-canary.test.ts` is a P2 bug by default.**
 
 When the `ci:soak` step fails with a non-deterministic outcome (some runs pass,
 some fail):
@@ -34,16 +44,17 @@ layer; their flakes are the canary.
 ### `ci:soak` step
 
 `npm run ci:soak` (from the workspace root or directly via
-`npm run ci:soak -w @remux/session-proxy`) runs `flow-load.test.ts` and
-`resilience.test.ts` **N=3 consecutive times** (override with `SOAK_N=5`).
-CI fails if:
+`npm run ci:soak -w @remux/session-proxy`) runs `flow-load.test.ts`,
+`resilience.test.ts`, and `topology-canary.test.ts` **N=3 consecutive times**
+(override with `SOAK_N=5`).  CI fails if:
 
 - Any single run fails (consistent failure).
 - Outcomes differ across runs (non-deterministic / flake).
 
-Wall-clock budget: **2 minutes** hard limit (typical: ~36 s for N=3).  If the
-suites grow and the budget is routinely exceeded, increase `SOAK_BUDGET_SECS`
-in `scripts/soak-real-tmux.sh` **and update this doc** with the new target.
+Wall-clock budget: **2 minutes** hard limit (typical: ~50 s for N=3 once the
+canary is included).  If the suites grow and the budget is routinely
+exceeded, increase `SOAK_BUDGET_SECS` in `scripts/soak-real-tmux.sh` **and
+update this doc** with the new target.
 
 `npm run ci` includes `ci:soak` as a named step between `ci:fast` and
 `test-integration`:

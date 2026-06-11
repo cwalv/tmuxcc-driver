@@ -16,6 +16,7 @@
     "src/runtime/flow-load.test.ts",
     "src/runtime/resize-roundtrip.test.ts",
     "src/runtime/resilience.test.ts",
-    "src/runtime/resync.test.ts"
+    "src/runtime/resync.test.ts",
+    "src/runtime/topology-canary.test.ts"
   ]
 }
