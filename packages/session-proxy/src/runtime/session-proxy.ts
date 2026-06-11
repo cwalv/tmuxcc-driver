@@ -274,10 +274,10 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
   });
 
   // 5a. Patch the late-binding pipeline reference so the flow-controller's
-  //     writeCommand seam (and the switch-client attach-session writer
-  //     installed in step 5) can reach the pipeline now that it exists. Both
-  //     callsites only fire after pipeline.start() resolves, so the slot/write
-  //     wiring is always live by then.
+  //     `send` seam (and the switch-client attach-session writer installed in
+  //     step 5) can reach the pipeline now that it exists. Both callsites only
+  //     fire after pipeline.start() resolves, so the slot/write wiring is
+  //     always live by then (tc-3si.1).
   pipelineRef = pipeline;
 
   // 6. Control-plane server.

@@ -294,19 +294,18 @@ export function createInputPath(
    *
    * Pattern:
    *   1. Capture the before-value from the current model.
-   *   2. Register an `expectCommand()` slot BEFORE writing (matches correlator
-   *      FIFO ordering so the next %begin/%end binds to our slot).
-   *   3. Write the tmux command.
-   *   4. Dispatch the optimistic synthetic event immediately so downstream
+   *   2. Call `send(cmd)` (tc-3si.1): atomically registers a correlator slot
+   *      AND writes the command, so the next %begin/%end binds to our slot.
+   *   3. Dispatch the optimistic synthetic event immediately so downstream
    *      clients see the change without waiting for tmux confirmation.
-   *   5. Await the correlator result.  On `%error` (ok=false), dispatch a
-   *      compensating synthetic event built from the captured before-value to
-   *      restore the model to its prior state.
+   *   4. Await the Promise returned by `send`.  On `%error` (ok=false),
+   *      dispatch a compensating synthetic event built from the captured
+   *      before-value to restore the model to its prior state.
    *
-   * If `expectCommand`, `dispatchSynthetic`, or `getModel` is not wired (e.g.
-   * tests without a real pipeline), this degrades gracefully: optimistic update
-   * still fires but reversal is skipped.  This preserves the no-pipeline test
-   * path and matches the pre-tc-7xv.37 fire-and-forget behaviour.
+   * If `dispatchSynthetic` or `getModel` is not wired (e.g. tests without a
+   * real pipeline), this degrades gracefully: optimistic update still fires
+   * but reversal is skipped.  This preserves the no-pipeline test path and
+   * matches the pre-tc-7xv.37 fire-and-forget behaviour.
    *
    * @param cmd       The full tmux command line to send (without trailing \n).
    * @param optimistic The optimistic synthetic event to dispatch immediately

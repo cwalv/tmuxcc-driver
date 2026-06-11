@@ -187,10 +187,11 @@ export function requeryDiff(
 /**
  * Issue the two bootstrap-shape tmux commands and resolve when both replies
  * are in. The engine is transport-agnostic: it asks the caller for a
- * `submit(command)` function that writes the command and returns a Promise
- * for its `CommandResult` (the existing `CommandCorrelator.expectCommand()`
- * is the obvious provider — register the slot, then `host.write(cmd + "\n")`,
- * then return the promise).
+ * `submit(command)` function that atomically registers a correlator slot AND
+ * writes the command, returning the Promise for its `CommandResult`. The
+ * obvious provider is `correlator.send` (tc-3si.1) — slot registration and
+ * the host write happen together, so the FIFO sequence stays in lockstep with
+ * tmux's reply order no matter how many concurrent writers are active.
  *
  * The engine sends both commands first, then awaits both replies — same as
  * the bootstrap coordinator. This preserves the FIFO ordering expected by the
@@ -222,15 +223,12 @@ export interface RequeryEngineOptions {
    * `CommandResult`. Concretely, a wiring like
    *
    * ```ts
-   * const submit: SubmitCommand = (cmd) => {
-   *   const p = correlator.expectCommand();
-   *   host.write(cmd + "\n");
-   *   return p;
-   * };
+   * const submit: SubmitCommand = (cmd) => correlator.send(cmd);
    * ```
    *
-   * keeps the correlator FIFO in sync. The engine deliberately does NOT take
-   * a `host` + `correlator` so it stays testable with a synthetic submit.
+   * keeps the correlator FIFO in sync — `send` is atomic slot+write (tc-3si.1).
+   * The engine deliberately does NOT take a `host` + `correlator` so it stays
+   * testable with a synthetic submit.
    */
   readonly submit: SubmitCommand;
 }

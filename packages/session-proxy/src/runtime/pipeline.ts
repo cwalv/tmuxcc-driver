@@ -40,7 +40,7 @@
  *             - everything else → coalescer.notify(kind) (topology dirty bit)
  *         block-begin/body/end/error → CommandCorrelator.push(token)
  *             (the engine's submit() expects two %end blocks per requery cycle
- *              via correlator.expectCommand())
+ *              via correlator.send() — tc-3si.1)
  *
  * # Bootstrap integration
  *
@@ -49,7 +49,8 @@
  *     2. Construct the Coalescer wrapping the engine, with onDeltas wired
  *        back into this pipeline's broadcast path.
  *     3. Wire host.onData → tokenizer → correlator (notifications routed to
- *        dispatchEvent; command blocks routed to expectCommand promises).
+ *        dispatchEvent; command blocks routed to slot promises registered by
+ *        correlator.send() — tc-3si.1).
  *     4. Call `engine.requery()` once for the initial bootstrap. The diff
  *        against the empty model produces the full snapshot's worth of
  *        deltas; the coalescer's onDeltas fires the broadcast.
