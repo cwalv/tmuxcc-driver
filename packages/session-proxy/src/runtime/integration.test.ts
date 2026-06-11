@@ -170,6 +170,17 @@ function makeBootstrapBytes(opts: {
  * Create a ScriptedHost: spawns fake-tmux.js and provides an onData/write
  * interface compatible with TmuxHost.  The host automatically emits bootstrap
  * bytes after the DCS intro so that pipeline.start() can complete.
+ *
+ * tc-128.4 review fix: after bootstrap, the pipeline drains buffered topology
+ * events (fake-tmux.js emits %sessions-changed + %session-changed at startup)
+ * and fires a healing requery (list-windows + list-panes).  fake-tmux.js echoes
+ * commands with flags=0 (startup blocks), which the correlator discards —
+ * leaving the engine's requery Promise unresolved and the process hanging.
+ *
+ * We fix this by auto-injecting proper flags=1 replies for any list-windows /
+ * list-panes written AFTER the bootstrap injection has fired (i.e. for the
+ * healing requery and any subsequent coalescer cycles). The auto-reply uses the
+ * same bootstrapOpts so the model is stable.
  */
 function createScriptedHost(bootstrapOpts: Parameters<typeof makeBootstrapBytes>[0] = {}): ScriptedHostHandle {
   // Process is NOT spawned until start() is called — this ensures pipeline.start()
@@ -189,6 +200,44 @@ function createScriptedHost(bootstrapOpts: Parameters<typeof makeBootstrapBytes>
 
   // Track whether we have already injected bootstrap bytes.
   let _bootstrapInjected = false;
+  // True once the bootstrap-injection nextTick has fired. All list-commands
+  // written after this point are from the healing requery or later coalescer
+  // cycles and need an auto-injected reply (fake-tmux.js echoes flags=0 which
+  // the correlator discards).
+  let _bootstrapFired = false;
+  // Auto-reply cmdnum counter (distinct from fake-tmux.js's counter).
+  let _autoReplyCmdNum = 200;
+
+  function _injectAutoReply(cmdType: "windows" | "panes" | "empty"): void {
+    const ts = 1_000_000;
+    const cn = _autoReplyCmdNum++;
+    const opts = bootstrapOpts;
+    const sid = opts.sessionId ?? "$0";
+    const sname = opts.sessionName ?? "testsession";
+    const wid = opts.windowId ?? "@1";
+    const wname = opts.windowName ?? "testwin";
+    const pid_ = opts.paneId ?? "%1";
+    const cols = opts.cols ?? 80;
+    const rows = opts.rows ?? 24;
+    const layoutStr = `aaaa,${cols}x${rows},0,0,${parseInt(pid_.slice(1), 10)}`;
+
+    const body = cmdType === "windows"
+      ? `${sid}\t${sname}\t${wid}\t${wname}\t${cols}\t${rows}\t${layoutStr}\t*\t1\n`
+      : cmdType === "panes"
+        ? `${pid_}\t${wid}\t${sid}\t0\t${cols}\t${rows}\t0\t0\t1\t1234\tbash\n`
+        : "";
+
+    const replyBytes = new TextEncoder().encode(
+      `%begin ${ts} ${cn} 1\r\n${body}%end ${ts} ${cn} 1\r\n`,
+    );
+    // Inject on nextTick so the write() call stack unwinds first (mirroring
+    // how real tmux delivers responses asynchronously).
+    process.nextTick(() => {
+      for (const h of _dataHandlers) {
+        try { h(replyBytes); } catch { /**/ }
+      }
+    });
+  }
 
   function _attachProcListeners(p: ChildProcess): void {
     p.stdout!.on("data", (chunk: Buffer) => {
@@ -203,7 +252,14 @@ function createScriptedHost(bootstrapOpts: Parameters<typeof makeBootstrapBytes>
         if (str.includes("\x1bP1000p")) {
           _bootstrapInjected = true;
           process.nextTick(() => {
-            const bootstrapBytes = makeBootstrapBytes(bootstrapOpts);
+            _bootstrapFired = true;
+            // noPreNotif: true — fake-tmux.js already sends %sessions-changed +
+            // %session-changed via its own stdout; we don't inject a duplicate
+            // %session-changed here. The pipeline's drain will dispatch the
+            // fake-tmux.js notifications and fire a healing requery; the
+            // createScriptedHost write() interceptor auto-injects proper replies
+            // for those list-* commands so the engine doesn't hang.
+            const bootstrapBytes = makeBootstrapBytes({ ...bootstrapOpts, noPreNotif: true });
             for (const h of _dataHandlers) {
               try { h(bootstrapBytes); } catch { /**/ }
             }
@@ -259,6 +315,25 @@ function createScriptedHost(bootstrapOpts: Parameters<typeof makeBootstrapBytes>
       const s = typeof data === "string" ? data : new TextDecoder().decode(data);
       writtenCommands.push(s);
       proc.stdin!.write(typeof data === "string" ? data : data);
+      // tc-128.4 review fix: after the bootstrap injection fires, the pipeline
+      // issues slotted commands the correlator must see replies for — the
+      // healing requery's list-* pair, later coalescer cycles, and the
+      // post-bootstrap setup commands (set-option / refresh-client, which
+      // register throwaway slots to keep the correlator FIFO aligned).
+      // fake-tmux.js echoes commands with flags=0 (startup blocks) which the
+      // correlator discards — leaving slots pending forever and hanging the
+      // engine (or mis-binding later replies). Auto-inject proper flags=1
+      // replies so every slot resolves in write order, mirroring real tmux.
+      if (_bootstrapFired) {
+        const trimmed = s.trim();
+        if (trimmed.startsWith("list-windows")) {
+          _injectAutoReply("windows");
+        } else if (trimmed.startsWith("list-panes")) {
+          _injectAutoReply("panes");
+        } else if (trimmed.startsWith("set-option") || trimmed.startsWith("refresh-client")) {
+          _injectAutoReply("empty");
+        }
+      }
     },
 
     onData(handler: HostDataHandler): () => void {
@@ -865,6 +940,7 @@ async function buildFakePushSession(
   const _dataHandlers = new Set<HostDataHandler>();
   const writtenCommands: string[] = [];
 
+  let _ackCmdNum = 700;
   const host: TmuxHost = {
     get pid(): number | undefined { return 99998; },
     get exited(): boolean { return false; },
@@ -872,6 +948,17 @@ async function buildFakePushSession(
     write(data: string | Uint8Array | Buffer): void {
       const s = typeof data === "string" ? data : new TextDecoder().decode(data);
       writtenCommands.push(s);
+      // Auto-ack fire-and-forget setup commands (set-option / refresh-client):
+      // the pipeline registers throwaway correlator slots for them (FIFO
+      // invariant, see _writeSlottedCommand). Without an ack those slots stay
+      // pending and swallow the next reply pair a test injects, starving the
+      // requery slots behind them.
+      const trimmed = s.trim();
+      if (trimmed.startsWith("set-option") || trimmed.startsWith("refresh-client")) {
+        const cn = _ackCmdNum++;
+        const ack = new TextEncoder().encode(`%begin 1000000 ${cn} 1\r\n%end 1000000 ${cn} 1\r\n`);
+        process.nextTick(() => inject(ack));
+      }
     },
     onData(handler: HostDataHandler): () => void {
       _dataHandlers.add(handler);
@@ -907,8 +994,13 @@ async function buildFakePushSession(
   });
 
   // start() sends bootstrap commands; we feed the replies via inject().
+  // noPreNotif: true omits the leading %session-changed preamble so no
+  // topology event is buffered during bootstrap. These tests exercise
+  // content-plane + control-plane behavior — the bootstrap-race healing
+  // requery is irrelevant here, and the in-memory fake host has no way
+  // to answer a second list-* reply pair.
   const startPromise = pipeline.start();
-  inject(makeBootstrapBytes(bootstrapOpts));
+  inject(makeBootstrapBytes({ ...bootstrapOpts, noPreNotif: true }));
   await startPromise;
 
   // Use a recording pair so snapshot + deltas are captured regardless of
@@ -1016,7 +1108,7 @@ describe("tc-7ml.1: flow-control resume wiring — notification routing + noteDr
 
     // Bootstrap the pipeline.
     const startP = pipelineW1.start();
-    inject2(makeBootstrapBytes({ paneId: "%1" }));
+    inject2(makeBootstrapBytes({ paneId: "%1", noPreNotif: true }));
     await startP;
 
     const P1 = paneId("p1");
@@ -1098,7 +1190,7 @@ describe("tc-7ml.1: flow-control resume wiring — notification routing + noteDr
     });
 
     const startP2 = pipelineW2.start();
-    inject3(makeBootstrapBytes({ paneId: "%3" }));
+    inject3(makeBootstrapBytes({ paneId: "%3", noPreNotif: true }));
     await startP2;
 
     const P3 = paneId("p3");

@@ -528,51 +528,84 @@ class RuntimePipelineImpl implements RuntimePipeline {
     }
     this._live = true;
 
-    // Drain notifications buffered during bootstrap. Two distinct flavors:
+    // tc-95lue §3.4: Enable monitor-activity on all windows (global window
+    // default) so that tmux tracks pane activity.
     //
-    //  1. Content-plane events (output / extended-output / pause / continue /
-    //     subscription-changed / internal:*) describe ongoing pane bytes and
-    //     out-of-band signals that are NOT in the list-* snapshot we just
-    //     committed. Replay them through _dispatchEvent so byte buffers and
-    //     subscribers see them.
+    // The setup commands are written BEFORE the drain below. With correlator
+    // slots registered (see _writeSlottedCommand) production correctness is
+    // order-independent — replies bind to slots in write order either way —
+    // but writing setup first means a test harness that acks each command as
+    // it is written stays reply-order == write-order relative to the healing
+    // requery the drain may fire.
+    if (!this._stopped) {
+      this._writeSlottedCommand(
+        setOption("window-global", "monitor-activity", "on"),
+        "set-option monitor-activity",
+      );
+    }
+
+    // tc-7xv.28: register a per-window subscription so the runtime detects
+    // synchronize-panes changes made by external tmux clients.
+    if (!this._stopped) {
+      this._writeSlottedCommand(
+        refreshClientSubscribeWindows(
+          SYNC_WATCH_SUBSCRIPTION_NAME,
+          "#{?synchronize-panes,1,0}",
+        ),
+        "refresh-client sync-watch subscribe",
+      );
+    }
+
+    // Drain notifications buffered during bootstrap. Replay every buffered event
+    // uniformly through _dispatchEvent. Topology events route to the normal
+    // choke point (onTopologyNotify + coalescer.notify), which treats them as a
+    // dirty bit: the coalescer fires ONE leading-edge requery (coalescer._lastRequeryAt
+    // is untouched by the engine-direct bootstrap cycle, so the first notify fires
+    // immediately). Content-plane events (output / extended-output / pause /
+    // continue / subscription-changed / internal:*) reach their usual sinks.
     //
-    //  2. Topology events (window-add, layout-change, session-changed, …) are
-    //     DISCARDED here. The bootstrap snapshot we just committed is
-    //     authoritative for everything tmux would have reported about
-    //     topology up to and including the moment list-* replied — replaying
-    //     these would force a redundant requery, and in test harnesses where
-    //     no further reply bytes are scripted, that requery hangs forever.
-    //     Any topology change that arrives AFTER the snapshot is captured by
-    //     the live (non-buffering) dispatch path below.
+    // Cost: one ~ms requery at startup when a topology notification raced the
+    // bootstrap window. The diff is empty when the snapshot already reflects the
+    // change; non-empty when it doesn't (staleness bounded by the requery round-
+    // trip, not by the 30 s heartbeat).
     //
     // _dispatchEvent now sees _bootstrapBuffer === null and routes each event
     // to its proper sink without re-buffering.
     const buffered = this._bootstrapBuffer ?? [];
     this._bootstrapBuffer = null;
     for (const event of buffered) {
-      if (isTopologyEvent(event)) continue;
       this._dispatchEvent(event);
-    }
-
-    // tc-95lue §3.4: Enable monitor-activity on all windows (global window
-    // default) so that tmux tracks pane activity.
-    if (!this._stopped) {
-      this._host.write(setOption("window-global", "monitor-activity", "on") + "\n");
-    }
-
-    // tc-7xv.28: register a per-window subscription so the runtime detects
-    // synchronize-panes changes made by external tmux clients.
-    if (!this._stopped) {
-      this._host.write(
-        refreshClientSubscribeWindows(
-          SYNC_WATCH_SUBSCRIPTION_NAME,
-          "#{?synchronize-panes,1,0}",
-        ) + "\n",
-      );
     }
 
     // Start the coalescer's heartbeat so silent changes get caught.
     coalescer.start();
+  }
+
+  /**
+   * Write a fire-and-forget command WITH a correlator slot registered first.
+   *
+   * The correlator binds %begin/%end blocks to expectCommand() slots in FIFO
+   * order. A slot-less write therefore plants a fuse: its response block is
+   * harmless only while no slot is pending, but any slot registered between
+   * the write and the response (e.g. a requery's list-* pair — common now
+   * that every topology notification can trigger one) mis-binds the setup
+   * response to that slot and corrupts the requery result. Registering a
+   * throwaway slot keeps the FIFO aligned no matter when the response lands.
+   * The result is ignored; %error is logged.
+   */
+  private _writeSlottedCommand(command: string, label: string): void {
+    void this._correlator.expectCommand().then(
+      (result) => {
+        if (!result.ok) {
+          console.warn(`[pipeline] ${label} failed: %error`);
+        }
+      },
+      () => {
+        // Correlator rejection (protocol anomaly / teardown) — nothing to do
+        // for a fire-and-forget setup command.
+      },
+    );
+    this._host.write(command + "\n");
   }
 
   stop(): void {

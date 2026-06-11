@@ -60,10 +60,19 @@ class FakeTmuxHost implements TmuxHost {
   start(): Promise<void> { return Promise.resolve(); }
 
   write(data: string | Uint8Array | Buffer): void {
-    if (typeof data === "string") {
-      this._written.push(data);
-    } else {
-      this._written.push(new TextDecoder().decode(data));
+    const s = typeof data === "string" ? data : new TextDecoder().decode(data);
+    this._written.push(s);
+    // Auto-ack fire-and-forget setup commands (set-option / refresh-client):
+    // the pipeline registers throwaway correlator slots for them (FIFO
+    // invariant, see _writeSlottedCommand), so the fake host must answer or
+    // the slots stay pending and mis-bind whatever reply the test injects
+    // next. list-* replies stay test-scripted (tests assert their content).
+    const trimmed = s.trim();
+    if (trimmed.startsWith("set-option") || trimmed.startsWith("refresh-client")) {
+      const block = makeCommandBlock(nextCmdNum(), "");
+      process.nextTick(() => {
+        if (!this._exited) this.pushData(bytes(block));
+      });
     }
   }
 
@@ -393,6 +402,104 @@ describe("Pipeline: live requery on topology events", () => {
     const model = pipeline.getModel();
     assert.equal(model.windows.has(windowId("w9")), false, "unlinked window must not enter the model");
     assert.equal(model.windows.size, 1, "only our session's window is present");
+
+    pipeline.stop();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite — bootstrap-race regression (tc-128.4 review fix)
+//
+// A topology notification that arrives DURING the bootstrap requery (while
+// list-*/list-panes are in flight) must not be silently discarded.  The drain
+// must replay it as a dirty bit so the coalescer issues a healing requery;
+// staleness is bounded by the requery round-trip, not the 30 s heartbeat.
+// ---------------------------------------------------------------------------
+
+describe("Pipeline: bootstrap-race — topology notification during bootstrap triggers healing requery", () => {
+  it("topology notification injected before bootstrap replies → healing requery issued after drain → updated snapshot lands in the model", async () => {
+    const host = new FakeTmuxHost();
+    const pipeline = createRuntimePipeline(host, {
+      ceilingMs: 50,
+      heartbeatMs: 999_999, // disable heartbeat for determinism
+    });
+
+    const startPromise = pipeline.start();
+
+    // Inject a topology notification BEFORE the bootstrap list-* replies arrive.
+    // This races the bootstrap requery (the pipeline is still in the
+    // _bootstrapBuffer phase), so the event is buffered rather than dispatched.
+    host.pushData(bytes("%window-add @2\r\n"));
+
+    // Now feed the bootstrap replies (one window). The engine commits this as
+    // the initial snapshot. The notification above was buffered.
+    host.pushData(buildBootstrapReplies()); // one window (@1)
+    await startPromise;
+
+    // At this point start() has resolved. The buffered %window-add should have
+    // been drained through _dispatchEvent → coalescer.notify, marking the
+    // engine dirty. Since coalescer._lastRequeryAt is -Infinity (the bootstrap
+    // cycle bypassed the coalescer), the leading edge fires immediately.
+    //
+    // Yield one microtask tick so the coalescer's leading-edge requery issues
+    // its list-* commands.
+    await new Promise<void>((r) => setImmediate(r));
+
+    const writtenAfterBootstrap = host.popWritten();
+    assert.ok(
+      writtenAfterBootstrap.some((w) => w.startsWith("list-windows")),
+      `healing requery must issue list-windows; got: ${JSON.stringify(writtenAfterBootstrap)}`,
+    );
+    assert.ok(
+      writtenAfterBootstrap.some((w) => w.startsWith("list-panes")),
+      `healing requery must issue list-panes; got: ${JSON.stringify(writtenAfterBootstrap)}`,
+    );
+
+    // Feed the updated snapshot: two windows now (the raced notification was real).
+    host.pushData(buildTwoWindowReplies());
+    await new Promise<void>((r) => setImmediate(r));
+
+    const model = pipeline.getModel();
+    assert.equal(
+      model.windows.size,
+      2,
+      "healing requery must update model to reflect the raced topology change",
+    );
+    assert.ok(model.windows.has(windowId("w1")), "w1 must be present after healing requery");
+    assert.ok(model.windows.has(windowId("w2")), "w2 must be present after healing requery");
+
+    pipeline.stop();
+  });
+
+  it("topology notification during bootstrap increments the onTopologyNotify counter", async () => {
+    const host = new FakeTmuxHost();
+    const topologyKinds: string[] = [];
+    const pipeline = createRuntimePipeline(host, {
+      ceilingMs: 50,
+      heartbeatMs: 999_999,
+      onTopologyNotify: (kind) => { topologyKinds.push(kind); },
+    });
+
+    const startPromise = pipeline.start();
+
+    // Inject topology notification during bootstrap window.
+    host.pushData(bytes("%window-add @2\r\n"));
+
+    // Bootstrap replies.
+    host.pushData(buildBootstrapReplies());
+    await startPromise;
+
+    // Yield so coalescer fires the leading-edge requery and the drain runs.
+    await new Promise<void>((r) => setImmediate(r));
+
+    // Feed the second reply pair so the requery completes (prevents test hang).
+    host.pushData(buildTwoWindowReplies());
+    await new Promise<void>((r) => setImmediate(r));
+
+    assert.ok(
+      topologyKinds.includes("window-add"),
+      `onTopologyNotify must have been called with "window-add"; got: ${JSON.stringify(topologyKinds)}`,
+    );
 
     pipeline.stop();
   });
