@@ -824,24 +824,12 @@ class ServerProxyImpl implements ServerProxyHandle {
         windowCount: entry.windowCount,
         paneCount: paneCounts.get(entry.tmuxId) ?? 0,
         attachedClientCount: entry.attachedClientCount,
-        // tc-x6l: session-proxy metrics are cross-process; we cannot fetch them
-        // synchronously here. Session-proxy-level metrics are available by
-        // connecting to the session-proxy socket and issuing session-proxy.info.
-        sessionMetricsText: null,
       });
     }
 
     // tc-x6l: update the sessions-active gauge before building the info payload.
     this._metrics.setSessionsActive(this._sessions.size);
 
-    // tc-x6l: metrics text exposition (server-proxy level only).
-    // Wrapped in a synchronous path: prom-client's Registry.metrics() returns a
-    // Promise but we need a synchronous result here.  We resolve it synchronously
-    // using a local flag trick — prom-client's default metrics() resolves
-    // immediately in a microtask.  For simplicity, we return a pending placeholder
-    // and let the caller await; alternatively, we return null and let clients
-    // issue a follow-up query.  Decision: return null synchronously (the info
-    // payload is built synchronously; async text is fetched by callers that need it).
     return {
       socketName: this._opts.socketName,
       serverProxySocketPath: this._socketPath,
@@ -854,7 +842,6 @@ class ServerProxyImpl implements ServerProxyHandle {
       sessions,
       // tc-x6l: metricsText deferred to async; populated in _buildInfoAsync.
       metricsText: null,
-      sessionMetricsText: null,
     };
   }
 
