@@ -153,9 +153,11 @@ describe(
 
           // Number of split iterations.  Each iteration is an independent
           // chance to interleave a flow-control reply with the requery's
-          // list-* reply.  5 iterations keeps the test under ~6 s on a
-          // lightly-loaded machine.
-          const ITERATIONS = 5;
+          // list-* reply.  8 iterations keeps the test under ~10 s on a
+          // lightly-loaded machine while widening the cumulative race
+          // window enough that a single N=5 soak run reliably traps the
+          // slot-less bug class motivated by tc-e3m.
+          const ITERATIONS = 8;
 
           // The pane we send the firehose to — always pane1, because subsequent
           // splits create new panes whose shell prompts may not be ready
