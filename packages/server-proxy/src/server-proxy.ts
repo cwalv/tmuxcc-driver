@@ -46,7 +46,7 @@ import {
   runServerHandshake,
   WIRE_PROTOCOL_VERSION,
   sessionId as mintSessionId,
-} from "@tmuxcc/session-proxy";
+} from "@remux/session-proxy";
 import type {
   Transport,
   Capabilities,
@@ -64,7 +64,7 @@ import type {
   MessageBase,
   PaneId,
   SessionId,
-} from "@tmuxcc/session-proxy";
+} from "@remux/session-proxy";
 
 import { createSocketServer, createSocketTransport } from "./socket-transport.js";
 import { serverProxySocketPath, sessionProxySocketPath, removeSocket, restrictSocket } from "./runtime-dir.js";

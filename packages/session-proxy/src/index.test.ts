@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { SESSION_PROXY_PLACEHOLDER, type SessionProxyHandle } from "./index.js";
 
-describe("@tmuxcc/session-proxy placeholder", () => {
+describe("@remux/session-proxy placeholder", () => {
   it("exports SESSION_PROXY_PLACEHOLDER as true", () => {
     assert.strictEqual(SESSION_PROXY_PLACEHOLDER, true);
   });

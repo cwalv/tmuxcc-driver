@@ -45,8 +45,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as fs from "node:fs";
 
-import { encodeFrame, paneId } from "@tmuxcc/session-proxy";
-import type { Transport, PaneId } from "@tmuxcc/session-proxy";
+import { encodeFrame, paneId } from "@remux/session-proxy";
+import type { Transport, PaneId } from "@remux/session-proxy";
 import { createSocketServer } from "./socket-transport.js";
 
 // ---------------------------------------------------------------------------

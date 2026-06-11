@@ -47,7 +47,7 @@
  * then a layout.updated delta; asserts onLayoutChanged fires with geometry.
  *
  * Reuses E1's round-trip harness: createInMemoryTransportPair +
- * runSessionProxyHandshake from @tmuxcc/session-proxy.
+ * runSessionProxyHandshake from @remux/session-proxy.
  */
 
 import { describe, it } from "node:test";
@@ -69,7 +69,7 @@ import {
   // Projection helpers
   projectSnapshot,
   diffModel,
-} from "@tmuxcc/session-proxy";
+} from "@remux/session-proxy";
 
 import type {
   PaneId,
@@ -79,7 +79,7 @@ import type {
   SessionProxyMessage,
   WindowLayout,
   Capabilities,
-} from "@tmuxcc/session-proxy";
+} from "@remux/session-proxy";
 
 import { EchoRenderHook } from "./render-hook.js";
 import { Mirror } from "./mirror.js";
@@ -176,11 +176,11 @@ function stampSeqs(deltas: SessionProxyMessage[], startSeq: number): SessionProx
  * a model-change event (same ordering as the old driver.start() flow).
  */
 async function connectAndSnapshot(
-  sessionProxyTransport: import("@tmuxcc/session-proxy").Transport,
-  clientTransport: import("@tmuxcc/session-proxy").Transport,
+  sessionProxyTransport: import("@remux/session-proxy").Transport,
+  clientTransport: import("@remux/session-proxy").Transport,
   hook: EchoRenderHook,
   snapshot: SnapshotMessage,
-): Promise<{ handle: ClientHandle; session: import("@tmuxcc/session-proxy").NegotiatedSession }> {
+): Promise<{ handle: ClientHandle; session: import("@remux/session-proxy").NegotiatedSession }> {
   // Start handshake on both sides concurrently (session-proxy doesn't need to await).
   const sessionProxyHandshake = runSessionProxyHandshake(sessionProxyTransport, SESSION_PROXY_CAPS);
 

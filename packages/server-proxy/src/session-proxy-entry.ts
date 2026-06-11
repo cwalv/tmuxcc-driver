@@ -10,7 +10,7 @@
  *   1. Install the die-with-parent watchdog (tc-2c5, see below).
  *   2. Parse arguments.
  *   3. Create a unix socket server on `--socket-path`.
- *   4. Create and start a sessionProxy (createSessionProxy from @tmuxcc/session-proxy).
+ *   4. Create and start a sessionProxy (createSessionProxy from @remux/session-proxy).
  *   5. Write "READY\n" to stdout so the supervisor knows we are listening.
  *   6. Accept client connections in a loop, calling sessionProxy.addClient(transport).
  *   7. On SIGTERM: call sessionProxy.stop() and exit cleanly.
@@ -33,7 +33,7 @@
 import * as net from "node:net";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { createSessionProxy, installDieWithParent } from "@tmuxcc/session-proxy";
+import { createSessionProxy, installDieWithParent } from "@remux/session-proxy";
 import { createSocketTransport } from "./socket-transport.js";
 import { removeSocket, restrictSocket } from "./runtime-dir.js";
 

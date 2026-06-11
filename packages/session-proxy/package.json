@@ -1,5 +1,5 @@
 {
-  "name": "@tmuxcc/session-proxy",
+  "name": "@remux/session-proxy",
   "version": "0.0.0",
   "private": true,
   "type": "module",

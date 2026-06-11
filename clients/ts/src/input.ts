@@ -61,7 +61,7 @@
  * # NO DOM, NO vscode, NO host API, NO Pseudoterminal
  */
 
-import type { PaneId, InputMessage, ResizeRequestMessage, CommandRequestMessage, WireCommand } from "@tmuxcc/session-proxy";
+import type { PaneId, InputMessage, ResizeRequestMessage, CommandRequestMessage, WireCommand } from "@remux/session-proxy";
 
 // ---------------------------------------------------------------------------
 // Public interface

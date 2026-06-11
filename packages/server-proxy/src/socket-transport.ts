@@ -24,7 +24,7 @@
  * exact boundary tracking is what lets data and control units interleave
  * arbitrarily across socket read chunks (tc-3y8.9; see _processBuffer).
  *
- * On the SEND side, `encodeFrame(paneId, seq, payload)` from @tmuxcc/session-proxy
+ * On the SEND side, `encodeFrame(paneId, seq, payload)` from @remux/session-proxy
  * produces the binary blob; we write it directly to the socket.
  *
  * # Control-plane framing (length-prefixed JSON)
@@ -48,9 +48,9 @@
  */
 
 import * as net from "node:net";
-import { FRAME_MAGIC, MAX_FRAME, decodeFrame, encodeFrame } from "@tmuxcc/session-proxy";
-import type { Transport, ControlHandler, DataHandler, CloseHandler } from "@tmuxcc/session-proxy";
-import type { PaneId } from "@tmuxcc/session-proxy";
+import { FRAME_MAGIC, MAX_FRAME, decodeFrame, encodeFrame } from "@remux/session-proxy";
+import type { Transport, ControlHandler, DataHandler, CloseHandler } from "@remux/session-proxy";
+import type { PaneId } from "@remux/session-proxy";
 
 // ---------------------------------------------------------------------------
 // Control-plane framing constants

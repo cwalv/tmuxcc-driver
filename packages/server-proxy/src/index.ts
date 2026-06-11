@@ -1,5 +1,5 @@
 /**
- * @tmuxcc/server-proxy — public API.
+ * @remux/server-proxy — public API.
  *
  * Primary entry point: `createServerProxy({ socketName, runtimeDir? })`.
  * Returns a ServerProxyHandle with `start()`, `shutdown()`, `endpoint()`.

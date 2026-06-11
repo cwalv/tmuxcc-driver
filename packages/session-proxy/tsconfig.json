@@ -5,7 +5,7 @@
     "outDir": "dist"
   },
   "include": ["src"],
-  // Exclude full-stack e2e tests: they import from @tmuxcc/client (a sibling
+  // Exclude full-stack e2e tests: they import from @remux/client (a sibling
   // workspace) via relative src paths outside rootDir, which tsc rejects but
   // tsx handles correctly at runtime.  This matches the pattern used by
   // tmuxcc-vscode's tsconfig for session-proxy-transport.test.ts.

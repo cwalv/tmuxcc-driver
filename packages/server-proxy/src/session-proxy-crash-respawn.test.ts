@@ -46,14 +46,14 @@ import * as path from "node:path";
 
 import { createServerProxy, connectSocketTransport } from "./index.js";
 import type { ServerProxySelfExitReason } from "./index.js";
-import { runClientHandshake, WIRE_PROTOCOL_VERSION } from "@tmuxcc/session-proxy";
+import { runClientHandshake, WIRE_PROTOCOL_VERSION } from "@remux/session-proxy";
 import type {
   Transport,
   Capabilities,
   ServerProxySnapshotMessage,
   ServerProxyCommandResponseMessage,
   MessageBase,
-} from "@tmuxcc/session-proxy";
+} from "@remux/session-proxy";
 
 // ---------------------------------------------------------------------------
 // Guards + small helpers

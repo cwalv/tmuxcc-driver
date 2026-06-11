@@ -37,10 +37,10 @@ fi
 # Write a deliberately-bad fixture: client importing session-proxy internal sub-path
 cat > "$FIXTURE" << 'EOF'
 // VERIFY FIXTURE — deliberately forbidden import.
-// client/src/ must only import from the @tmuxcc/session-proxy barrel, not sub-paths.
+// client/src/ must only import from the @remux/session-proxy barrel, not sub-paths.
 // This file exists only to confirm the client-no-session-proxy-runtime lint rule is
 // active.  Never commit real code like this.
-import { createSessionProxy } from "@tmuxcc/session-proxy/src/runtime/session-proxy.js";
+import { createSessionProxy } from "@remux/session-proxy/src/runtime/session-proxy.js";
 export { createSessionProxy };
 EOF
 

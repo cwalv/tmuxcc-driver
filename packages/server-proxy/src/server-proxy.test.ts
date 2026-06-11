@@ -40,19 +40,19 @@ import * as path from "node:path";
 
 import { createServerProxy, connectSocketTransport, serverProxySocketPath } from "./index.js";
 import type { ServerProxyHandle, ServerProxySelfExitReason } from "./index.js";
-import type { Transport } from "@tmuxcc/session-proxy";
+import type { Transport } from "@remux/session-proxy";
 
 import {
   runClientHandshake,
   WIRE_PROTOCOL_VERSION,
-} from "@tmuxcc/session-proxy";
+} from "@remux/session-proxy";
 import type {
   ServerProxySnapshotMessage,
   ServerProxyCommandResponseMessage,
   ServerProxySessionAddedMessage,
   MessageBase,
   Capabilities,
-} from "@tmuxcc/session-proxy";
+} from "@remux/session-proxy";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -275,7 +275,7 @@ describe("server-proxy – unit (no tmux)", () => {
       assert.ok(resp.result.ok, `Expected ok=true, got: ${JSON.stringify(resp.result)}`);
       const info = (resp.result as {
         ok: true;
-        payload: { info: import("@tmuxcc/session-proxy").ServerProxyInfoPayload };
+        payload: { info: import("@remux/session-proxy").ServerProxyInfoPayload };
       }).payload.info;
 
       assert.equal(info.socketName, socketName);
@@ -313,7 +313,7 @@ describe("server-proxy – unit (no tmux)", () => {
       assert.ok(resp.result.ok);
       const info = (resp.result as {
         ok: true;
-        payload: { info: import("@tmuxcc/session-proxy").ServerProxyInfoPayload };
+        payload: { info: import("@remux/session-proxy").ServerProxyInfoPayload };
       }).payload.info;
       assert.equal(info.logPath, "/tmp/some-server-proxy.log");
       mux.transport.close();
@@ -542,7 +542,7 @@ describe("server-proxy – integration (requires tmux)", { skip: !TMUX_AVAILABLE
     assert.ok(resp.result.ok, `server-proxy.info failed: ${JSON.stringify(resp.result)}`);
     const info = (resp.result as {
       ok: true;
-      payload: { info: import("@tmuxcc/session-proxy").ServerProxyInfoPayload };
+      payload: { info: import("@remux/session-proxy").ServerProxyInfoPayload };
     }).payload.info;
 
     // tmux server pid is live.
@@ -610,7 +610,7 @@ describe("server-proxy – integration (requires tmux)", { skip: !TMUX_AVAILABLE
     assert.ok(infoResp.result.ok, `server-proxy.info failed: ${JSON.stringify(infoResp.result)}`);
     const info = (infoResp.result as {
       ok: true;
-      payload: { info: import("@tmuxcc/session-proxy").ServerProxyInfoPayload };
+      payload: { info: import("@remux/session-proxy").ServerProxyInfoPayload };
     }).payload.info;
     const infoRow = info.sessions.find((s) => s.name === "own-clients-test");
     assert.ok(

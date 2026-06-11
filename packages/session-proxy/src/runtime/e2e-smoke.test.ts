@@ -45,7 +45,7 @@
  *
  * # Import strategy
  *
- * This file imports from @tmuxcc/client by relative src paths (outside
+ * This file imports from @remux/client by relative src paths (outside
  * rootDir) so that tsx resolves them correctly at runtime.  It is excluded
  * from the session-proxy's tsconfig build to avoid rootDir violations — matching the
  * pattern used by tmuxcc-vscode/tsconfig.json for session-proxy-transport.test.ts.

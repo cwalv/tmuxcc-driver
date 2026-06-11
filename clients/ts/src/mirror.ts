@@ -63,7 +63,7 @@ import type {
   SessionId,
   WindowLayout,
   PaneMode,
-} from "@tmuxcc/session-proxy";
+} from "@remux/session-proxy";
 import type { SessionProxyConnection } from "./connection.js";
 import type { RenderHook, ByteSource } from "./render-hook.js";
 

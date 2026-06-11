@@ -38,14 +38,14 @@ import {
   setFocus,
   projectSnapshot,
   createControlServer,
-} from "@tmuxcc/session-proxy";
+} from "@remux/session-proxy";
 import type {
   SnapshotMessage,
   Capabilities,
   Transport,
   ControlMessage,
   ControlServer,
-} from "@tmuxcc/session-proxy";
+} from "@remux/session-proxy";
 
 import { applySnapshot } from "./mirror.js";
 import type { ClientModel } from "./mirror.js";
@@ -478,14 +478,14 @@ function buildLivePipeline() {
 describe("tc-44wu0: applyDelta handles client-count.changed", () => {
   it("updates attachedClientCount in ClientModel", () => {
     const model = buildBaseModel();
-    const snap: import("@tmuxcc/session-proxy").SnapshotMessage = projectSnapshot(model, {
+    const snap: import("@remux/session-proxy").SnapshotMessage = projectSnapshot(model, {
       seq: 1,
       attachedClientCount: 1,
     });
     const { model: clientModel } = applySnapshot(snap);
 
     // Simulate a client-count.changed delta arriving (a second client connected).
-    const delta: import("@tmuxcc/session-proxy").SessionProxyMessage = {
+    const delta: import("@remux/session-proxy").SessionProxyMessage = {
       type: "client-count.changed",
       seq: 2,
       count: 2,
@@ -501,13 +501,13 @@ describe("tc-44wu0: applyDelta handles client-count.changed", () => {
 
   it("decrements attachedClientCount when a client detaches", () => {
     const model = buildBaseModel();
-    const snap: import("@tmuxcc/session-proxy").SnapshotMessage = projectSnapshot(model, {
+    const snap: import("@remux/session-proxy").SnapshotMessage = projectSnapshot(model, {
       seq: 1,
       attachedClientCount: 3,
     });
     const { model: clientModel } = applySnapshot(snap);
 
-    const delta: import("@tmuxcc/session-proxy").SessionProxyMessage = {
+    const delta: import("@remux/session-proxy").SessionProxyMessage = {
       type: "client-count.changed",
       seq: 2,
       count: 2,
@@ -518,13 +518,13 @@ describe("tc-44wu0: applyDelta handles client-count.changed", () => {
 
   it("does not affect other model fields", () => {
     const model = buildBaseModel();
-    const snap: import("@tmuxcc/session-proxy").SnapshotMessage = projectSnapshot(model, {
+    const snap: import("@remux/session-proxy").SnapshotMessage = projectSnapshot(model, {
       seq: 1,
       attachedClientCount: 1,
     });
     const { model: clientModel } = applySnapshot(snap);
 
-    const delta: import("@tmuxcc/session-proxy").SessionProxyMessage = {
+    const delta: import("@remux/session-proxy").SessionProxyMessage = {
       type: "client-count.changed",
       seq: 2,
       count: 5,
@@ -545,7 +545,7 @@ describe("tc-44wu0: ControlServer broadcasts client-count.changed on attach", ()
     const server = createControlServer(pipeline);
 
     // Track all control messages received by client A (after snapshot).
-    const receivedByA: import("@tmuxcc/session-proxy").ControlMessage[] = [];
+    const receivedByA: import("@remux/session-proxy").ControlMessage[] = [];
 
     // Connect client A.
     const { sessionProxy: dA, client: cA } = createInMemoryTransportPair();
@@ -556,7 +556,7 @@ describe("tc-44wu0: ControlServer broadcasts client-count.changed on attach", ()
 
     // Snapshot for A is already received (seq=1). Now spy on subsequent messages.
     const origSend = dA.sendControl.bind(dA);
-    dA.sendControl = function (msg: import("@tmuxcc/session-proxy").ControlMessage) {
+    dA.sendControl = function (msg: import("@remux/session-proxy").ControlMessage) {
       receivedByA.push(msg);
       return origSend(msg);
     };
@@ -578,7 +578,7 @@ describe("tc-44wu0: ControlServer broadcasts client-count.changed on attach", ()
     );
 
     // The last one (or only one) should have count=2.
-    const last = countMsgs[countMsgs.length - 1] as import("@tmuxcc/session-proxy").ClientCountChangedMessage;
+    const last = countMsgs[countMsgs.length - 1] as import("@remux/session-proxy").ClientCountChangedMessage;
     assert.equal(
       last.count,
       2,
@@ -608,9 +608,9 @@ describe("tc-44wu0: ControlServer broadcasts client-count.changed on attach", ()
     ]);
 
     // Now spy on messages to client A.
-    const receivedByA: import("@tmuxcc/session-proxy").ControlMessage[] = [];
+    const receivedByA: import("@remux/session-proxy").ControlMessage[] = [];
     const origSend = dA.sendControl.bind(dA);
-    dA.sendControl = function (msg: import("@tmuxcc/session-proxy").ControlMessage) {
+    dA.sendControl = function (msg: import("@remux/session-proxy").ControlMessage) {
       receivedByA.push(msg);
       return origSend(msg);
     };
@@ -629,7 +629,7 @@ describe("tc-44wu0: ControlServer broadcasts client-count.changed on attach", ()
       "client A must receive a client-count.changed after client B disconnects",
     );
 
-    const last = countMsgs[countMsgs.length - 1] as import("@tmuxcc/session-proxy").ClientCountChangedMessage;
+    const last = countMsgs[countMsgs.length - 1] as import("@remux/session-proxy").ClientCountChangedMessage;
     assert.equal(
       last.count,
       1,

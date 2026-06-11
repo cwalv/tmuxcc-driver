@@ -88,7 +88,7 @@
  * ✓ Streaming invariance: byte-by-byte feed produces the same tokens as one-shot.
  * ✓ Real captures for pre-3.4 (tmux 3.2a), post-3.4 (tmux 3.5a), and
  *   `-CC` DCS-wrapped (tmux 3.4) modes — closes hand-authored-only coverage.
- * ✓ Golden corpus runs in CI under `npm test -w @tmuxcc/session-proxy`.
+ * ✓ Golden corpus runs in CI under `npm test -w @remux/session-proxy`.
  *
  * @module parser/golden/golden.test.ts
  */

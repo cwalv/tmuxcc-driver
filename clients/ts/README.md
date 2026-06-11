@@ -19,4 +19,4 @@ Part of the `tmuxcc` repoweave project.
 tmux session on one session-proxy-wire connection. `RenderHook` callbacks carry
 `paneId` and `windowId` but no `sessionId` — the session is always the
 bound session. Clients that need multi-session discovery connect to the
-server-proxy first (`@tmuxcc/server-proxy`) and maintain one `Mirror` per claimed session.
+server-proxy first (`@remux/server-proxy`) and maintain one `Mirror` per claimed session.
