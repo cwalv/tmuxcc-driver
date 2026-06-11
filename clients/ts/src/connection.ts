@@ -74,7 +74,7 @@
 import {
   runClientHandshake,
   WIRE_PROTOCOL_VERSION,
-} from "@remux/session-proxy";
+} from "@tmuxcc/session-proxy";
 import type {
   Transport,
   SessionProxyMessage,
@@ -82,7 +82,7 @@ import type {
   NegotiatedSession,
   WireFeature,
   PaneId,
-} from "@remux/session-proxy";
+} from "@tmuxcc/session-proxy";
 
 // ---------------------------------------------------------------------------
 // Lifecycle state
@@ -154,7 +154,7 @@ export type StateChangeHandler = (state: ConnectionState) => void;
  * ```
  *
  * Transport is injected by the caller; the connection never creates one.
- * For tests use createInMemoryTransportPair() from @remux/session-proxy.
+ * For tests use createInMemoryTransportPair() from @tmuxcc/session-proxy.
  */
 export class SessionProxyConnection {
   // ── Injected transport ────────────────────────────────────────────────────

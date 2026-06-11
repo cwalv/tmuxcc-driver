@@ -31,7 +31,7 @@
  *
  * # Import strategy
  *
- * This file imports from @remux/client via relative src paths (outside the
+ * This file imports from @tmuxcc/client via relative src paths (outside the
  * session-proxy's rootDir). tsx resolves them at runtime without issues, but tsc
  * rejects the rootDir violation. Therefore this file is excluded from
  * session-proxy/tsconfig.json (see the "exclude" array there) — matching the pattern
@@ -65,9 +65,9 @@ import type { Transport, ControlMessage, ControlHandler, CloseHandler, PaneId } 
 // ---------------------------------------------------------------------------
 
 // @ts-ignore — outside rootDir; resolved by tsx at runtime
-import { SessionProxyConnection } from "@remux/client/src/connection.js";
+import { SessionProxyConnection } from "@tmuxcc/client/src/connection.js";
 // @ts-ignore — outside rootDir; resolved by tsx at runtime
-import { Mirror } from "@remux/client/src/mirror.js";
+import { Mirror } from "@tmuxcc/client/src/mirror.js";
 
 // ---------------------------------------------------------------------------
 // Fake pipeline (same pattern as serve.test.ts)

@@ -45,7 +45,7 @@
  *
  * # Import strategy
  *
- * This file imports from @remux/client by relative src paths (outside
+ * This file imports from @tmuxcc/client by relative src paths (outside
  * rootDir) so that tsx resolves them correctly at runtime.  It is excluded
  * from the session-proxy's tsconfig build to avoid rootDir violations — matching the
  * pattern used by tmuxcc-vscode/tsconfig.json for session-proxy-transport.test.ts.
@@ -84,15 +84,15 @@ import type { ClientMessage } from "../wire/index.js";
 // ---------------------------------------------------------------------------
 
 // @ts-ignore — outside rootDir; resolved by tsx at runtime
-import { Mirror } from "@remux/client/src/mirror.js";
+import { Mirror } from "@tmuxcc/client/src/mirror.js";
 // @ts-ignore — outside rootDir; resolved by tsx at runtime
-import { PaneStreamConsumer } from "@remux/client/src/pane-stream.js";
+import { PaneStreamConsumer } from "@tmuxcc/client/src/pane-stream.js";
 // @ts-ignore — outside rootDir; resolved by tsx at runtime
-import { createInputApi } from "@remux/client/src/input.js";
+import { createInputApi } from "@tmuxcc/client/src/input.js";
 // @ts-ignore — outside rootDir; resolved by tsx at runtime
-import { EchoRenderHook } from "@remux/client/src/render-hook.js";
+import { EchoRenderHook } from "@tmuxcc/client/src/render-hook.js";
 // @ts-ignore — outside rootDir; resolved by tsx at runtime
-import type { RenderHookCall, PaneInfo, ClientController } from "@remux/client/src/render-hook.js";
+import type { RenderHookCall, PaneInfo, ClientController } from "@tmuxcc/client/src/render-hook.js";
 
 // ---------------------------------------------------------------------------
 // Guard: only register the E1-E6 describe block when this file is the direct

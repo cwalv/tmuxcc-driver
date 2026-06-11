@@ -1,6 +1,6 @@
-# remux wire protocol
+# tmuxcc-driver wire protocol
 
-The seam between remux and its hosts, as a first-class language-neutral
+The seam between tmuxcc-driver and its hosts, as a first-class language-neutral
 artifact. Target contents:
 
 - JSON Schemas for every wire message (snapshot, deltas, verbs, results)

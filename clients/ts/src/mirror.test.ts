@@ -15,7 +15,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  // State model helpers — imported from @remux/session-proxy by package name.
+  // State model helpers — imported from @tmuxcc/session-proxy by package name.
   paneId,
   windowId,
   sessionId,
@@ -29,7 +29,7 @@ import {
   setFocus,
   projectSnapshot,
   diffModel,
-} from "@remux/session-proxy";
+} from "@tmuxcc/session-proxy";
 
 import type {
   SessionModel,
@@ -39,7 +39,7 @@ import type {
   SnapshotMessage,
   SessionProxyMessage,
   WindowLayout,
-} from "@remux/session-proxy";
+} from "@tmuxcc/session-proxy";
 
 import { Mirror, applySnapshot, applyDelta } from "./mirror.js";
 import type { ClientModel } from "./mirror.js";
@@ -109,7 +109,7 @@ function makeSession(
   windowIds: readonly WindowId[],
   activeWindowId: WindowId | null,
   name = "test-session",
-): import("@remux/session-proxy").Session {
+): import("@tmuxcc/session-proxy").Session {
   return { sessionId: id, name, windowIds, activeWindowId };
 }
 
@@ -123,7 +123,7 @@ function makeWindow(
   synchronizePanes = false,
   monitorActivity = true,   // ── tc-7xv.15 ──
   monitorSilence = 0,       // ── tc-7xv.15 ──
-): import("@remux/session-proxy").Window {
+): import("@tmuxcc/session-proxy").Window {
   return { windowId: id, sessionId: sessId, name, paneIds, activePaneId, layout, synchronizePanes, monitorActivity, monitorSilence }; // ── tc-7xv.15 ──
 }
 
@@ -133,7 +133,7 @@ function makePane(
   sessId: SessionId,
   cols = 80,
   rows = 24,
-): import("@remux/session-proxy").Pane {
+): import("@tmuxcc/session-proxy").Pane {
   return {
     paneId: id,
     windowId: winId,

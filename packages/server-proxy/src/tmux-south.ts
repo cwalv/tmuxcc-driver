@@ -45,8 +45,8 @@
  */
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { createTmuxHost } from "@remux/session-proxy";
-import type { TmuxHost } from "@remux/session-proxy";
+import { createTmuxHost } from "@tmuxcc/session-proxy";
+import type { TmuxHost } from "@tmuxcc/session-proxy";
 
 // ---------------------------------------------------------------------------
 // Types

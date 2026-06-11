@@ -36,7 +36,7 @@
  * lives in tmuxcc-vscode, not here.
  */
 
-import type { PaneId, WindowId, SessionId, WindowLayout, PaneMode, WireCommand } from "@remux/session-proxy";
+import type { PaneId, WindowId, SessionId, WindowLayout, PaneMode, WireCommand } from "@tmuxcc/session-proxy";
 
 // ---------------------------------------------------------------------------
 // Re-export wire primitives that renderers reference (convenience)
@@ -183,7 +183,7 @@ export interface RenderHook {
    *
    * `exitCode` is the process exit code if the session-proxy captured it.  It is
    * absent when the underlying tmux notification did not carry exit status
-   * (the most common case — see PaneClosedMessage in @remux/session-proxy).
+   * (the most common case — see PaneClosedMessage in @tmuxcc/session-proxy).
    *
    * Renderers should show an exit message and mark the terminal as exited here.
    * The tab MUST NOT auto-close; that is a user-driven action.
@@ -256,7 +256,7 @@ export interface RenderHook {
    * The layout of a window changed (panes added, removed, or resized).
    *
    * `layout` is the complete current geometry as a structured tree (see
-   * WindowLayout in @remux/session-proxy).  Renderers should apply the layout
+   * WindowLayout in @tmuxcc/session-proxy).  Renderers should apply the layout
    * ATOMICALLY: update all pane rects in one pass to avoid flicker.
    *
    * This callback fires both from snapshot replay (one call per window that

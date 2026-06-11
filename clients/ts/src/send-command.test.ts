@@ -22,13 +22,13 @@ import {
   createInMemoryTransportPair,
   runSessionProxyHandshake,
   WIRE_PROTOCOL_VERSION,
-} from "@remux/session-proxy";
+} from "@tmuxcc/session-proxy";
 import type {
   CommandRequestMessage,
   WireCommand,
   ClientMessage,
   SnapshotMessage,
-} from "@remux/session-proxy";
+} from "@tmuxcc/session-proxy";
 
 import { createInputApi } from "./input.js";
 import type { InputSender } from "./input.js";

@@ -23,8 +23,8 @@
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
-import { paneId } from "@remux/session-proxy";
-import type { InputMessage, ResizeRequestMessage, PaneId } from "@remux/session-proxy";
+import { paneId } from "@tmuxcc/session-proxy";
+import type { InputMessage, ResizeRequestMessage, PaneId } from "@tmuxcc/session-proxy";
 
 import { createInputApi } from "./input.js";
 import type { InputApi, InputSender } from "./input.js";

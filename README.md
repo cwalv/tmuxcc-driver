@@ -1,8 +1,8 @@
-# remux
+# tmuxcc-driver
 
 A stateful protocol adapter that puts a real API on tmux. tmux's control mode
 (`-CC`) is a notification stream plus ad-hoc command replies, not a queryable
-API; remux materializes the state (bootstrap + reducer) and serves a
+API; tmuxcc-driver materializes the state (bootstrap + reducer) and serves a
 consistent model — snapshot + ordered deltas — to any number of frontends.
 Category neighbors: LSP servers and DAP debug adapters.
 
@@ -15,7 +15,7 @@ Category neighbors: LSP servers and DAP debug adapters.
   session-proxies, multiplexes clients.
 - `packages/session-proxy/` — per-session adapter: speaks `tmux -CC`, holds
   the fold, serves snapshot + deltas.
-- `clients/ts/` — `@remux/client`, the TypeScript host SDK.
+- `clients/ts/` — `@tmuxcc/client`, the TypeScript host SDK.
 
 SDKs version with the protocol and live here; hosts (e.g. tmuxcc-vscode)
 version with their product and live in their own repos.

@@ -43,8 +43,8 @@ for state mutations.
 ## Public API
 
 ```ts
-import { createServerProxy } from "@remux/server-proxy";
-import type { ServerProxyHandle, ServerProxyOptions } from "@remux/server-proxy";
+import { createServerProxy } from "@tmuxcc/server-proxy";
+import type { ServerProxyHandle, ServerProxyOptions } from "@tmuxcc/server-proxy";
 ```
 
 ### `createServerProxy(opts: ServerProxyOptions): ServerProxyHandle`
@@ -84,7 +84,7 @@ import {
   createSocketTransport,
   connectSocketTransport,
   createSocketServer,
-} from "@remux/server-proxy";
+} from "@tmuxcc/server-proxy";
 ```
 
 `serverProxySocketPath(serverProxyId, opts?)` and `sessionProxySocketPath(serverProxyId, sessionId, opts?)`
@@ -109,7 +109,7 @@ The integration test runner in `tmuxcc-vscode/test/integration/runTest.ts`
 shows the canonical server-proxy-per-test pattern:
 
 ```ts
-import { createServerProxy } from "@remux/server-proxy";
+import { createServerProxy } from "@tmuxcc/server-proxy";
 
 const serverProxySocketName = `tmuxcc-test-${process.pid}`;
 const serverProxy = createServerProxy({ socketName: serverProxySocketName });

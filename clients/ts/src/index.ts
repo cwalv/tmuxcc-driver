@@ -1,5 +1,5 @@
 /**
- * @remux/client — headless client for tmuxcc.
+ * @tmuxcc/client — headless client for tmuxcc.
  *
  * No DOM, no host API, no tmux vocabulary.
  * Safe to import in Node, bundled for the browser, or run in a worker.
@@ -55,8 +55,8 @@ export * from "./input.js";
 
 export * from "./render-hook.js";
 
-// WireCommand is re-exported from render-hook.js (imported from @remux/session-proxy).
-// Consumers can also import it directly from @remux/session-proxy if they need the
+// WireCommand is re-exported from render-hook.js (imported from @tmuxcc/session-proxy).
+// Consumers can also import it directly from @tmuxcc/session-proxy if they need the
 // full command type union (OpenWindowCommand, SplitPaneCommand, etc.).
 
 // ---------------------------------------------------------------------------

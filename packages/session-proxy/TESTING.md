@@ -1,4 +1,4 @@
-# Testing policy — @remux/session-proxy
+# Testing policy — @tmuxcc/session-proxy
 
 ## Real-tmux timing-sensitive suites
 
@@ -44,7 +44,7 @@ layer; their flakes are the canary.
 ### `ci:soak` step
 
 `npm run ci:soak` (from the workspace root or directly via
-`npm run ci:soak -w @remux/session-proxy`) runs `flow-load.test.ts`,
+`npm run ci:soak -w @tmuxcc/session-proxy`) runs `flow-load.test.ts`,
 `resilience.test.ts`, and `topology-canary.test.ts` **N=3 consecutive times**
 (override with `SOAK_N=5`).  CI fails if:
 

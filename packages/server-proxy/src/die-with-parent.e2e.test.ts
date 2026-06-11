@@ -42,13 +42,13 @@ import { join, dirname } from "node:path";
 import * as fs from "node:fs";
 
 import { connectSocketTransport, serverProxySocketPath } from "./index.js";
-import { runClientHandshake, WIRE_PROTOCOL_VERSION } from "@remux/session-proxy";
+import { runClientHandshake, WIRE_PROTOCOL_VERSION } from "@tmuxcc/session-proxy";
 import type {
   Transport,
   ServerProxyCommandResponseMessage,
   Capabilities,
   MessageBase,
-} from "@remux/session-proxy";
+} from "@tmuxcc/session-proxy";
 
 // ---------------------------------------------------------------------------
 // Paths + guards

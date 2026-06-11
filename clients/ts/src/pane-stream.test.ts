@@ -27,8 +27,8 @@ import {
   runSessionProxyHandshake,
   WIRE_PROTOCOL_VERSION,
   paneId,
-} from "@remux/session-proxy";
-import type { PaneId } from "@remux/session-proxy";
+} from "@tmuxcc/session-proxy";
+import type { PaneId } from "@tmuxcc/session-proxy";
 
 import { SessionProxyConnection } from "./connection.js";
 import { PaneStreamConsumer, connectPaneStream } from "./pane-stream.js";

@@ -34,12 +34,12 @@ import {
   HandshakeError,
   WIRE_PROTOCOL_VERSION,
   paneId,
-} from "@remux/session-proxy";
+} from "@tmuxcc/session-proxy";
 import type {
   SessionProxyMessage,
   NegotiatedSession,
   PaneId,
-} from "@remux/session-proxy";
+} from "@tmuxcc/session-proxy";
 
 import { SessionProxyConnection } from "./connection.js";
 import type { ConnectionState } from "./connection.js";
@@ -285,7 +285,7 @@ describe("SessionProxyConnection — post-handshake control routing", () => {
       type: "pane.opened",
       seq: 2,
       paneId: P0,
-      windowId: "w0" as import("@remux/session-proxy").WindowId,
+      windowId: "w0" as import("@tmuxcc/session-proxy").WindowId,
       cols: 80,
       rows: 24,
       active: true,
@@ -311,7 +311,7 @@ describe("SessionProxyConnection — post-handshake control routing", () => {
         type: "pane.opened",
         seq: 2,
         paneId: P0,
-        windowId: "w0" as import("@remux/session-proxy").WindowId,
+        windowId: "w0" as import("@tmuxcc/session-proxy").WindowId,
         cols: 80,
         rows: 24,
         active: true,
@@ -320,7 +320,7 @@ describe("SessionProxyConnection — post-handshake control routing", () => {
         type: "pane.closed",
         seq: 3,
         paneId: P0,
-        windowId: "w0" as import("@remux/session-proxy").WindowId,
+        windowId: "w0" as import("@tmuxcc/session-proxy").WindowId,
       },
     ];
 
@@ -383,7 +383,7 @@ describe("SessionProxyConnection — send() in ready state", () => {
   it("send() delivers a ClientMessage to the session-proxy transport", async () => {
     const { conn, sessionProxyTransport } = makePair();
 
-    const sessionProxyReceived: import("@remux/session-proxy").ControlMessage[] = [];
+    const sessionProxyReceived: import("@tmuxcc/session-proxy").ControlMessage[] = [];
     sessionProxyTransport.onControl((msg) => sessionProxyReceived.push(msg));
 
     const sessionProxyHandshake = runSessionProxyHandshake(sessionProxyTransport, caps());
@@ -394,7 +394,7 @@ describe("SessionProxyConnection — send() in ready state", () => {
     // cleared when it settled.  Re-install it for this test.
     sessionProxyTransport.onControl((msg) => sessionProxyReceived.push(msg));
 
-    const inputMsg: import("@remux/session-proxy").InputMessage = {
+    const inputMsg: import("@tmuxcc/session-proxy").InputMessage = {
       type: "input",
       seq: 1,
       paneId: P0,
@@ -470,7 +470,7 @@ describe("SessionProxyConnection — message buffering", () => {
       type: "focus.changed",
       seq: 2,
       paneId: P0,
-      windowId: "w0" as import("@remux/session-proxy").WindowId,
+      windowId: "w0" as import("@tmuxcc/session-proxy").WindowId,
     };
     sessionProxyTransport.sendControl(msg);
 
@@ -490,7 +490,7 @@ describe("SessionProxyConnection — message buffering", () => {
       type: "pane.opened",
       seq: 3,
       paneId: P0,
-      windowId: "w0" as import("@remux/session-proxy").WindowId,
+      windowId: "w0" as import("@tmuxcc/session-proxy").WindowId,
       cols: 80,
       rows: 24,
       active: false,
@@ -516,7 +516,7 @@ describe("SessionProxyConnection — message buffering", () => {
       type: "pane.opened",
       seq: 2,
       paneId: P0,
-      windowId: "w0" as import("@remux/session-proxy").WindowId,
+      windowId: "w0" as import("@tmuxcc/session-proxy").WindowId,
       cols: 80,
       rows: 24,
       active: true,

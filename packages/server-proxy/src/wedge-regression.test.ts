@@ -50,7 +50,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as fs from "node:fs";
 
-// Pull the session-proxy-side flow-control and demux primitives from @remux/session-proxy
+// Pull the session-proxy-side flow-control and demux primitives from @tmuxcc/session-proxy
 // (server-proxy depends on sessionProxy).  The SocketTransport lives in this same package,
 // so we import it directly via the relative path.
 import {
@@ -58,12 +58,12 @@ import {
   createFlowController,
   DEFAULT_HIGH_WATER_BYTES,
   paneId as mintPaneId,
-} from "@remux/session-proxy";
+} from "@tmuxcc/session-proxy";
 import type {
   PaneId,
   CommandResult,
   Transport,
-} from "@remux/session-proxy";
+} from "@tmuxcc/session-proxy";
 
 import { connectSocketTransport } from "./socket-transport.js";
 

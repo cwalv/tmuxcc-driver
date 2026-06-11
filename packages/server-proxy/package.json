@@ -1,5 +1,5 @@
 {
-  "name": "@remux/server-proxy",
+  "name": "@tmuxcc/server-proxy",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -25,7 +25,7 @@
     "format": "prettier --write src"
   },
   "dependencies": {
-    "@remux/session-proxy": "*",
+    "@tmuxcc/session-proxy": "*",
     "prom-client": "^15.1.3"
   },
   "devDependencies": {

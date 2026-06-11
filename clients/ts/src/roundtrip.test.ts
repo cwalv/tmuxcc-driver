@@ -1,7 +1,7 @@
 /**
  * Wire protocol round-trip test — cross-package proof.
  *
- * Imports everything from "@remux/session-proxy" by package name (workspace resolution).
+ * Imports everything from "@tmuxcc/session-proxy" by package name (workspace resolution).
  * This is the monorepo ergonomics proof: the client imports all wire types and
  * utilities from the session-proxy package without a publish step.
  *
@@ -46,7 +46,7 @@ import {
   encodeFrame,
   decodeFrame,
   FrameDecoder,
-} from "@remux/session-proxy";
+} from "@tmuxcc/session-proxy";
 
 import type {
   PaneId,
@@ -77,7 +77,7 @@ import type {
   CommandRequestMessage,
   // Layout types (used in snapshot / layout.updated)
   WindowLayout,
-} from "@remux/session-proxy";
+} from "@tmuxcc/session-proxy";
 
 // ---------------------------------------------------------------------------
 // Shared test fixtures
@@ -369,7 +369,7 @@ function jsonRoundTrip<T>(value: T): T {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe("wire round-trip — cross-package import from @remux/session-proxy", () => {
+describe("wire round-trip — cross-package import from @tmuxcc/session-proxy", () => {
   // ── Control plane: session-proxy→client ──────────────────────────────────────────
 
   describe("control plane — session-proxy→client JSON round-trips", () => {
