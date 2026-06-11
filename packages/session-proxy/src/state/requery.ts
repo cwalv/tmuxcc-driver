@@ -270,6 +270,32 @@ export interface RequeryEngine {
   getModel(): SessionModel;
 
   /**
+   * Overwrite the engine's stored model with `model`.
+   *
+   * Used by the pipeline's model-patch path (tc-128.4) for the cases where
+   * the model needs to change WITHOUT a tmux-side requery: optimistic
+   * updates from `input-path` (synchronize-panes etc.) and the
+   * `%subscription-changed sync-watch` value feed.
+   *
+   * The patched model becomes the baseline for the next requery cycle's
+   * diff — without this, the next `engine.requery()` would emit a
+   * compensating delta that undoes the patch.
+   *
+   * Does NOT clear the dirty bit, does NOT cancel an in-flight cycle: if a
+   * requery is currently running, its result still commits cleanly (the
+   * candidate model is built from the FRESH tmux replies, not from
+   * `_model`). The caller is responsible for sequencing: callers should
+   * apply patches only when no requery is in flight, or accept that a
+   * concurrent requery will overwrite the patch with the authoritative
+   * snapshot — which is the correct behaviour for any field tmux also
+   * reports (window-option subscriptions land in `list-windows` output as
+   * well, so a follow-up requery will reaffirm the same value).
+   *
+   * Throws nothing; pure assignment.
+   */
+  setModel(model: SessionModel): void;
+
+  /**
    * Mark the engine dirty. If a `requery()` is currently in flight the
    * cycle will be re-run on completion (the "dirtied mid-flight" case from
    * the bead description). If no cycle is in flight this is a hint for the
@@ -342,6 +368,10 @@ class RequeryEngineImpl implements RequeryEngine {
 
   getModel(): SessionModel {
     return this._model;
+  }
+
+  setModel(model: SessionModel): void {
+    this._model = model;
   }
 
   markDirty(): void {

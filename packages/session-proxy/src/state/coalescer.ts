@@ -49,6 +49,7 @@
  */
 
 import type { RequeryEngine, RequeryResult } from "./requery.js";
+import type { NotificationEvent } from "../parser/notifications.js";
 
 // ---------------------------------------------------------------------------
 // Clock abstraction (injectable for tests)
@@ -102,6 +103,74 @@ export function realClock(): Clock {
  */
 export type TopologyEventKind = string;
 
+/**
+ * Classify a parsed `NotificationEvent` as topology-kind (should trigger a
+ * requery) or content-kind / out-of-band (handled elsewhere).
+ *
+ * The §6 policy demotes every topology-affecting `%`-notification to a dirty
+ * bit; this helper is the ONE place where the parser vocabulary is mapped onto
+ * "does this invalidate the topology model?". The reducer's per-event
+ * interpretation is gone (tc-128.4) — the coalescer only ever cares about the
+ * dichotomy, not the specifics.
+ *
+ * Returns `true` for any event that could reflect a change in the
+ * sessions/windows/panes/layout/focus structure. Returns `false` for content-
+ * plane events (`output`, `extended-output`), flow control (`pause`,
+ * `continue`), purely-informational events (`exit`), the internal synthetic
+ * events used by `input-path` for optimistic updates, and `subscription-
+ * changed` (which is the polled value feed, not a topology notification).
+ *
+ * `unknown` keywords default to topology — we'd rather requery a few extra
+ * times than miss a change. `%layout-change` arrives as `unknown` (it is not
+ * in the parser vocabulary), and it MUST be classified as topology.
+ */
+export function isTopologyEvent(event: NotificationEvent): boolean {
+  switch (event.kind) {
+    // Content plane — bytes streamed to a pane.
+    case "output":
+    case "extended-output":
+      return false;
+
+    // Flow control — out-of-band signals for the FlowController.
+    case "pause":
+    case "continue":
+      return false;
+
+    // Lifecycle — handled by the runtime's onExit path, not topology.
+    case "exit":
+      return false;
+
+    // Subscription value delivery (e.g. the sync-watch poll). Handled by the
+    // runtime as a model patch on the matching window, NOT a topology change.
+    case "subscription-changed":
+      return false;
+
+    // Optimistic / compensating model patches injected by input-path. These
+    // mutate the model directly via the pipeline's patch path; they are not
+    // signals from tmux about topology drift.
+    case "internal:set-window-sync":
+    case "internal:set-window-monitor-activity":
+    case "internal:set-window-monitor-silence":
+      return false;
+
+    // Everything else from tmux — every topology-affecting notification —
+    // is a dirty bit. We don't enumerate them positively: any future tmux
+    // event we don't recognize lands in "unknown" and falls through here.
+    case "window-add":
+    case "window-close":
+    case "window-renamed":
+    case "window-pane-changed":
+    case "session-changed":
+    case "client-session-changed":
+    case "session-renamed":
+    case "sessions-changed":
+    case "session-window-changed":
+    case "pane-mode-changed":
+    case "unknown":
+      return true;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Options
 // ---------------------------------------------------------------------------
@@ -152,6 +221,31 @@ export interface CoalescerOptions {
    * here are caught and ignored.
    */
   readonly onError?: (err: unknown) => void;
+
+  /**
+   * Optional sink invoked once per SUCCESSFUL `engine.requery()` completion,
+   * with the freshly-converged model and the wire deltas needed to transform
+   * the previous served model into it. This is the handoff the pipeline uses
+   * to broadcast deltas to clients — the coalescer drives requery cycles, and
+   * this hook lets the runtime stamp + emit the resulting deltas without
+   * polling the engine.
+   *
+   * Fired ONLY on successful cycles: when the engine reports `failed: true`
+   * (a `%error` reply, or convergence budget exhausted), this is NOT called —
+   * the engine and coalescer handle the retry path internally and the runtime
+   * never sees a torn snapshot.
+   *
+   * The hook may receive an empty `deltas` array (a clean requery cycle that
+   * found no observable change — e.g. a heartbeat in steady state, or a
+   * trailing-edge cycle whose dirty signal was driven by a notification that
+   * did not actually alter the structure). The runtime should treat empty as
+   * a no-op (no deltas to send) but still update any "last served model"
+   * snapshot if it tracks one.
+   *
+   * Throws here are caught and ignored so a misbehaving subscriber cannot
+   * break the pipeline.
+   */
+  readonly onDeltas?: (result: RequeryResult) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -214,6 +308,7 @@ class CoalescerImpl implements Coalescer {
   private readonly _heartbeatMs: number;
   private readonly _onNotify: ((kind: TopologyEventKind | undefined) => void) | undefined;
   private readonly _onError: ((err: unknown) => void) | undefined;
+  private readonly _onDeltas: ((result: RequeryResult) => void) | undefined;
 
   /**
    * Wall-clock timestamp of the most recent `requery()` invocation start, or
@@ -238,6 +333,7 @@ class CoalescerImpl implements Coalescer {
     this._heartbeatMs = opts.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
     this._onNotify = opts.onNotify;
     this._onError = opts.onError;
+    this._onDeltas = opts.onDeltas;
   }
 
   notify(kind?: TopologyEventKind): void {
@@ -350,6 +446,19 @@ class CoalescerImpl implements Coalescer {
       // next ceiling boundary so we don't busy-loop into the same error.
       this._scheduleRetryAfterFailure();
       return;
+    }
+
+    // Successful cycle: hand the converged result to the runtime so it can
+    // stamp + broadcast the deltas. This fires BEFORE evaluating whether to
+    // schedule another cycle, so any synchronous follow-up the consumer does
+    // (e.g. updating a "last served model" reference) lands before the next
+    // requery's startModel snapshot is taken.
+    if (result !== null && this._onDeltas !== undefined) {
+      try {
+        this._onDeltas(result);
+      } catch {
+        // Subscriber errors must not break the pipeline.
+      }
     }
 
     // Successful cycle. If the engine is somehow still dirty (something

@@ -63,11 +63,15 @@ export {
 export type { PaneBufferStore } from "./scrollback.js";
 export { createPaneBufferStore, DEFAULT_CAP_BYTES } from "./scrollback.js";
 
-// Reducer types (tc-j9c.2: SwitchClientOutcome for switch-client narrowing)
-export type { ReducerContext, PaneBufferStore as ReducerPaneBufferStore, SwitchClientOutcome } from "./reducer.js";
-export { reduce } from "./reducer.js";
+// tc-j9c.2: SwitchClientOutcome — retained as a wire-level type used by the
+// session-proxy runtime to react to switch-client drift detected from
+// requery-driven model deltas (the per-event reducer that originally owned
+// this type was retired in tc-128.4).
+export type { SwitchClientOutcome } from "./switch-client.js";
 
-// tc-835: attach-time bootstrap → live-delta handoff
+// tc-835: bootstrap reply parsing + initial-model builder. The
+// `BootstrapCoordinator` (per-event reducer driver) was retired in tc-128.4;
+// the requery engine now owns the bootstrap path end-to-end.
 export {
   BOOTSTRAP_WINDOWS_FORMAT,
   BOOTSTRAP_PANES_FORMAT,
@@ -75,13 +79,10 @@ export {
   parseWindowsReply,
   parsePanesReply,
   buildInitialModel,
-  BootstrapCoordinator,
 } from "./bootstrap.js";
 export type {
   WindowsReplyRow,
   PanesReplyRow,
-  BootstrapCoordinatorOptions,
-  BootstrapPhase,
 } from "./bootstrap.js";
 
 // tc-128.1: requery engine + diff-to-deltas
@@ -94,7 +95,7 @@ export type {
 } from "./requery.js";
 
 // tc-128.2: dirty-bit coalescer (leading edge, 1 Hz ceiling, heartbeat)
-export { createCoalescer, realClock } from "./coalescer.js";
+export { createCoalescer, realClock, isTopologyEvent } from "./coalescer.js";
 export type {
   Coalescer,
   CoalescerOptions,

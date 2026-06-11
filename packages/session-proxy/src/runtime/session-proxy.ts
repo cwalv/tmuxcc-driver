@@ -53,8 +53,8 @@ import type { FlowController, FlowControllerOptions } from "./flow-control.js";
 import type { Transport } from "../wire/transport.js";
 import { paneId as mintPaneId } from "../wire/ids.js";
 import type { PaneId } from "../wire/ids.js";
-import type { PaneBufferStore } from "../state/reducer.js";
-import type { SwitchClientOutcome } from "../state/reducer.js";
+import type { PaneBufferStore } from "../state/scrollback.js";
+import type { SwitchClientOutcome } from "../state/switch-client.js";
 import { createSessionProxyRegistry, createStormAlarm } from "../metrics/index.js";
 import type { SessionProxyRegistry, StormAlarmOptions } from "../metrics/index.js";
 
@@ -222,6 +222,16 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
   const pipeline = createRuntimePipeline(host, {
     buffers: accountingStore,
     sessionName: opts.host.sessionName,
+    // tc-x6l: per-kind counters + storm alarm attach to the topology
+    // classification choke point — the coalescer's onNotify path, surfaced
+    // through this pipeline option. The hook only fires for topology-
+    // classified notifications (output/pause/continue and the optimistic
+    // internal:* events never count); the storm alarm and counters only
+    // care about topology rate, so this is the right scope.
+    onTopologyNotify: (kind) => {
+      metricsRegistry.incTopologyEvent(kind);
+      stormAlarm.record(kind);
+    },
     onSwitchClientDetected: (outcome: SwitchClientOutcome) => {
       if (outcome === "reattach") {
         // The bound session is still alive but the -CC client drifted away.
@@ -264,72 +274,54 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
   });
 
   // 8. Route %pause / %continue notifications from the pipeline to the
-  //    FlowController.  These are no-ops at the model level (reducer returns
-  //    the same model reference), so they don't appear in onModelChange.
-  //    We subscribe via pipeline.onNotification which fires for every event
-  //    regardless of model changes.
+  //    FlowController.  These are content-plane signals, not topology — they
+  //    don't fire onTopologyNotify (and don't change the model), so we keep
+  //    the explicit subscription via pipeline.onNotification (which fires for
+  //    every parsed event regardless of category).
   //
   //    %extended-output byte accounting is already handled by accountingStore
-  //    (which calls fc.onPaneBytes on every append).  fc.onExtendedOutput
-  //    simply delegates to onPaneBytes, so we don't double-count here.
+  //    (which calls fc.onPaneBytes on every append).
   //
-  //    tc-x6l: This subscription is also the topology-event choke point for
-  //    per-kind counter increments and storm alarm recording. `event.kind`
-  //    is the classifier (same vocabulary as the coalescer's TopologyEventKind
-  //    — tc-128.4 will re-point these counters to coalescer.onNotify when it
-  //    wires the coalescer into the pipeline, requiring only a one-line change
-  //    here). We record ALL notification kinds (including "output",
-  //    "extended-output", "pause", "continue") so the counters reflect the
-  //    full notification volume. The storm alarm only fires on topology events
-  //    by design — but recording output events gives an honest total.
+  //    tc-x6l counter increments + storm alarm record live in the pipeline's
+  //    onTopologyNotify hook above (wired at construction). That hook fires
+  //    once per topology-classified notification — the single choke point the
+  //    coalescer was shaped for — so we don't double-count by also recording
+  //    here.
   pipeline.onNotification((event) => {
-    // Flow control (existing wiring — must come first for correctness).
     if (event.kind === "pause") {
       fc.onPauseNotification(mintPaneId("p" + event.paneId));
     } else if (event.kind === "continue") {
       fc.onContinueNotification(mintPaneId("p" + event.paneId));
     }
-
-    // tc-x6l: metrics + storm alarm (hot path — only counter.inc() per event).
-    metricsRegistry.incTopologyEvent(event.kind);
-    stormAlarm.record(event.kind);
   });
 
-  // 9. Output-before-topology buffering (tc-128.3).
+  // 9. Output-before-topology buffering (tc-128.3, tc-128.4).
   //
-  // The demux holds fan-out for panes not yet known to the topology model (the
-  // "unknown-pane window" race: under requery a %output frame can arrive for a
-  // pane before the requery snapshot that reveals it).  We opt in via
-  // activatePaneTracking(), then sync the demux's known-pane set by watching
+  // The demux holds fan-out for panes not yet known to the topology model
+  // (under requery, a %output frame can arrive for a pane before the requery
+  // snapshot reveals it). Pane tracking is always-on (tc-128.4 removed the
+  // opt-in); we keep the demux's known-pane set in sync by watching
   // model-change events: new panes → notifyPaneBound, removed panes →
   // notifyPaneClosed.
   //
   // Ordering note: this subscription fires BEFORE per-client model-change
   // subscriptions (which are registered in addClient(), called after factory
-  // time).  However, notifyPaneBound uses queueMicrotask to defer the flush
-  // so that control-plane `pane.opened` deltas reach clients before the
-  // flushed data bytes.  See output-demux.ts notifyPaneBound for details.
+  // time). notifyPaneBound uses queueMicrotask to defer the flush so that
+  // control-plane `pane.opened` deltas reach clients before the flushed data
+  // bytes. See output-demux.ts notifyPaneBound for details.
   //
   // Bootstrap path: pipeline.ts emits the initial model-change as
   // (initialModel, initialModel) — same reference for both prev and next —
   // so diffModel(prev, next) would yield zero deltas and miss the bootstrap
-  // panes.  We use demux.isPaneKnown() for addition detection (asks the demux
-  // whether it already knows the pane) so that ALL panes present in the next
-  // model are bound, including those that first appear in bootstrap.
-  // For removals we iterate prev.panes and check next.panes; at bootstrap
-  // prev === next so no false closures.
-  demux.activatePaneTracking();
+  // panes. We use demux.isPaneKnown() for addition detection so ALL panes
+  // present in the next model are bound, including those that first appear
+  // in bootstrap.
   pipeline.onModelChange((next, prev) => {
-    // Bind any pane in the new model that the demux doesn't yet know.
-    // Uses demux.isPaneKnown() instead of prev/next diff so bootstrap panes
-    // (where prev === next === initialModel) are not missed.
     for (const pid of next.panes.keys()) {
       if (!demux.isPaneKnown(pid)) {
         demux.notifyPaneBound(pid);
       }
     }
-    // Close panes that are no longer in the model.  At bootstrap prev === next
-    // so this loop is a no-op; for genuine removals it fires once per pane.
     for (const pid of prev.panes.keys()) {
       if (!next.panes.has(pid)) {
         demux.notifyPaneClosed(pid);
