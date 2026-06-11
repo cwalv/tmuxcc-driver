@@ -66,6 +66,19 @@ export interface PaneInfo {
    * Renderers MAY use this to avoid a separate focus event on startup.
    */
   readonly active: boolean;
+  /**
+   * tc-zna.12: True iff this onPaneOpened call corresponds to a freshly-arriving
+   * pane delta (a `pane.opened` event the Mirror just received and applied).
+   * False when the pane is replayed from the initial snapshot during
+   * `Mirror.attach()` — the pane was already in the model before the renderer
+   * attached, so the call is a catch-up replay, not a new pane creation.
+   *
+   * Renderers that gate provenance / own-verb attribution (e.g. the VS Code
+   * `PerPaneTerminalFactory` bind-on-provenance gate) consume this to avoid
+   * letting a snapshot-replay pane race past the next-pane-open observer
+   * before the verb's real pane arrives.  Other renderers MAY ignore it.
+   */
+  readonly created: boolean;
 }
 
 /**

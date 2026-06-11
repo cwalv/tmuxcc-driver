@@ -156,7 +156,7 @@ function makeMirror(snap: SnapshotMessage): { mirror: Mirror; byteSource: FakeBy
 describe("NoOpRenderHook", () => {
   it("satisfies the RenderHook interface (compile check)", () => {
     // All methods are callable without throwing.
-    NoOpRenderHook.onPaneOpened({ paneId: pid("p0"), windowId: wid("w0"), cols: 80, rows: 24, active: false });
+    NoOpRenderHook.onPaneOpened({ paneId: pid("p0"), windowId: wid("w0"), cols: 80, rows: 24, active: false, created: true });
     NoOpRenderHook.onPaneClosed(pid("p0"));
     NoOpRenderHook.onPaneResized(pid("p0"), 80, 24);
     NoOpRenderHook.onPaneModeChanged(pid("p0"), "copy" as PaneMode);
@@ -179,7 +179,7 @@ describe("NoOpRenderHook", () => {
 describe("EchoRenderHook", () => {
   it("records onPaneOpened", () => {
     const echo = new EchoRenderHook();
-    const pane = { paneId: pid("p1"), windowId: wid("w1"), cols: 120, rows: 40, active: true };
+    const pane = { paneId: pid("p1"), windowId: wid("w1"), cols: 120, rows: 40, active: true, created: true };
     echo.onPaneOpened(pane);
     assert.equal(echo.calls.length, 1);
     const call = echo.calls[0];

@@ -923,6 +923,8 @@ export class Mirror {
             cols: pane.cols,
             rows: pane.rows,
             active: pane.paneId === curr.focus.paneId,
+            // tc-zna.12: post-attach delta — this is a freshly-arriving pane.
+            created: true,
           });
           subscribeBytes(pid);
         } else if (prevPane.cols !== pane.cols || prevPane.rows !== pane.rows) {
@@ -985,6 +987,11 @@ export class Mirror {
         cols: pane.cols,
         rows: pane.rows,
         active: pane.paneId === initial.focus.paneId,
+        // tc-zna.12: initial-snapshot replay — these panes existed before
+        // attach() ran, so the call is a catch-up replay rather than a fresh
+        // pane creation.  The factory's bind-on-provenance gate uses this to
+        // refuse to consume an own-verb claim for a replay-race pane.
+        created: false,
       });
       subscribeBytes(pid);
     }
