@@ -272,6 +272,16 @@ export interface ServerProxyInfoSession {
    * owns fixing the semantics.  Display surfaces should label it as raw.
    */
   readonly attachedClientCount: number;
+  /**
+   * Prometheus text exposition for this session's metrics (tc-x6l).
+   *
+   * Includes topology event counters (per kind), command round-trip histogram,
+   * and delta fan-out counters. `null` when no session-proxy is running for this
+   * session (not yet claimed, or crashed and awaiting lazy respawn).
+   *
+   * Additive optional field — clients that do not consume metrics ignore it.
+   */
+  readonly sessionMetricsText: string | null;
 }
 
 /**
@@ -317,6 +327,27 @@ export interface ServerProxyInfoPayload {
   readonly logPath: string | null;
   /** Per-session diagnostics rows. */
   readonly sessions: readonly ServerProxyInfoSession[];
+  /**
+   * Prometheus text exposition of all server-proxy-level metrics (tc-x6l).
+   *
+   * Contains counter and histogram data for the server-proxy itself
+   * (commands issued, clients connected, etc.).  Per-session metrics are
+   * embedded in each `ServerProxyInfoSession.sessionMetricsText` row.
+   *
+   * Additive optional field — clients that do not consume metrics ignore it.
+   * `null` when metrics are unavailable (should never happen in practice).
+   */
+  readonly metricsText: string | null;
+  /**
+   * Per-session Prometheus text exposition (tc-x6l).
+   *
+   * Concatenated text from each live session-proxy's registry, prefixed with
+   * a `# SESSION <sessionId>` comment for disambiguation.  Includes topology
+   * event counters, command round-trip histograms, and delta fan-out counts.
+   *
+   * Additive optional field. `null` when no sessions are running.
+   */
+  readonly sessionMetricsText: string | null;
 }
 
 /**

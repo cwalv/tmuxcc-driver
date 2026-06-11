@@ -55,6 +55,8 @@ import { paneId as mintPaneId } from "../wire/ids.js";
 import type { PaneId } from "../wire/ids.js";
 import type { PaneBufferStore } from "../state/reducer.js";
 import type { SwitchClientOutcome } from "../state/reducer.js";
+import { createSessionProxyRegistry, createStormAlarm } from "../metrics/index.js";
+import type { SessionProxyRegistry, StormAlarmOptions } from "../metrics/index.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -76,6 +78,13 @@ export interface SessionProxyOptions {
   input?: InputPathOptions;
   /** Options forwarded to createFlowController (highWaterBytes / lowWaterBytes). */
   flow?: FlowControllerOptions;
+  /**
+   * Options for the topology-event storm alarm (tc-x6l).
+   *
+   * Omit to accept the defaults (2500 events / 5 s window, stderr alarm).
+   * Pass `{ threshold: Infinity }` to disable the alarm while keeping counters.
+   */
+  stormAlarm?: StormAlarmOptions;
 }
 
 /**
@@ -98,6 +107,18 @@ export interface SessionProxy {
   readonly inputPath: InputPath;
   /** The flow controller (onPaneBytes / noteDrained / …). */
   readonly flowController: FlowController;
+  /**
+   * The metrics registry for this session-proxy (tc-x6l).
+   *
+   * Call `metrics.metrics()` to get the Prometheus text exposition for the
+   * debug surface (e.g. `server-proxy.info` response). The registry accumulates
+   * topology event counts, command counts, delta fan-out counts, and
+   * command round-trip latency histograms.
+   *
+   * The storm alarm runs automatically once `start()` is called and logs to
+   * stderr on sustained high topology-event rates.
+   */
+  readonly metrics: SessionProxyRegistry;
 
   /**
    * Start the sessionProxy: spawn tmux and run the bootstrap exchange.
@@ -145,6 +166,16 @@ export interface SessionProxy {
  * @param opts - Optional per-component options.
  */
 export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
+  // 0. Metrics registry + storm alarm (tc-x6l).
+  //
+  //    Created before any component so the registry is always present. The
+  //    storm alarm's timer is NOT started yet — we call alarm.start() inside
+  //    the SessionProxy.start() method, after the pipeline is live, so the
+  //    5-second window doesn't start counting from factory time (when no
+  //    notifications can arrive yet).
+  const metricsRegistry = createSessionProxyRegistry();
+  const stormAlarm = createStormAlarm(opts.stormAlarm ?? {});
+
   // 1. Host
   const host = createTmuxHost(opts.host);
 
@@ -241,12 +272,27 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
   //    %extended-output byte accounting is already handled by accountingStore
   //    (which calls fc.onPaneBytes on every append).  fc.onExtendedOutput
   //    simply delegates to onPaneBytes, so we don't double-count here.
+  //
+  //    tc-x6l: This subscription is also the topology-event choke point for
+  //    per-kind counter increments and storm alarm recording. `event.kind`
+  //    is the classifier (same vocabulary as the coalescer's TopologyEventKind
+  //    — tc-128.4 will re-point these counters to coalescer.onNotify when it
+  //    wires the coalescer into the pipeline, requiring only a one-line change
+  //    here). We record ALL notification kinds (including "output",
+  //    "extended-output", "pause", "continue") so the counters reflect the
+  //    full notification volume. The storm alarm only fires on topology events
+  //    by design — but recording output events gives an honest total.
   pipeline.onNotification((event) => {
+    // Flow control (existing wiring — must come first for correctness).
     if (event.kind === "pause") {
       fc.onPauseNotification(mintPaneId("p" + event.paneId));
     } else if (event.kind === "continue") {
       fc.onContinueNotification(mintPaneId("p" + event.paneId));
     }
+
+    // tc-x6l: metrics + storm alarm (hot path — only counter.inc() per event).
+    metricsRegistry.incTopologyEvent(event.kind);
+    stormAlarm.record(event.kind);
   });
 
   // 9. Output-before-topology buffering (tc-128.3).
@@ -302,10 +348,15 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
     server,
     inputPath,
     flowController: fc,
+    metrics: metricsRegistry,
 
     async start(): Promise<void> {
       await host.start();
       await pipeline.start();
+
+      // tc-x6l: start the storm alarm AFTER the pipeline is live so the
+      // 5-second window doesn't eat into factory-time silence.
+      stormAlarm.start();
 
       // tc-5166i: Enable monitor-bell on all windows in the attached session.
       //
@@ -401,6 +452,30 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
           server.handleResyncRequest(transport);
           return;
         }
+
+        // tc-x6l: session-proxy.info — read-only diagnostics command.
+        // Handled here (not in input-path) because it requires sending a
+        // directed response using the per-connection seq counter.
+        if (msg.type === "command.request" && msg.command.kind === "session-proxy.info") {
+          const correlationId = (msg as import("../wire/session-proxy-control.js").SessionProxyCommandRequestMessage).correlationId;
+          void metricsRegistry.metrics().then((metricsText) => {
+            const breakdown = stormAlarm.windowBreakdown();
+            const breakdownObj: Record<string, number> = {};
+            for (const [k, v] of breakdown) {
+              breakdownObj[k] = v;
+            }
+            server.sendCommandResponse(transport, correlationId, {
+              info: {
+                metricsText,
+                stormWindowTotal: stormAlarm.windowTotal(),
+                stormWindowBreakdown: breakdownObj,
+                stormThreshold: stormAlarm.threshold,
+              },
+            });
+          });
+          return;
+        }
+
         inputPath.handleClientMessage(msg as import("../wire/session-proxy-control.js").ClientMessage);
       });
 
@@ -414,11 +489,15 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
     },
 
     stop(): Promise<void> {
+      stormAlarm.stop();
+      metricsRegistry.stop();
       pipeline.stop();
       return host.stop();
     },
 
     kill(): void {
+      stormAlarm.stop();
+      metricsRegistry.stop();
       pipeline.stop();
       host.kill();
     },

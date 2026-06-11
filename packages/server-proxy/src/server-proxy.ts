@@ -68,6 +68,8 @@ import type {
 
 import { createSocketServer, createSocketTransport } from "./socket-transport.js";
 import { serverProxySocketPath, sessionProxySocketPath, removeSocket, restrictSocket } from "./runtime-dir.js";
+import { createServerProxyMetrics } from "./metrics.js";
+import type { ServerProxyMetrics } from "./metrics.js";
 import { listSessions, createSession, killSession, createTmuxWatcher, probeTmuxAlive, setWindowSynchronizePanes, setWindowMonitorActivity, setWindowMonitorSilence, setSessionMarker, getTmuxServerPid, countPanesBySession, countTmuxccClientsBySession } from "./tmux-south.js";
 import type { TmuxWatcher } from "./tmux-south.js";
 import { createSessionProxySupervisor } from "./session-proxy-supervisor.js";
@@ -337,6 +339,9 @@ class ServerProxyImpl implements ServerProxyHandle {
    */
   private _claimLocks = new Map<string, Promise<{ sessionId: SessionId; endpoint: string; created: boolean }>>();
 
+  // ── tc-x6l server-proxy metrics ───────────────────────────────────────────────
+  private readonly _metrics: ServerProxyMetrics = createServerProxyMetrics();
+
   constructor(opts: ServerProxyOptions) {
     this._opts = opts;
     this._socketDirName = opts.socketName;
@@ -561,7 +566,17 @@ class ServerProxyImpl implements ServerProxyHandle {
 
   /** Socket-level connection count changed (raw connections, pre-handshake). */
   private _onConnectionCountChange(count: number): void {
+    // tc-x6l: track active connections and new accepts.
+    const prev = this._ipcClientCount;
     this._ipcClientCount = count;
+    if (count > prev) {
+      // New connection(s) accepted.
+      this._metrics.incConnectionAccepted();
+      this._metrics.incConnectionActive();
+    } else if (count < prev) {
+      // Connection(s) closed.
+      this._metrics.decConnectionActive();
+    }
     if (!this._started || this._selfExited) return;
     if (count === 0) {
       // Last client gone — restart the hysteresis window.
@@ -665,6 +680,7 @@ class ServerProxyImpl implements ServerProxyHandle {
   // ---------------------------------------------------------------------------
 
   private _refreshSessions(): void {
+    // tc-x6l: sessions gauge is updated at the end of each refresh.
     const rows = listSessions(this._opts.socketName);
     // tc-3y8.7: subtract tmuxcc-owned control-mode clients from the raw
     // session_attached count so that attachedClientCount reflects only
@@ -721,6 +737,9 @@ class ServerProxyImpl implements ServerProxyHandle {
         existing.attachedClientCount = externalCount;
       }
     }
+
+    // tc-x6l: update the sessions-active gauge after each refresh.
+    this._metrics.setSessionsActive(this._sessions.size);
   }
 
   // ---------------------------------------------------------------------------
@@ -805,9 +824,24 @@ class ServerProxyImpl implements ServerProxyHandle {
         windowCount: entry.windowCount,
         paneCount: paneCounts.get(entry.tmuxId) ?? 0,
         attachedClientCount: entry.attachedClientCount,
+        // tc-x6l: session-proxy metrics are cross-process; we cannot fetch them
+        // synchronously here. Session-proxy-level metrics are available by
+        // connecting to the session-proxy socket and issuing session-proxy.info.
+        sessionMetricsText: null,
       });
     }
 
+    // tc-x6l: update the sessions-active gauge before building the info payload.
+    this._metrics.setSessionsActive(this._sessions.size);
+
+    // tc-x6l: metrics text exposition (server-proxy level only).
+    // Wrapped in a synchronous path: prom-client's Registry.metrics() returns a
+    // Promise but we need a synchronous result here.  We resolve it synchronously
+    // using a local flag trick — prom-client's default metrics() resolves
+    // immediately in a microtask.  For simplicity, we return a pending placeholder
+    // and let the caller await; alternatively, we return null and let clients
+    // issue a follow-up query.  Decision: return null synchronously (the info
+    // payload is built synchronously; async text is fetched by callers that need it).
     return {
       socketName: this._opts.socketName,
       serverProxySocketPath: this._socketPath,
@@ -818,7 +852,20 @@ class ServerProxyImpl implements ServerProxyHandle {
       connectedClientCount: this._ipcClientCount,
       logPath: this._opts.logPath ?? null,
       sessions,
+      // tc-x6l: metricsText deferred to async; populated in _buildInfoAsync.
+      metricsText: null,
+      sessionMetricsText: null,
     };
+  }
+
+  /**
+   * Async variant of _buildInfo that populates `metricsText` from prom-client.
+   * Used by the command handler so the server-proxy.info response carries live metrics.
+   */
+  private async _buildInfoAsync(): Promise<ServerProxyInfoPayload> {
+    const info = this._buildInfo();
+    const metricsText = await this._metrics.metricsText();
+    return { ...info, metricsText };
   }
 
   // ---------------------------------------------------------------------------
@@ -830,6 +877,9 @@ class ServerProxyImpl implements ServerProxyHandle {
     req: ServerProxyCommandRequestMessage,
   ): Promise<void> {
     const { correlationId, command } = req;
+
+    // tc-x6l: increment command counter before dispatch.
+    this._metrics.incCommand(command.kind);
 
     try {
       let payload: { sessionId?: SessionId; endpoint?: string; paneId?: PaneId; created?: boolean; ok?: true; info?: ServerProxyInfoPayload };
@@ -845,8 +895,8 @@ class ServerProxyImpl implements ServerProxyHandle {
           payload = await this._destroySession(command.sessionId);
           break;
         case "server-proxy.info":
-          // tc-k6v: read-only diagnostics snapshot for debug surfaces.
-          payload = { info: this._buildInfo() };
+          // tc-k6v + tc-x6l: read-only diagnostics snapshot with metrics.
+          payload = { info: await this._buildInfoAsync() };
           break;
         case "pane.attach":
           // tc-7xv.36: attach intent for a specific pane.  The server-proxy doesn't

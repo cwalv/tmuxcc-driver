@@ -593,6 +593,58 @@ export interface ResizeManagedWindowCommand {
 }
 
 /**
+ * Read-only diagnostics snapshot for the session-proxy (tc-x6l).
+ *
+ * Issued by debug surfaces to inspect runtime metrics without a side-effect.
+ * The session-proxy responds with a `SessionProxyCommandResponseMessage` whose
+ * `payload` carries a `SessionProxyInfoPayload`.
+ *
+ * Additive addition — non-breaking per the versioning policy. Older session-proxies
+ * respond with `protocol.unknown-message`; debug clients may display a
+ * "session-proxy does not support session-proxy.info" fallback.
+ */
+export interface SessionProxyInfoCommand {
+  readonly kind: "session-proxy.info";
+}
+
+/**
+ * Payload of a successful `session-proxy.info` response (tc-x6l).
+ *
+ * Contains runtime metrics in Prometheus text-exposition format plus
+ * a snapshot of the storm alarm's current window state for attribution.
+ */
+export interface SessionProxyInfoPayload {
+  /**
+   * Prometheus text exposition of all per-session-proxy counters and histograms.
+   *
+   * Includes:
+   *   - `topology_events_total{kind}` — per-kind topology notification counts.
+   *   - `commands_issued_total` — south-side tmux commands issued.
+   *   - `deltas_fanned_out_total{client}` — model-change deltas sent to clients.
+   *   - `command_round_trip_seconds` — command latency histogram.
+   */
+  readonly metricsText: string;
+  /**
+   * Total topology events counted in the current sliding window
+   * (default: last 5 seconds).
+   */
+  readonly stormWindowTotal: number;
+  /**
+   * Per-kind breakdown of events in the current sliding window.
+   *
+   * An object mapping notification kind (e.g. "layout-change") to the
+   * count of events seen in the window. Useful for identifying which
+   * event kind is responsible for a high storm rate.
+   */
+  readonly stormWindowBreakdown: Record<string, number>;
+  /**
+   * The configured storm alarm threshold (events in the window before an
+   * alarm trips). Included for context when interpreting `stormWindowTotal`.
+   */
+  readonly stormThreshold: number;
+}
+
+/**
  * Kill the tmux session entirely.
  *
  * Used when `tmuxcc.killSessionOnLastWindowClose: true` (ux-design.md [deleted; map: ux-design-v2 §8] §13)
@@ -803,7 +855,9 @@ export type WireCommand =
   | KillWindowCommand
   | SwapWindowCommand
   // tc-zna.3: VS-Code-authoritative managed-window resize transaction
-  | ResizeManagedWindowCommand;
+  | ResizeManagedWindowCommand
+  // tc-x6l: read-only diagnostics + metrics
+  | SessionProxyInfoCommand;
 
 /**
  * Client issues a model-level command to the session-proxy.
@@ -826,10 +880,14 @@ export interface SessionProxyCommandRequestMessage extends MessageBase {
  * Successful command result payload. Fields are optional because not every
  * command produces a new entity. The session-proxy includes ids for newly created
  * entities (open-window → windowId + paneId, split-pane → paneId).
+ *
+ * tc-x6l: `info` carries the `session-proxy.info` diagnostic payload.
  */
 export interface SessionProxyCommandOkPayload {
   readonly windowId?: WindowId;
   readonly paneId?: PaneId;
+  /** session-proxy.info diagnostics payload (tc-x6l). Present only in session-proxy.info responses. */
+  readonly info?: SessionProxyInfoPayload;
 }
 
 /**

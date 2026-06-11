@@ -25,7 +25,8 @@
     "format": "prettier --write src"
   },
   "dependencies": {
-    "@remux/session-proxy": "*"
+    "@remux/session-proxy": "*",
+    "prom-client": "^15.1.3"
   },
   "devDependencies": {
     "@types/node": "^22.19.19",

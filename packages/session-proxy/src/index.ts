@@ -91,3 +91,13 @@ export type {
   ControlServerOptions,
 } from "./runtime/serve.js";
 export type { RuntimePipeline } from "./runtime/pipeline.js";
+
+// tc-x6l: metrics + storm alarm — re-exported so consumers can import
+// from "@remux/session-proxy" without reaching into internal sub-paths.
+export { createSessionProxyRegistry, createStormAlarm } from "./metrics/index.js";
+export type {
+  SessionProxyRegistry,
+  StormAlarm,
+  StormAlarmOptions,
+  KindBreakdown,
+} from "./metrics/index.js";

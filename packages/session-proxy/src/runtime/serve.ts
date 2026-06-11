@@ -219,6 +219,26 @@ export interface ControlServer {
    * @param transport - The session-proxy-side transport of the requesting client.
    */
   handleResyncRequest(transport: Transport): void;
+
+  /**
+   * Send a `command.response` to a specific client using the per-connection seq counter.
+   *
+   * Used by integration layers (e.g. session-proxy.ts) that intercept
+   * `command.request` messages (such as `session-proxy.info`) before they reach
+   * `handleClientMessage` and need to send a directed response using the correct
+   * seq number.
+   *
+   * No-op if the transport is not in the active client set.
+   *
+   * @param transport     - The session-proxy-side transport of the target client.
+   * @param correlationId - The correlationId from the matching command.request.
+   * @param payload       - The successful response payload.
+   */
+  sendCommandResponse(
+    transport: Transport,
+    correlationId: string,
+    payload: import("../wire/session-proxy-control.js").SessionProxyCommandOkPayload,
+  ): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -468,6 +488,28 @@ class ControlServerImpl implements ControlServer {
     });
     state.nextSeq++;
     transport.sendControl(snapshot);
+  }
+
+  sendCommandResponse(
+    transport: Transport,
+    correlationId: string,
+    payload: import("../wire/session-proxy-control.js").SessionProxyCommandOkPayload,
+  ): void {
+    const state = this._clients.get(transport);
+    if (!state) return; // not in active client set
+    const msg: import("../wire/session-proxy-control.js").SessionProxyCommandResponseMessage = {
+      type: "command.response",
+      seq: state.nextSeq,
+      correlationId,
+      result: { ok: true, payload },
+    };
+    state.nextSeq++;
+    try {
+      transport.sendControl(msg);
+    } catch {
+      // Transport may have closed concurrently — clean up.
+      this._cleanupClient(transport);
+    }
   }
 
   private _cleanupClient(transport: Transport): void {
