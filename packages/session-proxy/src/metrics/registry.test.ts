@@ -7,7 +7,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { createSessionProxyRegistry } from "./registry.js";
+import { createSessionProxyRegistry, classifyCommand } from "./registry.js";
 
 describe("SessionProxyRegistry", () => {
   it("incTopologyEvent increments the counter and appears in text exposition", async () => {
@@ -90,11 +90,12 @@ describe("SessionProxyRegistry", () => {
     reg.stop();
   });
 
-  it("observeCommandRoundTrip adds to histogram", async () => {
+  it("observeCommandRoundTrip adds to histogram and labels by kind", async () => {
     const reg = createSessionProxyRegistry();
 
-    reg.observeCommandRoundTrip(0.005); // 5 ms
-    reg.observeCommandRoundTrip(0.010); // 10 ms
+    reg.observeCommandRoundTrip(0.005, "list-windows"); // 5 ms
+    reg.observeCommandRoundTrip(0.010, "list-panes"); // 10 ms
+    reg.observeCommandRoundTrip(0.002, "list-windows"); // 2 ms — same kind, second bucket
 
     const text = await reg.metrics();
     assert.ok(
@@ -105,8 +106,184 @@ describe("SessionProxyRegistry", () => {
       text.includes("command_round_trip_seconds_count"),
       "text should contain histogram count",
     );
+    assert.ok(
+      text.includes('kind="list-windows"'),
+      "text should contain kind=list-windows label",
+    );
+    assert.ok(
+      text.includes('kind="list-panes"'),
+      "text should contain kind=list-panes label",
+    );
 
     reg.stop();
+  });
+
+  it("observeNotifyToDelta records the edge label", async () => {
+    const reg = createSessionProxyRegistry();
+
+    reg.observeNotifyToDelta(0.002, "leading"); // 2 ms — leading mode
+    reg.observeNotifyToDelta(0.95, "trailing"); // ~ceiling — trailing mode
+    reg.observeNotifyToDelta(30, "heartbeat"); // way above modes — heartbeat
+
+    const text = await reg.metrics();
+    assert.ok(
+      text.includes("topology_notify_to_delta_seconds"),
+      "text should contain topology_notify_to_delta_seconds histogram",
+    );
+    assert.ok(
+      text.includes('edge="leading"'),
+      "text should contain edge=leading label",
+    );
+    assert.ok(
+      text.includes('edge="trailing"'),
+      "text should contain edge=trailing label",
+    );
+    assert.ok(
+      text.includes('edge="heartbeat"'),
+      "text should contain edge=heartbeat label",
+    );
+
+    reg.stop();
+  });
+
+  it("incDeltasEmitted increments the counter by the given amount", async () => {
+    const reg = createSessionProxyRegistry();
+
+    reg.incDeltasEmitted(3);
+    reg.incDeltasEmitted(2);
+    reg.incDeltasEmitted(0); // no-op
+    reg.incDeltasEmitted(-1); // defensive no-op
+
+    const text = await reg.metrics();
+    assert.ok(
+      text.includes("deltas_emitted_total"),
+      "text should contain deltas_emitted_total",
+    );
+    assert.ok(
+      text.match(/deltas_emitted_total 5/),
+      `deltas_emitted_total should be 5; got:\n${text}`,
+    );
+
+    reg.stop();
+  });
+
+  it("incOutputBytes + observeOutputFrameSize: aggregate, no per-pane labels", async () => {
+    const reg = createSessionProxyRegistry();
+
+    reg.incOutputBytes(1024);
+    reg.observeOutputFrameSize(1024);
+    reg.incOutputBytes(64);
+    reg.observeOutputFrameSize(64);
+
+    const text = await reg.metrics();
+    assert.ok(
+      text.includes("output_bytes_total"),
+      "text should contain output_bytes_total",
+    );
+    assert.ok(
+      text.match(/output_bytes_total 1088/),
+      `output_bytes_total should be 1088; got:\n${text}`,
+    );
+    assert.ok(
+      text.includes("output_frame_size_bytes"),
+      "text should contain output_frame_size_bytes histogram",
+    );
+    // No per-pane label — assert no pane="..." label is present on any of
+    // these aggregate metrics.
+    assert.ok(
+      !/output_bytes_total\{[^}]*pane=/.test(text) &&
+        !/output_frame_size_bytes\{[^}]*pane=/.test(text),
+      "aggregate metrics must not carry a `pane` label (cardinality rule)",
+    );
+
+    reg.stop();
+  });
+
+  it("notePauseEntered/Exited refcount and accumulator are well-formed", async () => {
+    const reg = createSessionProxyRegistry();
+
+    // Two simultaneous pauses then two resumes: counter should accumulate
+    // wall time spanning the entire interval (refcount-style), not double-
+    // count overlapping intervals.
+    reg.notePauseEntered();
+    reg.notePauseEntered();
+    // No real sleep — but the metric is on a real Date.now() clock; sample
+    // exposition just to verify the metric exists. The unit tests for the
+    // wall-time accounting are in the wiring layer, where the system
+    // clock is the relevant thing being measured.
+    reg.notePauseExited();
+    reg.notePauseExited();
+    // Spurious extra resume — must not under-flow the refcount.
+    reg.notePauseExited();
+
+    const text = await reg.metrics();
+    assert.ok(
+      text.includes("session_paused_seconds_total"),
+      "text should contain session_paused_seconds_total",
+    );
+
+    reg.stop();
+  });
+
+  it("default metrics (event-loop lag, GC, heap) are present in exposition", async () => {
+    const reg = createSessionProxyRegistry();
+
+    // collectDefaultMetrics() is registered at factory time; the metrics
+    // appear in the exposition immediately (prom-client emits the
+    // registered metric definitions even before the first sample).
+    const text = await reg.metrics();
+
+    // Spot-check a few of the well-known default-metric names. prom-client
+    // names are stable across versions for these (process_*, nodejs_*).
+    assert.ok(
+      text.includes("nodejs_eventloop_lag_seconds") ||
+        text.includes("nodejs_eventloop_lag"),
+      "default metrics should include eventloop lag (load-bearing for tc-2x3)",
+    );
+    assert.ok(
+      text.includes("process_cpu_user_seconds_total") ||
+        text.includes("process_cpu_seconds_total"),
+      "default metrics should include process CPU",
+    );
+    assert.ok(
+      text.includes("nodejs_heap_size_total_bytes") ||
+        text.includes("nodejs_heap_size_used_bytes"),
+      "default metrics should include heap size",
+    );
+
+    reg.stop();
+  });
+
+  it("classifyCommand: bounded vocabulary; unknown commands collapse to 'unknown'", () => {
+    // Known kinds — round-trip exactly.
+    assert.equal(classifyCommand("list-windows -a"), "list-windows");
+    assert.equal(classifyCommand("list-panes -s -t =foo"), "list-panes");
+    assert.equal(
+      classifyCommand("set-option -g monitor-bell on"),
+      "set-option",
+    );
+    assert.equal(
+      classifyCommand("refresh-client -A '%1:pause'"),
+      "refresh-client",
+    );
+    assert.equal(classifyCommand("send-keys -t %1 hello"), "send-keys");
+    assert.equal(
+      classifyCommand("attach-session -t mysession"),
+      "attach-session",
+    );
+    assert.equal(classifyCommand("kill-pane -t %1"), "kill-pane");
+
+    // Unknown kinds — collapsed to "unknown" (cardinality rule).
+    assert.equal(classifyCommand("display-message foo"), "unknown");
+    assert.equal(classifyCommand("source-file ~/.tmux.conf"), "unknown");
+
+    // Edge cases.
+    assert.equal(classifyCommand(""), "unknown");
+    assert.equal(classifyCommand("   "), "unknown");
+    // Leading whitespace is tolerated.
+    assert.equal(classifyCommand("  list-windows -a"), "list-windows");
+    // A trailing newline doesn't bleed into the kind.
+    assert.equal(classifyCommand("list-windows\n"), "list-windows");
   });
 
   it("multiple registries are isolated (no cross-contamination)", async () => {

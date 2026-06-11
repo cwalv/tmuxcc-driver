@@ -52,6 +52,30 @@ import type { RequeryEngine, RequeryResult } from "./requery.js";
 import type { NotificationEvent } from "../parser/notifications.js";
 
 // ---------------------------------------------------------------------------
+// Cycle edges (tc-3si.6) — exported for callers that route the edge label
+// onto the `topology_notify_to_delta_seconds` histogram.
+// ---------------------------------------------------------------------------
+
+/**
+ * The edge classification reported alongside each successful cycle's
+ * `onDeltas` callback (tc-3si.6). Maps directly onto the `edge` label of
+ * the `topology_notify_to_delta_seconds` histogram in metrics/registry.ts.
+ *
+ * - `leading`: the cycle was fired by `notify()` after a quiet period —
+ *   the keystone "served instantly" mode (state-model.md §6).
+ * - `trailing`: the cycle ran on the trailing-edge timer (a notify landed
+ *   inside the ceiling window and got folded). Bounded by ceiling, ~1 s.
+ * - `heartbeat`: the cycle was fired by the unconditional slow heartbeat,
+ *   without a triggering notify. The "notify-to-delta" distance for these
+ *   cycles is undefined; reporting them under a dedicated edge lets the
+ *   metric's reader distinguish heartbeat samples from the latency modes.
+ * - `bootstrap`: only used by the runtime for the initial bootstrap
+ *   transition (not driven through the coalescer). Same semantics as
+ *   heartbeat for the purposes of the histogram.
+ */
+export type CycleEdge = "leading" | "trailing" | "heartbeat" | "bootstrap";
+
+// ---------------------------------------------------------------------------
 // Clock abstraction (injectable for tests)
 // ---------------------------------------------------------------------------
 
@@ -242,10 +266,40 @@ export interface CoalescerOptions {
    * a no-op (no deltas to send) but still update any "last served model"
    * snapshot if it tracks one.
    *
+   * # `meta` (tc-3si.6)
+   *
+   * `meta.edge` is the cycle edge — `leading` / `trailing` / `heartbeat` —
+   * used to label the `topology_notify_to_delta_seconds` histogram so the
+   * keystone latency promise stays observable. `meta.firstNotifyAt` is the
+   * `clock.now()` timestamp at which THIS cycle's triggering `notify()`
+   * arrived (the FIRST notify since the last cycle completed); the runtime
+   * computes the histogram's notify-to-delta sample as
+   * `clock.now() - firstNotifyAt` at broadcast time. Heartbeat cycles
+   * report `firstNotifyAt === null` and should be observed under the
+   * `heartbeat` edge with a synthetic large value (the heartbeat interval),
+   * NOT included in the leading/trailing modes.
+   *
    * Throws here are caught and ignored so a misbehaving subscriber cannot
    * break the pipeline.
    */
-  readonly onDeltas?: (result: RequeryResult) => void;
+  readonly onDeltas?: (result: RequeryResult, meta: CycleMeta) => void;
+}
+
+/**
+ * Per-cycle metadata reported alongside `onDeltas` (tc-3si.6). Lets the
+ * runtime route the `edge` label onto `topology_notify_to_delta_seconds`
+ * and compute the notify-to-delta distance from `firstNotifyAt`.
+ */
+export interface CycleMeta {
+  /** Which edge of the §6 policy fired this cycle. */
+  readonly edge: CycleEdge;
+  /**
+   * Timestamp (from the injected clock) of the first `notify()` call since
+   * the previous successful cycle completed. `null` for heartbeat cycles
+   * (no triggering notification). Used by the runtime as the "t=0" point
+   * for the `topology_notify_to_delta_seconds` observation.
+   */
+  readonly firstNotifyAt: number | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -308,7 +362,35 @@ class CoalescerImpl implements Coalescer {
   private readonly _heartbeatMs: number;
   private readonly _onNotify: ((kind: TopologyEventKind | undefined) => void) | undefined;
   private readonly _onError: ((err: unknown) => void) | undefined;
-  private readonly _onDeltas: ((result: RequeryResult) => void) | undefined;
+  private readonly _onDeltas: ((result: RequeryResult, meta: CycleMeta) => void) | undefined;
+
+  /**
+   * Timestamp of the FIRST `notify()` call since the last cycle's commit,
+   * or `null` if no notify has arrived since (i.e. the next cycle, if any,
+   * will be a heartbeat). The runtime uses this as the "t=0" for the
+   * notify-to-delta histogram (tc-3si.6).
+   */
+  private _firstNotifyAt: number | null = null;
+
+  /**
+   * Edge classification for the next cycle. Set by `_maybeFire` /
+   * `_armHeartbeat` at the moment the cycle is scheduled; consumed by
+   * `_runRequery` when it eventually fires and forwarded to `onDeltas`
+   * (tc-3si.6).
+   */
+  private _pendingEdge: CycleEdge = "leading";
+
+  /**
+   * True when the next cycle was scheduled by the heartbeat tick rather
+   * than by a real `notify()` call. Survives `_maybeFire`'s edge
+   * recomputation so the eventual cycle is reported as `heartbeat` even
+   * if the elapsed-since-last-requery happens to satisfy the leading-edge
+   * test (tc-3si.6).
+   *
+   * Cleared by `_runRequery` after the edge has been latched for the
+   * cycle in flight.
+   */
+  private _heartbeatPending = false;
 
   /**
    * Wall-clock timestamp of the most recent `requery()` invocation start, or
@@ -347,6 +429,15 @@ class CoalescerImpl implements Coalescer {
       } catch {
         // Observer errors must not break the pipeline.
       }
+    }
+
+    // tc-3si.6: capture the timestamp of the FIRST notify since the last
+    // cycle's commit. The runtime uses this as the "t=0" for the
+    // notify-to-delta histogram observation; subsequent notifies in the
+    // same cycle window collapse into this one (the whole point of the
+    // coalescer — they share a fire). Cleared on cycle commit.
+    if (this._firstNotifyAt === null) {
+      this._firstNotifyAt = this._clock.now();
     }
 
     this._engine.markDirty();
@@ -390,11 +481,19 @@ class CoalescerImpl implements Coalescer {
     const elapsed = now - this._lastRequeryAt;
     if (elapsed >= this._ceilingMs) {
       // Leading edge. Quiet for at least the ceiling window — fire now.
+      // tc-3si.6: a heartbeat that lands on a quiet leading-edge moment
+      // (the common case — heartbeat interval is 30 s by default, ceiling
+      // is 1 s) is still classified as `heartbeat` for the metric.
+      this._pendingEdge = this._heartbeatPending ? "heartbeat" : "leading";
       this._runRequery();
       return;
     }
 
     // Inside the ceiling window. Schedule the trailing edge.
+    // (A heartbeat coinciding with a busy ceiling window collapses into a
+    // trailing-edge cycle — there's an open notify storm being served, so
+    // the cycle is a trailing edge of THAT, not a heartbeat.)
+    this._pendingEdge = this._heartbeatPending ? "heartbeat" : "trailing";
     const wait = this._ceilingMs - elapsed;
     this._trailingHandle = this._clock.setTimeout(() => {
       this._trailingHandle = null;
@@ -411,10 +510,20 @@ class CoalescerImpl implements Coalescer {
   private _runRequery(): void {
     this._lastRequeryAt = this._clock.now();
     this._inFlight = true;
+    // Capture the edge + first-notify-at snapshot AT FIRE TIME — these are
+    // about THIS cycle. We clear `_firstNotifyAt` here so the next notify
+    // arriving DURING the cycle starts a fresh "t=0" for the NEXT cycle
+    // (tc-3si.6). The engine's mid-flight rearm path uses markDirty(); a
+    // mid-flight notify also lands in _onCycleSettled which calls
+    // _maybeFire() — by then `_firstNotifyAt` is the new cycle's trigger.
+    const cycleEdge = this._pendingEdge;
+    const cycleFirstNotifyAt = this._firstNotifyAt;
+    this._firstNotifyAt = null;
+    this._heartbeatPending = false;
 
     this._engine.requery().then(
-      (result) => this._onCycleSettled(result, null),
-      (err) => this._onCycleSettled(null, err),
+      (result) => this._onCycleSettled(result, null, cycleEdge, cycleFirstNotifyAt),
+      (err) => this._onCycleSettled(null, err, cycleEdge, cycleFirstNotifyAt),
     );
   }
 
@@ -422,7 +531,12 @@ class CoalescerImpl implements Coalescer {
    * Cycle completion path: clear the in-flight flag, react to failure /
    * mid-cycle dirties, and re-evaluate whether another fire is needed.
    */
-  private _onCycleSettled(result: RequeryResult | null, err: unknown): void {
+  private _onCycleSettled(
+    result: RequeryResult | null,
+    err: unknown,
+    edge: CycleEdge,
+    firstNotifyAt: number | null,
+  ): void {
     this._inFlight = false;
 
     if (err !== undefined && err !== null) {
@@ -435,6 +549,11 @@ class CoalescerImpl implements Coalescer {
       }
       // On thrown rejection (the engine should never throw in practice, but
       // a broken submit might): treat as a failed cycle. Stay dirty, retry.
+      // The notify-to-delta sample is preserved across the retry (we did
+      // not yet observe), so restore `_firstNotifyAt` if we cleared it.
+      if (this._firstNotifyAt === null && firstNotifyAt !== null) {
+        this._firstNotifyAt = firstNotifyAt;
+      }
       this._engine.markDirty();
       this._scheduleRetryAfterFailure();
       return;
@@ -444,6 +563,11 @@ class CoalescerImpl implements Coalescer {
       // Steady-state %error from list-*. Engine already left the model
       // alone and re-armed dirty; we only need to defer the retry to the
       // next ceiling boundary so we don't busy-loop into the same error.
+      // Preserve the notify-to-delta trigger so the retry observes from
+      // the original notify, not the retry's fire moment.
+      if (this._firstNotifyAt === null && firstNotifyAt !== null) {
+        this._firstNotifyAt = firstNotifyAt;
+      }
       this._scheduleRetryAfterFailure();
       return;
     }
@@ -453,9 +577,12 @@ class CoalescerImpl implements Coalescer {
     // schedule another cycle, so any synchronous follow-up the consumer does
     // (e.g. updating a "last served model" reference) lands before the next
     // requery's startModel snapshot is taken.
+    //
+    // tc-3si.6: `meta` carries the edge label + firstNotifyAt so the runtime
+    // can route the notify-to-delta sample onto the histogram.
     if (result !== null && this._onDeltas !== undefined) {
       try {
-        this._onDeltas(result);
+        this._onDeltas(result, { edge, firstNotifyAt });
       } catch {
         // Subscriber errors must not break the pipeline.
       }
@@ -504,6 +631,15 @@ class CoalescerImpl implements Coalescer {
       // Unconditional: even without a dirty bit, ask the engine. We DO
       // honor the ceiling though — same path as a notify with no kind.
       // The engine's mid-flight slot handles concurrent cycles fine.
+      //
+      // tc-3si.6: classify this cycle as `heartbeat` UNLESS a real notify
+      // had already arrived (in which case the notify's "t=0" stands and
+      // the cycle is reported as the notify's edge). The
+      // `_heartbeatPending` flag survives `_maybeFire`'s edge
+      // recomputation; `_runRequery` consumes and clears it.
+      if (this._firstNotifyAt === null) {
+        this._heartbeatPending = true;
+      }
       this._engine.markDirty();
       this._maybeFire();
       // Re-arm. Heartbeats keep ticking until stop().

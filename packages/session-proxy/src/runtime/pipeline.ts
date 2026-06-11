@@ -102,8 +102,11 @@ import {
   realClock,
   type Coalescer,
   type Clock,
+  type CycleEdge,
   type TopologyEventKind,
 } from "../state/coalescer.js";
+import type { SessionProxyRegistry } from "../metrics/registry.js";
+import { classifyCommand } from "../metrics/registry.js";
 import { decodeOutputPayload } from "../parser/output-codec.js";
 import { paneId as mintPaneId } from "../wire/ids.js";
 import type { TmuxHost } from "./tmux-host.js";
@@ -216,6 +219,30 @@ export interface RuntimePipelineOptions {
    * storm alarm.
    */
   onTopologyNotify?: TopologyNotifyHandler;
+
+  /**
+   * Optional metrics registry for the latency/throughput histograms
+   * (tc-3si.6). When provided, the pipeline:
+   *
+   *   - Observes `command_round_trip_seconds{kind}` for every slotted
+   *     command write (requery list-* pair, optimistic-update set-option,
+   *     refresh-client flow-control, …). The `kind` label comes from
+   *     `classifyCommand(commandLine)`.
+   *   - Observes `topology_notify_to_delta_seconds{edge}` once per
+   *     successful coalescer cycle: notify timestamp → broadcast.
+   *   - Increments `deltas_emitted_total` by the wire-delta count of each
+   *     emitted cycle (the denominator of the fan-out amplification ratio).
+   *   - Increments `output_bytes_total` and observes
+   *     `output_frame_size_bytes` for every decoded `%output` /
+   *     `%extended-output` payload, AGGREGATE (no per-pane labels —
+   *     cardinality rule, see metrics/registry.ts).
+   *
+   * Wired by `runtime/session-proxy.ts`. The pipeline is otherwise
+   * metrics-free — every observation lives behind this option so unit
+   * tests that don't care about metrics don't have to construct a
+   * registry just to construct a pipeline.
+   */
+  metrics?: SessionProxyRegistry;
 }
 
 /**
@@ -389,12 +416,16 @@ const SYNC_WATCH_SUBSCRIPTION_NAME = "sync-watch";
 class RuntimePipelineImpl implements RuntimePipeline {
   private readonly _host: TmuxHost;
   private readonly _opts: Required<
-    Omit<RuntimePipelineOptions, "sessionName" | "onSwitchClientDetected" | "clock" | "onTopologyNotify">
+    Omit<
+      RuntimePipelineOptions,
+      "sessionName" | "onSwitchClientDetected" | "clock" | "onTopologyNotify" | "metrics"
+    >
   > & {
     sessionName: string | undefined;
     onSwitchClientDetected: ((outcome: SwitchClientOutcome) => void) | undefined;
     clock: Clock;
     onTopologyNotify: TopologyNotifyHandler | undefined;
+    metrics: SessionProxyRegistry | undefined;
   };
   private readonly _tokenizer: ControlTokenizer;
   private readonly _correlator: CommandCorrelator;
@@ -431,6 +462,7 @@ class RuntimePipelineImpl implements RuntimePipeline {
       onSwitchClientDetected: opts.onSwitchClientDetected,
       clock: opts.clock ?? realClock(),
       onTopologyNotify: opts.onTopologyNotify,
+      metrics: opts.metrics,
     };
 
     // The correlator routes notification tokens back to _onNotificationToken
@@ -469,8 +501,11 @@ class RuntimePipelineImpl implements RuntimePipeline {
     });
 
     // Build the engine's submit: the correlator's atomic `send` (slot + write
-    // together) is exactly the right primitive. tc-3si.1.
-    const submit: SubmitCommand = (command: string) => this._correlator.send(command);
+    // together) is exactly the right primitive (tc-3si.1). `_send` wraps it
+    // with command_round_trip_seconds / commands-issued observation
+    // (tc-3si.6) — every slotted command path (requery submit, setup writes,
+    // pipeline.send/sendBatch) flows through the same wrapper.
+    const submit: SubmitCommand = (command: string) => this._send(command);
 
     const engineOpts: Parameters<typeof createRequeryEngine>[0] = { submit };
     if (this._opts.sessionName !== undefined) {
@@ -498,7 +533,7 @@ class RuntimePipelineImpl implements RuntimePipeline {
       clock: this._opts.clock,
       ceilingMs: this._opts.ceilingMs,
       heartbeatMs: this._opts.heartbeatMs,
-      onDeltas: (result) => {
+      onDeltas: (result, meta) => {
         // The engine already committed result.next to its internal _model.
         // Compute the prev → next transition for our subscribers.
         if (result.failed) return; // defensive — coalescer skips this anyway
@@ -506,6 +541,30 @@ class RuntimePipelineImpl implements RuntimePipeline {
         const next = result.next;
         if (prev === next) return; // no observable change (e.g. heartbeat no-op)
         lastBroadcastModel = next;
+        // tc-3si.6: observe topology_notify_to_delta_seconds BEFORE the
+        // model-change broadcast so the timestamp captures "delta
+        // produced", not "all subscribers serviced". The histogram's
+        // `edge` label is set per the coalescer's classification (leading
+        // / trailing / heartbeat); heartbeat cycles report against the
+        // synthetic firstNotifyAt = lastRequeryAt-ish distance (the
+        // heartbeat interval), which lands in a high bucket far from the
+        // leading/trailing modes.
+        const metrics = this._opts.metrics;
+        if (metrics !== undefined) {
+          const broadcastAt = this._opts.clock.now();
+          if (meta.firstNotifyAt !== null) {
+            const seconds = (broadcastAt - meta.firstNotifyAt) / 1000;
+            metrics.observeNotifyToDelta(seconds, meta.edge);
+          } else if (meta.edge === "heartbeat") {
+            // Heartbeat without a triggering notify: the diagnostic value
+            // is just "the heartbeat ticked"; report a constant-shape
+            // sample at the heartbeat interval so the bucket-it-lands-in
+            // is the heartbeat interval itself (always far above the
+            // leading/trailing modes — they read clean).
+            metrics.observeNotifyToDelta(this._opts.heartbeatMs / 1000, "heartbeat");
+          }
+          metrics.incDeltasEmitted(result.deltas.length);
+        }
         this._emitModelChange(next, prev);
       },
       onError: (err) => {
@@ -539,6 +598,16 @@ class RuntimePipelineImpl implements RuntimePipeline {
       // their own deltas via diffModel(prev, next) — diffing empty against
       // the bootstrap snapshot yields the full set of pane.opened /
       // window.added / focus.changed etc. messages.
+      //
+      // tc-3si.6: count the deltas this bootstrap will fan out. We do NOT
+      // observe `topology_notify_to_delta_seconds` for bootstrap — there
+      // was no triggering notify (the cycle was driven directly by start()
+      // for lifecycle reasons; see the longer comment above). The
+      // bootstrap cycle's command_round_trip_seconds samples already
+      // landed via the wrapped submit closure.
+      if (this._opts.metrics !== undefined) {
+        this._opts.metrics.incDeltasEmitted(initialResult.deltas.length);
+      }
       this._emitModelChange(initialResult.next, emptyModel());
       lastBroadcastModel = initialResult.next;
 
@@ -607,7 +676,7 @@ class RuntimePipelineImpl implements RuntimePipeline {
    */
   private _sendSetup(command: string, label: string): void {
     if (this._stopped) return;
-    void this._correlator.send(command).then(
+    void this._send(command).then(
       (result) => {
         if (!result.ok) {
           console.warn(`[pipeline] ${label} failed: %error`);
@@ -618,6 +687,34 @@ class RuntimePipelineImpl implements RuntimePipeline {
         // for a fire-and-forget setup command.
       },
     );
+  }
+
+  /**
+   * Slot + write via the correlator's atomic `send` (tc-3si.1), wrapped with
+   * commands-issued / command_round_trip_seconds{kind} observation
+   * (tc-3si.6). Every slotted command path — the requery submit, setup
+   * writes, and the public send/sendBatch used by input-path and
+   * flow-control — flows through here, so per-kind RTT covers the seam
+   * end-to-end. Rejections (correlator protocol anomaly / teardown) are NOT
+   * observed — those aren't normal round-trips.
+   */
+  private _send(command: string): Promise<CommandResult> {
+    const metrics = this._opts.metrics;
+    if (metrics === undefined) {
+      return this._correlator.send(command);
+    }
+    const startedAt = this._opts.clock.now();
+    metrics.incCommandsIssued();
+    const kind = classifyCommand(command);
+    const promise = this._correlator.send(command);
+    promise.then(
+      () => {
+        const seconds = (this._opts.clock.now() - startedAt) / 1000;
+        metrics.observeCommandRoundTrip(seconds, kind);
+      },
+      () => {},
+    );
+    return promise;
   }
 
   stop(): void {
@@ -660,6 +757,14 @@ class RuntimePipelineImpl implements RuntimePipeline {
     // diffs use this as the baseline. The engine exposes `setModel` for this
     // use case (see requery.ts).
     engine.setModel(next);
+    // tc-3si.6: a patch is a pipeline-level model change too — count its
+    // deltas against deltas_emitted_total so the fan-out amplification
+    // ratio (deltas_fanned_out / deltas_emitted) stays consistent with
+    // the per-client per-delta fan-out counter.
+    if (this._opts.metrics !== undefined) {
+      const deltas = diffModel(prev, next);
+      this._opts.metrics.incDeltasEmitted(deltas.length);
+    }
     this._emitModelChange(next, prev);
   }
 
@@ -669,11 +774,28 @@ class RuntimePipelineImpl implements RuntimePipeline {
   }
 
   send(command: string): Promise<CommandResult> {
-    return this._correlator.send(command);
+    return this._send(command);
   }
 
   sendBatch(commands: readonly string[]): Promise<CommandResult>[] {
-    return this._correlator.sendBatch(commands);
+    const metrics = this._opts.metrics;
+    if (metrics === undefined) {
+      return this._correlator.sendBatch(commands);
+    }
+    const startedAt = this._opts.clock.now();
+    const promises = this._correlator.sendBatch(commands);
+    promises.forEach((promise, i) => {
+      metrics.incCommandsIssued();
+      const kind = classifyCommand(commands[i]!);
+      promise.then(
+        () => {
+          const seconds = (this._opts.clock.now() - startedAt) / 1000;
+          metrics.observeCommandRoundTrip(seconds, kind);
+        },
+        () => {},
+      );
+    });
+    return promises;
   }
 
   // -------------------------------------------------------------------------
@@ -728,6 +850,14 @@ class RuntimePipelineImpl implements RuntimePipeline {
       const pid = mintPaneId("p" + event.paneId);
       const bytes = decodeOutputPayload(event.rawPayload);
       this.buffers.append(pid, bytes);
+      // tc-3si.6: aggregate output-throughput accounting. Two hot-path
+      // calls per frame: one counter inc + one histogram observe, no
+      // allocation, no per-byte work. Aggregate (no per-pane label —
+      // cardinality rule, see metrics/registry.ts module doc).
+      if (this._opts.metrics !== undefined && bytes.length > 0) {
+        this._opts.metrics.incOutputBytes(bytes.length);
+        this._opts.metrics.observeOutputFrameSize(bytes.length);
+      }
       this._fireNotificationHandlers(event);
       return;
     }

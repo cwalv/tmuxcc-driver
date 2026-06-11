@@ -495,6 +495,11 @@ class ServerProxyImpl implements ServerProxyHandle {
     // Remove socket file
     removeSocket(this._socketPath);
 
+    // tc-3si.6: stop the prom-client default-metrics sampler timer so a
+    // shut-down server-proxy doesn't leak a setInterval handle keeping the
+    // event loop alive.
+    this._metrics.stop();
+
     this._started = false;
   }
 

@@ -239,6 +239,12 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
   const pipeline = createRuntimePipeline(host, {
     buffers: accountingStore,
     sessionName: opts.host.sessionName,
+    // tc-3si.6: thread the metrics registry into the pipeline so it can
+    // instrument command_round_trip_seconds{kind}, the
+    // topology_notify_to_delta_seconds{edge} histogram, deltas_emitted_total,
+    // output_bytes_total + output_frame_size_bytes — the latency / throughput
+    // shapes documented in docs/observability.md.
+    metrics: metricsRegistry,
     // tc-x6l: per-kind counters + storm alarm attach to the topology
     // classification choke point — the coalescer's onNotify path, surfaced
     // through this pipeline option. The hook only fires for topology-
@@ -281,7 +287,15 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
   pipelineRef = pipeline;
 
   // 6. Control-plane server.
-  const server = createControlServer(pipeline, opts.server);
+  //
+  // tc-3si.6: thread the metrics registry so the server can increment
+  // deltas_fanned_out_total{client="cN"} per per-client delta. The
+  // pipeline owns the denominator (deltas_emitted_total); the server owns
+  // the numerator.
+  const server = createControlServer(pipeline, {
+    ...opts.server,
+    metrics: metricsRegistry,
+  });
 
   // 6a. Patch the late-binding reference so the switch-client callback
   //     installed in step 5 can reach the server.
@@ -321,11 +335,30 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
   //    once per topology-classified notification — the single choke point the
   //    coalescer was shaped for — so we don't double-count by also recording
   //    here.
+  // tc-3si.6: track per-pane pause/resume so the registry can accumulate
+  // session_paused_seconds_total. We mirror the FlowController's own
+  // pause set rather than counting raw %pause / %continue events because
+  // tmux can emit redundant %pause for an already-paused pane (e.g. when
+  // tmux's own capacity management decides to pause something the
+  // controller already paused). Keeping a local set keeps the refcount in
+  // the registry exactly equal to the number of actually-paused panes.
+  const _metricsPaused = new Set<string>();
+
   pipeline.onNotification((event) => {
     if (event.kind === "pause") {
-      fc.onPauseNotification(mintPaneId("p" + event.paneId));
+      const pid = mintPaneId("p" + event.paneId);
+      fc.onPauseNotification(pid);
+      if (!_metricsPaused.has(pid)) {
+        _metricsPaused.add(pid);
+        metricsRegistry.notePauseEntered();
+      }
     } else if (event.kind === "continue") {
-      fc.onContinueNotification(mintPaneId("p" + event.paneId));
+      const pid = mintPaneId("p" + event.paneId);
+      fc.onContinueNotification(pid);
+      if (_metricsPaused.has(pid)) {
+        _metricsPaused.delete(pid);
+        metricsRegistry.notePauseExited();
+      }
     }
   });
 

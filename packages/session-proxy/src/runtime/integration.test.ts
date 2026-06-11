@@ -63,6 +63,7 @@ import { createControlServer } from "./serve.js";
 import { createInputPath } from "./input-path.js";
 import { createFlowController } from "./flow-control.js";
 import { createSessionProxy } from "./session-proxy.js";
+import { createSessionProxyRegistry } from "../metrics/index.js";
 
 // ---------------------------------------------------------------------------
 // Wire utilities
@@ -1434,6 +1435,113 @@ describe("tc-93a: createSessionProxy assembly — fake-tmux smoke", () => {
       await sess.cleanup();
     }
   });
+
+  // ---------------------------------------------------------------------------
+  // tc-3si.6: latency/throughput histograms + process health in the exposition.
+  //
+  // Wire a session-proxy through the same scripted-host path, but attach a
+  // SessionProxyRegistry to the pipeline + server, drive a bootstrap cycle,
+  // and assert the exposition exposes all the families the bead requires
+  // (notify-to-delta histogram with edge label, command_round_trip with
+  // kind label, deltas_emitted_total, output_bytes_total + frame-size,
+  // session_paused_seconds_total, default metrics).
+  // ---------------------------------------------------------------------------
+
+  it("tc-3si.6: pipeline + server expose tc-3si.6 histograms via registry.metrics()", async () => {
+    const reg = createSessionProxyRegistry();
+    const host = createScriptedHost();
+    const demux = createOutputDemux();
+    const pipeline = createRuntimePipeline(host, {
+      buffers: demux.store,
+      metrics: reg,
+    });
+    const server = createControlServer(pipeline, { metrics: reg });
+
+    await host.start();
+    await pipeline.start();
+
+    // Attach a client so deltas_fanned_out_total{client="c1"} has a slot.
+    const { sessionProxyTransport, clientTransport } = createRecordingPair();
+    demux.attachTransport(sessionProxyTransport);
+    const addPromise = server.addClient(sessionProxyTransport);
+    const clientHandshake = runClientHandshake(clientTransport, CLIENT_CAPS);
+    await Promise.all([addPromise, clientHandshake]);
+
+    // Yield so the bootstrap cycle's snapshot + deltas land on the client
+    // (deltas_fanned_out_total ticks once per delta send).
+    await new Promise<void>((r) => setImmediate(r));
+
+    const text = await reg.metrics();
+
+    // tc-3si.6 — every required family is present in the exposition.
+    assert.ok(
+      text.includes("command_round_trip_seconds"),
+      "exposition must contain command_round_trip_seconds histogram",
+    );
+    // The bootstrap requery issued list-windows + list-panes via the wrapped
+    // submit closure — both show up with kind labels.
+    assert.ok(
+      text.includes('kind="list-windows"'),
+      "command_round_trip_seconds must have a kind=list-windows sample after bootstrap",
+    );
+    assert.ok(
+      text.includes('kind="list-panes"'),
+      "command_round_trip_seconds must have a kind=list-panes sample after bootstrap",
+    );
+    assert.ok(
+      text.includes("topology_notify_to_delta_seconds"),
+      "exposition must contain topology_notify_to_delta_seconds histogram",
+    );
+    assert.ok(
+      text.includes("deltas_emitted_total"),
+      "exposition must contain deltas_emitted_total counter",
+    );
+    assert.ok(
+      text.includes("output_bytes_total"),
+      "exposition must contain output_bytes_total counter",
+    );
+    assert.ok(
+      text.includes("output_frame_size_bytes"),
+      "exposition must contain output_frame_size_bytes histogram",
+    );
+    assert.ok(
+      text.includes("session_paused_seconds_total"),
+      "exposition must contain session_paused_seconds_total counter",
+    );
+    // Default metrics (event-loop lag, heap, CPU). Names are stable across
+    // prom-client versions.
+    assert.ok(
+      text.includes("nodejs_eventloop_lag_seconds") ||
+        text.includes("nodejs_eventloop_lag"),
+      "exposition must contain default event-loop lag metric (load-bearing for tc-2x3)",
+    );
+    assert.ok(
+      text.includes("process_cpu_user_seconds_total") ||
+        text.includes("process_cpu_seconds_total"),
+      "exposition must contain default process CPU metric",
+    );
+
+    // Bootstrap should have emitted deltas; counter should be > 0.
+    const emittedMatch = text.match(/^deltas_emitted_total (\d+)$/m);
+    assert.ok(
+      emittedMatch !== null && Number(emittedMatch[1]) > 0,
+      `deltas_emitted_total should be > 0 after bootstrap; got match:\n${emittedMatch?.[0] ?? "(none)"}`,
+    );
+
+    // Cardinality rule: no per-pane labels on the aggregate output metrics.
+    assert.ok(
+      !/output_bytes_total\{[^}]*pane=/.test(text) &&
+        !/output_frame_size_bytes\{[^}]*pane=/.test(text),
+      "aggregate output metrics must not carry a `pane` label (cardinality rule)",
+    );
+
+    pipeline.stop();
+    sessionProxyTransport.close();
+    clientTransport.close();
+    host.kill();
+    await host.waitForExit();
+    reg.stop();
+  });
 });
 
 // ===========================================================================
@@ -1571,6 +1679,47 @@ describe(
     // -------------------------------------------------------------------------
     // R3. Clean teardown — no leaked tmux servers
     // -------------------------------------------------------------------------
+
+    // -------------------------------------------------------------------------
+    // R4 (tc-3si.6). session-proxy.info exposition surfaces all the
+    // tc-3si.6 metric families. End-to-end through createSessionProxy → real
+    // tmux → metricsRegistry.metrics() consumed by the .info command path.
+    // -------------------------------------------------------------------------
+
+    it("R4 (tc-3si.6): session-proxy.info exposition carries the tc-3si.6 metric families", async () => {
+      const sock = realSockName("info-metrics");
+      after(() => killRealServer(sock));
+
+      const sessionProxy = createSessionProxy({
+        host: { socketName: sock, sessionName: "r4session", cols: 80, rows: 24 },
+      });
+      sessionProxy.host.onError(() => {});
+
+      await sessionProxy.start();
+
+      // Drive the exposition directly from the registry (the same string the
+      // session-proxy.info command would emit — see runtime/session-proxy.ts
+      // command.request handler). The real-tmux path is what we're verifying:
+      // the registry has been populated by real list-* round-trips and a
+      // real bootstrap delta emission.
+      const text = await sessionProxy.metrics.metrics();
+
+      assert.ok(text.includes("command_round_trip_seconds"), "info must include command_round_trip_seconds");
+      assert.ok(text.includes('kind="list-windows"'), "info must include kind=list-windows histogram entry");
+      assert.ok(text.includes('kind="list-panes"'), "info must include kind=list-panes histogram entry");
+      assert.ok(text.includes("topology_notify_to_delta_seconds"), "info must include topology_notify_to_delta_seconds");
+      assert.ok(text.includes("deltas_emitted_total"), "info must include deltas_emitted_total");
+      assert.ok(text.includes("output_bytes_total"), "info must include output_bytes_total");
+      assert.ok(text.includes("output_frame_size_bytes"), "info must include output_frame_size_bytes");
+      assert.ok(text.includes("session_paused_seconds_total"), "info must include session_paused_seconds_total");
+      assert.ok(
+        text.includes("nodejs_eventloop_lag_seconds") || text.includes("nodejs_eventloop_lag"),
+        "info must include default event-loop lag metric",
+      );
+
+      sessionProxy.kill();
+      await new Promise<void>((r) => { sessionProxy.host.onExit(() => r()); });
+    });
 
     it("R3: clean teardown — host bridge exits cleanly via sessionProxy.stop(); server killed explicitly", async () => {
       const sock = realSockName("teardown");

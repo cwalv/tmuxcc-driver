@@ -8,8 +8,8 @@
  * @module metrics/index
  */
 
-export { createSessionProxyRegistry } from "./registry.js";
-export type { SessionProxyRegistry } from "./registry.js";
+export { createSessionProxyRegistry, classifyCommand } from "./registry.js";
+export type { SessionProxyRegistry, CycleEdge } from "./registry.js";
 
 export { createStormAlarm } from "./storm-alarm.js";
 export type { StormAlarm, StormAlarmOptions, KindBreakdown } from "./storm-alarm.js";

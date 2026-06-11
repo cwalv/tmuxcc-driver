@@ -1,5 +1,5 @@
 /**
- * Server-proxy metrics registry (tc-x6l).
+ * Server-proxy metrics registry (tc-x6l + tc-3si.6).
  *
  * Thin prom-client registry for the server-proxy process itself — tracks
  * server-level counters that the session-proxy registry doesn't own:
@@ -11,6 +11,11 @@
  *   - `server_proxy_connections_active` — current open connection count
  *     (gauge — incremented on connect, decremented on close).
  *   - `server_proxy_sessions_active` — current session count (gauge).
+ *   - `process_*` / `nodejs_*` (tc-3si.6) — default process metrics from
+ *     `prom-client.collectDefaultMetrics()`: event-loop lag, GC pause,
+ *     heap, RSS, CPU. The server-proxy is one process per machine (post
+ *     tc-2x3); event-loop lag here is the cross-cutting health signal for
+ *     the whole tmuxcc supervisor.
  *
  * This module is intentionally small. Per-session topology metrics live in the
  * per-session `SessionProxyRegistry` (packages/session-proxy/src/metrics/).
@@ -24,7 +29,7 @@
  * @module server-proxy/metrics
  */
 
-import { Registry, Counter, Gauge } from "prom-client";
+import { Registry, Counter, Gauge, collectDefaultMetrics } from "prom-client";
 
 // ---------------------------------------------------------------------------
 // Public interface
@@ -55,6 +60,13 @@ export interface ServerProxyMetrics {
    * Returns a Promise<string> to match prom-client's async API.
    */
   metricsText(): Promise<string>;
+
+  /**
+   * Stop background resources owned by this registry — currently the
+   * prom-client default-metrics sampler (tc-3si.6). Idempotent. Safe to
+   * call from a teardown path (no-op if already stopped).
+   */
+  stop(): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -95,6 +107,11 @@ export function createServerProxyMetrics(): ServerProxyMetrics {
     registers: [reg],
   });
 
+  // tc-3si.6: process health (event-loop lag, GC pause, heap, RSS, CPU).
+  // Load-bearing for the post-tc-2x3 one-process-per-machine model: the
+  // server-proxy event-loop lag is the cross-cutting health signal.
+  const defaultMetricsTimer = collectDefaultMetrics({ register: reg });
+
   return {
     incCommand(kind: string): void {
       commandsTotal.inc({ kind });
@@ -118,6 +135,16 @@ export function createServerProxyMetrics(): ServerProxyMetrics {
 
     async metricsText(): Promise<string> {
       return reg.metrics();
+    },
+
+    stop(): void {
+      // Stop the prom-client default-metrics sampler timer if one was
+      // returned (older prom-client versions return void; newer return a
+      // Timeout handle that we must clear so the server-proxy can shut
+      // down without leaking timers).
+      if (defaultMetricsTimer !== undefined && defaultMetricsTimer !== null) {
+        clearInterval(defaultMetricsTimer as ReturnType<typeof setInterval>);
+      }
     },
   };
 }

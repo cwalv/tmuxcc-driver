@@ -597,3 +597,208 @@ describe("coalescer: trailing-edge fold", () => {
     assert.equal(engine.getModel().windows.size, 2, "trailing edge picked up the final state");
   });
 });
+
+// ---------------------------------------------------------------------------
+// tc-3si.6: onDeltas meta — edge label + firstNotifyAt for the
+// topology_notify_to_delta_seconds histogram. The bimodality test asserts
+// that leading and trailing edge cycles land in two well-separated regions
+// of "now() - firstNotifyAt" via the injected clock — no real timing.
+// ---------------------------------------------------------------------------
+
+describe("coalescer: onDeltas meta (tc-3si.6 — bimodal notify-to-delta)", () => {
+  it("leading edge reports edge='leading' and firstNotifyAt == notify time", async () => {
+    const fake = makeFakeClock();
+    const script = scriptedSubmit(() => [...bothReplies([1])]);
+    const engine = createRequeryEngine({ submit: script.submit });
+
+    const observed: Array<{ edge: string; notifyToDeltaMs: number }> = [];
+    const co = createCoalescer({
+      engine,
+      clock: fake.clock,
+      ceilingMs: 1000,
+      onDeltas: (_result, meta) => {
+        // Reuse the injected clock as the "broadcast at" timestamp the
+        // runtime would record — this is what pipeline.ts does in
+        // production. (See pipeline.ts onDeltas wiring.)
+        const broadcastAt = fake.now();
+        observed.push({
+          edge: meta.edge,
+          notifyToDeltaMs: meta.firstNotifyAt !== null
+            ? broadcastAt - meta.firstNotifyAt
+            : NaN,
+        });
+      },
+    });
+
+    co.notify("%layout-change");        // t=0 → leading edge fires immediately
+    await fake.advance(0);
+
+    assert.equal(observed.length, 1, "expected one cycle commit");
+    assert.equal(observed[0]!.edge, "leading");
+    // Leading edge fires synchronously after notify — no ms accrued by the
+    // injected clock yet (the scripted submit resolves on a microtask).
+    assert.ok(
+      observed[0]!.notifyToDeltaMs >= 0 && observed[0]!.notifyToDeltaMs < 10,
+      `leading-mode notify-to-delta should be near zero on the injected clock; got ${observed[0]!.notifyToDeltaMs}`,
+    );
+  });
+
+  it("trailing edge reports edge='trailing' and firstNotifyAt == first notify in the window", async () => {
+    const fake = makeFakeClock();
+    const script = scriptedSubmit(() => [
+      ...bothReplies([1]),         // leading-edge cycle (initial)
+      ...bothReplies([1, 2]),      // trailing-edge cycle (this is the one we observe)
+    ]);
+    const engine = createRequeryEngine({ submit: script.submit });
+
+    const observed: Array<{ edge: string; firstNotifyAt: number | null; broadcastAt: number }> = [];
+    const co = createCoalescer({
+      engine,
+      clock: fake.clock,
+      ceilingMs: 1000,
+      onDeltas: (_result, meta) => {
+        observed.push({
+          edge: meta.edge,
+          firstNotifyAt: meta.firstNotifyAt,
+          broadcastAt: fake.now(),
+        });
+      },
+    });
+
+    // Leading edge at t=0.
+    co.notify();
+    await fake.advance(0);
+    assert.equal(observed.length, 1);
+    assert.equal(observed[0]!.edge, "leading");
+
+    // Sub-ceiling notify at t=200 starts the trailing-edge window. Two
+    // more notifies within the window fold into the same trailing cycle.
+    await fake.advance(200);
+    co.notify();                  // FIRST notify of the trailing window — records firstNotifyAt=200
+    await fake.advance(200);
+    co.notify();
+    await fake.advance(200);
+    co.notify();
+    // Still inside the ceiling window — no cycle yet.
+    assert.equal(observed.length, 1, "trailing-edge fire is deferred");
+
+    // Walk to t=1000ms — trailing edge fires.
+    await fake.advance(400);
+    assert.equal(observed.length, 2);
+    const trailing = observed[1]!;
+    assert.equal(trailing.edge, "trailing", "second cycle is the trailing edge");
+    assert.equal(
+      trailing.firstNotifyAt,
+      200,
+      "firstNotifyAt must be the time of the FIRST notify after the leading-edge cycle (not the third)",
+    );
+    // The broadcast happens at t=1000 → notify-to-delta = 800ms,
+    // bounded by the ceiling. This is the second mode of the bimodal
+    // histogram; the test asserts it lands in the trailing region
+    // (clearly > 200ms — well above the leading mode's near-zero bucket).
+    const trailingNotifyToDeltaMs = trailing.broadcastAt - trailing.firstNotifyAt!;
+    assert.ok(
+      trailingNotifyToDeltaMs >= 500 && trailingNotifyToDeltaMs <= 1000,
+      `trailing-mode notify-to-delta should be bounded by the ceiling (~800ms here); got ${trailingNotifyToDeltaMs}ms`,
+    );
+  });
+
+  it("two distinct modes: synthetic 100-sample run lands clearly bimodal", async () => {
+    // Drive two regimes alternately and assert that the leading samples
+    // cluster near zero and the trailing samples cluster near the
+    // ceiling. The test does not check exact timings; it checks that the
+    // two modes do not overlap (the keystone of the histogram is exactly
+    // that they read as two distinct masses).
+    const fake = makeFakeClock();
+    // Build a long reply script (≥ 2 cycles × 50 iterations = 100 cycles
+    // of replies). Each cycle is two replies (windows + panes).
+    const replies: CommandResult[] = [];
+    for (let i = 0; i < 200; i++) {
+      replies.push(...bothReplies([1]));
+    }
+    const script = scriptedSubmit(() => replies);
+    const engine = createRequeryEngine({ submit: script.submit });
+
+    const samples: Array<{ edge: string; latencyMs: number }> = [];
+    const co = createCoalescer({
+      engine,
+      clock: fake.clock,
+      ceilingMs: 1000,
+      onDeltas: (_result, meta) => {
+        if (meta.firstNotifyAt === null) return;
+        samples.push({ edge: meta.edge, latencyMs: fake.now() - meta.firstNotifyAt });
+      },
+    });
+
+    // 50 iterations. Each iteration:
+    //   - Quiet for >ceiling, then notify → leading-edge sample (~0ms).
+    //   - Notify again immediately, then another notify ~200ms later;
+    //     trailing edge fires at ceiling → trailing-edge sample
+    //     bounded by ~ceiling - 200 = 800ms.
+    for (let i = 0; i < 50; i++) {
+      await fake.advance(1100);    // quiet period > ceiling
+      co.notify();                  // leading-edge fires
+      await fake.advance(0);
+
+      // Immediately notify again — kicks off the trailing window.
+      co.notify();
+      await fake.advance(200);
+      co.notify();                  // folds in
+      // Walk to the trailing-edge fire.
+      await fake.advance(800);     // total inside-window: 1000ms
+    }
+
+    const leadingSamples = samples.filter((s) => s.edge === "leading");
+    const trailingSamples = samples.filter((s) => s.edge === "trailing");
+
+    assert.ok(leadingSamples.length >= 50, `leading-edge samples (got ${leadingSamples.length})`);
+    assert.ok(trailingSamples.length >= 50, `trailing-edge samples (got ${trailingSamples.length})`);
+
+    // Bimodal assertion: every leading sample < some_threshold; every
+    // trailing sample > some_threshold; the two regions don't overlap.
+    const SEPARATOR_MS = 100; // any value between modes; leading <<100, trailing >>100.
+    for (const s of leadingSamples) {
+      assert.ok(
+        s.latencyMs < SEPARATOR_MS,
+        `leading-edge sample must fall in the low mode; got ${s.latencyMs}ms`,
+      );
+    }
+    for (const s of trailingSamples) {
+      assert.ok(
+        s.latencyMs > SEPARATOR_MS,
+        `trailing-edge sample must fall in the high mode; got ${s.latencyMs}ms`,
+      );
+    }
+  });
+
+  it("heartbeat cycle reports edge='heartbeat' and firstNotifyAt === null", async () => {
+    const fake = makeFakeClock();
+    const script = scriptedSubmit(() => [...bothReplies([1]), ...bothReplies([1])]);
+    const engine = createRequeryEngine({ submit: script.submit });
+
+    const observed: Array<{ edge: string; firstNotifyAt: number | null }> = [];
+    const co = createCoalescer({
+      engine,
+      clock: fake.clock,
+      ceilingMs: 1000,
+      heartbeatMs: 30_000,
+      onDeltas: (_result, meta) => {
+        observed.push({ edge: meta.edge, firstNotifyAt: meta.firstNotifyAt });
+      },
+    });
+
+    co.start();                      // arm the heartbeat
+    // Walk to the first heartbeat tick. No notify in this interval — the
+    // cycle that fires here should be classified as `heartbeat`.
+    await fake.advance(30_000);
+    assert.ok(observed.length >= 1, "heartbeat must have fired at least one cycle");
+    const heartbeat = observed[0]!;
+    assert.equal(heartbeat.edge, "heartbeat");
+    assert.equal(
+      heartbeat.firstNotifyAt,
+      null,
+      "heartbeat cycle has no triggering notify — firstNotifyAt is null",
+    );
+    co.stop();
+  });
+});

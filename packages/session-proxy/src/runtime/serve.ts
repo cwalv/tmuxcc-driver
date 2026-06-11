@@ -83,6 +83,7 @@ import type {
 } from "../wire/session-proxy-control.js";
 import { projectSnapshot } from "../state/projection.js";
 import { diffModel } from "../state/projection.js";
+import type { SessionProxyRegistry } from "../metrics/registry.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -99,6 +100,18 @@ export interface ControlServerOptions {
    * `WIRE_PROTOCOL_VERSION` and all known wire features.
    */
   capabilities?: Capabilities;
+
+  /**
+   * Optional metrics registry for the per-client fan-out counter
+   * (tc-3si.6). When provided, every delta sent to a connected client
+   * increments `deltas_fanned_out_total{client="cN"}` where `N` is the
+   * client's connection slot (1-based, mirroring the order clients
+   * connect). The denominator for the fan-out amplification ratio
+   * `deltas_fanned_out_total / deltas_emitted_total` (the pipeline owns
+   * the denominator side). Per-client `cN` labels are bounded by the
+   * attached-client count.
+   */
+  metrics?: SessionProxyRegistry;
 }
 
 /**
@@ -260,6 +273,14 @@ interface ClientState {
   nextSeq: number;
   /** Unsubscribe from pipeline.onModelChange. */
   unsubModelChange: (() => void) | null;
+  /**
+   * tc-3si.6: per-connection slot label for the
+   * `deltas_fanned_out_total{client}` counter. Assigned at addClient time
+   * from a monotonically-increasing counter on the server (so labels are
+   * bounded by the lifetime attached-client count). NOT a stable client
+   * identity — just enough to attribute per-slot fan-out volume.
+   */
+  metricsClientLabel: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -269,6 +290,7 @@ interface ClientState {
 class ControlServerImpl implements ControlServer {
   private readonly _pipeline: RuntimePipeline;
   private readonly _capabilities: Capabilities;
+  private readonly _metrics: SessionProxyRegistry | undefined;
 
   /**
    * Active clients keyed by transport reference. Using the Transport object as
@@ -277,9 +299,19 @@ class ControlServerImpl implements ControlServer {
    */
   private readonly _clients = new Map<Transport, ClientState>();
 
+  /**
+   * tc-3si.6: monotonically-increasing counter used to mint per-connection
+   * client labels for the `deltas_fanned_out_total{client}` counter. Each
+   * addClient gets the next sequence label ("c1", "c2", …); removed
+   * clients do not "release" their label so per-slot history is preserved
+   * across reconnects.
+   */
+  private _nextClientLabelSeq = 1;
+
   constructor(pipeline: RuntimePipeline, opts: ControlServerOptions = {}) {
     this._pipeline = pipeline;
     this._capabilities = opts.capabilities ?? DEFAULT_CAPABILITIES;
+    this._metrics = opts.metrics;
   }
 
   async addClient(transport: Transport): Promise<NegotiatedSession> {
@@ -320,6 +352,7 @@ class ControlServerImpl implements ControlServer {
       transport,
       nextSeq: 1,
       unsubModelChange: null,
+      metricsClientLabel: `c${this._nextClientLabelSeq++}`,
     };
     this._clients.set(transport, state);
 
@@ -337,6 +370,12 @@ class ControlServerImpl implements ControlServer {
         const stamped = { ...delta, seq: state.nextSeq };
         state.nextSeq++;
         transport.sendControl(stamped as SessionProxyMessage);
+        // tc-3si.6: count the fan-out. The denominator
+        // (deltas_emitted_total) is incremented once per pipeline cycle in
+        // pipeline.ts; the per-client `cN` label keeps this counter
+        // tractable while still letting the fan-out amplification ratio
+        // be checked against the attached-client count.
+        this._metrics?.incDeltasFannedOut(state.metricsClientLabel);
       }
     });
     state.unsubModelChange = unsub;
