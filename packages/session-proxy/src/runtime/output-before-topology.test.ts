@@ -560,3 +560,84 @@ describe("OutputDemux: integration with pipeline and pane tracking", () => {
     pipeline.stop();
   });
 });
+
+// ---------------------------------------------------------------------------
+// tc-3si.5: pretopology-drop provenance accounting
+// ---------------------------------------------------------------------------
+
+describe("OutputDemux: pretopology drops counter (tc-3si.5)", () => {
+  // Sized to match the demux's internal MAX_PENDING_BYTES_PER_PANE constant.
+  // Overflow tests deliberately exceed this so the drop path fires.
+  const MAX_PENDING = 128 * 1024;
+
+  it("a drop on a pane THAT LATER GETS BOUND is credited as provenance=owned (F4 symptom)", async () => {
+    const drops: Array<{ bytes: number; provenance: "owned" | "foreign" }> = [];
+    const demux = createOutputDemux({
+      onPretopologyDropped: (b, p) => drops.push({ bytes: b, provenance: p }),
+    });
+    const P = paneId("p42");
+
+    // Suppress the console.warn that the existing demux fires on overflow.
+    const origWarn = console.warn;
+    console.warn = (() => {}) as typeof console.warn;
+    try {
+      // Stuff the staging buffer to the brim, then push one byte that
+      // overflows. The overflow byte is dropped.
+      demux.store.append(P, new Uint8Array(MAX_PENDING));
+      // The next append crosses the limit — its 64 bytes are dropped.
+      demux.store.append(P, new Uint8Array(64));
+
+      // No counter activity yet: the demux defers the provenance decision.
+      assert.equal(drops.length, 0, "drops are deferred until bind/close");
+
+      // Pane is bound — the deferred bytes settle to provenance=owned (the
+      // F4 symptom: we dropped bytes for a pane WE OWN).
+      demux.notifyPaneBound(P);
+    } finally {
+      console.warn = origWarn;
+    }
+
+    assert.equal(drops.length, 1, "exactly one settlement on bind");
+    assert.equal(drops[0]!.bytes, 64);
+    assert.equal(drops[0]!.provenance, "owned");
+  });
+
+  it("a drop on a pane THAT IS NEVER BOUND (just closed) settles as provenance=foreign", () => {
+    const drops: Array<{ bytes: number; provenance: "owned" | "foreign" }> = [];
+    const demux = createOutputDemux({
+      onPretopologyDropped: (b, p) => drops.push({ bytes: b, provenance: p }),
+    });
+    const P = paneId("p99");
+
+    const origWarn = console.warn;
+    console.warn = (() => {}) as typeof console.warn;
+    try {
+      demux.store.append(P, new Uint8Array(MAX_PENDING));
+      demux.store.append(P, new Uint8Array(128));
+
+      // Pane closed without ever being bound — drops are foreign.
+      demux.notifyPaneClosed(P);
+    } finally {
+      console.warn = origWarn;
+    }
+
+    assert.equal(drops.length, 1);
+    assert.equal(drops[0]!.bytes, 128);
+    assert.equal(drops[0]!.provenance, "foreign");
+  });
+
+  it("a pane WITHOUT any drops fires no settlement on bind or close", () => {
+    const drops: Array<{ bytes: number; provenance: "owned" | "foreign" }> = [];
+    const demux = createOutputDemux({
+      onPretopologyDropped: (b, p) => drops.push({ bytes: b, provenance: p }),
+    });
+    const P = paneId("p1");
+
+    // Stage some bytes BELOW the overflow limit — no drops.
+    demux.store.append(P, new Uint8Array(1024));
+    demux.notifyPaneBound(P);
+    assert.equal(drops.length, 0, "bind with no overflow does not credit");
+    demux.notifyPaneClosed(P);
+    assert.equal(drops.length, 0, "close with no remaining drops does not credit");
+  });
+});

@@ -1851,3 +1851,165 @@ describe("RequeryEngine: teardown-confirmation guard (tc-3si.2)", () => {
     assert.equal(engine2.isDirty(), true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// tc-3si.5: engine telemetry hooks (failed-cycle reason, budget exhausted)
+// ---------------------------------------------------------------------------
+
+describe("RequeryEngine: failure telemetry hooks (tc-3si.5)", () => {
+  it("onCycleFailed fires with reason=error when a list-* reply is %error", async () => {
+    const failedReasons: ("error" | "budget")[] = [];
+    let budgetExhaustedCount = 0;
+
+    const d = deferredSubmit();
+    const engine = createRequeryEngine({
+      submit: d.submit,
+      onCycleFailed: (r) => failedReasons.push(r),
+      onBudgetExhausted: () => { budgetExhaustedCount++; },
+    });
+
+    const inflight = engine.requery();
+    d.resolveNext(errResult()); // %error from list-windows
+    d.resolveNext(errResult()); // %error from list-panes too
+
+    const result = await inflight;
+    assert.equal(result.failed, true);
+    assert.deepEqual(failedReasons, ["error"], "exactly one error-reason fire");
+    assert.equal(budgetExhaustedCount, 0, "budget hook must NOT fire on a transient error");
+  });
+
+  it("onBudgetExhausted + onCycleFailed(reason=budget) fire together on budget exhaustion", async () => {
+    // Replays the storm scenario from the existing storm/convergence-budget
+    // suite, asserting that the new tc-3si.5 hooks fire correctly.
+    const win = winLine({
+      sessNum: 0,
+      sessName: "main",
+      winNum: 1,
+      winName: "shell",
+      layout: SINGLE_PANE_LAYOUT(1),
+      active: true,
+    });
+    const pane = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true });
+
+    const replies: CommandResult[] = [];
+    for (let i = 0; i < 100; i++) replies.push(okResult(win), okResult(pane));
+    const { submit } = queueSubmit(replies);
+
+    let engineRef: { ref: RequeryEngine } | null = null;
+    let callCount = 0;
+    const wrappedSubmit: SubmitCommand = (cmd) => {
+      callCount++;
+      if (engineRef !== null && callCount % 2 === 1) {
+        engineRef.ref.markDirty();
+      }
+      return submit(cmd);
+    };
+
+    const failedReasons: ("error" | "budget")[] = [];
+    let budgetExhaustedCount = 0;
+
+    // Capture stderr to verify the loud log emitted by the engine.
+    const origWrite = process.stderr.write.bind(process.stderr);
+    const captured: string[] = [];
+    (process.stderr as { write: typeof process.stderr.write }).write = ((
+      chunk: string | Uint8Array,
+    ) => {
+      captured.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+
+    let result;
+    try {
+      const engine = createRequeryEngine({
+        submit: wrappedSubmit,
+        onCycleFailed: (r) => failedReasons.push(r),
+        onBudgetExhausted: () => { budgetExhaustedCount++; },
+      });
+      engineRef = { ref: engine };
+      result = await engine.requery();
+    } finally {
+      process.stderr.write = origWrite;
+    }
+
+    assert.equal(result.failed, true);
+    assert.equal(budgetExhaustedCount, 1, "budget hook fires exactly once per exhausted call");
+    assert.deepEqual(failedReasons, ["budget"], "failed reason is budget, no double-count");
+    const logText = captured.join("");
+    assert.ok(
+      logText.includes("BUDGET EXHAUSTED"),
+      `expected loud budget-exhausted log; got: ${logText}`,
+    );
+  });
+
+  it("onCycleFailed does NOT fire on a clean cycle", async () => {
+    const failedReasons: ("error" | "budget")[] = [];
+
+    const win = winLine({
+      sessNum: 0,
+      sessName: "main",
+      winNum: 1,
+      winName: "shell",
+      layout: SINGLE_PANE_LAYOUT(1),
+      active: true,
+    });
+    const pane = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true });
+    const { submit } = queueSubmit([okResult(win), okResult(pane)]);
+
+    const engine = createRequeryEngine({
+      submit,
+      onCycleFailed: (r) => failedReasons.push(r),
+    });
+
+    const result = await engine.requery();
+    assert.equal(result.failed, undefined);
+    assert.deepEqual(failedReasons, [], "no failure hook fires on success");
+  });
+
+  it("refuted teardown does NOT bump requery_failed_cycles_total{reason} (the dedicated counter handles it)", async () => {
+    // The teardown-refuted path returns failed:true but the failure-reason
+    // vocabulary is `error|budget` — refuted is its own counter
+    // (`requery_teardown_confirmations_total{outcome="refuted"}`). Verifying
+    // that the dispatched `onCycleFailed` reason set stays empty for the
+    // refuted path keeps the reason vocabulary clean.
+    const { winBody, paneBody } = twoPaneModelBodies();
+
+    const bootD = deferredSubmit();
+    const engine = createRequeryEngine({ submit: bootD.submit });
+    const boot = engine.requery();
+    bootD.resolveNext(okResult(winBody));
+    bootD.resolveNext(okResult(paneBody));
+    await boot;
+
+    const failedReasons: ("error" | "budget")[] = [];
+    const d = deferredSubmit();
+    const engine2 = createRequeryEngine({
+      initialModel: engine.getModel(),
+      submit: d.submit,
+      onCycleFailed: (r) => failedReasons.push(r),
+    });
+
+    // Suppress stderr (the refute path loud-logs).
+    const origWrite = process.stderr.write.bind(process.stderr);
+    (process.stderr as { write: typeof process.stderr.write }).write = (() => true) as typeof process.stderr.write;
+    try {
+      const inflight = engine2.requery();
+      // Cycle 1: garbage empty.
+      d.resolveNext(okResult(""));
+      d.resolveNext(okResult(""));
+      await new Promise((r) => setImmediate(r));
+      // Cycle 2: confirming — disagrees.
+      d.resolveNext(okResult(winBody));
+      d.resolveNext(okResult(paneBody));
+      const result = await inflight;
+      assert.equal(result.failed, true);
+    } finally {
+      process.stderr.write = origWrite;
+    }
+
+    assert.deepEqual(
+      failedReasons,
+      [],
+      "refuted teardown must NOT bump the error|budget failed-cycles counter (it has its own surface)",
+    );
+  });
+});

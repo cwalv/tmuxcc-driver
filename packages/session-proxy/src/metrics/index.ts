@@ -9,7 +9,14 @@
  */
 
 export { createSessionProxyRegistry, classifyCommand } from "./registry.js";
-export type { SessionProxyRegistry, CycleEdge } from "./registry.js";
+export type {
+  SessionProxyRegistry,
+  CycleEdge,
+  RequeryTrigger,
+  RequeryFailureReason,
+  Provenance,
+  ResyncCause,
+} from "./registry.js";
 
 export { createStormAlarm } from "./storm-alarm.js";
 export type { StormAlarm, StormAlarmOptions, KindBreakdown } from "./storm-alarm.js";

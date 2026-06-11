@@ -238,6 +238,7 @@ describe("tc-1elae: ControlServer stamps attachedClientCount in snapshots", () =
       },
       send() { return new Promise<never>(() => {}); },
       sendBatch(cmds: readonly string[]) { return cmds.map(() => new Promise<never>(() => {})); },
+      refreshCorrelatorPendingGauge() {},
       get buffers(): never { throw new Error("no buffers"); },
     };
 
@@ -278,6 +279,7 @@ describe("tc-1elae: ControlServer stamps attachedClientCount in snapshots", () =
       },
       send() { return new Promise<never>(() => {}); },
       sendBatch(cmds: readonly string[]) { return cmds.map(() => new Promise<never>(() => {})); },
+      refreshCorrelatorPendingGauge() {},
       get buffers(): never { throw new Error("no buffers"); },
     };
 
@@ -327,6 +329,7 @@ describe("tc-1elae: ControlServer stamps attachedClientCount in snapshots", () =
       },
       send() { return new Promise<never>(() => {}); },
       sendBatch(cmds: readonly string[]) { return cmds.map(() => new Promise<never>(() => {})); },
+      refreshCorrelatorPendingGauge() {},
       get buffers(): never { throw new Error("no buffers"); },
     };
     const server = createControlServer(pipeline);
@@ -430,6 +433,7 @@ describe("tc-1elae: end-to-end via connectClient", () => {
       },
       send() { return new Promise<never>(() => {}); },
       sendBatch(cmds: readonly string[]) { return cmds.map(() => new Promise<never>(() => {})); },
+      refreshCorrelatorPendingGauge() {},
       get buffers(): never { throw new Error("no buffers"); },
     };
     const server = createControlServer(pipeline);
@@ -509,6 +513,7 @@ function buildLivePipeline() {
       },
       send() { return new Promise<never>(() => {}); },
       sendBatch(cmds: readonly string[]) { return cmds.map(() => new Promise<never>(() => {})); },
+      refreshCorrelatorPendingGauge() {},
       get buffers(): never { throw new Error("no buffers"); },
     },
     setModel: (m: typeof model) => { current = m; },

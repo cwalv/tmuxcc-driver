@@ -286,6 +286,200 @@ describe("SessionProxyRegistry", () => {
     assert.equal(classifyCommand("list-windows\n"), "list-windows");
   });
 
+  // ---- tc-3si.5: premise-watching + tripwire counters --------------------
+
+  it("incRequeryCycle records per-trigger attribution", async () => {
+    const reg = createSessionProxyRegistry();
+
+    reg.incRequeryCycle("leading");
+    reg.incRequeryCycle("leading");
+    reg.incRequeryCycle("leading");
+    reg.incRequeryCycle("trailing");
+    reg.incRequeryCycle("heartbeat");
+    reg.incRequeryCycle("bootstrap");
+
+    const text = await reg.metrics();
+    assert.ok(text.includes("requery_cycles_total"));
+    assert.ok(
+      text.match(/trigger="leading"\} 3/),
+      `leading should be 3; got:\n${text}`,
+    );
+    assert.ok(text.includes('trigger="trailing"'));
+    assert.ok(text.includes('trigger="heartbeat"'));
+    assert.ok(text.includes('trigger="bootstrap"'));
+
+    reg.stop();
+  });
+
+  it("incRequeryHeartbeatChange increments the expected-zero tripwire", async () => {
+    const reg = createSessionProxyRegistry();
+
+    // Caller passes the delta count for the log line, but the counter just
+    // increments by 1 per incident.
+    reg.incRequeryHeartbeatChange(2);
+    reg.incRequeryHeartbeatChange(5);
+
+    const text = await reg.metrics();
+    assert.ok(text.includes("requery_heartbeat_changes_total"));
+    assert.ok(
+      text.match(/requery_heartbeat_changes_total 2/),
+      `expected 2 heartbeat-change incidents; got:\n${text}`,
+    );
+
+    reg.stop();
+  });
+
+  it("observeRequeryRoundTrip records a unimodal-shaped histogram (no labels)", async () => {
+    const reg = createSessionProxyRegistry();
+
+    reg.observeRequeryRoundTrip(0.0008); // 0.8 ms — the expected mode
+    reg.observeRequeryRoundTrip(0.0011); // 1.1 ms
+    reg.observeRequeryRoundTrip(0.0014); // 1.4 ms
+
+    const text = await reg.metrics();
+    assert.ok(text.includes("requery_round_trip_seconds"));
+    assert.ok(text.includes("requery_round_trip_seconds_count"));
+    // No `kind` or other label allowed — it is unlabelled by design.
+    assert.ok(
+      !/requery_round_trip_seconds_count\{[^}]*kind=/.test(text),
+      "requery_round_trip_seconds must be unlabelled (cardinality rule)",
+    );
+
+    reg.stop();
+  });
+
+  it("incRequeryBudgetExhausted + incRequeryFailedCycle: distinct counter surfaces", async () => {
+    const reg = createSessionProxyRegistry();
+
+    // Exhaustion path: both counters bump (the engine wires them together).
+    reg.incRequeryBudgetExhausted();
+    reg.incRequeryFailedCycle("budget");
+    // Error path: only the failed-cycle counter bumps.
+    reg.incRequeryFailedCycle("error");
+    reg.incRequeryFailedCycle("error");
+
+    const text = await reg.metrics();
+    assert.ok(text.includes("requery_budget_exhausted_total"));
+    assert.ok(text.match(/requery_budget_exhausted_total 1/));
+    assert.ok(text.includes('reason="budget"'));
+    assert.ok(text.includes('reason="error"'));
+    assert.ok(text.match(/reason="error"\} 2/));
+
+    reg.stop();
+  });
+
+  it("incCorrelatorUnsolicitedBlock is an expected-zero tripwire (counts on increment only)", async () => {
+    const reg = createSessionProxyRegistry();
+
+    reg.incCorrelatorUnsolicitedBlock();
+    reg.incCorrelatorUnsolicitedBlock();
+
+    const text = await reg.metrics();
+    assert.ok(text.includes("correlator_unsolicited_blocks_total"));
+    assert.ok(text.match(/correlator_unsolicited_blocks_total 2/));
+
+    reg.stop();
+  });
+
+  it("setCorrelatorPending writes both gauges atomically", async () => {
+    const reg = createSessionProxyRegistry();
+
+    reg.setCorrelatorPending(0, 0); // initial / empty state
+    let text = await reg.metrics();
+    assert.ok(text.includes("correlator_pending_slots 0"));
+    assert.ok(text.includes("correlator_pending_slot_max_age_seconds 0"));
+
+    reg.setCorrelatorPending(3, 0.42);
+    text = await reg.metrics();
+    assert.ok(text.includes("correlator_pending_slots 3"));
+    assert.ok(text.match(/correlator_pending_slot_max_age_seconds 0\.42/));
+
+    reg.stop();
+  });
+
+  it("incPretopologyDroppedBytes records bytes by provenance (the F4 tripwire)", async () => {
+    const reg = createSessionProxyRegistry();
+
+    // The F4 symptom: bytes for a pane WE OWN were dropped.
+    reg.incPretopologyDroppedBytes(1024, "owned");
+    reg.incPretopologyDroppedBytes(512, "owned");
+    // Legitimate foreign-pane drops.
+    reg.incPretopologyDroppedBytes(8192, "foreign");
+    // Defensive: zero / negative are no-ops.
+    reg.incPretopologyDroppedBytes(0, "owned");
+    reg.incPretopologyDroppedBytes(-1, "foreign");
+
+    const text = await reg.metrics();
+    assert.ok(text.includes("output_pretopology_dropped_bytes_total"));
+    assert.ok(
+      text.match(/provenance="owned"\} 1536/),
+      `owned should be 1536; got:\n${text}`,
+    );
+    assert.ok(
+      text.match(/provenance="foreign"\} 8192/),
+      `foreign should be 8192; got:\n${text}`,
+    );
+
+    reg.stop();
+  });
+
+  it("notePanePauseEntered/Exited drives gauge + totals; totals balance over time", async () => {
+    const reg = createSessionProxyRegistry();
+
+    reg.notePanePauseEntered();
+    reg.notePanePauseEntered();
+    let text = await reg.metrics();
+    assert.ok(text.includes("flow_panes_paused 2"));
+
+    reg.notePanePauseExited();
+    text = await reg.metrics();
+    assert.ok(text.includes("flow_panes_paused 1"));
+
+    reg.notePanePauseExited();
+    text = await reg.metrics();
+    assert.ok(text.includes("flow_panes_paused 0"));
+    assert.ok(text.match(/flow_pane_pauses_total 2/));
+    assert.ok(text.match(/flow_pane_resumes_total 2/));
+
+    reg.stop();
+  });
+
+  it("incResync attributes by cause; escalation is the expected-zero tripwire", async () => {
+    const reg = createSessionProxyRegistry();
+
+    reg.incResync("gap");
+    reg.incResync("gap");
+    reg.incResync("escalation");
+
+    const text = await reg.metrics();
+    assert.ok(text.includes("resyncs_total"));
+    assert.ok(text.match(/cause="gap"\} 2/));
+    assert.ok(text.match(/cause="escalation"\} 1/));
+
+    reg.stop();
+  });
+
+  it("observeDeltasPerCycle: zero-delta cycles are observed (the no-change rate)", async () => {
+    const reg = createSessionProxyRegistry();
+
+    reg.observeDeltasPerCycle(0); // heartbeat no-op
+    reg.observeDeltasPerCycle(0);
+    reg.observeDeltasPerCycle(3); // typical steady state
+    reg.observeDeltasPerCycle(150); // bootstrap-ish spike
+    reg.observeDeltasPerCycle(-1); // defensive no-op
+
+    const text = await reg.metrics();
+    assert.ok(text.includes("deltas_per_cycle"));
+    assert.ok(text.includes("deltas_per_cycle_count"));
+    // 4 observations landed (the -1 was dropped); the count should reflect that.
+    assert.ok(
+      text.match(/deltas_per_cycle_count 4/),
+      `expected 4 observations after one defensive no-op; got:\n${text}`,
+    );
+
+    reg.stop();
+  });
+
   it("multiple registries are isolated (no cross-contamination)", async () => {
     const reg1 = createSessionProxyRegistry();
     const reg2 = createSessionProxyRegistry();

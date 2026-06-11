@@ -355,6 +355,39 @@ export interface RequeryEngineOptions {
    * the engine has no metrics dependency.
    */
   readonly onTeardownOutcome?: (outcome: "confirmed" | "refuted") => void;
+
+  /**
+   * Optional registry-shaped hook for the per-reason failure counter
+   * (tc-3si.5). Fired once per `requery()` call that returns `failed: true`,
+   * just before the return. The engine ALSO loud-logs the
+   * budget-exhausted variant to stderr (storm-alarm-style alert path) so
+   * the bug class stays visible without metrics wired.
+   *
+   * `reason="error"` — a `list-*` reply was `%error` from tmux. The
+   * coalescer's failed-path schedules a retry at the next ceiling boundary.
+   *
+   * `reason="budget"` — the convergence loop exhausted `CYCLE_BUDGET`
+   * iterations without producing a clean cycle (typically a sustained mid-
+   * flight rearm storm). The engine ALSO bumps the standalone
+   * `requery_budget_exhausted_total` via `onBudgetExhausted` (kept on a
+   * separate surface so a reader sees the exhaustion total at a glance
+   * without filtering the failed-cycles counter by reason).
+   *
+   * Throws are caught and swallowed so a misbehaving subscriber cannot
+   * break the pipeline.
+   */
+  readonly onCycleFailed?: (reason: "error" | "budget") => void;
+
+  /**
+   * Optional registry-shaped hook for the convergence-budget exhaustion
+   * counter (tc-3si.5). Fired exactly once per `requery()` call that
+   * exits via the budget path (i.e. concurrent with `onCycleFailed("budget")`).
+   * Kept on a separate surface from the failed-cycles counter so the
+   * "budget exhausted" total is readable at a glance — that single counter
+   * being non-zero in the absence of a storm-alarm trip is itself the
+   * convergence-pathology diagnostic.
+   */
+  readonly onBudgetExhausted?: () => void;
 }
 
 /**
@@ -479,6 +512,10 @@ class RequeryEngineImpl implements RequeryEngine {
   private readonly _onTeardownOutcome:
     | ((outcome: "confirmed" | "refuted") => void)
     | undefined;
+  private readonly _onCycleFailed:
+    | ((reason: "error" | "budget") => void)
+    | undefined;
+  private readonly _onBudgetExhausted: (() => void) | undefined;
 
   /** True iff `markDirty()` has been called since the last completed cycle. */
   private _dirty = false;
@@ -501,6 +538,8 @@ class RequeryEngineImpl implements RequeryEngine {
       typeof t === "number" && t > 0 && t <= 1 ? t : DEFAULT_TEARDOWN_THRESHOLD;
     this._onTeardownConfirmation = opts.onTeardownConfirmation;
     this._onTeardownOutcome = opts.onTeardownOutcome;
+    this._onCycleFailed = opts.onCycleFailed;
+    this._onBudgetExhausted = opts.onBudgetExhausted;
   }
 
   getModel(): SessionModel {
@@ -614,6 +653,7 @@ class RequeryEngineImpl implements RequeryEngine {
       // can't confirm against a %error.
       if (!winResult.ok || !paneResult.ok) {
         this._dirty = true;
+        this._reportCycleFailed("error");
         return { next: startModel, deltas: [], failed: true };
       }
 
@@ -692,6 +732,14 @@ class RequeryEngineImpl implements RequeryEngine {
       // attempt up, return failed. The loud stderr log + counter bump
       // already happened inside _reportTeardownOutcome — by the time we
       // get here the bug class has been announced.
+      //
+      // tc-3si.5: a refuted teardown is NOT a generic cycle failure — the
+      // dedicated `requery_teardown_confirmations_total{outcome="refuted"}`
+      // counter already captures it with the correct semantic. Bumping
+      // `requery_failed_cycles_total{reason=error|budget}` here would
+      // muddle the failure-reason vocabulary (the failure here is neither
+      // a tmux `%error` nor budget exhaustion). The refuted counter IS the
+      // tripwire; the failed-cycles counter stays clean.
       this._dirty = true;
       return { next: startModel, deltas: [], failed: true };
     }
@@ -703,8 +751,53 @@ class RequeryEngineImpl implements RequeryEngine {
     // report failure. `_model` is unchanged from the pre-call snapshot
     // because no cycle ever committed. Teardown counters are NOT bumped:
     // we never adjudicated, only ran out of budget.
+    //
+    // tc-3si.5: bump the dedicated budget-exhausted counter AND the
+    // failed-cycles counter with reason="budget" (they're on separate
+    // surfaces so a session-proxy.info reader sees both totals at a
+    // glance — see the registry module doc for the rationale). Loud-log
+    // the exhaustion so the bug class survives metric-less test setups.
     this._dirty = true;
+    this._reportBudgetExhausted();
+    this._reportCycleFailed("budget");
     return { next: startModel, deltas: [], failed: true };
+  }
+
+  /**
+   * Surface a cycle failure to the registry sink. Throws are caught and
+   * swallowed — counter wiring must not break the pipeline.
+   */
+  private _reportCycleFailed(reason: "error" | "budget"): void {
+    if (this._onCycleFailed === undefined) return;
+    try {
+      this._onCycleFailed(reason);
+    } catch {
+      // Counter wiring must not break the pipeline.
+    }
+  }
+
+  /**
+   * Surface a budget exhaustion to the registry sink AND to stderr
+   * (storm-alarm-style alert path). The loud log mirrors
+   * `_reportTeardownOutcome`'s pattern: an expected-zero counter
+   * incrementing is an alarm, not a silent counter — even without the
+   * sink wired, the bug class lands one stderr line per incident.
+   */
+  private _reportBudgetExhausted(): void {
+    // Loud-log unconditionally (independent of whether onBudgetExhausted
+    // is wired). One line per incident; not parsed by anything.
+    process.stderr.write(
+      `[requery-engine] BUDGET EXHAUSTED: ${CYCLE_BUDGET} convergence cycles ran without producing a clean commit. ` +
+        `This is expected ONLY during a sustained tmux notification storm (the storm alarm should also be tripping). ` +
+        `Exhaustion in isolation = a self-sourced rearm storm (mid-flight notification convergence pathology); ` +
+        `coalescer will retry at the next ceiling boundary.\n`,
+    );
+    if (this._onBudgetExhausted === undefined) return;
+    try {
+      this._onBudgetExhausted();
+    } catch {
+      // Counter wiring must not break the pipeline.
+    }
   }
 
   /**

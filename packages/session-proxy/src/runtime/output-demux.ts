@@ -115,6 +115,29 @@ export interface OutputDemuxOptions {
    * another component (e.g. the snapshot projection, tc-7gp).
    */
   innerStore?: PaneBufferStore;
+
+  /**
+   * Called when bytes are dropped from the bounded pre-topology buffer
+   * (tc-3si.5). Provenance is **deferred**: the demux accumulates drops
+   * per unknown pane, then settles them when the pane is either bound
+   * (`notifyPaneBound` → `provenance="owned"`, the F4 symptom — bytes for
+   * a pane WE OWN were thrown away) or closed without ever being bound
+   * (`notifyPaneClosed` → `provenance="foreign"`, legitimate under
+   * bind-on-provenance).
+   *
+   * This separation is load-bearing: at drop time we don't yet know
+   * whether the pane is owned or foreign, so eagerly attributing would
+   * bias every overflow as foreign (the model lag IS exactly the gap the
+   * staging buffer is designed to bridge). Deferring keeps the `owned`
+   * tripwire honest.
+   *
+   * Hot-path cost: zero (deferred); the counter is bumped at most once
+   * per pane-bind / pane-close edge.
+   *
+   * Throws are caught and swallowed by the demux's wiring so a
+   * misbehaving observer cannot break the data plane.
+   */
+  onPretopologyDropped?: (bytes: number, provenance: "owned" | "foreign") => void;
 }
 
 /**
@@ -233,6 +256,27 @@ export function createOutputDemux(opts: OutputDemuxOptions = {}): OutputDemux {
   const _inner: PaneBufferStore = opts.innerStore ?? createPaneBufferStore();
   const _transports = new Set<Transport>();
   const _pausedPanes = new Set<PaneId>();
+  const _onPretopologyDropped = opts.onPretopologyDropped;
+
+  /**
+   * Per-pane accumulator of bytes dropped from the pre-topology buffer
+   * (tc-3si.5). Holds the total dropped count for each pane that has
+   * overflowed; settled to the `owned` or `foreign` provenance bucket when
+   * the pane is later bound or closed.
+   */
+  const _pendingDroppedBytes = new Map<PaneId, number>();
+
+  function _settleDroppedBytes(paneId: PaneId, provenance: "owned" | "foreign"): void {
+    const bytes = _pendingDroppedBytes.get(paneId);
+    if (bytes === undefined || bytes <= 0) return;
+    _pendingDroppedBytes.delete(paneId);
+    if (_onPretopologyDropped === undefined) return;
+    try {
+      _onPretopologyDropped(bytes, provenance);
+    } catch {
+      // Observer errors must not break the data plane.
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // Pane-tracking state (always on, tc-128.4).
@@ -296,6 +340,10 @@ export function createOutputDemux(opts: OutputDemuxOptions = {}): OutputDemux {
             ` dropping ${bytes.length} bytes. Recapture-on-bind will restore content.`,
           );
         }
+        // tc-3si.5: accumulate the dropped byte count; provenance is
+        // resolved at bind / close time. Counter increments are deferred
+        // off the hot path — at most one per pane edge.
+        _pendingDroppedBytes.set(paneId, (_pendingDroppedBytes.get(paneId) ?? 0) + bytes.length);
         return;
       }
 
@@ -353,6 +401,12 @@ export function createOutputDemux(opts: OutputDemuxOptions = {}): OutputDemux {
       if (_knownPanes.has(paneId)) return; // already known — idempotent
       _knownPanes.add(paneId);
 
+      // tc-3si.5: the pane is OWNED — credit any accumulated dropped bytes
+      // to provenance=owned (the F4 symptom — bytes for a pane we own were
+      // thrown away). The drops happened ALREADY, before this bind; this
+      // is just the deferred attribution.
+      _settleDroppedBytes(paneId, "owned");
+
       // Flush any staged bytes to all attached transports, deferred by one
       // microtask so that control-plane model-change handlers (which send
       // `pane.opened` to clients) have a chance to fire first.
@@ -373,6 +427,14 @@ export function createOutputDemux(opts: OutputDemuxOptions = {}): OutputDemux {
     },
 
     notifyPaneClosed(paneId: PaneId): void {
+      // tc-3si.5: if the pane is closing WITHOUT ever being bound
+      // (knownPanes never picked it up), any accumulated drops are
+      // FOREIGN. If it WAS bound, the owned settlement already happened
+      // inside notifyPaneBound; the entry has been cleared so the
+      // _settleDroppedBytes call here is a no-op in that case.
+      const wasKnown = _knownPanes.has(paneId);
+      _settleDroppedBytes(paneId, wasKnown ? "owned" : "foreign");
+
       _knownPanes.delete(paneId);
       _pendingFanout.delete(paneId);
       _pendingFanoutBytes.delete(paneId);

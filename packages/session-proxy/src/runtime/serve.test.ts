@@ -92,6 +92,9 @@ function createFakePipeline(initialModel?: SessionModel): FakePipeline {
       // FakePipeline: returns one never-resolving promise per command.
       return _commands.map(() => new Promise<import("../parser/correlator.js").CommandResult>(() => {}));
     },
+    refreshCorrelatorPendingGauge(): void {
+      // FakePipeline: no correlator, no gauge to refresh (tc-3si.5).
+    },
     get buffers(): never {
       throw new Error("FakePipeline has no buffers");
     },

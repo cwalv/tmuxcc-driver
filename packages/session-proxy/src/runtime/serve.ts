@@ -281,7 +281,36 @@ interface ClientState {
    * identity — just enough to attribute per-slot fan-out volume.
    */
   metricsClientLabel: string;
+  /**
+   * tc-3si.5: wall-clock timestamp (ms, from `Date.now()`) of the most
+   * recent `resync.request` from this client, or `null` if none has fired
+   * yet. Used to attribute the next request as either a fresh `gap` (no
+   * prior request, or last request landed long ago) or an `escalation`
+   * (a second request inside `RESYNC_ESCALATION_WINDOW_MS` of the
+   * previous one — the previous snapshot did NOT heal the gap, which is
+   * the expected-zero tripwire).
+   */
+  lastResyncAtMs: number | null;
 }
+
+/**
+ * Window inside which a second `resync.request` from the same client is
+ * classified as `escalation` rather than `gap` (tc-3si.5).
+ *
+ * The wire client's documented state machine is: detect a seq gap →
+ * send resync.request → wait for snapshot → if a gap persists AFTER the
+ * snapshot delivers, close the transport. A second resync.request before
+ * `close()` would only happen if the client's gap-detection loop is
+ * broken (resync.request without waiting for snapshot completion) or if
+ * the snapshot itself was structurally invalid (didn't carry the seq
+ * baseline forward).
+ *
+ * 30 s is intentionally generous: a snapshot RTT plus a settling pause
+ * is well under 1 s in practice, so an escalation arriving within 30 s
+ * is unambiguously "the previous resync didn't fix anything". We'd
+ * rather catch a slow regression than miss a fast one.
+ */
+const RESYNC_ESCALATION_WINDOW_MS = 30_000;
 
 // ---------------------------------------------------------------------------
 // Implementation
@@ -360,6 +389,7 @@ class ControlServerImpl implements ControlServer {
       nextSeq: 1,
       unsubModelChange: null,
       metricsClientLabel: this._mintClientLabel(),
+      lastResyncAtMs: null,
     };
     this._clients.set(transport, state);
 
@@ -525,6 +555,34 @@ class ControlServerImpl implements ControlServer {
   handleResyncRequest(transport: Transport): void {
     const state = this._clients.get(transport);
     if (!state) return; // client may have been removed already (race with close)
+
+    // tc-3si.5: classify this resync as either `gap` (fresh) or
+    // `escalation` (a second request from the same client inside the
+    // escalation window — the previous snapshot did NOT heal the gap).
+    // Escalation is an expected-zero tripwire; loud-log it alongside the
+    // counter bump so the bug class lands even when no metric reader is
+    // attached.
+    const nowMs = Date.now();
+    const prevResyncAtMs = state.lastResyncAtMs;
+    let cause: "gap" | "escalation" = "gap";
+    if (
+      prevResyncAtMs !== null &&
+      nowMs - prevResyncAtMs < RESYNC_ESCALATION_WINDOW_MS
+    ) {
+      cause = "escalation";
+    }
+    state.lastResyncAtMs = nowMs;
+    if (this._metrics !== undefined) {
+      this._metrics.incResync(cause);
+    }
+    if (cause === "escalation" && prevResyncAtMs !== null) {
+      process.stderr.write(
+        `[serve] RESYNC ESCALATION: a second resync.request from client ${state.metricsClientLabel} ` +
+          `landed ${nowMs - prevResyncAtMs}ms after the previous one (within the ` +
+          `${RESYNC_ESCALATION_WINDOW_MS}ms escalation window). The previous snapshot did not heal the gap — ` +
+          `the wire's sequence invariant is broken or the client's gap detector is misfiring (tc-3si.5).\n`,
+      );
+    }
 
     // tc-1elae: include the current client count in the re-sent snapshot so
     // that the status bar tooltip stays accurate after a resync.

@@ -239,7 +239,24 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
   const host = createTmuxHost(opts.host);
 
   // 2. Demux
-  const demux = createOutputDemux();
+  //
+  // tc-3si.5: wire the pretopology-drop counter through. Provenance is
+  // resolved at bind / close time inside the demux (see output-demux.ts);
+  // the hook is fired with the accumulated byte count and the settled
+  // label. Owned drops loud-log alongside the counter bump (the F4
+  // symptom — a pane we own had bytes thrown away).
+  const demux = createOutputDemux({
+    onPretopologyDropped: (bytes, provenance) => {
+      metricsRegistry.incPretopologyDroppedBytes(bytes, provenance);
+      if (provenance === "owned") {
+        process.stderr.write(
+          `[output-demux] OWNED PRETOPOLOGY DROP: ${bytes} bytes dropped before the pane was bound to the model. ` +
+            `This is the F4 symptom — bytes for a pane we own were thrown away; recapture-on-bind will fill the gap ` +
+            `but the staging buffer cap (128 KiB) was too small for the bind delay (tc-3si.5).\n`,
+        );
+      }
+    },
+  });
 
   // 3. Flow controller — needs the pipeline's atomic `send` (slot + write)
   //    callback; pipeline not yet created.
@@ -410,6 +427,12 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
       if (!_metricsPaused.has(pid)) {
         _metricsPaused.add(pid);
         metricsRegistry.notePauseEntered();
+        // tc-3si.5: pane-level pause gauge + totals. Pairs with
+        // notePauseEntered (the session-time accumulator that already
+        // existed in tc-3si.6) — distinct surfaces because session-time
+        // is "fraction of session paused", and the gauge/totals are
+        // "are there currently stuck panes? do pauses balance resumes?"
+        metricsRegistry.notePanePauseEntered();
       }
     } else if (event.kind === "continue") {
       const pid = mintPaneId("p" + event.paneId);
@@ -417,6 +440,7 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
       if (_metricsPaused.has(pid)) {
         _metricsPaused.delete(pid);
         metricsRegistry.notePauseExited();
+        metricsRegistry.notePanePauseExited();
       }
     }
   });
@@ -592,6 +616,13 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
         // directed response using the per-connection seq counter.
         if (msg.type === "command.request" && msg.command.kind === "session-proxy.info") {
           const correlationId = (msg as import("../wire/session-proxy-control.js").SessionProxyCommandRequestMessage).correlationId;
+          // tc-3si.5: refresh the correlator's pending-slot age gauge
+          // RIGHT BEFORE the exposition is rendered. The gauge is written
+          // synchronously on every register/close edge, but the OLDEST
+          // slot's age grows continuously while the queue is non-empty,
+          // so this is the cheapest way to keep the exposition fresh
+          // without a polling timer.
+          pipeline.refreshCorrelatorPendingGauge();
           void metricsRegistry.metrics().then((metricsText) => {
             const breakdown = stormAlarm.windowBreakdown();
             const breakdownObj: Record<string, number> = {};

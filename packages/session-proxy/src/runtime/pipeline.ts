@@ -403,6 +403,21 @@ export interface RuntimePipeline {
    * writer can land bytes in between.
    */
   sendBatch(commands: readonly string[]): Promise<CommandResult>[];
+
+  /**
+   * Re-snapshot the correlator's pending-slot depth and oldest-slot age
+   * into the metrics registry's gauges (tc-3si.5).
+   *
+   * The correlator's `onPendingChanged` hook drives the gauges on every
+   * register / close edge, but the OLDEST slot's AGE grows continuously
+   * while the queue is non-empty — so a reader that hits
+   * `session-proxy.info` between command edges would see a stale age.
+   * Calling this immediately before `metricsRegistry.metrics()` keeps the
+   * exposition fresh without polling on a timer.
+   *
+   * No-op when no metrics registry is wired.
+   */
+  refreshCorrelatorPendingGauge(): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -490,11 +505,35 @@ class RuntimePipelineImpl implements RuntimePipeline {
     // what gives `correlator.send` its atomic "register slot + write" property.
     // Once the pipeline is stopped we drop writes (matches the previous
     // _writeSlottedCommand stop-gate behaviour).
+    //
+    // tc-3si.5: forward unsolicited-block and pending-changed events into
+    // the metrics registry. The hooks are bypassed entirely when no
+    // registry is wired (test setups that don't care about metrics), so
+    // there's zero cost outside production wiring.
     this._correlator = new CommandCorrelator({
       onNotification: (token: NotificationToken) => this._onNotificationToken(token),
       write: (data) => {
         if (this._stopped) return;
         this._host.write(data);
+      },
+      onUnsolicitedBlock: () => {
+        const metrics = this._opts.metrics;
+        if (metrics === undefined) return;
+        metrics.incCorrelatorUnsolicitedBlock();
+        // tc-3si.5: storm-alarm-style alert path — name the event so the
+        // bug class stays visible in stderr even when no metric reader is
+        // attached. One line per incident; not parsed by anything.
+        process.stderr.write(
+          `[correlator] UNSOLICITED REPLY BLOCK: a %end/%error closed with no pending slot to bind to. ` +
+            `Under tc-3si.1's atomic slot+write this is structurally impossible — a slot-less command path ` +
+            `has regressed (the flow-load-F4 class). Bytes intended for whoever DID register the next slot ` +
+            `are now mis-bound (tc-3si.5).\n`,
+        );
+      },
+      onPendingChanged: (depth, oldestAgeSeconds) => {
+        const metrics = this._opts.metrics;
+        if (metrics === undefined) return;
+        metrics.setCorrelatorPending(depth, oldestAgeSeconds);
       },
     });
 
@@ -523,7 +562,26 @@ class RuntimePipelineImpl implements RuntimePipeline {
     // with command_round_trip_seconds / commands-issued observation
     // (tc-3si.6) — every slotted command path (requery submit, setup writes,
     // pipeline.send/sendBatch) flows through the same wrapper.
-    const submit: SubmitCommand = (command: string) => this._send(command);
+    //
+    // tc-3si.5: the requery engine's submit ALSO observes
+    // `requery_round_trip_seconds` (the requery-only histogram, separate
+    // from `command_round_trip_seconds{kind}` so a fattening tail is
+    // visible without filtering). Implemented by wrapping `_send` here
+    // rather than inside the engine so the engine stays metric-free.
+    const submit: SubmitCommand = (command: string) => {
+      const metrics = this._opts.metrics;
+      if (metrics === undefined) return this._send(command);
+      const startedAt = this._opts.clock.now();
+      const promise = this._send(command);
+      promise.then(
+        () => {
+          const seconds = (this._opts.clock.now() - startedAt) / 1000;
+          metrics.observeRequeryRoundTrip(seconds);
+        },
+        () => {},
+      );
+      return promise;
+    };
 
     const engineOpts: Parameters<typeof createRequeryEngine>[0] = { submit };
     if (this._opts.sessionName !== undefined) {
@@ -542,6 +600,15 @@ class RuntimePipelineImpl implements RuntimePipeline {
     if (metricsRegistry !== undefined) {
       (engineOpts as { onTeardownOutcome: (o: "confirmed" | "refuted") => void }).onTeardownOutcome =
         (outcome) => metricsRegistry.incTeardownConfirmation(outcome);
+      // tc-3si.5: the engine reports per-reason failed cycles and budget
+      // exhaustion separately. The engine also loud-logs the budget-
+      // exhausted path to stderr unconditionally (so the bug class lands
+      // even when metrics aren't wired); the counters here are the
+      // forensic surface for session-proxy.info readers.
+      (engineOpts as { onCycleFailed: (r: "error" | "budget") => void }).onCycleFailed =
+        (reason) => metricsRegistry.incRequeryFailedCycle(reason);
+      (engineOpts as { onBudgetExhausted: () => void }).onBudgetExhausted =
+        () => metricsRegistry.incRequeryBudgetExhausted();
     }
     const engine = createRequeryEngine(engineOpts);
     this._engine = engine;
@@ -596,6 +663,25 @@ class RuntimePipelineImpl implements RuntimePipeline {
             metrics.observeNotifyToDelta(this._opts.heartbeatMs / 1000, "heartbeat");
           }
           metrics.incDeltasEmitted(result.deltas.length);
+          // tc-3si.5: trigger attribution + per-cycle delta-count
+          // distribution. The CycleMeta.edge vocabulary aligns with the
+          // RequeryTrigger label (minus `reconnect`, which is reserved).
+          metrics.incRequeryCycle(meta.edge);
+          metrics.observeDeltasPerCycle(result.deltas.length);
+          // tc-3si.5: expected-zero tripwire — a heartbeat cycle that
+          // found a real change means a topology change reached us with
+          // NO triggering notification. The heartbeat self-healed, but
+          // upstream is silently lossy. Loud-log alongside the counter
+          // (storm-alarm-style alert path).
+          if (meta.edge === "heartbeat" && result.deltas.length > 0) {
+            metrics.incRequeryHeartbeatChange(result.deltas.length);
+            process.stderr.write(
+              `[pipeline] HEARTBEAT FOUND CHANGES: a heartbeat cycle's diff carried ${result.deltas.length} ` +
+                `delta${result.deltas.length === 1 ? "" : "s"} — tmux state changed without a triggering ` +
+                `notification (event-vocabulary gap / dropped notification). The heartbeat self-healed; ` +
+                `the upstream notification stream is silently lossy (tc-3si.5).\n`,
+            );
+          }
         }
         this._emitModelChange(next, prev);
       },
@@ -639,6 +725,13 @@ class RuntimePipelineImpl implements RuntimePipeline {
       // landed via the wrapped submit closure.
       if (this._opts.metrics !== undefined) {
         this._opts.metrics.incDeltasEmitted(initialResult.deltas.length);
+        // tc-3si.5: bootstrap is a pipeline-level cycle too — credit it
+        // to the `bootstrap` trigger and feed the per-cycle delta-count
+        // histogram. Distinguishing bootstrap on the cycle counter lets
+        // the reader confirm the bootstrap spike on `deltas_per_cycle`
+        // matches the engine's first commit.
+        this._opts.metrics.incRequeryCycle("bootstrap");
+        this._opts.metrics.observeDeltasPerCycle(initialResult.deltas.length);
       }
       this._emitModelChange(initialResult.next, emptyModel());
       lastBroadcastModel = initialResult.next;
@@ -793,9 +886,16 @@ class RuntimePipelineImpl implements RuntimePipeline {
     // deltas against deltas_emitted_total so the fan-out amplification
     // ratio (deltas_fanned_out / deltas_emitted) stays consistent with
     // the per-client per-delta fan-out counter.
+    //
+    // tc-3si.5: a patch is NOT a requery cycle — `requery_cycles_total`
+    // stays clean of patches (they don't go through the engine), but the
+    // `deltas_per_cycle` histogram WANTS them so the per-cycle delta
+    // shape covers the whole pipeline (a flapping subscription value
+    // shows up there even though it never runs a requery).
     if (this._opts.metrics !== undefined) {
       const deltas = diffModel(prev, next);
       this._opts.metrics.incDeltasEmitted(deltas.length);
+      this._opts.metrics.observeDeltasPerCycle(deltas.length);
     }
     this._emitModelChange(next, prev);
   }
@@ -807,6 +907,13 @@ class RuntimePipelineImpl implements RuntimePipeline {
 
   send(command: string): Promise<CommandResult> {
     return this._send(command);
+  }
+
+  refreshCorrelatorPendingGauge(): void {
+    const metrics = this._opts.metrics;
+    if (metrics === undefined) return;
+    const snap = this._correlator.pendingSnapshot();
+    metrics.setCorrelatorPending(snap.depth, snap.oldestAgeSeconds);
   }
 
   sendBatch(commands: readonly string[]): Promise<CommandResult>[] {

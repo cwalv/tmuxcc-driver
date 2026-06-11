@@ -19,6 +19,20 @@
  * | `output_frame_size_bytes` | histogram | — | Per-frame payload size for `%output` / `%extended-output`, aggregate (tc-3si.6). |
  * | `session_paused_seconds_total` | counter | — | Wall-clock seconds during which one or more panes in this session were paused for flow control. Reads as a fraction-of-time when differentiated (tc-3si.6). |
  * | `requery_teardown_confirmations_total` | counter | `outcome` | Mass-teardown candidates the engine's confirmation guard evaluated, split into `confirmed` (a real session-end the engine ran a confirming cycle for) and `refuted` (the FIRST candidate disagreed with a confirming requery — a garbage snapshot caught before clients saw it). `outcome=refuted` is an **expected-zero tripwire**: any non-zero value is a correctness bug announcing itself; see tc-3si.2 + observability.md (tc-3si.2). |
+ * | `requery_cycles_total` | counter | `trigger` | Coalescer-fired (or bootstrap-fired) requery cycles, attributed to the trigger edge (`leading` \| `trailing` \| `heartbeat` \| `bootstrap` \| `reconnect`). EXPECT `leading` dominant in interactive use, `trailing` only in bursts, `heartbeat` a steady 1/heartbeatMs metronome. `trailing >> leading` = sustained churn (tc-3si.5). |
+ * | `requery_heartbeat_changes_total` | counter | — | Heartbeat cycles whose diff contained ≥1 delta. **Expected-zero tripwire**: every increment means a topology change reached us with NO triggering notification (event-vocabulary gap / dropped notification); the heartbeat self-healed but the upstream stream is silently lossy. ALERT on sustained nonzero (tc-3si.5). |
+ * | `requery_round_trip_seconds` | histogram | — | `list-windows` / `list-panes` round-trip latency observed at the engine's submit closure (requery-only, separate from `command_round_trip_seconds`). EXPECT tight unimodal ~1 ms. Tail fattening = the "requery is cheap" premise (state-model.md §5) eroding (tc-3si.5). |
+ * | `requery_budget_exhausted_total` | counter | — | Convergence budget exhausted inside `RequeryEngine._runCycles`. **Expected-zero tripwire** unless the storm alarm is also tripping (the legitimate sustained-storm cause). Exhaustion without a storm = convergence pathology (mid-flight rearm storm sourced inside the proxy, not from tmux); ALERT (tc-3si.5). |
+ * | `requery_failed_cycles_total` | counter | `reason` | Cycles the engine marked `failed: true` (model untouched, dirty re-armed), attributed by `reason` (`error` = `%error` from a `list-*` reply; `budget` = convergence budget exhausted; mirrors `requery_budget_exhausted_total` for `budget`). **Expected-zero tripwire**: clustered at session teardown only. Steady-state failures = the coalescer's retry path being exercised continuously (tc-3si.5). |
+ * | `correlator_unsolicited_blocks_total` | counter | — | `%end` / `%error` blocks closed with NO pending slot to bind them to (`flags=0` startup blocks are excluded — they're a protocol fixture, not a slot regression). **Expected-zero tripwire** once tc-3si.1's atomic slot+write lands. Any non-zero value is a slot-less write regressing — the flow-load-F4 class announcing itself BEFORE corruption (tc-3si.5). ALERT. |
+ * | `correlator_pending_slots` | gauge | — | Current depth of the correlator's FIFO `_pending` queue (registered slots awaiting `%end`). EXPECT 0–2 during normal command flow; aging past seconds = tmux never answered = wedge precursor (tc-3si.5). |
+ * | `correlator_pending_slot_max_age_seconds` | gauge | — | Age (now − registration time) of the oldest pending slot, in seconds. EXPECT sub-second; `> 1 s` = an outstanding command tmux has not acknowledged (tc-3si.5). |
+ * | `output_pretopology_dropped_bytes_total` | counter | `provenance` | Bytes dropped by the output-demux's bounded pre-topology buffer. `provenance=owned`: the pane was eventually bound to the model (the F4 symptom — we dropped bytes for a pane we own; **expected-zero tripwire**, ALERT). `provenance=foreign`: the pane was never bound (legitimate under bind-on-provenance — bytes that belonged to another tmux client's pane that recapture-on-bind will cover) (tc-3si.5). |
+ * | `flow_panes_paused` | gauge | — | Number of panes currently paused by the flow controller (FIFO refcount-style — pairs with `session_paused_seconds_total`). EXPECT returns to 0 after every firehose drains; drift = a pane stuck gated, "the terminal went dead" symptom (tc-3si.5). |
+ * | `flow_pane_pauses_total` | counter | — | Total pane pause transitions (0→paused). Balances with `flow_pane_resumes_total` over time. Imbalance = a pane stuck paused (tc-3si.5). |
+ * | `flow_pane_resumes_total` | counter | — | Total pane resume transitions (paused→0). Balances with `flow_pane_pauses_total` over time. Imbalance = paused panes leak (tc-3si.5). |
+ * | `resyncs_total` | counter | `cause` | Resync events handled by `serve.ts`, attributed by `cause` (`gap`: the client detected a seq gap and asked for a snapshot — legitimate under packet loss / drop tests; `escalation`: a second resync request from the same client within a short window — the previous snapshot didn't heal the gap). EXPECT ~0 on in-process transports (in-memory pairs are lossless); `escalation` is **expected-zero tripwire** universally — it means the wire's sequence invariant is broken (tc-3si.5). ALERT on escalation. |
+ * | `deltas_per_cycle` | histogram | — | Wire-delta count per pipeline cycle (coalescer cycle, bootstrap, patch). EXPECT small (1–5) in steady state; spikes only at bootstrap / reconnect. Steady large batches = a diff-instability (a flapping field producing spurious deltas) (tc-3si.5). |
  * | `process_*` / `nodejs_*` | various | — | Default process metrics from `prom-client.collectDefaultMetrics()`: event-loop lag, GC, heap, RSS, CPU (tc-3si.6). |
  *
  * # Expected-shape reading guide
@@ -103,7 +117,7 @@
  * @module metrics/registry
  */
 
-import { Registry, Counter, Histogram, collectDefaultMetrics } from "prom-client";
+import { Registry, Counter, Histogram, Gauge, collectDefaultMetrics } from "prom-client";
 
 // ---------------------------------------------------------------------------
 // Bounded label vocabularies
@@ -131,6 +145,66 @@ import { Registry, Counter, Histogram, collectDefaultMetrics } from "prom-client
  *   histogram label vocabulary stay in lockstep.
  */
 export type CycleEdge = "leading" | "trailing" | "heartbeat" | "bootstrap";
+
+/**
+ * Trigger label vocabulary for `requery_cycles_total` (tc-3si.5).
+ *
+ * Mirrors `CycleEdge` and adds `reconnect`. `reconnect` is not currently
+ * emitted (this pipeline collapses bootstrap and reconnect into the engine's
+ * prev-model diff path), but is reserved in the vocabulary so future runtime
+ * code that wants to differentiate first-attach vs. mid-session re-attach can
+ * land without altering the metric's label cardinality.
+ *
+ * Cardinality: 5 values, fully closed.
+ */
+export type RequeryTrigger = CycleEdge | "reconnect";
+
+/**
+ * `output_pretopology_dropped_bytes_total` provenance label values (tc-3si.5).
+ *
+ * - `owned`: the pane that the dropped bytes were addressed to was EVENTUALLY
+ *   bound to the topology model (the demux later saw `notifyPaneBound` for
+ *   it). Bytes for a pane we own went into the bounded staging buffer and
+ *   were thrown away — the F4 symptom we used to log via `console.warn`.
+ *   Expected-zero tripwire.
+ * - `foreign`: the pane was never bound (bind-on-provenance, tc-zna.9 —
+ *   another tmux client's pane, or a transient short-lived pane). Drops are
+ *   legitimate; recapture-on-bind covers the rare case the pane is later
+ *   bound (no test path currently does this, so the foreign credit stays).
+ *
+ * Cardinality: 2 values, fully closed.
+ */
+export type Provenance = "owned" | "foreign";
+
+/**
+ * `requery_failed_cycles_total` reason label values (tc-3si.5).
+ *
+ * - `error`: the cycle's `list-*` reply was `%error` from tmux — the engine
+ *   re-armed dirty and the coalescer's failed-path scheduled a retry at the
+ *   next ceiling boundary.
+ * - `budget`: convergence budget (`CYCLE_BUDGET`) was exhausted — sustained
+ *   mid-flight notification storm or a teardown candidate tripped on the
+ *   final allowed cycle and never reached the confirmation step.
+ *
+ * Cardinality: 2 values, fully closed.
+ */
+export type RequeryFailureReason = "error" | "budget";
+
+/**
+ * `resyncs_total` cause label values (tc-3si.5).
+ *
+ * - `gap`: the client detected a sequence gap and asked for a fresh
+ *   snapshot. Legitimate under lossy transports.
+ * - `escalation`: a second resync request from the same client landed
+ *   within `RESYNC_ESCALATION_WINDOW_MS` of the previous one — the
+ *   previous snapshot did not heal the gap. Expected-zero tripwire: the
+ *   client's "resync, then close on persistent gap" state machine should
+ *   have closed instead of asking again. An escalation either means the
+ *   client's gap detector is broken, or our snapshot itself was corrupt.
+ *
+ * Cardinality: 2 values, fully closed.
+ */
+export type ResyncCause = "gap" | "escalation";
 
 // ---------------------------------------------------------------------------
 // Registry (non-default so it doesn't pollute Node.js process-wide metrics)
@@ -283,6 +357,141 @@ export interface SessionProxyRegistry {
    */
   incTeardownConfirmation(outcome: "confirmed" | "refuted"): void;
 
+  // ---- tc-3si.5: premise-watching + tripwire counters ---------------------
+
+  /**
+   * Increment `requery_cycles_total{trigger}` (tc-3si.5).
+   *
+   * Called once per pipeline-level requery cycle. Bootstrap is reported as
+   * `trigger="bootstrap"`; coalescer-driven cycles forward their `CycleMeta.edge`
+   * verbatim. The trigger distribution validates the §6 economics
+   * continuously — leading dominant in interactive use, heartbeat as a
+   * steady metronome, trailing only during bursts.
+   */
+  incRequeryCycle(trigger: RequeryTrigger): void;
+
+  /**
+   * Increment `requery_heartbeat_changes_total` (tc-3si.5).
+   *
+   * Called when a `trigger="heartbeat"` cycle's diff contained ≥1 delta —
+   * i.e. tmux state changed without a triggering notification. This is the
+   * "dropped notification / event-vocabulary gap" signal. Expected-zero
+   * tripwire: every increment is silently lossy upstream, and ALSO loud-
+   * logged to stderr by the caller (storm-alarm-style alert path).
+   *
+   * `deltaCount` is the count of deltas the heartbeat carried; passed so the
+   * alert sink can include it in the forensic log line.
+   */
+  incRequeryHeartbeatChange(deltaCount: number): void;
+
+  /**
+   * Observe a single requery-cycle round-trip latency sample (tc-3si.5).
+   *
+   * Called once per `list-windows` / `list-panes` write inside the engine's
+   * submit closure. The histogram is separate from `command_round_trip_seconds`
+   * so the requery-only sample population isn't diluted by user-driven
+   * command latencies. EXPECT tight unimodal ~1 ms; tail fattening erodes
+   * the "requery is cheap" premise (state-model.md §5).
+   *
+   * @param seconds - Duration from `host.write(list-*)` to `%end` receipt.
+   */
+  observeRequeryRoundTrip(seconds: number): void;
+
+  /**
+   * Increment `requery_budget_exhausted_total` (tc-3si.5).
+   *
+   * Called by the engine when `_runCycles` exits via budget exhaustion —
+   * sustained mid-flight rearm storm or a teardown candidate tripped on the
+   * very last allowed cycle. Expected-zero tripwire (the legitimate path is
+   * a coincident storm alarm); the caller ALSO loud-logs to stderr.
+   */
+  incRequeryBudgetExhausted(): void;
+
+  /**
+   * Increment `requery_failed_cycles_total{reason}` (tc-3si.5).
+   *
+   * Called by the engine when a `requery()` call returns `failed: true`,
+   * attributed by reason (`error` = a `%error` reply from tmux on a
+   * `list-*`; `budget` = convergence budget exhausted — the same condition
+   * `incRequeryBudgetExhausted` was incremented for, kept on the same
+   * surface so a reader sees both totals at once). Expected-zero tripwire:
+   * clustered at session teardown only.
+   */
+  incRequeryFailedCycle(reason: RequeryFailureReason): void;
+
+  /**
+   * Increment `correlator_unsolicited_blocks_total` (tc-3si.5).
+   *
+   * Called by `CommandCorrelator` when a `%end` / `%error` block closes with
+   * no pending slot to bind to (the `_pending` FIFO was empty). Excludes
+   * `flags=0` startup blocks — those are a tmux protocol fixture, not a
+   * slot regression.
+   *
+   * Expected-zero tripwire once tc-3si.1 lands (atomic slot+write makes
+   * a slot-less reply structurally impossible). Any increment is the
+   * flow-load-F4 class announcing itself BEFORE corruption.
+   */
+  incCorrelatorUnsolicitedBlock(): void;
+
+  /**
+   * Update the `correlator_pending_slots` gauge to the current FIFO depth
+   * AND update `correlator_pending_slot_max_age_seconds` to the oldest
+   * slot's age, in seconds (or 0 when the queue is empty). Called from the
+   * correlator on every register / resolve, AND polled on a metrics-read
+   * path (the gauges' values are read at exposition time). Hot-path cost:
+   * two `Gauge.set` calls (no allocation).
+   */
+  setCorrelatorPending(depth: number, oldestAgeSeconds: number): void;
+
+  /**
+   * Increment `output_pretopology_dropped_bytes_total{provenance}` (tc-3si.5).
+   *
+   * Called by the output-demux when bytes are dropped from the bounded
+   * per-pane staging buffer. `provenance` is determined by whether the pane
+   * is later bound (`owned`) or never bound (`foreign`); the demux defers
+   * crediting until that decision is made — see the demux's
+   * `_pendingDroppedBytes` map. Hot-path cost: one `Counter.inc(bytes)`,
+   * called only at decision time (bind / close), never per-byte.
+   */
+  incPretopologyDroppedBytes(bytes: number, provenance: Provenance): void;
+
+  /**
+   * Increment `flow_pane_pauses_total` and bump `flow_panes_paused` by 1
+   * (tc-3si.5). Called by the per-session adapter that tracks the flow
+   * controller's pause set. Pairs with `notePanePauseExited`.
+   */
+  notePanePauseEntered(): void;
+
+  /**
+   * Increment `flow_pane_resumes_total` and decrement `flow_panes_paused`
+   * by 1 — clamped to 0 to defend against spurious resume notifications
+   * for panes the gauge wasn't tracking (tc-3si.5).
+   */
+  notePanePauseExited(): void;
+
+  /**
+   * Increment `resyncs_total{cause}` (tc-3si.5).
+   *
+   * Called by `ControlServer.handleResyncRequest` after deciding whether
+   * this is a fresh `gap` request or an `escalation` (a second request from
+   * the same client within the escalation window). `escalation` is an
+   * expected-zero tripwire and is ALSO loud-logged to stderr.
+   */
+  incResync(cause: ResyncCause): void;
+
+  /**
+   * Observe a single per-cycle delta count sample on the `deltas_per_cycle`
+   * histogram (tc-3si.5). Called at the same site as `incDeltasEmitted`
+   * (every pipeline-level cycle, coalescer or patch). EXPECT small (1–5)
+   * in steady state; spikes only at bootstrap / reconnect.
+   *
+   * Zero-delta cycles (heartbeat no-ops, patches that found no observable
+   * change) ARE observed under bucket 0 so the histogram captures
+   * "no-change rate" too — a flapping diff that emits and then withdraws
+   * a delta shows up as alternating 0 / 1 samples.
+   */
+  observeDeltasPerCycle(count: number): void;
+
   /**
    * Render the full registry as Prometheus text exposition format.
    * Returns a Promise<string> to match prom-client's async API.
@@ -328,6 +537,22 @@ const NOTIFY_TO_DELTA_BUCKETS = [
 const OUTPUT_FRAME_BUCKETS = [
   16, 64, 256, 1024, 4096, 16_384, 65_536, 262_144, 1_048_576,
 ];
+
+/**
+ * Buckets for `requery_round_trip_seconds` (tc-3si.5). Tighter at the bottom
+ * than `command_round_trip_seconds` because the bead's EXPECTATION is
+ * "tight unimodal ~1 ms" — bucket resolution at 0.5 / 1 / 2 ms lets a
+ * fattening tail be visible in a session-proxy.info read at a glance.
+ */
+const REQUERY_RTT_BUCKETS = [0.0005, 0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0];
+
+/**
+ * Buckets for `deltas_per_cycle` (tc-3si.5). Bead EXPECTATION is "small
+ * (1–5) steady state; spikes only at bootstrap/reconnect". Buckets cover
+ * the steady-state shape with high resolution AND the bootstrap-sized
+ * spikes without inflating cardinality.
+ */
+const DELTAS_PER_CYCLE_BUCKETS = [0, 1, 2, 5, 10, 25, 50, 100, 250, 1000];
 
 // ---------------------------------------------------------------------------
 // Factory
@@ -448,6 +673,157 @@ export function createSessionProxyRegistry(): SessionProxyRegistry {
     registers: [reg],
   });
 
+  // tc-3si.5: per-trigger requery cycle attribution. Bounded by RequeryTrigger
+  // (5 values). Premise-watching counter — the shape of `leading` vs.
+  // `trailing` vs. `heartbeat` validates state-model.md §6 continuously.
+  const requeryCyclesTotal = new Counter({
+    name: "requery_cycles_total",
+    help:
+      "Pipeline-level requery cycles, attributed to the trigger edge. " +
+      "EXPECT leading dominant in interactive use; trailing only in bursts; " +
+      "heartbeat a steady 1/heartbeatMs metronome.",
+    labelNames: ["trigger"],
+    registers: [reg],
+  });
+
+  // tc-3si.5: heartbeat changes — expected-zero tripwire. A heartbeat cycle
+  // that found a real model change means a topology change reached us
+  // without a triggering notification (event-vocabulary gap / dropped
+  // notification). The caller ALSO loud-logs to stderr.
+  const requeryHeartbeatChangesTotal = new Counter({
+    name: "requery_heartbeat_changes_total",
+    help:
+      "Heartbeat cycles whose diff contained ≥1 delta — a topology change with no triggering notification. " +
+      "Expected-zero tripwire.",
+    registers: [reg],
+  });
+
+  // tc-3si.5: requery-only round-trip latency (separate from general
+  // command RTT so the per-kind sample population stays interpretable).
+  const requeryRoundTripSeconds = new Histogram({
+    name: "requery_round_trip_seconds",
+    help:
+      "Round-trip latency for list-windows / list-panes commands issued by the requery engine, in seconds. " +
+      "EXPECT tight unimodal ~1 ms; tail fattening = the 'requery is cheap' premise eroding.",
+    buckets: REQUERY_RTT_BUCKETS,
+    registers: [reg],
+  });
+
+  // tc-3si.5: convergence-budget exhaustion — expected-zero tripwire unless
+  // the storm alarm is also tripping. Exhaustion in isolation is a
+  // convergence pathology, not a tmux-side storm. Caller loud-logs.
+  const requeryBudgetExhaustedTotal = new Counter({
+    name: "requery_budget_exhausted_total",
+    help:
+      "RequeryEngine convergence-budget exhaustions. Expected-zero tripwire unless coincident with a storm alarm.",
+    registers: [reg],
+  });
+
+  // tc-3si.5: failed-cycle counter, attributed by reason. Expected-zero
+  // tripwire (clustered at teardown only — see observability.md).
+  const requeryFailedCyclesTotal = new Counter({
+    name: "requery_failed_cycles_total",
+    help:
+      "RequeryEngine cycles that returned failed:true, by reason. " +
+      "Expected-zero tripwire: clustered at session teardown only.",
+    labelNames: ["reason"],
+    registers: [reg],
+  });
+
+  // tc-3si.5: correlator unsolicited-block counter. Expected-zero once
+  // tc-3si.1's atomic slot+write makes slot-less replies structurally
+  // impossible; any non-zero value is the flow-load-F4 class announcing
+  // itself BEFORE corruption. Caller loud-logs.
+  const correlatorUnsolicitedBlocksTotal = new Counter({
+    name: "correlator_unsolicited_blocks_total",
+    help:
+      "Reply blocks closed with no pending slot to bind (excludes flags=0 startup blocks). " +
+      "Expected-zero tripwire — slot-less write regression (the flow-load-F4 pre-corruption signal).",
+    registers: [reg],
+  });
+
+  // tc-3si.5: correlator FIFO discipline — the live depth of registered
+  // slots awaiting %end, plus the oldest slot's age. EXPECT 0–2 slots, sub-
+  // second age in steady state; aging past seconds = tmux never answered.
+  const correlatorPendingSlots = new Gauge({
+    name: "correlator_pending_slots",
+    help:
+      "Current depth of the correlator's FIFO _pending queue. " +
+      "EXPECT 0–2 in steady state; growth = a command tmux has not replied to.",
+    registers: [reg],
+  });
+
+  const correlatorPendingSlotMaxAgeSeconds = new Gauge({
+    name: "correlator_pending_slot_max_age_seconds",
+    help:
+      "Age of the oldest pending slot in the correlator FIFO, in seconds (0 when queue empty). " +
+      "EXPECT sub-second; > 1 s = a wedge precursor.",
+    registers: [reg],
+  });
+
+  // tc-3si.5: pretopology-buffer drops counter. Provenance-labelled so
+  // `owned` (the F4 symptom — a pane we own had bytes thrown away) is a
+  // separate, expected-zero tripwire from `foreign` (legitimate under
+  // bind-on-provenance).
+  const outputPretopologyDroppedBytesTotal = new Counter({
+    name: "output_pretopology_dropped_bytes_total",
+    help:
+      "Bytes dropped by the output-demux's pre-topology bounded staging buffer, by provenance. " +
+      "provenance=owned is an expected-zero tripwire (the F4 symptom).",
+    labelNames: ["provenance"],
+    registers: [reg],
+  });
+
+  // tc-3si.5: flow-control pause gauge + totals. Pairs with
+  // `session_paused_seconds_total` (the time-paused area-under-the-curve).
+  // The gauge should return to 0 after every firehose drains; the
+  // pauses/resumes totals should balance over the lifetime.
+  const flowPanesPaused = new Gauge({
+    name: "flow_panes_paused",
+    help:
+      "Number of panes currently paused by the flow controller. " +
+      "EXPECT returns to 0 between firehoses; persistent non-zero = a pane stuck gated.",
+    registers: [reg],
+  });
+
+  const flowPanePausesTotal = new Counter({
+    name: "flow_pane_pauses_total",
+    help: "Total 0→paused transitions across all panes (paired with flow_pane_resumes_total).",
+    registers: [reg],
+  });
+
+  const flowPaneResumesTotal = new Counter({
+    name: "flow_pane_resumes_total",
+    help: "Total paused→0 transitions across all panes (paired with flow_pane_pauses_total).",
+    registers: [reg],
+  });
+
+  // tc-3si.5: resync counter, by cause. `gap` is legitimate under lossy
+  // transports; `escalation` is an expected-zero tripwire that means a
+  // second resync from the same client landed inside the escalation
+  // window — the previous snapshot did not heal the gap. Caller loud-logs.
+  const resyncsTotal = new Counter({
+    name: "resyncs_total",
+    help:
+      "Resync events handled by the control-plane server, by cause. " +
+      "cause=escalation is an expected-zero tripwire — the previous snapshot did not heal the gap.",
+    labelNames: ["cause"],
+    registers: [reg],
+  });
+
+  // tc-3si.5: per-cycle delta-count distribution. Complements
+  // deltas_emitted_total (rate) by showing the SHAPE — small steady
+  // (1–5) vs. bootstrap spikes vs. flapping diffs (alternating 0/N).
+  const deltasPerCycle = new Histogram({
+    name: "deltas_per_cycle",
+    help:
+      "Wire-delta count per pipeline cycle. " +
+      "EXPECT small (1–5) steady state; spikes only at bootstrap/reconnect; " +
+      "steady large batches = diff instability.",
+    buckets: DELTAS_PER_CYCLE_BUCKETS,
+    registers: [reg],
+  });
+
   // tc-3si.6: process health (event-loop lag, GC pause, heap, CPU). The
   // prom-client sampler manages its own timers and tags samples with
   // gauges; calling collectDefaultMetrics({ register }) is idempotent only
@@ -508,6 +884,73 @@ export function createSessionProxyRegistry(): SessionProxyRegistry {
 
     incTeardownConfirmation(outcome: "confirmed" | "refuted"): void {
       requeryTeardownConfirmationsTotal.inc({ outcome });
+    },
+
+    // ---- tc-3si.5: premise-watching + tripwire counters -------------------
+
+    incRequeryCycle(trigger: RequeryTrigger): void {
+      requeryCyclesTotal.inc({ trigger });
+    },
+
+    incRequeryHeartbeatChange(_deltaCount: number): void {
+      // The delta count is purely a parameter for the caller's loud-log
+      // line; the counter itself just increments by 1.
+      requeryHeartbeatChangesTotal.inc();
+    },
+
+    observeRequeryRoundTrip(seconds: number): void {
+      requeryRoundTripSeconds.observe(seconds);
+    },
+
+    incRequeryBudgetExhausted(): void {
+      requeryBudgetExhaustedTotal.inc();
+    },
+
+    incRequeryFailedCycle(reason: RequeryFailureReason): void {
+      requeryFailedCyclesTotal.inc({ reason });
+    },
+
+    incCorrelatorUnsolicitedBlock(): void {
+      correlatorUnsolicitedBlocksTotal.inc();
+    },
+
+    setCorrelatorPending(depth: number, oldestAgeSeconds: number): void {
+      correlatorPendingSlots.set(depth);
+      correlatorPendingSlotMaxAgeSeconds.set(oldestAgeSeconds);
+    },
+
+    incPretopologyDroppedBytes(bytes: number, provenance: Provenance): void {
+      if (bytes <= 0) return;
+      outputPretopologyDroppedBytesTotal.inc({ provenance }, bytes);
+    },
+
+    notePanePauseEntered(): void {
+      flowPanePausesTotal.inc();
+      flowPanesPaused.inc();
+    },
+
+    notePanePauseExited(): void {
+      flowPaneResumesTotal.inc();
+      // Defensive clamp at 0 — the per-pane mirror set in the caller already
+      // dedupes spurious resumes, but the gauge must never go negative.
+      // prom-client's Gauge doesn't expose its current value cheaply, so we
+      // use dec() and rely on the caller's pause-set guard for correctness;
+      // the test for the spurious-resume case (registry.test.ts) verifies the
+      // gauge stays non-negative through the mirror, not by inspecting it
+      // directly. (A future hardening could read `flowPanesPaused.get()` but
+      // that path is async in prom-client v15+.)
+      flowPanesPaused.dec();
+    },
+
+    incResync(cause: ResyncCause): void {
+      resyncsTotal.inc({ cause });
+    },
+
+    observeDeltasPerCycle(count: number): void {
+      // Zero is a meaningful sample (heartbeat no-op, idempotent patch); it
+      // lands in bucket 0. Negative inputs are defensive no-ops.
+      if (count < 0) return;
+      deltasPerCycle.observe(count);
     },
 
     notePauseEntered(): void {

@@ -539,3 +539,85 @@ describe("startup block (flags=0) does not consume expectCommand() slots", () =>
     }, "startup block with no pending slots is silently discarded");
   });
 });
+
+// ---------------------------------------------------------------------------
+// tc-3si.5: correlator FIFO telemetry seams
+// ---------------------------------------------------------------------------
+
+describe("CommandCorrelator: tripwire telemetry (tc-3si.5)", () => {
+  it("onUnsolicitedBlock fires when a non-startup reply has no pending slot", () => {
+    let count = 0;
+    const corr = new CommandCorrelator({
+      onUnsolicitedBlock: () => { count++; },
+    });
+
+    // No expectCommand() — this is a user-command reply (flags=1) with no
+    // matching slot. The current implementation silently discards it; with
+    // the tc-3si.5 hook it should fire ONCE.
+    feedBuffer(corr, bytes("%begin 1000 272 1\n%end 1000 272 1\n"));
+    assert.equal(count, 1, "unsolicited block must fire the hook exactly once");
+
+    // A startup block (flags=0) is NOT an unsolicited tripwire — it is a
+    // tmux protocol fixture. The hook must NOT fire.
+    feedBuffer(corr, bytes("%begin 1001 273 0\n%end 1001 273 0\n"));
+    assert.equal(count, 1, "startup block (flags=0) is excluded from the tripwire");
+  });
+
+  it("onPendingChanged fires on every register and resolve, with current depth + oldest age", async () => {
+    // Inject a clock so the oldest-age assertion is deterministic.
+    let now = 1_000_000;
+    const events: Array<{ depth: number; ageS: number }> = [];
+
+    const corr = new CommandCorrelator({
+      nowMs: () => now,
+      onPendingChanged: (depth, ageS) => {
+        events.push({ depth, ageS });
+      },
+    });
+
+    // First register — depth 1, age 0 (just registered).
+    const p1 = corr.expectCommand();
+    assert.equal(events.length, 1);
+    assert.equal(events[0]!.depth, 1);
+    assert.equal(events[0]!.ageS, 0);
+
+    // Advance clock; second register — depth 2, oldest age = 1.5 s.
+    now += 1500;
+    const p2 = corr.expectCommand();
+    assert.equal(events.length, 2);
+    assert.equal(events[1]!.depth, 2);
+    assert.equal(events[1]!.ageS, 1.5);
+
+    // Resolve the oldest — depth drops to 1, new oldest age = 0 (it was
+    // just registered).
+    feedBuffer(corr, bytes("%begin 1000 100 1\n%end 1000 100 1\n"));
+    await p1;
+    assert.equal(events.length, 3);
+    assert.equal(events[2]!.depth, 1);
+    assert.equal(events[2]!.ageS, 0);
+
+    // Resolve the second — depth 0, age 0.
+    feedBuffer(corr, bytes("%begin 1001 101 1\n%end 1001 101 1\n"));
+    await p2;
+    assert.equal(events.at(-1)!.depth, 0);
+    assert.equal(events.at(-1)!.ageS, 0);
+  });
+
+  it("pendingSnapshot returns the live depth + oldest age at the call moment", () => {
+    let now = 0;
+    const corr = new CommandCorrelator({
+      nowMs: () => now,
+    });
+
+    // Empty queue → 0/0.
+    assert.deepEqual(corr.pendingSnapshot(), { depth: 0, oldestAgeSeconds: 0 });
+
+    void corr.expectCommand();
+    void corr.expectCommand();
+
+    now = 2500; // advance clock; both slots are now 2.5 s old.
+    const snap = corr.pendingSnapshot();
+    assert.equal(snap.depth, 2);
+    assert.equal(snap.oldestAgeSeconds, 2.5);
+  });
+});

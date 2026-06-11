@@ -127,6 +127,41 @@ export interface CommandCorrelatorOptions {
    * inject reply tokens without driving real writes).
    */
   write?: CommandWriter;
+
+  /**
+   * Called once per `%end` / `%error` block that closed with NO pending
+   * slot to bind to (and was NOT a `flags=0` startup block — those are a
+   * tmux protocol fixture, not a slot regression). This is the
+   * `correlator_unsolicited_blocks_total` tripwire seam (tc-3si.5):
+   * expected-zero once tc-3si.1's atomic slot+write makes a slot-less
+   * reply structurally impossible. Any increment is the flow-load-F4
+   * class announcing itself BEFORE corruption.
+   *
+   * Throws are caught and swallowed so a misbehaving observer cannot
+   * break the pipeline.
+   */
+  onUnsolicitedBlock?: () => void;
+
+  /**
+   * Called after every operation that changes the pending FIFO — i.e.
+   * `expectCommand()` / `send()` (push), and `_closeBlock` (shift). Fed
+   * the current depth and the oldest slot's age in seconds (or 0 when the
+   * queue is empty). The wiring layer drives the
+   * `correlator_pending_slots` + `correlator_pending_slot_max_age_seconds`
+   * gauges from here (tc-3si.5).
+   *
+   * Hot-path cost: one closure call per command edge — bounded by the
+   * command rate (≤ ~10/s in steady state). Throws are caught and
+   * swallowed.
+   */
+  onPendingChanged?: (depth: number, oldestAgeSeconds: number) => void;
+
+  /**
+   * Optional clock override for the pending-slot age accounting. Defaults
+   * to `Date.now`. Tests inject a controlled clock so age assertions are
+   * deterministic without sleeps.
+   */
+  nowMs?: () => number;
 }
 
 // ---------------------------------------------------------------------------
@@ -144,6 +179,14 @@ interface PendingCommand {
   expectedCommandNumber: number | undefined;
   resolve: (result: CommandResult) => void;
   reject: (err: Error) => void;
+  /**
+   * Wall-clock timestamp (milliseconds, from `Date.now()`) at which this
+   * slot was registered. Used to compute the oldest-pending-slot age for
+   * `correlator_pending_slot_max_age_seconds` (tc-3si.5). Captured at
+   * `expectCommand()` time so slot age tracks "time spent waiting for
+   * tmux", not "time since the matching %begin arrived".
+   */
+  registeredAtMs: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -163,6 +206,11 @@ interface PendingCommand {
 export class CommandCorrelator {
   private readonly _onNotification: NotificationHandler | undefined;
   private readonly _write: CommandWriter | undefined;
+  private readonly _onUnsolicitedBlock: (() => void) | undefined;
+  private readonly _onPendingChanged:
+    | ((depth: number, oldestAgeSeconds: number) => void)
+    | undefined;
+  private readonly _nowMs: () => number;
 
   /**
    * FIFO queue of pending commands registered by the caller.
@@ -186,6 +234,9 @@ export class CommandCorrelator {
   constructor(options: CommandCorrelatorOptions = {}) {
     this._onNotification = options.onNotification;
     this._write = options.write;
+    this._onUnsolicitedBlock = options.onUnsolicitedBlock;
+    this._onPendingChanged = options.onPendingChanged;
+    this._nowMs = options.nowMs ?? Date.now;
   }
 
   // -------------------------------------------------------------------------
@@ -217,7 +268,9 @@ export class CommandCorrelator {
         expectedCommandNumber: undefined,
         resolve,
         reject,
+        registeredAtMs: this._nowMs(),
       });
+      this._firePendingChanged();
     });
   }
 
@@ -426,8 +479,25 @@ export class CommandCorrelator {
       // No registered command — unsolicited block. Silently discard.
       // (This can happen if the caller fires a command without registering via
       // expectCommand(), which is a caller error.)
+      //
+      // tc-3si.5: this is the `correlator_unsolicited_blocks_total` tripwire
+      // seam. Under tc-3si.1's atomic slot+write the only way to land here
+      // is a slot-less write regressing — the flow-load-F4 class announcing
+      // itself BEFORE corruption. Fire the hook so the registry can bump
+      // its expected-zero counter; the caller (session-proxy wiring) loud-
+      // logs alongside the counter bump.
+      if (this._onUnsolicitedBlock !== undefined) {
+        try {
+          this._onUnsolicitedBlock();
+        } catch {
+          // Observer errors must not break the pipeline.
+        }
+      }
       return;
     }
+
+    // Slot consumed — let the gauge layer reflect the new (smaller) depth.
+    this._firePendingChanged();
 
     // Secondary safety: if we bound a commandNumber to this pending entry on
     // %begin, verify it matches now.
@@ -444,6 +514,45 @@ export class CommandCorrelator {
     }
 
     pending.resolve({ ok, commandNumber, body });
+  }
+
+  /**
+   * Snapshot the current pending depth and the oldest slot's age (in
+   * seconds), then dispatch to `onPendingChanged`. Throws are swallowed.
+   *
+   * This is the seam the session-proxy wiring uses to drive the
+   * `correlator_pending_slots` + `correlator_pending_slot_max_age_seconds`
+   * gauges (tc-3si.5). Called on register and on close; not on body bytes.
+   */
+  private _firePendingChanged(): void {
+    if (this._onPendingChanged === undefined) return;
+    const depth = this._pending.length;
+    let oldestAgeSeconds = 0;
+    if (depth > 0) {
+      const oldest = this._pending[0]!;
+      oldestAgeSeconds = Math.max(0, (this._nowMs() - oldest.registeredAtMs) / 1000);
+    }
+    try {
+      this._onPendingChanged(depth, oldestAgeSeconds);
+    } catch {
+      // Observer errors must not break the pipeline.
+    }
+  }
+
+  /**
+   * Expose the current pending-slot age snapshot so an external poller
+   * (e.g. the `session-proxy.info` reader) can refresh the gauges without
+   * waiting for the next command edge. Hot-path cost: one Date.now() call
+   * + one subtraction.
+   *
+   * Returns `{ depth: 0, oldestAgeSeconds: 0 }` when the queue is empty.
+   */
+  pendingSnapshot(): { depth: number; oldestAgeSeconds: number } {
+    const depth = this._pending.length;
+    if (depth === 0) return { depth: 0, oldestAgeSeconds: 0 };
+    const oldest = this._pending[0]!;
+    const oldestAgeSeconds = Math.max(0, (this._nowMs() - oldest.registeredAtMs) / 1000);
+    return { depth, oldestAgeSeconds };
   }
 
   /**
@@ -483,6 +592,8 @@ export class CommandCorrelator {
   /** Reject the oldest pending command with an error. */
   private _rejectOldest(err: Error): void {
     const pending = this._pending.shift();
-    pending?.reject(err);
+    if (pending === undefined) return;
+    this._firePendingChanged();
+    pending.reject(err);
   }
 }
