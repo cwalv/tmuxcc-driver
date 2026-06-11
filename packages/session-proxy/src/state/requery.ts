@@ -103,10 +103,19 @@ import {
  *   observable change). The `seq` fields are placeholders (0); the caller
  *   stamps real values before sending, exactly like the existing
  *   `diffModel` contract.
+ * - `failed` is set by the `RequeryEngine` driver when either `list-*` reply
+ *   was `%error`. The engine treats steady-state `%error` as "leave the model
+ *   alone, stay dirty, retry on the next edge or heartbeat" (TL design call,
+ *   tc-128.2): wiping the model on a transient command failure would emit a
+ *   teardown burst that the next successful cycle would then have to undo.
+ *   The pure `requeryDiff` function never sets `failed` — its `%error`
+ *   handling is the BOOTSTRAP semantic ("treat missing rows as empty"). When
+ *   `failed` is true, `next === prev` and `deltas` is empty.
  */
 export interface RequeryResult {
   readonly next: SessionModel;
   readonly deltas: readonly SessionProxyMessage[];
+  readonly failed?: boolean;
 }
 
 /**
@@ -321,8 +330,16 @@ class RequeryEngineImpl implements RequeryEngine {
    * Each cycle:
    *   1. Clear the dirty bit (notifications during this cycle re-arm it).
    *   2. Issue both `list-*` commands and await both replies.
-   *   3. Compute `requeryDiff(prev, win, pane)`; swap `_model` to `next`.
-   *   4. If the bit is set, go to 1; otherwise return the accumulated result.
+   *   3. If either reply is `%error`, treat the cycle as failed: do NOT swap
+   *      the model, re-arm the dirty bit so the coalescer retries on the
+   *      next edge/heartbeat, and abandon the loop. Returns
+   *      `{ next: startModel, deltas: [], failed: true }`. This is the
+   *      TL design call (tc-128.2): steady-state `list-*` failure must not
+   *      wipe the model — that fallback is the BOOTSTRAP semantic of the
+   *      pure `requeryDiff` only.
+   *   4. Otherwise compute the fresh model via `buildInitialModel`; swap
+   *      `_model` to it.
+   *   5. If the bit is set (mid-flight dirty), go to 1; otherwise return.
    *
    * `startModel` is the model the FIRST cycle started from. The accumulated
    * deltas returned to the caller are `diffModel(startModel, finalModel)`,
@@ -346,11 +363,22 @@ class RequeryEngineImpl implements RequeryEngine {
 
       const [winResult, paneResult] = await Promise.all([winPromise, panePromise]);
 
+      // Steady-state failure policy (tc-128.2 TL call): if either list-*
+      // reply is %error, do NOT clobber the model — the bootstrap fallback
+      // of "missing rows = empty rows" would emit a full teardown delta
+      // burst, which is wrong here. Re-arm the dirty bit so the coalescer's
+      // next edge or heartbeat retries; the heartbeat guarantees eventual
+      // convergence.
+      if (!winResult.ok || !paneResult.ok) {
+        this._dirty = true;
+        return { next: startModel, deltas: [], failed: true };
+      }
+
       // Parse and build the fresh model directly (we don't need the
       // per-cycle deltas because the caller-facing diff is against
       // startModel — see method JSDoc).
-      const windowRows = winResult.ok ? parseWindowsReply(winResult.body) : [];
-      const paneRows = paneResult.ok ? parsePanesReply(paneResult.body) : [];
+      const windowRows = parseWindowsReply(winResult.body);
+      const paneRows = parsePanesReply(paneResult.body);
       this._model = buildInitialModel(windowRows, paneRows);
     } while (this._dirty);
 

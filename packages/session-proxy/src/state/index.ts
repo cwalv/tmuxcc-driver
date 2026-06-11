@@ -92,3 +92,13 @@ export type {
   RequeryEngineOptions,
   SubmitCommand,
 } from "./requery.js";
+
+// tc-128.2: dirty-bit coalescer (leading edge, 1 Hz ceiling, heartbeat)
+export { createCoalescer, realClock } from "./coalescer.js";
+export type {
+  Coalescer,
+  CoalescerOptions,
+  Clock,
+  TimeoutHandle,
+  TopologyEventKind,
+} from "./coalescer.js";

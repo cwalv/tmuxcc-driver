@@ -1,0 +1,404 @@
+/**
+ * Dirty-bit coalescer — leading-edge + 1 Hz ceiling + heartbeat (tc-128.2).
+ *
+ * @module state/coalescer
+ *
+ * # Why this exists
+ *
+ * The `RequeryEngine` (tc-128.1) knows HOW to run a requery cycle; it has no
+ * opinion on WHEN. This module is the policy layer: it wraps an engine, takes
+ * topology-notification calls from the parser, and decides when to run
+ * `engine.requery()`.
+ *
+ * The policy comes from `projects/tmuxcc/docs/state-model.md` §6 (adopted,
+ * 2026-06-10):
+ *
+ * - **Leading edge.** The first notification after a quiet period runs
+ *   `requery()` IMMEDIATELY. Rare events (e.g. pane death) almost always land
+ *   on quiet, so they get instant service. 1 Hz is a CEILING, not a clock.
+ * - **1 Hz ceiling under storms.** Notifications arriving inside the ceiling
+ *   window (default 1 s) are folded into a single trailing-edge cycle. Storm
+ *   rendering at 1 fps is intentional (see §5: sustained high rate is almost
+ *   always a bug).
+ * - **Heartbeat.** A slow unconditional cycle catches changes that arrived
+ *   with zero notifications (silent panes, future event-vocabulary gaps).
+ *   Replaces the old synthetic-reconcile special case.
+ *
+ * # Failure handling
+ *
+ * If the engine reports `failed: true` (a `list-*` reply was `%error`), the
+ * coalescer treats the cycle as failed: the model stays untouched (the engine
+ * already preserved it), the dirty bit is re-armed (the engine already did
+ * that), and the coalescer schedules a retry at `now + ceilingMs` rather than
+ * busy-retrying. The heartbeat guarantees eventual convergence even if the
+ * caller stops feeding notifications.
+ *
+ * # Single classification choke point (tc-x6l tie-in)
+ *
+ * `notify(kind?)` is the ONE place a topology notification is classified into
+ * "dirty + maybe a kind label". The optional `onNotify(kind)` hook fires
+ * exactly once per `notify()` call, before any other work — so a future
+ * per-kind counter (tc-x6l) can attach here without restructuring. We don't
+ * implement counters; we just shape the seam.
+ *
+ * # Wiring
+ *
+ * This module deliberately does NOT wire itself into `RuntimePipeline`. The
+ * pipeline swap is tc-128.4. Tests use a synthetic submit + injected clock to
+ * exercise the regimes.
+ */
+
+import type { RequeryEngine, RequeryResult } from "./requery.js";
+
+// ---------------------------------------------------------------------------
+// Clock abstraction (injectable for tests)
+// ---------------------------------------------------------------------------
+
+/**
+ * Opaque handle returned by `Clock.setTimeout` and accepted by
+ * `Clock.clearTimeout`. The host clock decides the concrete type — Node's
+ * real `setTimeout` returns a `Timeout` object; a test clock can use a
+ * number. We never compare or read these — the coalescer just round-trips
+ * them through the clock.
+ */
+export type TimeoutHandle = unknown;
+
+/**
+ * Minimal clock surface the coalescer needs. Production wiring binds this to
+ * the host's real `setTimeout` / `clearTimeout` / `Date.now`. Tests inject a
+ * synthetic clock that advances on demand — no real-time sleeps.
+ */
+export interface Clock {
+  now(): number;
+  setTimeout(fn: () => void, ms: number): TimeoutHandle;
+  clearTimeout(handle: TimeoutHandle): void;
+}
+
+/** Default clock: thin wrapper over the host globals. */
+export function realClock(): Clock {
+  return {
+    now: () => Date.now(),
+    setTimeout: (fn, ms) => globalThis.setTimeout(fn, ms),
+    clearTimeout: (h) => {
+      // Node typings want a NodeJS.Timeout; the host-global signature
+      // accepts the round-tripped opaque value. Cast at the boundary.
+      globalThis.clearTimeout(h as Parameters<typeof globalThis.clearTimeout>[0]);
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Notification classification (tc-x6l seam)
+// ---------------------------------------------------------------------------
+
+/**
+ * Optional, opaque label for the topology notification that produced this
+ * `notify()` call. The coalescer never interprets it (the whole point of the
+ * §6 policy is to never trust event content). It exists purely so the
+ * `onNotify` hook — the single classification choke point — can route a per-
+ * kind counter (tc-x6l) without us inventing the taxonomy here. Callers pass
+ * the raw tmux notification kind, e.g. `"%layout-change"`,
+ * `"%window-add"`, `"%pane-died"`.
+ */
+export type TopologyEventKind = string;
+
+// ---------------------------------------------------------------------------
+// Options
+// ---------------------------------------------------------------------------
+
+/** Options for `createCoalescer`. */
+export interface CoalescerOptions {
+  /** The wrapped requery engine. */
+  readonly engine: RequeryEngine;
+
+  /**
+   * Injected clock. Defaults to `realClock()`. Tests pass a synthetic clock
+   * to control `now()` and timer firings deterministically.
+   */
+  readonly clock?: Clock;
+
+  /**
+   * Minimum spacing between requery cycles, in milliseconds. Default 1000
+   * (1 Hz, the design's nominal ceiling). The FIRST notification after a
+   * quiet period of at least this long fires immediately — see the module
+   * doc on "leading edge". Storms inside the window fold into one trailing-
+   * edge cycle.
+   */
+  readonly ceilingMs?: number;
+
+  /**
+   * Heartbeat interval in milliseconds. The coalescer runs an unconditional
+   * `requery()` this often (whether or not the dirty bit is set), to catch
+   * changes that arrived with zero notifications — silent panes and any
+   * future event-vocabulary gap. Default 30_000 (30 s): slow enough to be
+   * free in steady state, fast enough that the worst-case stale window is
+   * bounded. Set to a small value in tests to exercise the regime.
+   */
+  readonly heartbeatMs?: number;
+
+  /**
+   * Optional observer fired once per `notify()` call, before any other work.
+   * This is the single classification choke point that tc-x6l (per-kind
+   * topology event counters + storm alarm) attaches to. The coalescer never
+   * interprets `kind`; the hook is purely an emit point. Throws are caught
+   * and ignored so a misbehaving observer cannot break the pipeline.
+   */
+  readonly onNotify?: (kind: TopologyEventKind | undefined) => void;
+
+  /**
+   * Optional error sink for failures inside `requery()` (rejected Promises
+   * or unexpected throws). The coalescer always re-arms dirty + schedules a
+   * retry on failure; this hook is purely for logging/observability. Throws
+   * here are caught and ignored.
+   */
+  readonly onError?: (err: unknown) => void;
+}
+
+// ---------------------------------------------------------------------------
+// Coalescer interface
+// ---------------------------------------------------------------------------
+
+/**
+ * Public surface of the dirty-bit coalescer.
+ */
+export interface Coalescer {
+  /**
+   * Receive one topology notification. The parser calls this for every
+   * topology-relevant `%`-message; the coalescer marks the engine dirty and
+   * decides whether to fire immediately (leading edge — quiet period ended)
+   * or schedule a trailing-edge cycle (ceiling window still active).
+   *
+   * `kind` is forwarded verbatim to the `onNotify` hook for counter routing
+   * (tc-x6l). The coalescer never reads it.
+   */
+  notify(kind?: TopologyEventKind): void;
+
+  /**
+   * Arm the heartbeat timer. Idempotent: calling twice is a no-op. The
+   * coalescer's other timers are armed on demand by `notify()`; this just
+   * starts the slow unconditional tick.
+   */
+  start(): void;
+
+  /**
+   * Cancel all pending timers (trailing-edge fire AND heartbeat). Does not
+   * touch the engine's dirty bit, does not cancel an in-flight `requery()`
+   * Promise (the engine itself has no cancel surface). Idempotent. Safe to
+   * call from a teardown path.
+   */
+  stop(): void;
+}
+
+// ---------------------------------------------------------------------------
+// Factory
+// ---------------------------------------------------------------------------
+
+/**
+ * Create a `Coalescer` wrapping the given engine. See module docs for the
+ * leading-edge / 1 Hz ceiling / heartbeat policy.
+ */
+export function createCoalescer(opts: CoalescerOptions): Coalescer {
+  return new CoalescerImpl(opts);
+}
+
+/** Default ceiling: 1 Hz. */
+const DEFAULT_CEILING_MS = 1000;
+
+/** Default heartbeat: 30 s. Slow, free in steady state, bounds staleness. */
+const DEFAULT_HEARTBEAT_MS = 30_000;
+
+class CoalescerImpl implements Coalescer {
+  private readonly _engine: RequeryEngine;
+  private readonly _clock: Clock;
+  private readonly _ceilingMs: number;
+  private readonly _heartbeatMs: number;
+  private readonly _onNotify: ((kind: TopologyEventKind | undefined) => void) | undefined;
+  private readonly _onError: ((err: unknown) => void) | undefined;
+
+  /**
+   * Wall-clock timestamp of the most recent `requery()` invocation start, or
+   * `-Infinity` if none has run yet (so the first notify always passes the
+   * "quiet for ≥ceilingMs" leading-edge test).
+   */
+  private _lastRequeryAt = Number.NEGATIVE_INFINITY;
+
+  /** Pending trailing-edge timer handle, or `null` if none is armed. */
+  private _trailingHandle: TimeoutHandle | null = null;
+
+  /** Heartbeat timer handle, or `null` if `start()` hasn't been called or `stop()` cleared it. */
+  private _heartbeatHandle: TimeoutHandle | null = null;
+
+  /** True iff we're inside `_runRequery` — used to fold mid-cycle notifies. */
+  private _inFlight = false;
+
+  constructor(opts: CoalescerOptions) {
+    this._engine = opts.engine;
+    this._clock = opts.clock ?? realClock();
+    this._ceilingMs = opts.ceilingMs ?? DEFAULT_CEILING_MS;
+    this._heartbeatMs = opts.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
+    this._onNotify = opts.onNotify;
+    this._onError = opts.onError;
+  }
+
+  notify(kind?: TopologyEventKind): void {
+    // Fire the classification hook FIRST, before any policy or engine work.
+    // This is the single choke point tc-x6l will attach per-kind counters to,
+    // and we don't want a counter to silently desync if a policy bug causes
+    // us to skip the dirty mark.
+    if (this._onNotify !== undefined) {
+      try {
+        this._onNotify(kind);
+      } catch {
+        // Observer errors must not break the pipeline.
+      }
+    }
+
+    this._engine.markDirty();
+    this._maybeFire();
+  }
+
+  start(): void {
+    this._armHeartbeat();
+  }
+
+  stop(): void {
+    if (this._trailingHandle !== null) {
+      this._clock.clearTimeout(this._trailingHandle);
+      this._trailingHandle = null;
+    }
+    if (this._heartbeatHandle !== null) {
+      this._clock.clearTimeout(this._heartbeatHandle);
+      this._heartbeatHandle = null;
+    }
+  }
+
+  /**
+   * Decide whether the freshly-arrived notification should fire a leading
+   * edge (cycle immediately) or fold into the already-scheduled trailing
+   * edge (cycle at `_lastRequeryAt + ceilingMs`).
+   *
+   * Decision tree:
+   *   - If a cycle is in flight: the engine's mid-flight rearm has it —
+   *     `engine.markDirty()` already ensured the engine will re-run on
+   *     completion. We don't schedule anything else.
+   *   - Else if a trailing-edge timer is already armed: nothing to do; the
+   *     trailing fire will pick up this notification's dirty bit.
+   *   - Else if we've been quiet for ≥ ceilingMs (leading edge): fire now.
+   *   - Else: schedule the trailing edge for `_lastRequeryAt + ceilingMs`.
+   */
+  private _maybeFire(): void {
+    if (this._inFlight) return;
+    if (this._trailingHandle !== null) return;
+
+    const now = this._clock.now();
+    const elapsed = now - this._lastRequeryAt;
+    if (elapsed >= this._ceilingMs) {
+      // Leading edge. Quiet for at least the ceiling window — fire now.
+      this._runRequery();
+      return;
+    }
+
+    // Inside the ceiling window. Schedule the trailing edge.
+    const wait = this._ceilingMs - elapsed;
+    this._trailingHandle = this._clock.setTimeout(() => {
+      this._trailingHandle = null;
+      this._runRequery();
+    }, wait);
+  }
+
+  /**
+   * Kick off one engine cycle. Records the start timestamp (so the ceiling
+   * window opens NOW, not at completion — a 500 ms requery should not
+   * itself count against the 1 Hz budget for trailing-edge follow-ups).
+   * Handles failure by re-arming a retry at `now + ceilingMs`.
+   */
+  private _runRequery(): void {
+    this._lastRequeryAt = this._clock.now();
+    this._inFlight = true;
+
+    this._engine.requery().then(
+      (result) => this._onCycleSettled(result, null),
+      (err) => this._onCycleSettled(null, err),
+    );
+  }
+
+  /**
+   * Cycle completion path: clear the in-flight flag, react to failure /
+   * mid-cycle dirties, and re-evaluate whether another fire is needed.
+   */
+  private _onCycleSettled(result: RequeryResult | null, err: unknown): void {
+    this._inFlight = false;
+
+    if (err !== undefined && err !== null) {
+      if (this._onError !== undefined) {
+        try {
+          this._onError(err);
+        } catch {
+          // Swallow observer errors.
+        }
+      }
+      // On thrown rejection (the engine should never throw in practice, but
+      // a broken submit might): treat as a failed cycle. Stay dirty, retry.
+      this._engine.markDirty();
+      this._scheduleRetryAfterFailure();
+      return;
+    }
+
+    if (result !== null && result.failed) {
+      // Steady-state %error from list-*. Engine already left the model
+      // alone and re-armed dirty; we only need to defer the retry to the
+      // next ceiling boundary so we don't busy-loop into the same error.
+      this._scheduleRetryAfterFailure();
+      return;
+    }
+
+    // Successful cycle. If the engine is somehow still dirty (something
+    // notified between the cycle's end and this callback running — possible
+    // if the engine's own mid-flight rearm didn't catch it because a
+    // notification arrived literally as the cycle resolved), evaluate
+    // whether to fire again or schedule a trailing edge.
+    if (this._engine.isDirty()) {
+      this._maybeFire();
+    }
+  }
+
+  /**
+   * After a failed cycle, schedule one retry at the next ceiling boundary.
+   * Uses the same trailing-edge machinery: if a notification arrives in the
+   * meantime, the trailing-edge fire will pick up the dirty bit; if not,
+   * the retry fires unconditionally (the engine is still dirty after
+   * failure, so `requery()` will re-issue the commands).
+   */
+  private _scheduleRetryAfterFailure(): void {
+    if (this._trailingHandle !== null) return;
+    const now = this._clock.now();
+    const elapsed = now - this._lastRequeryAt;
+    const wait = Math.max(0, this._ceilingMs - elapsed);
+    this._trailingHandle = this._clock.setTimeout(() => {
+      this._trailingHandle = null;
+      this._runRequery();
+    }, wait);
+  }
+
+  /**
+   * Arm the slow heartbeat. The heartbeat runs `requery()` unconditionally
+   * (no dirty-bit check) — that's the whole point: it self-heals against
+   * silent panes and event-vocabulary gaps. It does NOT bypass the ceiling:
+   * if a cycle ran recently the heartbeat just observes that and lets the
+   * trailing edge handle the next observation. The heartbeat re-arms itself
+   * regardless of whether the tick fired a cycle.
+   */
+  private _armHeartbeat(): void {
+    if (this._heartbeatHandle !== null) return;
+    this._heartbeatHandle = this._clock.setTimeout(() => {
+      this._heartbeatHandle = null;
+      // Unconditional: even without a dirty bit, ask the engine. We DO
+      // honor the ceiling though — same path as a notify with no kind.
+      // The engine's mid-flight slot handles concurrent cycles fine.
+      this._engine.markDirty();
+      this._maybeFire();
+      // Re-arm. Heartbeats keep ticking until stop().
+      this._armHeartbeat();
+    }, this._heartbeatMs);
+  }
+}
