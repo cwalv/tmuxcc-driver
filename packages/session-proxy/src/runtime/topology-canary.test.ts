@@ -162,56 +162,58 @@ describe(
           // immediately for arbitrary input.
           const firehosePaneId = pane1Id;
 
+          // Start the firehose ONCE — the chatter pump (started AFTER the
+          // first pause engages) keeps the flow-controller oscillating
+          // throughout all iterations.
+          controller.sendInput(firehosePaneId, "yes\n");
+
+          // Wait for the first pause to confirm the firehose is producing
+          // and the slot-less write path has fired at least once.
+          await waitFor(
+            () => (fc.isPanePaused(firehosePaneId) ? true : undefined),
+            15_000,
+            `firehose never paused on startup; ` +
+              `bufferedBytes=${fc.bufferedBytes(firehosePaneId)} ` +
+              `highWater=${DEFAULT_HIGH_WATER_BYTES}`,
+          );
+
+          // Start the chatter pump only AFTER the firehose has crossed
+          // high-water once.  The pump drains the controller to the
+          // low-water boundary so resume fires (each drain that crosses
+          // low-water emits a continue refresh-client command); the
+          // firehose then refills above high-water and another pause
+          // command fires.  Each is an independent slot-less write under
+          // the bug, multiplying the race chances throughout the test.
+          let pumpActive = true;
+          const chatterPump = setInterval(() => {
+            if (!pumpActive) return;
+            // Only act when the pane is paused — that means buffered >
+            // high-water and a pause command was issued.  Drain enough to
+            // drop below low-water → triggers a continue command.
+            if (fc.isPanePaused(firehosePaneId)) {
+              const b = fc.bufferedBytes(firehosePaneId);
+              if (b > DEFAULT_LOW_WATER_BYTES) {
+                fc.noteDrained(firehosePaneId, b - DEFAULT_LOW_WATER_BYTES + 1);
+              }
+            }
+          }, 5);
+
+          try {
+
           for (let i = 1; i <= ITERATIONS; i++) {
             const expectedPaneCount = 1 + i;
 
-            // Step 1: Re-engage the firehose to trigger a pause command.
-            //   - Drain anything stale from the prior iteration first.
-            const staleBuffered = fc.bufferedBytes(firehosePaneId);
-            if (staleBuffered > 0) {
-              fc.noteDrained(firehosePaneId, staleBuffered);
-            }
-
-            // Send the firehose start.  `yes` produces ~"y\n" continuously.
-            controller.sendInput(firehosePaneId, "yes\n");
-
-            // Wait for pause (high-water crossed).  This proves the
-            // refresh-client -A pause command has been issued by the flow
-            // controller.
-            await waitFor(
-              () => (fc.isPanePaused(firehosePaneId) ? true : undefined),
-              15_000,
-              `iter ${i}: pane never paused; ` +
-                `bufferedBytes=${fc.bufferedBytes(firehosePaneId)} ` +
-                `highWater=${DEFAULT_HIGH_WATER_BYTES}`,
-            );
-
-            // Step 2: Issue the split-pane command WHILE the firehose is
-            //   actively pumping bytes (the pause has gated the demux but
-            //   tmux may still be emitting %output for in-flight chunks,
-            //   and subsequent drains will cause continue commands to be
-            //   issued — both pause and continue %end replies are at risk of
-            //   mis-binding to the upcoming list-* requery slots).
+            // With the chatter pump running, every few ms a fresh pause OR
+            // continue refresh-client command is being written.  We now fire
+            // the split-pane which triggers a requery list-windows +
+            // list-panes pair.  Under the slot-less bug, the next in-flight
+            // flow-control %end can mis-bind to one of the list-* slots and
+            // produce a CORRUPT committed topology snapshot.
             controller.sendCommand({
               kind: "split-pane",
               paneId: pane1Id,
               direction: i % 2 === 0 ? "vertical" : "horizontal",
             });
-
-            // Step 3: Stop the firehose with Ctrl-C and drain — this issues
-            //   the continue refresh-client command, adding more in-flight
-            //   slot traffic that overlaps with the topology requery.
-            controller.sendInput(firehosePaneId, "\x03");
-
-            // Small delay so tmux can process Ctrl-C, then drain — this puts
-            // the continue refresh-client write right next to the split's
-            // requery list-* commands in the FIFO.  No artificial sleep in
-            // production code paths; this is test-side pacing.
-            await delay(20);
-            const buffered = fc.bufferedBytes(firehosePaneId);
-            if (buffered > 0) {
-              fc.noteDrained(firehosePaneId, buffered);
-            }
 
             // Step 4: Wait for the committed model to reflect the new pane
             // count.  We poll the pipeline's model directly — this is the
@@ -299,10 +301,17 @@ describe(
               `got ${finalModel.panes.size}`,
           );
 
-          // Drain residue so teardown is clean.
-          const residue = fc.bufferedBytes(firehosePaneId);
-          if (residue > 0) {
-            fc.noteDrained(firehosePaneId, residue);
+          } finally {
+            // Stop the chatter pump and the firehose.
+            pumpActive = false;
+            clearInterval(chatterPump);
+            controller.sendInput(firehosePaneId, "\x03");
+            await delay(200);
+            // Drain residue so teardown is clean.
+            const residue = fc.bufferedBytes(firehosePaneId);
+            if (residue > 0) {
+              fc.noteDrained(firehosePaneId, residue);
+            }
           }
         } finally {
           await session.teardown();
