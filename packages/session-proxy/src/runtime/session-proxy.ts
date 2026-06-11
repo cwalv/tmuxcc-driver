@@ -276,7 +276,33 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
     }
     return pipelineRef.send(command);
   };
-  const fc = createFlowController(fcSend, demux, opts.flow);
+  // tc-d7i: invariant-tripwire hooks — registry counters plus loud stderr
+  // for the expected-zero ones (the bytes-while-paused shape is expected
+  // non-zero in bounded bursts, so it gets the counter only).
+  const fc = createFlowController(fcSend, demux, {
+    ...opts.flow,
+    metrics: {
+      onDrainClamped: (paneId, excessBytes) => {
+        metricsRegistry.noteFlowDrainClamped();
+        process.stderr.write(
+          `[flow-control] DRAIN CLAMPED: pane ${paneId as string} drain credit exceeded buffered bytes by ${excessBytes}. ` +
+            `Expected never — an FC-1 accounting bug (double credit / drain-for-dead-pane) absorbed by the clamp.\n`,
+        );
+      },
+      onBytesWhilePaused: (_paneId, byteCount) => {
+        metricsRegistry.noteFlowBytesWhilePaused(byteCount);
+      },
+      onCommandFailed: (kind) => {
+        metricsRegistry.noteFlowCommandFailed(kind);
+        process.stderr.write(
+          `[flow-control] COMMAND FAILED: refresh-client -A ${kind} replied %error. ` +
+            (kind === "continue"
+              ? `tmux keeps holding this pane's output — if no later resume succeeds, the pane is frozen.\n`
+              : `the pane was not paused tmux-side; backpressure is demux-gate-only until the next crossing.\n`),
+        );
+      },
+    },
+  });
 
   // 4. Wrap the demux store so the flow controller is notified of every append.
   //    The wrapper delegates everything to demux.store and additionally calls

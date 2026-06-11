@@ -128,6 +128,40 @@ export const DEFAULT_LOW_WATER_BYTES = 65_536; // 64 KiB
 // Public types
 // ---------------------------------------------------------------------------
 
+/**
+ * Invariant-tripwire hooks (tc-d7i).
+ *
+ * Each hook witnesses an FC-N contract clause (see module header) that
+ * cannot be deterministically unit-asserted because it depends on real tmux
+ * timing. The controller stays metrics-free; production wiring
+ * (session-proxy.ts) forwards these to the metrics registry and loud-logs
+ * the expected-zero ones.
+ */
+export interface FlowControllerMetricsHooks {
+  /**
+   * `noteDrained`'s clamp-at-zero clipped: a drain credit exceeded the
+   * buffered total (an FC-1 violation the clamp absorbed). Expected never —
+   * every call is an accounting bug (double credit, drain for a dead pane).
+   */
+  onDrainClamped?(paneId: PaneId, excessBytes: number): void;
+  /**
+   * Bytes were accounted while the pane was already paused — the FC-5
+   * in-flight window. Expected: a small bounded burst right after each
+   * pause edge (output tmux flushed before honoring the pause); sustained
+   * growth = tmux is not honoring the pause command.
+   */
+  onBytesWhilePaused?(paneId: PaneId, byteCount: number): void;
+  /**
+   * A pause/continue `refresh-client -A` reply came back `%error`.
+   * Expected never. kind="continue" is the worst case: tmux keeps holding
+   * the pane's output — a frozen terminal if no later resume succeeds.
+   * Correlator rejection (session teardown with the slot in flight) is
+   * deliberately NOT reported — it would pollute the expected-zero signal
+   * at every session close.
+   */
+  onCommandFailed?(kind: "pause" | "continue"): void;
+}
+
 /** Options for `createFlowController`. */
 export interface FlowControllerOptions {
   /**
@@ -151,6 +185,9 @@ export interface FlowControllerOptions {
    * Supply a registry-backed function for multi-session namespacing.
    */
   paneIdToTmux?: (id: PaneId) => number;
+
+  /** Invariant-tripwire hooks (tc-d7i). See `FlowControllerMetricsHooks`. */
+  metrics?: FlowControllerMetricsHooks;
 }
 
 /**
@@ -231,6 +268,7 @@ class FlowControllerImpl implements FlowController {
   private readonly _highWater: number;
   private readonly _lowWater: number;
   private readonly _toTmux: (id: PaneId) => number;
+  private readonly _metrics: FlowControllerMetricsHooks;
 
   /** Per-pane buffered byte counter. */
   private readonly _buffered = new Map<PaneId, number>();
@@ -248,6 +286,7 @@ class FlowControllerImpl implements FlowController {
     this._highWater = opts.highWaterBytes ?? DEFAULT_HIGH_WATER_BYTES;
     this._lowWater = opts.lowWaterBytes ?? DEFAULT_LOW_WATER_BYTES;
     this._toTmux = opts.paneIdToTmux ?? defaultPaneIdToTmux;
+    this._metrics = opts.metrics ?? {};
 
     if (this._lowWater >= this._highWater) {
       throw new Error(
@@ -262,6 +301,10 @@ class FlowControllerImpl implements FlowController {
 
   onPaneBytes(paneId: PaneId, byteCount: number): void {
     if (byteCount <= 0) return;
+    if (this._paused.has(paneId)) {
+      // FC-5 in-flight window — expected small bursts at each pause edge.
+      this._metrics.onBytesWhilePaused?.(paneId, byteCount);
+    }
     const prev = this._buffered.get(paneId) ?? 0;
     const next = prev + byteCount;
     this._buffered.set(paneId, next);
@@ -275,6 +318,10 @@ class FlowControllerImpl implements FlowController {
   noteDrained(paneId: PaneId, byteCount: number): void {
     if (byteCount <= 0) return;
     const prev = this._buffered.get(paneId) ?? 0;
+    if (byteCount > prev) {
+      // FC-1 violation absorbed by the clamp — expected never (tc-d7i).
+      this._metrics.onDrainClamped?.(paneId, byteCount - prev);
+    }
     const next = Math.max(0, prev - byteCount);
     this._buffered.set(paneId, next);
 
@@ -335,8 +382,8 @@ class FlowControllerImpl implements FlowController {
     // Tell tmux to stop emitting %output for this pane.
     // tc-3si.1: `send` atomically registers a correlator slot and writes the
     // command, so the %end reply can never mis-bind to a concurrent requery's
-    // list-* slot. The Promise is discarded (fire-and-forget).
-    void this._send(refreshClientFlow(tmuxN, "pause"));
+    // list-* slot. Fire-and-forget, but %error is witnessed (tc-d7i).
+    this._sendFlowCommand(tmuxN, "pause");
   }
 
   private _resume(paneId: PaneId): void {
@@ -345,7 +392,19 @@ class FlowControllerImpl implements FlowController {
     this._paused.delete(paneId);
     this._demux.resumePane(paneId);
     // Tell tmux to resume output for this pane (slotted — see _pause).
-    void this._send(refreshClientFlow(tmuxN, "continue"));
+    this._sendFlowCommand(tmuxN, "continue");
+  }
+
+  private _sendFlowCommand(tmuxN: number, state: "pause" | "continue"): void {
+    this._send(refreshClientFlow(tmuxN, state)).then(
+      (result) => {
+        if (!result.ok) this._metrics.onCommandFailed?.(state);
+      },
+      () => {
+        // Correlator rejection = teardown with the slot in flight; not a
+        // command failure (see FlowControllerMetricsHooks.onCommandFailed).
+      },
+    );
   }
 }
 

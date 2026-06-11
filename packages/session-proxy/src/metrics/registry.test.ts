@@ -480,6 +480,55 @@ describe("SessionProxyRegistry", () => {
     reg.stop();
   });
 
+  it("noteFlowDrainClamped increments the expected-zero tripwire (tc-d7i)", async () => {
+    const reg = createSessionProxyRegistry();
+
+    reg.noteFlowDrainClamped();
+    reg.noteFlowDrainClamped();
+
+    const text = await reg.metrics();
+    assert.ok(
+      text.match(/flow_drain_clamped_total 2/),
+      `flow_drain_clamped_total should be 2; got:\n${text}`,
+    );
+    reg.stop();
+  });
+
+  it("noteFlowBytesWhilePaused accumulates bytes; non-positive is a no-op (tc-d7i)", async () => {
+    const reg = createSessionProxyRegistry();
+
+    reg.noteFlowBytesWhilePaused(2730);
+    reg.noteFlowBytesWhilePaused(2730);
+    reg.noteFlowBytesWhilePaused(0);
+    reg.noteFlowBytesWhilePaused(-5);
+
+    const text = await reg.metrics();
+    assert.ok(
+      text.match(/flow_bytes_while_paused_total 5460/),
+      `flow_bytes_while_paused_total should be 5460; got:\n${text}`,
+    );
+    reg.stop();
+  });
+
+  it("noteFlowCommandFailed attributes by kind (tc-d7i)", async () => {
+    const reg = createSessionProxyRegistry();
+
+    reg.noteFlowCommandFailed("continue");
+    reg.noteFlowCommandFailed("continue");
+    reg.noteFlowCommandFailed("pause");
+
+    const text = await reg.metrics();
+    assert.ok(
+      text.match(/flow_commands_failed_total\{kind="continue"\} 2/),
+      `continue failures should be 2; got:\n${text}`,
+    );
+    assert.ok(
+      text.match(/flow_commands_failed_total\{kind="pause"\} 1/),
+      `pause failures should be 1; got:\n${text}`,
+    );
+    reg.stop();
+  });
+
   it("multiple registries are isolated (no cross-contamination)", async () => {
     const reg1 = createSessionProxyRegistry();
     const reg2 = createSessionProxyRegistry();

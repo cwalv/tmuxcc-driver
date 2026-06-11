@@ -31,6 +31,9 @@
  * | `flow_panes_paused` | gauge | — | Number of panes currently paused by the flow controller (FIFO refcount-style — pairs with `session_paused_seconds_total`). EXPECT returns to 0 after every firehose drains; drift = a pane stuck gated, "the terminal went dead" symptom (tc-3si.5). |
  * | `flow_pane_pauses_total` | counter | — | Total pane pause transitions (0→paused). Balances with `flow_pane_resumes_total` over time. Imbalance = a pane stuck paused (tc-3si.5). |
  * | `flow_pane_resumes_total` | counter | — | Total pane resume transitions (paused→0). Balances with `flow_pane_pauses_total` over time. Imbalance = paused panes leak (tc-3si.5). |
+ * | `flow_drain_clamped_total` | counter | — | Times `noteDrained`'s clamp-at-zero clipped — a drain credit exceeded the buffered total. **Expected-zero tripwire**: every increment is an FC-1 accounting bug (double credit / drain-for-dead-pane) the clamp would otherwise absorb into silent drift. ALERT (tc-d7i). |
+ * | `flow_bytes_while_paused_total` | counter | — | Bytes accounted while the pane was already paused — the FC-5 in-flight window (output tmux flushed before honoring the pause). EXPECT small bounded bursts at each pause edge (~one socket flush, observed ~2730-byte chunks in tc-cbh); sustained growth = tmux not honoring `refresh-client -A pause` (tc-d7i). |
+ * | `flow_commands_failed_total` | counter | `kind` | `%error` replies to flow-control `refresh-client -A` commands (`kind=pause\|continue`). **Expected-zero tripwire**; `kind=continue` is the worst UX failure in this plane — tmux keeps holding the pane's output (frozen terminal) with no other witness. Correlator rejections at teardown are NOT counted. ALERT (tc-d7i). |
  * | `resyncs_total` | counter | `cause` | Resync events handled by `serve.ts`, attributed by `cause` (`gap`: the client detected a seq gap and asked for a snapshot — legitimate under packet loss / drop tests; `escalation`: a second resync request from the same client within a short window — the previous snapshot didn't heal the gap). EXPECT ~0 on in-process transports (in-memory pairs are lossless); `escalation` is **expected-zero tripwire** universally — it means the wire's sequence invariant is broken (tc-3si.5). ALERT on escalation. |
  * | `deltas_per_cycle` | histogram | — | Wire-delta count per pipeline cycle (coalescer cycle, bootstrap, patch). EXPECT small (1–5) in steady state; spikes only at bootstrap / reconnect. Steady large batches = a diff-instability (a flapping field producing spurious deltas) (tc-3si.5). |
  * | `process_*` / `nodejs_*` | various | — | Default process metrics from `prom-client.collectDefaultMetrics()`: event-loop lag, GC, heap, RSS, CPU (tc-3si.6). |
@@ -205,6 +208,17 @@ export type RequeryFailureReason = "error" | "budget";
  * Cardinality: 2 values, fully closed.
  */
 export type ResyncCause = "gap" | "escalation";
+
+/**
+ * `flow_commands_failed_total` kind label values (tc-d7i).
+ *
+ * The flow controller's two fire-and-forget `refresh-client -A` commands.
+ * `continue` failures are the worst case: tmux keeps holding the pane's
+ * output — a frozen terminal if no later resume succeeds.
+ *
+ * Cardinality: 2 values, fully closed.
+ */
+export type FlowCommandKind = "pause" | "continue";
 
 // ---------------------------------------------------------------------------
 // Registry (non-default so it doesn't pollute Node.js process-wide metrics)
@@ -468,6 +482,40 @@ export interface SessionProxyRegistry {
    * for panes the gauge wasn't tracking (tc-3si.5).
    */
   notePanePauseExited(): void;
+
+  /**
+   * Increment `flow_drain_clamped_total` (tc-d7i).
+   *
+   * Called (via the flow controller's metrics hooks) when `noteDrained`'s
+   * clamp-at-zero clipped — a drain credit exceeded the buffered total.
+   * Expected-zero tripwire: every increment is an FC-1 accounting bug
+   * (double credit / drain-for-dead-pane) that the clamp would otherwise
+   * absorb into silent drift. The wiring caller ALSO loud-logs to stderr.
+   */
+  noteFlowDrainClamped(): void;
+
+  /**
+   * Increment `flow_bytes_while_paused_total` by `bytes` (tc-d7i).
+   *
+   * Bytes accounted while the pane was already paused — the FC-5 in-flight
+   * window (output tmux flushed before honoring the pause command).
+   * EXPECT small bounded bursts right after each pause edge (~one socket
+   * flush); sustained growth = tmux is not honoring the pause command
+   * (lost or failed `refresh-client -A pause`).
+   */
+  noteFlowBytesWhilePaused(bytes: number): void;
+
+  /**
+   * Increment `flow_commands_failed_total{kind}` (tc-d7i).
+   *
+   * A flow-control pause/continue `refresh-client -A` reply came back
+   * `%error`. Expected-zero tripwire; `kind="continue"` is the worst UX
+   * failure in the flow plane — tmux keeps holding the pane's output
+   * (permanently frozen terminal) and this counter is its only witness.
+   * Correlator rejections at session teardown are deliberately NOT
+   * counted. The wiring caller ALSO loud-logs to stderr.
+   */
+  noteFlowCommandFailed(kind: FlowCommandKind): void;
 
   /**
    * Increment `resyncs_total{cause}` (tc-3si.5).
@@ -798,6 +846,36 @@ export function createSessionProxyRegistry(): SessionProxyRegistry {
     registers: [reg],
   });
 
+  // tc-d7i: flow-control invariant tripwires. These witness the FC-N
+  // contract clauses (flow-control.ts module header) that depend on real
+  // tmux timing and therefore cannot be deterministically unit-asserted:
+  // the clamp (FC-1), the in-flight window (FC-5), and the fire-and-forget
+  // command replies that were previously swallowed entirely.
+  const flowDrainClampedTotal = new Counter({
+    name: "flow_drain_clamped_total",
+    help:
+      "Times noteDrained's clamp-at-zero clipped (drain credit exceeded buffered bytes). " +
+      "Expected-zero tripwire: every increment is an accounting bug the clamp absorbed.",
+    registers: [reg],
+  });
+
+  const flowBytesWhilePausedTotal = new Counter({
+    name: "flow_bytes_while_paused_total",
+    help:
+      "Bytes accounted while the pane was already paused (the FC-5 in-flight window). " +
+      "EXPECT small bursts at pause edges; sustained growth = tmux not honoring pause.",
+    registers: [reg],
+  });
+
+  const flowCommandsFailedTotal = new Counter({
+    name: "flow_commands_failed_total",
+    help:
+      "%error replies to flow-control refresh-client pause/continue commands, by kind. " +
+      "Expected-zero tripwire: kind=continue means a pane stays frozen until a later resume succeeds.",
+    labelNames: ["kind"],
+    registers: [reg],
+  });
+
   // tc-3si.5: resync counter, by cause. `gap` is legitimate under lossy
   // transports; `escalation` is an expected-zero tripwire that means a
   // second resync from the same client landed inside the escalation
@@ -940,6 +1018,19 @@ export function createSessionProxyRegistry(): SessionProxyRegistry {
       // directly. (A future hardening could read `flowPanesPaused.get()` but
       // that path is async in prom-client v15+.)
       flowPanesPaused.dec();
+    },
+
+    noteFlowDrainClamped(): void {
+      flowDrainClampedTotal.inc();
+    },
+
+    noteFlowBytesWhilePaused(bytes: number): void {
+      if (bytes <= 0) return;
+      flowBytesWhilePausedTotal.inc(bytes);
+    },
+
+    noteFlowCommandFailed(kind: FlowCommandKind): void {
+      flowCommandsFailedTotal.inc({ kind });
     },
 
     incResync(cause: ResyncCause): void {

@@ -502,3 +502,102 @@ describe("createFlowController — defaults", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Invariant-tripwire metrics hooks (tc-d7i)
+// ---------------------------------------------------------------------------
+
+describe("createFlowController — metrics hooks (tc-d7i)", () => {
+  it("onDrainClamped fires with the excess when a drain credit exceeds buffered (FC-1)", () => {
+    const { send } = makeFakeSend();
+    const demux = createOutputDemux();
+    const clamps: Array<{ pane: PaneId; excess: number }> = [];
+    const fc = createFlowController(send, demux, {
+      highWaterBytes: 1_000,
+      lowWaterBytes: 200,
+      metrics: {
+        onDrainClamped: (pane, excess) => clamps.push({ pane, excess }),
+      },
+    });
+
+    fc.onPaneBytes(P3, 100);
+    fc.noteDrained(P3, 100); // exact drain — no clamp
+    assert.equal(clamps.length, 0, "exact drain must not clip");
+
+    fc.onPaneBytes(P3, 50);
+    fc.noteDrained(P3, 80); // over-drain by 30
+    assert.equal(clamps.length, 1, "over-drain must fire the clamp hook once");
+    assert.equal(clamps[0]!.pane, P3);
+    assert.equal(clamps[0]!.excess, 30);
+    assert.equal(fc.bufferedBytes(P3), 0, "counter clamped at 0");
+
+    fc.noteDrained(P5, 10); // drain for a pane with no bytes at all
+    assert.equal(clamps.length, 2, "drain-for-unknown-pane must clip");
+    assert.equal(clamps[1]!.excess, 10);
+  });
+
+  it("onBytesWhilePaused fires only for bytes arriving while paused (FC-4/FC-5)", () => {
+    const { send } = makeFakeSend();
+    const demux = createOutputDemux();
+    const seen: number[] = [];
+    const fc = createFlowController(send, demux, {
+      highWaterBytes: 1_000,
+      lowWaterBytes: 200,
+      metrics: {
+        onBytesWhilePaused: (_pane, n) => seen.push(n),
+      },
+    });
+
+    fc.onPaneBytes(P3, 900); // below high-water — not paused
+    assert.deepEqual(seen, [], "pre-pause bytes are not counted");
+
+    fc.onPaneBytes(P3, 200); // crosses high-water: THIS call pauses; the
+    // crossing bytes themselves are not "while paused"
+    assert.equal(fc.isPanePaused(P3), true);
+    assert.deepEqual(seen, [], "the crossing call itself is not while-paused");
+
+    fc.onPaneBytes(P3, 300); // in-flight window
+    fc.onPaneBytes(P3, 50);
+    assert.deepEqual(seen, [300, 50], "post-pause arrivals are counted, per arrival");
+
+    // Drain to resume; subsequent bytes are no longer counted.
+    fc.noteDrained(P3, fc.bufferedBytes(P3));
+    assert.equal(fc.isPanePaused(P3), false);
+    fc.onPaneBytes(P3, 40);
+    assert.deepEqual(seen, [300, 50], "post-resume bytes are not counted");
+  });
+
+  it("onCommandFailed fires on %error replies, not on success or rejection", async () => {
+    const demux = createOutputDemux();
+    const failures: string[] = [];
+    // Scripted send: pause reply fails (%error), continue reply succeeds,
+    // then a rejecting send simulates correlator teardown.
+    const results: Array<Promise<CommandResult>> = [
+      Promise.resolve({ ok: false, commandNumber: 1, body: new Uint8Array() }),
+      Promise.resolve({ ok: true, commandNumber: 2, body: new Uint8Array() }),
+      Promise.reject(new Error("correlator destroyed")),
+    ];
+    let i = 0;
+    const send = (): Promise<CommandResult> => results[i++]!;
+    const fc = createFlowController(send, demux, {
+      highWaterBytes: 1_000,
+      lowWaterBytes: 200,
+      metrics: {
+        onCommandFailed: (kind) => failures.push(kind),
+      },
+    });
+
+    fc.onPaneBytes(P3, 1_100); // pause → %error reply
+    fc.noteDrained(P3, 1_100); // resume → ok reply
+    fc.onPaneBytes(P3, 1_100); // pause again → rejected (teardown)
+
+    // Let the scripted promises settle.
+    await new Promise((r) => setImmediate(r));
+
+    assert.deepEqual(
+      failures,
+      ["pause"],
+      "only the %error reply counts: ok replies and teardown rejections are ignored",
+    );
+  });
+});
