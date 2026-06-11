@@ -263,6 +263,10 @@ describe("tc-4sg: hot-path throughput benchmark", () => {
     const demux = createOutputDemux();
     demux.attachTransport(nullTransport as Parameters<typeof demux.attachTransport>[0]);
     const pid = paneId("p0");
+    // tc-128.4: pane tracking is always-on in the demux — bind the pane
+    // explicitly so bytes fan out instead of staging in the pre-topology
+    // buffer (this is the benchmark; we're measuring the live fan-out path).
+    demux.notifyPaneBound(pid);
     const tok = new ControlTokenizer();
     let decodedTotal = 0;
 

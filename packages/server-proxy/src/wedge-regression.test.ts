@@ -177,6 +177,10 @@ describe("tc-7xv.24 wedge regression — real-socket backpressure engages tmux p
     // Pump bytes through accountingStore for a single pane.  Each append
     // simulates one %output notification from tmux.  Chunks are 64 KiB.
     const paneId = mintPaneId("p1");
+    // tc-128.4: pane tracking is always-on; bind explicitly so bytes fan
+    // out to the draining transport instead of overflowing the pre-topology
+    // staging buffer (which would mean the drain credit path never fires).
+    demux.notifyPaneBound(paneId);
     const chunk = new Uint8Array(64 * 1024); // 64 KiB of zeros
 
     // Production high-water is 256 KiB; we should observe pause within
@@ -247,6 +251,10 @@ describe("tc-7xv.24 wedge regression — real-socket backpressure engages tmux p
     demux.attachTransport(drainingTransport);
 
     const paneId = mintPaneId("p1");
+    // tc-128.4: pane tracking is always-on; bind explicitly so the
+    // accumulated bytes actually reach the draining transport (and the
+    // drain credit fires when the consumer unpauses).
+    demux.notifyPaneBound(paneId);
     const chunk = new Uint8Array(64 * 1024);
 
     // 1. Fill until paused.

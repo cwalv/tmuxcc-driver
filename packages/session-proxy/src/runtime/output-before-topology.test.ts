@@ -1,7 +1,7 @@
 /**
- * Output-before-topology buffering tests (tc-128.3).
+ * Output-before-topology buffering tests (tc-128.3, tc-128.4).
  *
- * Acceptance criteria:
+ * Acceptance criteria (post tc-128.4, pane tracking is always-on):
  *   A1. Split storm: bytes that arrive for a pane before the model knows about
  *       it are buffered, then flushed to transports in order once the pane is
  *       bound — every byte lands in the right terminal.
@@ -10,10 +10,13 @@
  *       overflow is dropped with a log, not accumulated unboundedly.
  *   A3. Ordering guarantee: `pane.opened` (control plane) always precedes the
  *       flushed data bytes (data plane) at the client.
- *   A4. Backwards-compat: without `activatePaneTracking()`, the demux fans out
- *       bytes for all pane IDs immediately (legacy pass-through).
  *   A5. Bootstrap path: panes present in the initial model after bootstrap are
  *       bound correctly and receive subsequent output without staging.
+ *
+ * NOTE (tc-128.4): A4 (legacy pass-through behaviour without
+ * `activatePaneTracking`) is RETIRED. The opt-in toggle is gone — pane
+ * tracking is the only mode. Test harnesses must call notifyPaneBound for
+ * every pane they expect bytes for.
  *
  * @module runtime/output-before-topology.test
  */
@@ -53,44 +56,15 @@ function flushMicrotasks(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// A4: Backwards compatibility — no activatePaneTracking → immediate fan-out
-// ---------------------------------------------------------------------------
-
-describe("OutputDemux: without activatePaneTracking (legacy pass-through)", () => {
-  it("A4: appends fan out immediately for all pane IDs (unknown panes not staged)", () => {
-    const demux = createOutputDemux();
-    const { sessionProxy, client } = createInMemoryTransportPair();
-    const frames = captureFrames(client);
-    demux.attachTransport(sessionProxy);
-
-    const P1 = paneId("p1");
-
-    // Without activatePaneTracking, bytes should flow through immediately
-    // even for a pane that was never announced via notifyPaneBound.
-    demux.store.append(P1, bytes(0x01, 0x02));
-
-    assert.equal(frames.length, 1, "bytes must flow through immediately without pane tracking");
-    assert.deepEqual(frames[0]!.bytes, bytes(0x01, 0x02));
-    assert.equal(demux.isPaneTrackingActive(), false, "pane tracking must be off by default");
-  });
-
-  it("A4: activatePaneTracking is off by default", () => {
-    const demux = createOutputDemux();
-    assert.equal(demux.isPaneTrackingActive(), false);
-  });
-});
-
-// ---------------------------------------------------------------------------
 // A1: Split storm — bytes arrive before model knows about the pane
 // ---------------------------------------------------------------------------
 
-describe("OutputDemux: output-before-topology buffering (activatePaneTracking)", () => {
+describe("OutputDemux: output-before-topology buffering", () => {
   it("A1: bytes for unknown pane are staged, then flushed in order on notifyPaneBound", async () => {
     const demux = createOutputDemux();
     const { sessionProxy, client } = createInMemoryTransportPair();
     const frames = captureFrames(client);
     demux.attachTransport(sessionProxy);
-    demux.activatePaneTracking();
 
     const P1 = paneId("p1");
 
@@ -120,7 +94,6 @@ describe("OutputDemux: output-before-topology buffering (activatePaneTracking)",
     const { sessionProxy, client } = createInMemoryTransportPair();
     const frames = captureFrames(client);
     demux.attachTransport(sessionProxy);
-    demux.activatePaneTracking();
 
     const P1 = paneId("p1");
     demux.notifyPaneBound(P1);
@@ -136,7 +109,6 @@ describe("OutputDemux: output-before-topology buffering (activatePaneTracking)",
     const { sessionProxy, client } = createInMemoryTransportPair();
     const frames = captureFrames(client);
     demux.attachTransport(sessionProxy);
-    demux.activatePaneTracking();
 
     const P1 = paneId("p1");
     const P2 = paneId("p2");
@@ -182,7 +154,6 @@ describe("OutputDemux: foreign-pane containment", () => {
     const { sessionProxy, client } = createInMemoryTransportPair();
     const frames = captureFrames(client);
     demux.attachTransport(sessionProxy);
-    demux.activatePaneTracking();
 
     const FOREIGN = paneId("p99");
     demux.store.append(FOREIGN, bytes(0xFF, 0xFE));
@@ -196,7 +167,6 @@ describe("OutputDemux: foreign-pane containment", () => {
     const { sessionProxy, client } = createInMemoryTransportPair();
     const frames = captureFrames(client);
     demux.attachTransport(sessionProxy);
-    demux.activatePaneTracking();
 
     const P1 = paneId("p1");
     demux.store.append(P1, bytes(0x01, 0x02));
@@ -216,7 +186,6 @@ describe("OutputDemux: foreign-pane containment", () => {
     const { sessionProxy, client } = createInMemoryTransportPair();
     const frames = captureFrames(client);
     demux.attachTransport(sessionProxy);
-    demux.activatePaneTracking();
 
     const FOREIGN = paneId("p99");
 
@@ -265,7 +234,6 @@ describe("OutputDemux: foreign-pane containment", () => {
     const { sessionProxy, client } = createInMemoryTransportPair();
     const frames = captureFrames(client);
     demux.attachTransport(sessionProxy);
-    demux.activatePaneTracking();
 
     const FOREIGN = paneId("p99");
     const P2 = paneId("p2");
@@ -312,7 +280,6 @@ describe("OutputDemux: pane.opened ordering guarantee", () => {
     const { sessionProxy, client } = createInMemoryTransportPair();
     const frames = captureFrames(client);
     demux.attachTransport(sessionProxy);
-    demux.activatePaneTracking();
 
     const P1 = paneId("p1");
     const events: string[] = [];
@@ -354,7 +321,6 @@ describe("OutputDemux: pane.opened ordering guarantee", () => {
     const { sessionProxy, client } = createInMemoryTransportPair();
     const frames = captureFrames(client);
     demux.attachTransport(sessionProxy);
-    demux.activatePaneTracking();
 
     const P1 = paneId("p1");
     demux.store.append(P1, bytes(0x01));
@@ -373,7 +339,6 @@ describe("OutputDemux: pane.opened ordering guarantee", () => {
     const { sessionProxy, client } = createInMemoryTransportPair();
     const frames = captureFrames(client);
     demux.attachTransport(sessionProxy);
-    demux.activatePaneTracking();
 
     const P1 = paneId("p1");
     demux.store.append(P1, bytes(0x01));
@@ -396,23 +361,15 @@ describe("OutputDemux: pane.opened ordering guarantee", () => {
 });
 
 // ---------------------------------------------------------------------------
-// A5: Bootstrap path via createSessionProxy wiring
+// Idempotency
 // ---------------------------------------------------------------------------
 
-describe("OutputDemux: activatePaneTracking + notifyPaneBound idempotency", () => {
-  it("A5: activatePaneTracking is idempotent (double-call safe)", () => {
-    const demux = createOutputDemux();
-    demux.activatePaneTracking();
-    demux.activatePaneTracking(); // no-op
-    assert.equal(demux.isPaneTrackingActive(), true);
-  });
-
-  it("A5: notifyPaneBound is idempotent (double-call does not double-flush)", async () => {
+describe("OutputDemux: notifyPaneBound / notifyPaneClosed idempotency", () => {
+  it("notifyPaneBound is idempotent (double-call does not double-flush)", async () => {
     const demux = createOutputDemux();
     const { sessionProxy, client } = createInMemoryTransportPair();
     const frames = captureFrames(client);
     demux.attachTransport(sessionProxy);
-    demux.activatePaneTracking();
 
     const P1 = paneId("p1");
     demux.store.append(P1, bytes(0xAA));
@@ -425,9 +382,8 @@ describe("OutputDemux: activatePaneTracking + notifyPaneBound idempotency", () =
     assert.equal(frames.length, 1, "double notifyPaneBound must not double-flush");
   });
 
-  it("A5: notifyPaneClosed is idempotent (double-call safe)", () => {
+  it("notifyPaneClosed is idempotent (double-call safe)", () => {
     const demux = createOutputDemux();
-    demux.activatePaneTracking();
     const P1 = paneId("p1");
     demux.store.append(P1, bytes(0x01));
     demux.notifyPaneClosed(P1);
@@ -435,29 +391,10 @@ describe("OutputDemux: activatePaneTracking + notifyPaneBound idempotency", () =
     assert.equal(demux.pendingBytes(P1), 0);
     assert.equal(demux.isPaneKnown(P1), false);
   });
-
-  it("A5: notifyPaneBound and notifyPaneClosed are no-ops when tracking is not active", () => {
-    const demux = createOutputDemux();
-    const { sessionProxy, client } = createInMemoryTransportPair();
-    const frames = captureFrames(client);
-    demux.attachTransport(sessionProxy);
-    // NOTE: activatePaneTracking() NOT called.
-
-    const P1 = paneId("p1");
-
-    // These should be no-ops.
-    demux.notifyPaneBound(P1);
-    demux.notifyPaneClosed(P1);
-    assert.equal(demux.isPaneKnown(P1), false, "isPaneKnown must be false when tracking not active");
-
-    // Bytes still fan out immediately (legacy behaviour).
-    demux.store.append(P1, bytes(0x55));
-    assert.equal(frames.length, 1, "bytes must fan out even after no-op notifyPaneBound/Closed");
-  });
 });
 
 // ---------------------------------------------------------------------------
-// Integration: pane tracking with full pipeline (synthetic host)
+// A5: Bootstrap path via the live pipeline (synthetic host)
 // ---------------------------------------------------------------------------
 
 import { createRuntimePipeline } from "./pipeline.js";
@@ -507,10 +444,9 @@ function makeBootstrapStream(paneNum: number): Uint8Array {
   const layoutStr = `aaaa,80x24,0,0,${paneNum}`;
   const winBody = `${sid}\ttestsession\t${wid}\ttestwin\t80\t24\t${layoutStr}\t*\t1\n`;
   const paneBody = `${pid_}\t${wid}\t${sid}\t0\t80\t24\t0\t0\t1\t1234\tbash\n`;
-  const preNotif = `%session-changed ${sid} testsession\r\n`;
   const winBlock = `%begin ${ts} 100 1\r\n${winBody}%end ${ts} 100 1\r\n`;
   const paneBlock = `%begin ${ts} 101 1\r\n${paneBody}%end ${ts} 101 1\r\n`;
-  return new TextEncoder().encode(preNotif + winBlock + paneBlock);
+  return new TextEncoder().encode(winBlock + paneBlock);
 }
 
 describe("OutputDemux: integration with pipeline and pane tracking", () => {
@@ -519,14 +455,12 @@ describe("OutputDemux: integration with pipeline and pane tracking", () => {
     const demux = createOutputDemux();
     const pipeline = createRuntimePipeline(host, { buffers: demux.store });
 
-    // Activate pane tracking and wire the model-change subscription.
-    demux.activatePaneTracking();
+    // Wire the model-change subscription that keeps demux's known-pane set
+    // in sync (always-on pane tracking — tc-128.4 removed the opt-in).
     pipeline.onModelChange((next, prev) => {
-      // Bind new panes using isPaneKnown (handles bootstrap prev === next case).
       for (const pid of next.panes.keys()) {
         if (!demux.isPaneKnown(pid)) demux.notifyPaneBound(pid);
       }
-      // Close removed panes.
       for (const pid of prev.panes.keys()) {
         if (!next.panes.has(pid)) demux.notifyPaneClosed(pid);
       }
@@ -558,6 +492,10 @@ describe("OutputDemux: integration with pipeline and pane tracking", () => {
     assert.ok(p1frames.length >= 1, "output bytes must reach transport for known bootstrap pane");
     const all = Buffer.concat(p1frames.map((f) => Buffer.from(f.bytes)));
     assert.ok(all.includes(Buffer.from([0x68, 0x69])), `expected 0x68 0x69 (hi), got: ${all.toString("hex")}`);
+
+    // Stop the pipeline so the coalescer's heartbeat timer doesn't hold the
+    // process open (tc-128.4: coalescer is always armed once start() resolves).
+    pipeline.stop();
   });
 
   it("A1 (integration): bytes for a new pane arriving before the model knows it are staged then flushed", async () => {
@@ -565,8 +503,6 @@ describe("OutputDemux: integration with pipeline and pane tracking", () => {
     const demux = createOutputDemux();
     const pipeline = createRuntimePipeline(host, { buffers: demux.store });
 
-    // Activate pane tracking and wire the model-change subscription.
-    demux.activatePaneTracking();
     pipeline.onModelChange((next, prev) => {
       for (const pid of next.panes.keys()) {
         if (!demux.isPaneKnown(pid)) demux.notifyPaneBound(pid);
@@ -618,5 +554,9 @@ describe("OutputDemux: integration with pipeline and pane tracking", () => {
       all.includes(Buffer.from([0x41, 0x42])),
       `expected bytes 0x41 0x42 ("AB") after bind, got: ${all.toString("hex")}`,
     );
+
+    // tc-128.4: stop the pipeline so the coalescer's heartbeat timer is
+    // cleared and the test process can exit.
+    pipeline.stop();
   });
 });

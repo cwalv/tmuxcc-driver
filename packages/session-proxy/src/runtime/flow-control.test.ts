@@ -341,6 +341,7 @@ describe("createFlowController — byte integrity", () => {
     const demux = createOutputDemux();
     const { sessionProxy, client } = createInMemoryTransportPair();
     demux.attachTransport(sessionProxy);
+    demux.notifyPaneBound(P3);
     const fc = createFlowController(host, demux, {
       highWaterBytes: 1_000,
       lowWaterBytes: 200,
@@ -393,6 +394,7 @@ describe("createFlowController — byte integrity", () => {
     const demux = createOutputDemux();
     const { sessionProxy, client } = createInMemoryTransportPair();
     demux.attachTransport(sessionProxy);
+    demux.notifyPaneBound(P3);
     const fc = createFlowController(host, demux, {
       highWaterBytes: 10_000,
       lowWaterBytes: 1_000,
@@ -415,6 +417,7 @@ describe("createFlowController — byte integrity", () => {
     const demux = createOutputDemux();
     const { sessionProxy, client } = createInMemoryTransportPair();
     demux.attachTransport(sessionProxy);
+    demux.notifyPaneBound(P3);
     const fc = createFlowController(host, demux, {
       highWaterBytes: 10_000,
       lowWaterBytes: 1_000,
@@ -437,6 +440,8 @@ describe("createFlowController — byte integrity", () => {
     const demux = createOutputDemux();
     const { sessionProxy, client } = createInMemoryTransportPair();
     demux.attachTransport(sessionProxy);
+    demux.notifyPaneBound(P3);
+    demux.notifyPaneBound(P5);
     const fc = createFlowController(host, demux, {
       highWaterBytes: 100,
       lowWaterBytes: 20,

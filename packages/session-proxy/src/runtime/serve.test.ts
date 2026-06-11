@@ -80,6 +80,9 @@ function createFakePipeline(initialModel?: SessionModel): FakePipeline {
     injectNotification(_event: import("../parser/notifications.js").NotificationEvent) {
       // FakePipeline: no-op — serve.test.ts does not test the optimistic-update path.
     },
+    patchModel(_updater: (m: SessionModel) => SessionModel) {
+      // FakePipeline: no-op — serve.test.ts drives model changes via fireChange.
+    },
     expectCommand(): Promise<import("../parser/correlator.js").CommandResult> {
       // FakePipeline: returns a never-resolving promise.  serve.test.ts does
       // not exercise the optimistic-update / tc-7xv.37 reversal path.

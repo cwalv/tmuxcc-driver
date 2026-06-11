@@ -53,7 +53,7 @@ import {
 import { emptyModel } from "../state/model.js";
 import type { SessionModel } from "../state/model.js";
 import { createPaneBufferStore } from "../state/scrollback.js";
-import type { PaneBufferStore } from "../state/reducer.js";
+import type { PaneBufferStore } from "../state/scrollback.js";
 
 // ---------------------------------------------------------------------------
 // E2E harness — reused from tc-2ph

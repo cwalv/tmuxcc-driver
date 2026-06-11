@@ -131,6 +131,16 @@ function makeBootstrapBytes(opts: {
   paneId?: string;
   cols?: number;
   rows?: number;
+  /**
+   * tc-128.4: when true, omit the leading `%session-changed` notification so
+   * the bytes carry ONLY the two list-* reply blocks. Useful for feeding a
+   * mid-flight requery cycle in tests that already established the bootstrap
+   * — under requery, a stray topology notification arriving while a cycle is
+   * in flight dirties the engine and forces it to loop (waiting for bytes
+   * the test never feeds). Bootstrap callers leave this false to preserve
+   * the pre-tc-128.4 wire shape.
+   */
+  noPreNotif?: boolean;
 } = {}): Uint8Array {
   const sid = opts.sessionId ?? "$0";
   const sname = opts.sessionName ?? "testsession";
@@ -147,7 +157,7 @@ function makeBootstrapBytes(opts: {
   // list-panes -a reply (BOOTSTRAP_PANES_FORMAT)
   const panesBody = `${pid_}\t${wid}\t${sid}\t0\t${cols}\t${rows}\t0\t0\t1\t1234\tbash\n`;
 
-  const preNotif = `%session-changed ${sid} ${sname}\r\n`;
+  const preNotif = opts.noPreNotif === true ? "" : `%session-changed ${sid} ${sname}\r\n`;
   // flags=1 → user-command reply (real tmux uses 0 only for the implicit
   // startup block; all user-command responses carry flags=1).
   const winBlock = `%begin ${ts} 100 1\r\n${windowsBody}%end ${ts} 100 1\r\n`;
@@ -534,9 +544,19 @@ describe("tc-93a: SessionProxy integration — fake-tmux harness", () => {
 
       const beforeCount = deltaMessages.length;
 
-      // Inject a %session-renamed notification — the pipeline is live so it will
-      // be processed and produce a session.renamed delta via onModelChange → server.
+      // tc-128.4: the requery-driven pipeline treats %session-renamed as a
+      // topology dirty bit; the coalescer's leading edge fires a full
+      // list-windows + list-panes requery. We must also feed the updated
+      // bootstrap-shape reply blocks so the engine commits the rename.
       inject(new TextEncoder().encode(`%session-renamed $0 renamed-session\r\n`));
+      // Yield one tick so the coalescer's leading edge issues the requery
+      // commands; then feed the updated replies. `noPreNotif: true` skips the
+      // synthetic `%session-changed` preamble — under requery, that stray
+      // topology notification arriving inside the in-flight cycle would
+      // dirty the engine and force a re-loop waiting for bytes we never
+      // feed.
+      await new Promise<void>((r) => setImmediate(r));
+      inject(makeBootstrapBytes({ sessionName: "renamed-session", noPreNotif: true }));
 
       // Wait for a new delta to appear.
       await waitFor(
@@ -712,6 +732,18 @@ describe("tc-93a: SessionProxy integration — fake-tmux harness", () => {
     const pipeline = createRuntimePipeline(host, { buffers: accountingStore });
     const server = createControlServer(pipeline);
 
+    // tc-128.4: pane tracking is always-on in the demux; wire model-change so
+    // bootstrap-discovered panes get bound (otherwise %output bytes stage
+    // indefinitely instead of fanning out to attached transports).
+    pipeline.onModelChange((next, prev) => {
+      for (const pid of next.panes.keys()) {
+        if (!demux.isPaneKnown(pid)) demux.notifyPaneBound(pid);
+      }
+      for (const pid of prev.panes.keys()) {
+        if (!next.panes.has(pid)) demux.notifyPaneClosed(pid);
+      }
+    });
+
     await host.start();
     await pipeline.start();
 
@@ -861,6 +893,18 @@ async function buildFakePushSession(
   const demux = createOutputDemux();
   const pipeline = createRuntimePipeline(host, { buffers: demux.store });
   const server = createControlServer(pipeline);
+
+  // tc-128.4: pane tracking is always-on in the demux; keep its known-pane
+  // set in sync with the model so bootstrap panes don't stage %output bytes
+  // indefinitely. This mirrors the wiring in runtime/session-proxy.ts.
+  pipeline.onModelChange((next, prev) => {
+    for (const pid of next.panes.keys()) {
+      if (!demux.isPaneKnown(pid)) demux.notifyPaneBound(pid);
+    }
+    for (const pid of prev.panes.keys()) {
+      if (!next.panes.has(pid)) demux.notifyPaneClosed(pid);
+    }
+  });
 
   // start() sends bootstrap commands; we feed the replies via inject().
   const startPromise = pipeline.start();
