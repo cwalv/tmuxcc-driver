@@ -21,9 +21,11 @@
     "clean": "rm -rf dist *.tsbuildinfo",
     "pretest": "npm run build",
     "test": "node --import tsx --test --test-timeout=30000 \"src/**/*.test.ts\"",
+    "test:soak": "bash scripts/soak-real-tmux.sh",
     "lint:boundaries": "depcruise src/parser/ --config .dependency-cruiser.cjs --ts-pre-compilation-deps --output-type err",
     "lint:boundaries:verify": "bash scripts/verify-boundary-lint.sh",
     "ci": "npm run build && npm run typecheck && npm run test && npm run lint:boundaries",
+    "ci:soak": "npm run build && bash scripts/soak-real-tmux.sh",
     "format": "prettier --write src"
   },
   "devDependencies": {
