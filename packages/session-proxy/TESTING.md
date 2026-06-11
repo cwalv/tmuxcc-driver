@@ -73,7 +73,7 @@ npm run ci:soak
 SOAK_N=5 npm run ci:soak
 
 # Directly from the package:
-cd github/cwalv/remux/packages/session-proxy
+cd github/cwalv/tmuxcc-driver/packages/session-proxy
 SOAK_N=3 bash scripts/soak-real-tmux.sh
 ```
 
