@@ -18,7 +18,7 @@ component-lifetime model.  The intended new name is **`session-proxy`**;
   Emits **raw bytes** for `%output` (octal-unescaped; never assumes UTF-8).
 - state reducer: events → windows / panes + layout-string parser. The session-proxy
   owns canonical model state for its bound session.
-- I/O / demux: per-pane streams out; input remuxed as `send-keys -H`.
+- I/O / demux: per-pane streams out; input muxed back in as `send-keys -H`.
 
 **Wires (a spec, not a repo):** `SCHEMA.md` defines two wires — the
 per-session **session-proxy wire** owned by this process, and the per-socket
