@@ -1,0 +1,33 @@
+{
+  "name": "@tmuxcc/session-proxy",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && cp src/runtime/tmux-pty-bridge.py dist/runtime/",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rm -rf dist *.tsbuildinfo",
+    "test": "node --import tsx --test --test-timeout=30000 \"src/**/*.test.ts\"",
+    "lint:boundaries": "depcruise src/parser/ --config .dependency-cruiser.cjs --ts-pre-compilation-deps --output-type err",
+    "lint:boundaries:verify": "bash scripts/verify-boundary-lint.sh",
+    "ci": "npm run build && npm run typecheck && npm run test && npm run lint:boundaries",
+    "format": "prettier --write src"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.19",
+    "dependency-cruiser": "^17.4.3",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}

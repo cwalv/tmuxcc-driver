@@ -1,0 +1,81 @@
+%begin 1780042374 272 0
+%end 1780042374 272 0
+%session-changed $0 s0
+%begin 1780042374 277 1
+0: zsh* (1 panes) [80x24] [layout b25d,80x24,0,0,0] @0 (active)
+%end 1780042374 277 1
+%begin 1780042374 278 1
+%end 1780042374 278 1
+%begin 1780042374 279 1
+%end 1780042374 279 1
+%begin 1780042374 280 1
+0: [40x24] [history 0/2000, 960 bytes] %1
+1: [39x24] [history 0/2000, 960 bytes] %2 (active)
+%end 1780042374 280 1
+%begin 1780042374 281 1
+s0: 2 windows (created Fri May 29 01:12:54 2026) (attached)
+%end 1780042374 281 1
+%session-window-changed $0 @1
+%window-add @1
+%window-pane-changed @1 %2
+%layout-change @1 020a,80x24,0,0{40x24,0,0,1,39x24,41,0,2} 020a,80x24,0,0{40x24,0,0,1,39x24,41,0,2} *
+%output %0 \033[1m\033[7m%\033[27m\033[1m\033[0m                                                                               \015 \015
+%output %0 \015\033[0m\033[27m\033[24m\033[J\015\012\033[38;5;135mcwa\033[39m at \033[38;5;166mchost\033[39m in \033[38;5;118m~/weaveroot/foundations\033[39m \015\012 \033[K
+%output %0 \033[?1h\033=
+%output %0 \015\015\033M\033M\033[0m\033[27m\033[24m\033[J\015\012\033[38;5;135mcwa\033[39m at \033[38;5;166mchost\033[39m in \033[38;5;118m~/weaveroot/foundations\033[39m \015\012$ \033[K
+%output %0 \033[?2004h
+%output %0 p
+%output %0 \010pr
+%output %0 i
+%output %0 n
+%output %0 t
+%output %0 f
+%output %0  
+%output %0 '
+%output %0 \134
+%output %0 x
+%output %0 c
+%output %0 0
+%output %0 \134
+%output %0 x
+%output %0 f
+%output %0 e
+%output %0 \134
+%output %0 x
+%output %0 f
+%output %0 f
+%output %0  
+%output %0 t
+%output %0 e
+%output %0 s
+%output %0 t
+%output %0  
+%output %0 b
+%output %0 y
+%output %0 t
+%output %0 e
+%output %0 s
+%output %0 \134
+%output %0 n
+%output %0 '
+%output %0 \033[34D\033[32mp\033[32mr\033[32mi\033[32mn\033[32mt\033[32mf\033[39m \033[33m'\033[33m\134\033[33mx\033[33mc\033[33m0\033[33m\134\033[33mx\033[33mf\033[33me\033[33m\134\033[33mx\033[33mf\033[33mf\033[33m \033[33mt\033[33me\033[33ms\033[33mt\033[33m \033[33mb\033[33my\033[33mt\033[33me\033[33ms\033[33m\134\033[33mn\033[33m'\033[39m
+%output %0 \033[?1l\033>
+%output %0 \033[?2004l\015\015\033M\033M\033[0m\033[27m\033[24m\033[J\015\012\033[38;5;135mcwa\033[39m at \033[38;5;166mchost\033[39m in \033[38;5;118m~/weaveroot/foundations\033[39m \015\012$ \033[32mprintf\033[39m \033[33m'\134xc0\134xfe\134xff test bytes\134n'\033[39m\033[K
+%output %0 \015\015\012
+%output %0 Àþÿ test bytes\015\012
+%output %0 \033[1m\033[7m%\033[27m\033[1m\033[0m                                                                               \015 \015
+%output %0 \015\033[0m\033[27m\033[24m\033[J\015\012\033[38;5;135mcwa\033[39m at \033[38;5;166mchost\033[39m in \033[38;5;118m~/weaveroot/foundations\033[39m \015\012$ \033[K
+%output %0 \033[?1h\033=
+%output %0 \015\015\033M\033M\033[0m\033[27m\033[24m\033[J\015\012\033[38;5;135mcwa\033[39m at \033[38;5;166mchost\033[39m in \033[38;5;118m~/weaveroot/foundations\033[39m \015\012$ \033[K
+%output %0 \033[?2004h
+%output %1 \033[1m\033[7m%\033[27m\033[1m\033[0m                                       \015 \015
+%output %2 \033[1m\033[7m%\033[27m\033[1m\033[0m                                      \015 \015
+%output %1 \015\033[0m\033[27m\033[24m\033[J\015\012\033[38;5;135mcwa\033[39m at \033[38;5;166mchost\033[39m in \033[38;5;118m~/weaveroot/foundations\033[39m \015\012 \033[K
+%output %1 \033[?1h\033=
+%output %1 \015\015\033M\033M\033[0m\033[27m\033[24m\033[J\015\012\033[38;5;135mcwa\033[39m at \033[38;5;166mchost\033[39m in \033[38;5;118m~/weaveroot/foundations\033[39m \015\012$ \033[K
+%output %1 \033[?2004h
+%output %2 \015\033[0m\033[27m\033[24m\033[J\015\012\033[38;5;135mcwa\033[39m at \033[38;5;166mchost\033[39m in \033[38;5;118m~/weaveroot/foundations\033[39m \015\012 \033[K
+%output %2 \033[?1h\033=
+%output %2 \015\015\033M\033M\033M\033[0m\033[27m\033[24m\033[J\015\012\033[38;5;135mcwa\033[39m at \033[38;5;166mchost\033[39m in \033[38;5;118m~/weaveroot/foundations\033[39m \015\012$ \033[K
+%output %2 \033[?2004h
+%exit
