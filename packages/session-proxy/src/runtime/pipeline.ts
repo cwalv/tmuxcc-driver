@@ -221,6 +221,17 @@ export interface RuntimePipelineOptions {
   onTopologyNotify?: TopologyNotifyHandler;
 
   /**
+   * Teardown-confirmation threshold for the requery engine guard
+   * (tc-3si.2). A clean cycle whose candidate would close ≥ this fraction
+   * of either the previous model's panes or its windows is held back and
+   * confirmed by a follow-up cycle before being served — defending
+   * clients against any future regression of the tc-128.4 garbage-snapshot
+   * mis-bind class. Default 0.8 (80%). Forwarded to
+   * `createRequeryEngine({ teardownThreshold })`.
+   */
+  teardownThreshold?: number;
+
+  /**
    * Optional metrics registry for the latency/throughput histograms
    * (tc-3si.6). When provided, the pipeline:
    *
@@ -418,7 +429,12 @@ class RuntimePipelineImpl implements RuntimePipeline {
   private readonly _opts: Required<
     Omit<
       RuntimePipelineOptions,
-      "sessionName" | "onSwitchClientDetected" | "clock" | "onTopologyNotify" | "metrics"
+      | "sessionName"
+      | "onSwitchClientDetected"
+      | "clock"
+      | "onTopologyNotify"
+      | "metrics"
+      | "teardownThreshold"
     >
   > & {
     sessionName: string | undefined;
@@ -426,6 +442,7 @@ class RuntimePipelineImpl implements RuntimePipeline {
     clock: Clock;
     onTopologyNotify: TopologyNotifyHandler | undefined;
     metrics: SessionProxyRegistry | undefined;
+    teardownThreshold: number | undefined;
   };
   private readonly _tokenizer: ControlTokenizer;
   private readonly _correlator: CommandCorrelator;
@@ -463,6 +480,7 @@ class RuntimePipelineImpl implements RuntimePipeline {
       clock: opts.clock ?? realClock(),
       onTopologyNotify: opts.onTopologyNotify,
       metrics: opts.metrics,
+      teardownThreshold: opts.teardownThreshold,
     };
 
     // The correlator routes notification tokens back to _onNotificationToken
@@ -510,6 +528,20 @@ class RuntimePipelineImpl implements RuntimePipeline {
     const engineOpts: Parameters<typeof createRequeryEngine>[0] = { submit };
     if (this._opts.sessionName !== undefined) {
       (engineOpts as { sessionName: string }).sessionName = this._opts.sessionName;
+    }
+    // tc-3si.2: forward the teardown-confirmation threshold to the engine,
+    // and wire the per-outcome counter to the metrics registry. The engine
+    // also loud-logs to stderr on refuted (storm-alarm-style alert path)
+    // independently of whether metrics are wired, so the bug-class trail
+    // survives metric-less test setups.
+    if (this._opts.teardownThreshold !== undefined) {
+      (engineOpts as { teardownThreshold: number }).teardownThreshold =
+        this._opts.teardownThreshold;
+    }
+    const metricsRegistry = this._opts.metrics;
+    if (metricsRegistry !== undefined) {
+      (engineOpts as { onTeardownOutcome: (o: "confirmed" | "refuted") => void }).onTeardownOutcome =
+        (outcome) => metricsRegistry.incTeardownConfirmation(outcome);
     }
     const engine = createRequeryEngine(engineOpts);
     this._engine = engine;

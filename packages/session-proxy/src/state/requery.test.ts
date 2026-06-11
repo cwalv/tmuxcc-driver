@@ -21,7 +21,11 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import { createRequeryEngine, requeryDiff } from "./requery.js";
-import type { RequeryEngine, SubmitCommand } from "./requery.js";
+import type {
+  RequeryEngine,
+  SubmitCommand,
+  TeardownConfirmation,
+} from "./requery.js";
 import { diffModel } from "./projection.js";
 import {
   emptyModel,
@@ -1336,3 +1340,514 @@ function serializePanesBody(model: SessionModel): string {
   }
   return out;
 }
+
+// ---------------------------------------------------------------------------
+// 4. Teardown-confirmation guard (tc-3si.2)
+//
+// The guard catches the tc-128.4 garbage-snapshot class: a clean cycle whose
+// candidate would close ≥ threshold of the previous model's panes/windows is
+// NOT committed immediately — the engine runs a confirming cycle first. If
+// the confirming cycle agrees (also a teardown) the session-end is real and
+// the teardown is served (one extra ~ms of latency). If it disagrees, the
+// first candidate was garbage: discard, stay dirty, bump the refuted counter,
+// log loudly, return failed. The refuted counter is an expected-zero
+// tripwire — its job is to make a future regression of the bug class
+// catastrophically visible, not silently absorbed.
+// ---------------------------------------------------------------------------
+
+/** Reusable populated baseline: one session, one window, two panes. */
+function twoPaneModelBodies(): { winBody: string; paneBody: string } {
+  const winBody = winLine({
+    sessNum: 0,
+    sessName: "main",
+    winNum: 1,
+    winName: "shell",
+    layout: TWO_PANE_HSPLIT_LAYOUT(1, 2),
+    active: true,
+  });
+  const paneBody =
+    paneLine({ paneNum: 1, winNum: 1, sessNum: 0, width: 40, active: true }) +
+    paneLine({ paneNum: 2, winNum: 1, sessNum: 0, width: 39, left: 41 });
+  return { winBody, paneBody };
+}
+
+describe("RequeryEngine: teardown-confirmation guard (tc-3si.2)", () => {
+  it("legit teardown (both cycles agree) served with exactly one extra cycle of latency", async () => {
+    // Setup: model has two panes (the keystone "user has stuff open" baseline).
+    // First requery returns it; second (post-kill-session) returns empty —
+    // and the confirming cycle also returns empty (the session really did end).
+    const { winBody, paneBody } = twoPaneModelBodies();
+
+    // Boot the engine to a populated baseline first.
+    const bootD = deferredSubmit();
+    const engine = createRequeryEngine({
+      submit: bootD.submit,
+      onTeardownConfirmation: (info) => outcomes.push(info),
+      onTeardownOutcome: (o) => counterCalls.push(o),
+    });
+    const outcomes: TeardownConfirmation[] = [];
+    const counterCalls: Array<"confirmed" | "refuted"> = [];
+
+    // Bootstrap cycle: deliver the two-pane state.
+    const boot = engine.requery();
+    bootD.resolveNext(okResult(winBody));
+    bootD.resolveNext(okResult(paneBody));
+    await boot;
+    assert.equal(engine.getModel().panes.size, 2);
+    assert.equal(engine.getModel().windows.size, 1);
+
+    // Second requery: tmux genuinely teared down (kill-session etc). Both
+    // the first cycle AND the confirming cycle return empty replies.
+    const d = deferredSubmit();
+    const engine2 = createRequeryEngine({
+      initialModel: engine.getModel(),
+      submit: d.submit,
+      onTeardownConfirmation: (info) => outcomes.push(info),
+      onTeardownOutcome: (o) => counterCalls.push(o),
+    });
+
+    const inflight = engine2.requery();
+    // Cycle 1: empty replies — would close 100% of panes/windows.
+    assert.equal(d.callCount(), 2, "cycle 1 issued list-windows + list-panes");
+    d.resolveNext(okResult(""));
+    d.resolveNext(okResult(""));
+
+    // After microtask drain, the engine must have launched ONE confirming
+    // cycle (the "one extra cycle of latency" promise).
+    await new Promise((r) => setImmediate(r));
+    assert.equal(
+      d.callCount(),
+      4,
+      "engine ran exactly one confirming cycle (4 submits = 2 cycles × 2 commands)",
+    );
+
+    // Cycle 2 (confirming): also empty — session-end is real.
+    d.resolveNext(okResult(""));
+    d.resolveNext(okResult(""));
+
+    const result = await inflight;
+    assert.equal(result.failed, undefined, "confirmed teardown is NOT a failure");
+    assert.equal(result.next.panes.size, 0, "model committed to empty state");
+    assert.equal(result.next.windows.size, 0);
+
+    // Deltas describe the teardown of the pre-call (two-pane) baseline.
+    const types = result.deltas.map((dlt) => dlt.type);
+    assert.ok(
+      types.filter((t) => t === "pane.closed").length === 2,
+      `expected 2 pane.closed deltas, got ${types.join(", ")}`,
+    );
+    assert.ok(types.includes("window.closed"));
+
+    // Counter + observer: ONE confirmed event, ZERO refuted.
+    assert.deepEqual(counterCalls, ["confirmed"]);
+    assert.equal(outcomes.length, 1);
+    assert.equal(outcomes[0]!.outcome, "confirmed");
+    assert.equal(outcomes[0]!.closedPanesFraction, 1);
+    assert.equal(outcomes[0]!.closedWindowsFraction, 1);
+    assert.equal(outcomes[0]!.startPanes, 2);
+    assert.equal(outcomes[0]!.startWindows, 1);
+    // Engine is clean after a confirmed commit — same as a normal cycle.
+    assert.equal(engine2.isDirty(), false);
+  });
+
+  it("garbage first cycle (refuted) → model untouched, refuted counter incremented, loud log emitted", async () => {
+    const { winBody, paneBody } = twoPaneModelBodies();
+
+    // Boot the engine to a populated baseline.
+    const bootD = deferredSubmit();
+    const engine = createRequeryEngine({ submit: bootD.submit });
+    const boot = engine.requery();
+    bootD.resolveNext(okResult(winBody));
+    bootD.resolveNext(okResult(paneBody));
+    await boot;
+    const baseline = engine.getModel();
+    assert.equal(baseline.panes.size, 2);
+
+    // Now the actual test: cycle 1 returns garbage (empty), cycle 2
+    // (confirming) returns the real two-pane state again.
+    const outcomes: TeardownConfirmation[] = [];
+    const counterCalls: Array<"confirmed" | "refuted"> = [];
+    const d = deferredSubmit();
+    const engine2 = createRequeryEngine({
+      initialModel: baseline,
+      submit: d.submit,
+      onTeardownConfirmation: (info) => outcomes.push(info),
+      onTeardownOutcome: (o) => counterCalls.push(o),
+    });
+
+    // Intercept stderr to verify the loud log.
+    const origWrite = process.stderr.write.bind(process.stderr);
+    const captured: string[] = [];
+    (process.stderr as { write: typeof process.stderr.write }).write = ((
+      chunk: string | Uint8Array,
+    ) => {
+      captured.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+
+    let result;
+    try {
+      const inflight = engine2.requery();
+      // Cycle 1: garbage empty (the tc-128.4 mis-bind class).
+      d.resolveNext(okResult(""));
+      d.resolveNext(okResult(""));
+      await new Promise((r) => setImmediate(r));
+      // Cycle 2 (confirming): the REAL state — disagrees.
+      d.resolveNext(okResult(winBody));
+      d.resolveNext(okResult(paneBody));
+      result = await inflight;
+    } finally {
+      process.stderr.write = origWrite;
+    }
+
+    // Failure contract: model untouched, no deltas, failed=true, dirty re-armed.
+    assert.equal(result.failed, true, "refuted candidate must surface as failed");
+    assert.deepEqual(result.deltas, []);
+    assert.equal(result.next, baseline, "next is the pre-call (unchanged) model");
+    assert.equal(engine2.getModel(), baseline, "engine.getModel() unchanged");
+    assert.equal(engine2.isDirty(), true, "dirty re-armed for the coalescer's retry");
+
+    // Telemetry: counter incremented with `refuted`, NO `confirmed`.
+    assert.deepEqual(counterCalls, ["refuted"]);
+    assert.equal(outcomes.length, 1);
+    const info = outcomes[0]!;
+    assert.equal(info.outcome, "refuted");
+    // The reported fractions describe the FIRST candidate's would-have-been
+    // teardown — the snapshot we held back, not the confirming one.
+    assert.equal(info.closedPanesFraction, 1, "first candidate would have closed 100% of panes");
+    assert.equal(info.closedWindowsFraction, 1);
+    assert.equal(info.threshold, 0.8, "default threshold reported");
+    assert.equal(info.startPanes, 2);
+    assert.equal(info.startWindows, 1);
+
+    // Loud stderr log emitted — names the event, fractions, threshold, bead.
+    const logText = captured.join("");
+    assert.ok(
+      logText.includes("TEARDOWN REFUTED"),
+      `expected loud refuted log, got: ${logText}`,
+    );
+    assert.ok(logText.includes("tc-128.4") || logText.includes("tc-3si.2"));
+  });
+
+  it("threshold is configurable (subtotal teardown trips when threshold lowered)", async () => {
+    // Build a 5-pane / 2-window baseline. A candidate closing 1/5 panes
+    // (20%) and 0/2 windows should NOT trip the default 80% threshold, but
+    // SHOULD trip a 0.15 (15%) threshold — flipping the same wire-shape
+    // candidate between "commit immediately" and "must be confirmed".
+    const winBody =
+      winLine({
+        sessNum: 0,
+        sessName: "main",
+        winNum: 1,
+        winName: "shell",
+        layout: TWO_PANE_HSPLIT_LAYOUT(1, 2),
+        active: true,
+      }) +
+      winLine({
+        sessNum: 0,
+        sessName: "main",
+        winNum: 2,
+        winName: "shell2",
+        layout: `0000,80x24,0,0{30x24,0,0,3,30x24,31,0,4,19x24,61,0,5}`,
+      });
+    const paneBody =
+      paneLine({ paneNum: 1, winNum: 1, sessNum: 0, width: 40, active: true }) +
+      paneLine({ paneNum: 2, winNum: 1, sessNum: 0, width: 39, left: 41 }) +
+      paneLine({ paneNum: 3, winNum: 2, sessNum: 0, width: 30, active: true }) +
+      paneLine({ paneNum: 4, winNum: 2, sessNum: 0, width: 30, left: 31 }) +
+      paneLine({ paneNum: 5, winNum: 2, sessNum: 0, width: 19, left: 61 });
+
+    const bootD = deferredSubmit();
+    const engine = createRequeryEngine({ submit: bootD.submit });
+    const boot = engine.requery();
+    bootD.resolveNext(okResult(winBody));
+    bootD.resolveNext(okResult(paneBody));
+    await boot;
+    assert.equal(engine.getModel().panes.size, 5);
+
+    // Subtotal teardown: drop pane 2 only. Panes closed = 1/5 = 20%.
+    // Windows untouched (0% closed). Well below the default 0.8 cap.
+    const winBodyPartial =
+      winLine({
+        sessNum: 0,
+        sessName: "main",
+        winNum: 1,
+        winName: "shell",
+        layout: SINGLE_PANE_LAYOUT(1),
+        active: true,
+      }) +
+      winLine({
+        sessNum: 0,
+        sessName: "main",
+        winNum: 2,
+        winName: "shell2",
+        layout: `0000,80x24,0,0{30x24,0,0,3,30x24,31,0,4,19x24,61,0,5}`,
+      });
+    const paneBodyPartial =
+      paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true }) +
+      paneLine({ paneNum: 3, winNum: 2, sessNum: 0, width: 30, active: true }) +
+      paneLine({ paneNum: 4, winNum: 2, sessNum: 0, width: 30, left: 31 }) +
+      paneLine({ paneNum: 5, winNum: 2, sessNum: 0, width: 19, left: 61 });
+
+    // 1. Default threshold (0.8): subtotal does NOT trip the guard, commits
+    //    on the first clean cycle (no extra latency).
+    {
+      const d = deferredSubmit();
+      const outcomes: TeardownConfirmation[] = [];
+      const engine2 = createRequeryEngine({
+        initialModel: engine.getModel(),
+        submit: d.submit,
+        onTeardownConfirmation: (info) => outcomes.push(info),
+      });
+      const inflight = engine2.requery();
+      d.resolveNext(okResult(winBodyPartial));
+      d.resolveNext(okResult(paneBodyPartial));
+      const result = await inflight;
+      assert.equal(result.failed, undefined, "subtotal commits at default threshold");
+      assert.equal(d.callCount(), 2, "exactly one cycle (no confirming cycle)");
+      assert.equal(outcomes.length, 0, "guard did NOT fire");
+      assert.equal(engine2.getModel().panes.size, 4);
+    }
+
+    // 2. Lowered threshold (0.15): same subtotal NOW trips the guard. Run
+    //    the confirming cycle agreeing → confirmed (commit).
+    {
+      const d = deferredSubmit();
+      const outcomes: TeardownConfirmation[] = [];
+      const engine2 = createRequeryEngine({
+        initialModel: engine.getModel(),
+        submit: d.submit,
+        teardownThreshold: 0.15,
+        onTeardownConfirmation: (info) => outcomes.push(info),
+      });
+      const inflight = engine2.requery();
+      // Cycle 1: subtotal close — trips at threshold=0.15.
+      d.resolveNext(okResult(winBodyPartial));
+      d.resolveNext(okResult(paneBodyPartial));
+      await new Promise((r) => setImmediate(r));
+      assert.equal(d.callCount(), 4, "lowered threshold triggered confirming cycle");
+      // Confirming cycle: same subtotal → confirmed.
+      d.resolveNext(okResult(winBodyPartial));
+      d.resolveNext(okResult(paneBodyPartial));
+      const result = await inflight;
+      assert.equal(result.failed, undefined, "confirmed at lowered threshold");
+      assert.equal(outcomes.length, 1);
+      assert.equal(outcomes[0]!.outcome, "confirmed");
+      assert.equal(outcomes[0]!.threshold, 0.15);
+      assert.equal(outcomes[0]!.closedPanesFraction, 0.2);
+      assert.equal(outcomes[0]!.closedWindowsFraction, 0);
+    }
+  });
+
+  it("invalid threshold values fall back to default (0.8)", async () => {
+    const { winBody, paneBody } = twoPaneModelBodies();
+    const bootD = deferredSubmit();
+    const engine = createRequeryEngine({ submit: bootD.submit });
+    const boot = engine.requery();
+    bootD.resolveNext(okResult(winBody));
+    bootD.resolveNext(okResult(paneBody));
+    await boot;
+
+    // teardownThreshold = 0 (would disable the guard entirely if not clamped)
+    // — must fall back to the default.
+    const d = deferredSubmit();
+    const outcomes: TeardownConfirmation[] = [];
+    const engine2 = createRequeryEngine({
+      initialModel: engine.getModel(),
+      submit: d.submit,
+      teardownThreshold: 0,
+      onTeardownConfirmation: (info) => outcomes.push(info),
+    });
+    const inflight = engine2.requery();
+    // Garbage empty → would close 100%, far above 0.8 default.
+    d.resolveNext(okResult(""));
+    d.resolveNext(okResult(""));
+    await new Promise((r) => setImmediate(r));
+    // Confirming cycle disagrees.
+    d.resolveNext(okResult(winBody));
+    d.resolveNext(okResult(paneBody));
+    // Suppress loud log noise for this test — we only care that the
+    // threshold reported is the DEFAULT (0.8), not 0.
+    const origWrite = process.stderr.write.bind(process.stderr);
+    (process.stderr as { write: typeof process.stderr.write }).write = (() => true) as typeof process.stderr.write;
+    try {
+      const result = await inflight;
+      assert.equal(result.failed, true);
+    } finally {
+      process.stderr.write = origWrite;
+    }
+    assert.equal(outcomes.length, 1);
+    assert.equal(
+      outcomes[0]!.threshold,
+      0.8,
+      "invalid threshold (0) clamped back to default (0.8)",
+    );
+  });
+
+  it("guard does NOT fire on cold bootstrap (empty pre-call model)", async () => {
+    // The engine's initialModel defaults to emptyModel(); a cold bootstrap
+    // would naively trigger the guard (everything closing 0/0 = NaN — which
+    // we treat as 0) — but the trip predicate is gated on the pre-call
+    // model having SOMETHING to tear down, so the guard is a no-op here.
+    const { winBody, paneBody } = twoPaneModelBodies();
+    const outcomes: TeardownConfirmation[] = [];
+    const counterCalls: Array<"confirmed" | "refuted"> = [];
+    const d = deferredSubmit();
+    const engine = createRequeryEngine({
+      submit: d.submit,
+      onTeardownConfirmation: (info) => outcomes.push(info),
+      onTeardownOutcome: (o) => counterCalls.push(o),
+    });
+
+    const inflight = engine.requery();
+    d.resolveNext(okResult(winBody));
+    d.resolveNext(okResult(paneBody));
+    const result = await inflight;
+
+    assert.equal(result.failed, undefined, "bootstrap commits cleanly");
+    assert.equal(d.callCount(), 2, "no confirming cycle on bootstrap");
+    assert.equal(outcomes.length, 0, "guard did not fire on cold bootstrap");
+    assert.deepEqual(counterCalls, []);
+    assert.equal(engine.getModel().panes.size, 2);
+  });
+
+  it("guard does NOT fire on a no-change cycle (heartbeat steady state)", async () => {
+    const { winBody, paneBody } = twoPaneModelBodies();
+    const bootD = deferredSubmit();
+    const engine = createRequeryEngine({ submit: bootD.submit });
+    const boot = engine.requery();
+    bootD.resolveNext(okResult(winBody));
+    bootD.resolveNext(okResult(paneBody));
+    await boot;
+
+    // Steady-state heartbeat: replies are identical — zero deltas, zero
+    // teardown. Must NOT trigger a confirming cycle.
+    const outcomes: TeardownConfirmation[] = [];
+    const d = deferredSubmit();
+    const engine2 = createRequeryEngine({
+      initialModel: engine.getModel(),
+      submit: d.submit,
+      onTeardownConfirmation: (info) => outcomes.push(info),
+    });
+    const inflight = engine2.requery();
+    d.resolveNext(okResult(winBody));
+    d.resolveNext(okResult(paneBody));
+    const result = await inflight;
+
+    assert.equal(d.callCount(), 2);
+    assert.deepEqual(result.deltas, []);
+    assert.equal(outcomes.length, 0);
+  });
+
+  it("dirty mid-flight during confirming cycle: confirming candidate discarded, no spurious commit", async () => {
+    // Mixing the guard with the convergence loop: cycle 1 tripped the
+    // guard, cycle 2 (confirming) is dirtied mid-flight (a notification
+    // arrives between sending the list-* commands and the replies). The
+    // engine must discard the confirming candidate, drop the pending
+    // teardown comparison, and loop — eventually committing whatever the
+    // next clean cycle says (or running out of budget if the storm
+    // continues).
+    const { winBody, paneBody } = twoPaneModelBodies();
+    const bootD = deferredSubmit();
+    const engine = createRequeryEngine({ submit: bootD.submit });
+    const boot = engine.requery();
+    bootD.resolveNext(okResult(winBody));
+    bootD.resolveNext(okResult(paneBody));
+    await boot;
+    const baseline = engine.getModel();
+
+    const outcomes: TeardownConfirmation[] = [];
+    const d = deferredSubmit();
+    const engine2 = createRequeryEngine({
+      initialModel: baseline,
+      submit: d.submit,
+      onTeardownConfirmation: (info) => outcomes.push(info),
+    });
+
+    const inflight = engine2.requery();
+    // Cycle 1: garbage empty (trips the guard).
+    d.resolveNext(okResult(""));
+    d.resolveNext(okResult(""));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(d.callCount(), 4, "confirming cycle issued");
+
+    // Dirty mid-flight in the confirming cycle.
+    engine2.markDirty();
+    // Confirming cycle's replies arrive — but the dirty bit means we
+    // discard this candidate AND drop the pending teardown comparison.
+    d.resolveNext(okResult(winBody));
+    d.resolveNext(okResult(paneBody));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(d.callCount(), 6, "engine looped to a fresh cycle");
+
+    // Final cycle: clean replies match the original — no teardown.
+    d.resolveNext(okResult(winBody));
+    d.resolveNext(okResult(paneBody));
+    const result = await inflight;
+
+    // The model was never wiped; deltas are empty (we ended up at the
+    // same state). No confirmation event because the comparison was
+    // dropped on mid-flight dirty.
+    assert.equal(result.failed, undefined);
+    assert.deepEqual(result.deltas, []);
+    assert.equal(engine2.getModel().panes.size, 2);
+    assert.equal(outcomes.length, 0, "no confirmation outcome when guard reset by mid-flight dirty");
+  });
+
+  it("budget exhaustion during pending teardown returns failed without touching the counter", async () => {
+    // Storm scenario where the first cycle trips the guard and EVERY
+    // subsequent cycle is dirtied mid-flight: we exhaust the budget
+    // without ever adjudicating confirm vs refute. The engine must
+    // return failed, leave the model untouched, and NOT bump either
+    // teardown counter — we never reached a decision.
+    const { winBody, paneBody } = twoPaneModelBodies();
+    const bootD = deferredSubmit();
+    const engine = createRequeryEngine({ submit: bootD.submit });
+    const boot = engine.requery();
+    bootD.resolveNext(okResult(winBody));
+    bootD.resolveNext(okResult(paneBody));
+    await boot;
+    const baseline = engine.getModel();
+
+    // Use queueSubmit so we can stuff in plenty of replies and re-dirty
+    // after every first submit (mirrors the existing storm test).
+    const replies: CommandResult[] = [];
+    // Cycle 1: empty (trips guard). Then enough empty pairs to satisfy
+    // the budget — every cycle is dirtied mid-flight.
+    for (let i = 0; i < 100; i++) replies.push(okResult(""), okResult(""));
+    const { submit } = queueSubmit(replies);
+    let engineRef: { ref: RequeryEngine } | null = null;
+    let callCount = 0;
+    const wrappedSubmit: SubmitCommand = (cmd) => {
+      callCount += 1;
+      if (engineRef !== null && callCount % 2 === 1) {
+        engineRef.ref.markDirty();
+      }
+      return submit(cmd);
+    };
+    const outcomes: TeardownConfirmation[] = [];
+    const counterCalls: Array<"confirmed" | "refuted"> = [];
+    const engine2 = createRequeryEngine({
+      initialModel: baseline,
+      submit: wrappedSubmit,
+      onTeardownConfirmation: (info) => outcomes.push(info),
+      onTeardownOutcome: (o) => counterCalls.push(o),
+    });
+    engineRef = { ref: engine2 };
+
+    const result = await engine2.requery();
+    assert.equal(result.failed, true);
+    assert.equal(engine2.getModel(), baseline, "model untouched after storm exhaustion");
+    assert.equal(
+      outcomes.length,
+      0,
+      "no confirmation outcome — budget exhausted before a decision",
+    );
+    assert.deepEqual(
+      counterCalls,
+      [],
+      "teardown counter NOT bumped on budget exhaustion (we never decided)",
+    );
+    assert.equal(engine2.isDirty(), true);
+  });
+});

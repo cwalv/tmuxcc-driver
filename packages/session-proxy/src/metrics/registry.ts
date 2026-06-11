@@ -18,6 +18,7 @@
  * | `output_bytes_total` | counter | — | Decoded `%output` / `%extended-output` payload bytes, AGGREGATE across all panes (cardinality rule — no per-pane labels) (tc-3si.6). |
  * | `output_frame_size_bytes` | histogram | — | Per-frame payload size for `%output` / `%extended-output`, aggregate (tc-3si.6). |
  * | `session_paused_seconds_total` | counter | — | Wall-clock seconds during which one or more panes in this session were paused for flow control. Reads as a fraction-of-time when differentiated (tc-3si.6). |
+ * | `requery_teardown_confirmations_total` | counter | `outcome` | Mass-teardown candidates the engine's confirmation guard evaluated, split into `confirmed` (a real session-end the engine ran a confirming cycle for) and `refuted` (the FIRST candidate disagreed with a confirming requery — a garbage snapshot caught before clients saw it). `outcome=refuted` is an **expected-zero tripwire**: any non-zero value is a correctness bug announcing itself; see tc-3si.2 + observability.md (tc-3si.2). |
  * | `process_*` / `nodejs_*` | various | — | Default process metrics from `prom-client.collectDefaultMetrics()`: event-loop lag, GC, heap, RSS, CPU (tc-3si.6). |
  *
  * # Expected-shape reading guide
@@ -56,6 +57,16 @@
  * - **`session_paused_seconds_total`** — should sit near zero except for
  *   genuine firehoses; growth = clients draining too slowly. Correlates
  *   with `flow_panes_paused` (tc-3si.5 tripwire gauge — a separate bead).
+ * - **`requery_teardown_confirmations_total{outcome}`** — `outcome="confirmed"`
+ *   should match real session-end events (rare, user-driven: kill-session,
+ *   tmux server shutdown). `outcome="refuted"` is **expected zero**: any
+ *   increment is a garbage list-* snapshot the engine caught before it
+ *   could clobber the model (tc-128.4 mis-bind class — pause-ack parsed as
+ *   an empty `list-windows` reply, etc.). Each refuted increment ALSO logs
+ *   loudly to stderr with the candidate's teardown breakdown so the bug
+ *   class stays visible — the guard converts a future catastrophe into a
+ *   ~1ms self-heal AND a loud forensic trail. The full row lives in
+ *   observability.md (tc-3si.2).
  * - **`nodejs_eventloop_lag_seconds`** (default metrics) — p99 stays in
  *   single-digit milliseconds even under firehose. Growth under flood is
  *   the early warning for the demux doing too much per frame, and becomes
@@ -255,6 +266,24 @@ export interface SessionProxyRegistry {
   notePauseExited(): void;
 
   /**
+   * Increment the requery teardown-confirmation counter for one cycle's
+   * outcome (tc-3si.2).
+   *
+   * `outcome="confirmed"`: a mass-teardown candidate (≥ threshold of the
+   * previous model's panes or windows would be closed) survived a
+   * confirming requery cycle — the session-end is real and the teardown is
+   * served. Expected to match real, user-driven session-end events (rare).
+   *
+   * `outcome="refuted"`: a mass-teardown candidate was DISAGREED with by
+   * the confirming requery — the first snapshot was garbage (the tc-128.4
+   * mis-bind class). Expected steady-state value: ZERO. Any non-zero value
+   * is a correctness bug announcing itself; this method's caller also logs
+   * loudly to stderr (the storm-alarm-style alert path) so the bug class
+   * stays visible operationally even when the guard absorbs the symptom.
+   */
+  incTeardownConfirmation(outcome: "confirmed" | "refuted"): void;
+
+  /**
    * Render the full registry as Prometheus text exposition format.
    * Returns a Promise<string> to match prom-client's async API.
    */
@@ -401,6 +430,24 @@ export function createSessionProxyRegistry(): SessionProxyRegistry {
     registers: [reg],
   });
 
+  // tc-3si.2: requery teardown-confirmation outcomes. Splits into
+  // `confirmed` (a mass-teardown candidate passed the confirming requery —
+  // session-end is real, rare and user-driven) and `refuted` (the FIRST
+  // candidate disagreed with the confirming requery — the garbage-snapshot
+  // mis-bind class caught before clients saw a catastrophic teardown).
+  // `outcome="refuted"` is an EXPECTED-ZERO tripwire — any increment is a
+  // correctness bug surfacing through the guard, and is ALSO logged loudly
+  // to stderr by the caller (engine driver). See observability.md (tc-3si.2).
+  const requeryTeardownConfirmationsTotal = new Counter({
+    name: "requery_teardown_confirmations_total",
+    help:
+      "Mass-teardown candidates evaluated by the requery engine's confirmation guard, by outcome. " +
+      "outcome=confirmed: a confirming requery agreed (real session-end, rare). " +
+      "outcome=refuted: a confirming requery DISAGREED (garbage first snapshot — expected-zero tripwire).",
+    labelNames: ["outcome"],
+    registers: [reg],
+  });
+
   // tc-3si.6: process health (event-loop lag, GC pause, heap, CPU). The
   // prom-client sampler manages its own timers and tags samples with
   // gauges; calling collectDefaultMetrics({ register }) is idempotent only
@@ -457,6 +504,10 @@ export function createSessionProxyRegistry(): SessionProxyRegistry {
     observeOutputFrameSize(bytes: number): void {
       if (bytes <= 0) return;
       outputFrameSizeBytes.observe(bytes);
+    },
+
+    incTeardownConfirmation(outcome: "confirmed" | "refuted"): void {
+      requeryTeardownConfirmationsTotal.inc({ outcome });
     },
 
     notePauseEntered(): void {
