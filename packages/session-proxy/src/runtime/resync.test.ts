@@ -65,9 +65,9 @@ import type { Transport, ControlMessage, ControlHandler, CloseHandler, PaneId } 
 // ---------------------------------------------------------------------------
 
 // @ts-ignore — outside rootDir; resolved by tsx at runtime
-import { SessionProxyConnection } from "../../../tmuxcc-client/src/connection.js";
+import { SessionProxyConnection } from "@remux/client/src/connection.js";
 // @ts-ignore — outside rootDir; resolved by tsx at runtime
-import { Mirror } from "../../../tmuxcc-client/src/mirror.js";
+import { Mirror } from "@remux/client/src/mirror.js";
 
 // ---------------------------------------------------------------------------
 // Fake pipeline (same pattern as serve.test.ts)
