@@ -88,6 +88,10 @@ function createFakePipeline(initialModel?: SessionModel): FakePipeline {
       // not exercise the optimistic-update / tc-7xv.37 reversal path.
       return new Promise<import("../parser/correlator.js").CommandResult>(() => {});
     },
+    writeCommand(_command: string) {
+      // FakePipeline: no-op — serve.test.ts does not exercise the slotted
+      // command-write seam (tc-128.4).
+    },
     get buffers(): never {
       throw new Error("FakePipeline has no buffers");
     },

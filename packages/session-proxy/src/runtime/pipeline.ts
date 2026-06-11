@@ -344,6 +344,25 @@ export interface RuntimePipeline {
    * caller's responsibility (e.g. via `host.write()` from input-path).
    */
   expectCommand(): Promise<CommandResult>;
+
+  /**
+   * Fire-and-forget slotted command writer (tc-128.4): registers a throwaway
+   * CommandCorrelator slot, writes `command + "\n"` to the host, and ignores
+   * the result (logs %error). This is the shared seam every fire-and-forget
+   * tmux command MUST go through under the requery pipeline — without the
+   * slot, the command's %end reply mis-binds to whatever requery list-* slot
+   * was registered in the meantime, corrupting the engine's topology snapshot.
+   *
+   * Used by:
+   *   - flow-control.ts pause/continue refresh-client writes (via the
+   *     `writeCommand` option threaded through session-proxy.ts).
+   *   - session-proxy.ts bell set-options and attach-session writes.
+   *   - the pipeline itself for its post-bootstrap setup commands.
+   *
+   * Callers that need the result (e.g. input-path's optimistic-update
+   * reversal) use `expectCommand()` + their own `host.write()` instead.
+   */
+  writeCommand(command: string): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -594,6 +613,7 @@ class RuntimePipelineImpl implements RuntimePipeline {
    * The result is ignored; %error is logged.
    */
   private _writeSlottedCommand(command: string, label: string): void {
+    if (this._stopped) return;
     void this._correlator.expectCommand().then(
       (result) => {
         if (!result.ok) {
@@ -658,6 +678,10 @@ class RuntimePipelineImpl implements RuntimePipeline {
 
   expectCommand(): Promise<CommandResult> {
     return this._correlator.expectCommand();
+  }
+
+  writeCommand(command: string): void {
+    this._writeSlottedCommand(command, command);
   }
 
   // -------------------------------------------------------------------------

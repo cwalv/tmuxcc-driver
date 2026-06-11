@@ -123,6 +123,22 @@ export interface FlowControllerOptions {
    * Supply a registry-backed function for multi-session namespacing.
    */
   paneIdToTmux?: (id: PaneId) => number;
+
+  /**
+   * Slotted command writer (tc-128.4): registers a CommandCorrelator slot
+   * BEFORE writing the pause/continue `refresh-client -A` line so the next
+   * %begin/%end tmux emits binds to our throwaway slot — not to whatever
+   * requery `list-*` slot landed in the meantime. Without this, a flood-time
+   * pause command's %end mis-binds to a concurrent requery's slot, the engine
+   * parses pause-ack bytes as a windows reply, and the model commits with
+   * panes missing.
+   *
+   * Wired by `runtime/session-proxy.ts` to `pipeline.writeCommand`. When
+   * omitted (e.g. unit tests with no pipeline), the controller falls back to
+   * raw `host.write` — correctness still holds because no engine is
+   * registering slots concurrently.
+   */
+  writeCommand?: (command: string) => void;
 }
 
 /**
@@ -203,6 +219,7 @@ class FlowControllerImpl implements FlowController {
   private readonly _highWater: number;
   private readonly _lowWater: number;
   private readonly _toTmux: (id: PaneId) => number;
+  private readonly _writeCommand: ((command: string) => void) | undefined;
 
   /** Per-pane buffered byte counter. */
   private readonly _buffered = new Map<PaneId, number>();
@@ -216,6 +233,7 @@ class FlowControllerImpl implements FlowController {
     this._highWater = opts.highWaterBytes ?? DEFAULT_HIGH_WATER_BYTES;
     this._lowWater = opts.lowWaterBytes ?? DEFAULT_LOW_WATER_BYTES;
     this._toTmux = opts.paneIdToTmux ?? defaultPaneIdToTmux;
+    this._writeCommand = opts.writeCommand;
 
     if (this._lowWater >= this._highWater) {
       throw new Error(
@@ -301,7 +319,10 @@ class FlowControllerImpl implements FlowController {
     this._paused.add(paneId);
     this._demux.pausePane(paneId);
     // Tell tmux to stop emitting %output for this pane.
-    this._host.write(refreshClientFlow(tmuxN, "pause") + "\n");
+    // tc-128.4: slot the write so the %end reply binds to a throwaway slot,
+    // not to a concurrent requery's list-* slot (FIFO correctness under the
+    // requery pipeline).
+    this._writeCommandLine(refreshClientFlow(tmuxN, "pause"));
   }
 
   private _resume(paneId: PaneId): void {
@@ -309,8 +330,23 @@ class FlowControllerImpl implements FlowController {
     // Open the demux gate.
     this._paused.delete(paneId);
     this._demux.resumePane(paneId);
-    // Tell tmux to resume output for this pane.
-    this._host.write(refreshClientFlow(tmuxN, "continue") + "\n");
+    // Tell tmux to resume output for this pane (slotted — see _pause).
+    this._writeCommandLine(refreshClientFlow(tmuxN, "continue"));
+  }
+
+  /**
+   * Write a tmux command line via the slotted seam (tc-128.4) when wired,
+   * else fall back to raw host.write. The slotted path is required in the
+   * production assembly where the requery engine is constantly registering
+   * list-* slots; the raw fallback is for unit tests that mock a host without
+   * a pipeline.
+   */
+  private _writeCommandLine(command: string): void {
+    if (this._writeCommand !== undefined) {
+      this._writeCommand(command);
+    } else {
+      this._host.write(command + "\n");
+    }
   }
 }
 

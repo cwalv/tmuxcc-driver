@@ -183,7 +183,22 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
   const demux = createOutputDemux();
 
   // 3. Flow controller — needs host + demux; pipeline not yet created.
-  const fc = createFlowController(host, demux, opts.flow);
+  //
+  // tc-128.4: the pause/continue refresh-client writes MUST be slotted under
+  // the requery pipeline (every command write goes through the correlator
+  // FIFO or its %end reply mis-binds to a concurrent requery's list-* slot).
+  // We don't have the pipeline yet, so we forward `writeCommand` via a
+  // late-binding closure patched after pipeline construction below.
+  let pipelineRef: RuntimePipeline | null = null;
+  const fc = createFlowController(host, demux, {
+    ...opts.flow,
+    writeCommand: (command) => {
+      // pipelineRef is patched immediately after createRuntimePipeline below,
+      // well before any pause/continue can fire (which require a live
+      // pipeline + active host data flow).
+      pipelineRef?.writeCommand(command);
+    },
+  });
 
   // 4. Wrap the demux store so the flow controller is notified of every append.
   //    The wrapper delegates everything to demux.store and additionally calls
@@ -236,8 +251,14 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
       if (outcome === "reattach") {
         // The bound session is still alive but the -CC client drifted away.
         // Silently issue attach-session to pull it back.  No wire emission.
+        //
+        // tc-128.4: slot the write — this fires AFTER pipeline.start(), so the
+        // requery engine is live and registering list-* slots; an unslotted
+        // attach-session write plants a fuse that mis-binds its %end reply to
+        // the next requery's slot, corrupting the topology snapshot. The
+        // pipeline is the safe seam (writeCommand handles slot + write).
         if (!host.exited) {
-          host.write("attach-session -t " + opts.host.sessionName + "\n");
+          pipelineRef?.writeCommand("attach-session -t " + opts.host.sessionName);
         }
       } else {
         // outcome === "unavailable": the bound session is gone.
@@ -250,6 +271,13 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
       }
     },
   });
+
+  // 5a. Patch the late-binding pipeline reference so the flow-controller's
+  //     writeCommand seam (and the switch-client attach-session writer
+  //     installed in step 5) can reach the pipeline now that it exists. Both
+  //     callsites only fire after pipeline.start() resolves, so the slot/write
+  //     wiring is always live by then.
+  pipelineRef = pipeline;
 
   // 6. Control-plane server.
   const server = createControlServer(pipeline, opts.server);
@@ -358,17 +386,18 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
       // off in ~/.tmux.conf. We override it globally so tmuxcc panes always
       // forward BEL bytes correctly via the %output stream.
       //
-      // The command is sent fire-and-forget: no `expectCommand()` slot is
-      // registered, so the %begin/%end response block is silently discarded
-      // by the correlator (see correlator.ts _closeBlock — "unsolicited block").
-      //
       // We also set `bell-action none` so that in the unlikely case the
       // control-mode client is connected to a real terminal, tmux does not
       // try to ring that terminal's bell (it would go nowhere in control mode,
       // but this is clean hygiene).
+      //
+      // tc-128.4: both writes go through pipeline.writeCommand so each
+      // registers a throwaway correlator slot — required under the requery
+      // pipeline so the %end replies don't mis-bind to a concurrent requery's
+      // list-* slot.
       if (!host.exited) {
-        host.write("set-option -g monitor-bell on\n");
-        host.write("set-option -g bell-action none\n");
+        pipeline.writeCommand("set-option -g monitor-bell on");
+        pipeline.writeCommand("set-option -g bell-action none");
       }
 
       // Subscribe to host.onExit so that when tmux dies unexpectedly the

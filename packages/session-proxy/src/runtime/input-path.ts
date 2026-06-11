@@ -269,9 +269,25 @@ export function createInputPath(
   const expectCommand = opts.expectCommand;
   const getModel = opts.getModel;
 
-  /** Write a tmux command line (appends \n). */
-  function sendCommand(cmd: string): void {
+  /**
+   * Write a tmux command line (appends \n).
+   *
+   * Registers a correlator slot BEFORE the write when `expectCommand` is wired
+   * (tc-128.4): the requery pipeline registers slots constantly, so every
+   * command write MUST be slotted in FIFO write order or its %end reply mis-
+   * binds to a requery's list-* slot, corrupting the topology snapshot. The
+   * returned Promise is consumed by `sendCommandWithReversal` for the
+   * optimistic-update error-reversal path; plain fire-and-forget callers
+   * discard it (the throwaway slot keeps the correlator FIFO aligned).
+   *
+   * When `expectCommand` is omitted (e.g. unit tests with a fake host and no
+   * pipeline), this degrades to a plain `host.write` — correctness still holds
+   * because no requery engine is registering slots concurrently.
+   */
+  function sendCommand(cmd: string): Promise<InputPathCommandResult> | undefined {
+    const result = expectCommand?.();
     host.write(cmd + "\n");
+    return result;
   }
 
   /**
@@ -311,13 +327,11 @@ export function createInputPath(
     // even if onModelChange handlers mutate downstream views inline.
     const before = getModel?.();
 
-    // Register expectCommand BEFORE the host.write so the correlator's FIFO
-    // queue is in sync: the next %begin tmux emits will bind to our slot.
-    // (The correlator's docs note either order is safe in practice, but
-    // before-write is the documented best practice.)
-    const resultPromise = expectCommand?.();
-
-    sendCommand(cmd);
+    // sendCommand registers the correlator slot BEFORE host.write (tc-128.4),
+    // so the next %begin/%end tmux emits binds to our slot. The returned Promise
+    // is the result observation we need for error reversal — no need to register
+    // a second slot.
+    const resultPromise = sendCommand(cmd);
 
     // Optimistic apply: the model updates immediately so deltas flow to clients
     // without waiting for tmux confirmation.
@@ -498,6 +512,17 @@ export function createInputPath(
             for (const pane of command.panes) {
               const tmuxPaneNum = toTmuxPane(pane.paneId);
               lines.push(resizePaneCmd(tmuxPaneNum, pane.cols, pane.rows));
+            }
+            // tc-128.4: the batch is ONE host.write of N command lines, but
+            // tmux acks each line with its own %begin/%end block. Register N
+            // throwaway correlator slots BEFORE the write so each reply binds
+            // to our slots in FIFO order — otherwise the trailing acks would
+            // mis-bind to whatever requery slot lands in the meantime,
+            // corrupting the engine's topology snapshot.
+            if (expectCommand !== undefined) {
+              for (let i = 0; i < lines.length; i++) {
+                void expectCommand();
+              }
             }
             // Single host.write so tmux receives one contiguous chunk.  Each
             // line is its own command; tmux executes them in order.
