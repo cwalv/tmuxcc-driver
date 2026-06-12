@@ -848,6 +848,50 @@ describe("server-proxy – race test (requires tmux)", { skip: !TMUX_AVAILABLE }
       mux.transport.close();
     }
   });
+
+  // tc-zcqr regression: rapid-fire single-claim sequence on a freshly-spawned
+  // server-proxy.  In the bug-era code, `_doClaimSession` ran `tmux new-session`
+  // then a SECOND `tmux list-sessions` to learn the session id; the second
+  // round-trip could transiently fail (5 s timeout, control-mode contention
+  // with the watcher + supervisor) and `listSessions` silently coerced that
+  // failure into `[]`, erasing the just-created session from `_byName` and
+  // producing `"[internal] Session 'X' not found after creation"`.
+  //
+  // The fix path:
+  //   - `createSession` returns the new session id authoritatively via
+  //     `new-session -P -F '#{session_id}'`.
+  //   - `_doClaimSession` injects the new row into `_sessions/_byName`
+  //     synchronously — no follow-up `list-sessions` on the happy path.
+  //   - `listSessions` returns null on transient failures so
+  //     `_refreshSessions` leaves the cache intact instead of clearing it.
+  //
+  // The regression: 25 sequential claim-then-disconnect cycles must ALL
+  // succeed with no "not found after creation" error.  Pre-fix this surface
+  // was intermittent (~1 in 50 under loaded CI); post-fix it must be 0/25.
+  it("R2 (tc-zcqr): 25 sequential single-claim cycles on a fresh server-proxy all succeed", async () => {
+    const N = 25;
+    const endpoint = serverProxy.endpoint();
+    for (let i = 0; i < N; i++) {
+      const { mux } = await connectToServerProxy(endpoint);
+      const seq = { value: 1 };
+      const resp = await sendServerProxyCommand(
+        mux,
+        { kind: "session.claim", name: `r2-cycle-${i}` },
+        seq,
+      );
+      assert.ok(
+        resp.result.ok,
+        `cycle ${i}: session.claim must succeed; got: ${JSON.stringify(resp.result)}`,
+      );
+      const payload = (resp.result as {
+        ok: true;
+        payload: { sessionId: string; endpoint: string; created: boolean };
+      }).payload;
+      assert.ok(payload.sessionId, `cycle ${i}: payload must include sessionId`);
+      assert.equal(payload.created, true, `cycle ${i}: this claim must report created=true`);
+      mux.transport.close();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

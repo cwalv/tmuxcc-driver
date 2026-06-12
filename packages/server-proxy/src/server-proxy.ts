@@ -780,7 +780,17 @@ class ServerProxyImpl implements ServerProxyHandle {
 
   private _refreshSessions(): void {
     // tc-x6l: sessions gauge is updated at the end of each refresh.
+    // tc-zcqr: listSessions returns null on transient failure (timeout, spawn
+    // error, unexpected non-zero exit) — distinguish from "no sessions"
+    // (status 0 with empty stdout / "no server running" stderr).  On a
+    // transient failure, leave _sessions/_byName intact; clearing on a flake
+    // is exactly what produced the "Session not found after creation" race.
     const rows = listSessions(this._opts.socketName);
+    if (rows === null) {
+      // Transient failure — do not mutate the session table.  The watcher /
+      // next claim will re-drive a refresh.
+      return;
+    }
     // tc-3y8.7: subtract tmuxcc-owned control-mode clients from the raw
     // session_attached count so that attachedClientCount reflects only
     // real (external) clients.
@@ -1084,10 +1094,37 @@ class ServerProxyImpl implements ServerProxyHandle {
     let created = false;
 
     if (!entry) {
-      // Session doesn't exist — create it
+      // Session doesn't exist — create it.
+      //
+      // tc-zcqr: `createSession` returns the new tmux session id directly via
+      // `new-session -P -F '#{session_id}'`.  We inject the new entry into
+      // _sessions/_byName synchronously rather than relying on a follow-up
+      // `tmux list-sessions` to learn the id — that round-trip can fail
+      // transiently (the watcher's -CC attach + supervisor's session-proxy spawn
+      // contend for the tmux server's response budget in this window) and
+      // silently produced "Session 'X' not found after creation".
       try {
-        createSession(this._opts.socketName, name);
+        const { tmuxId } = createSession(this._opts.socketName, name);
         created = true;
+        entry = this._byName.get(name);
+        if (!entry) {
+          // No race winner ahead of us — inject the just-created session
+          // authoritatively from the createSession return value.  Broadcast
+          // sessions.added so connected clients see it immediately (this is
+          // the same broadcast _refreshSessions would emit on the next tick).
+          const sessionId = mintSessionId(`s${tmuxId.replace("$", "")}`);
+          entry = {
+            sessionId,
+            tmuxId,
+            name,
+            windowCount: 1,
+            attachedClientCount: 0,
+          };
+          this._sessions.set(sessionId, entry);
+          this._byName.set(name, entry);
+          this._broadcastAdded(entry);
+          this._metrics.setSessionsActive(this._sessions.size);
+        }
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         if (msg.toLowerCase().includes("duplicate")) {
@@ -1100,18 +1137,6 @@ class ServerProxyImpl implements ServerProxyHandle {
           }
         } else {
           throw Object.assign(new Error(`tmux.unavailable: ${msg}`), { code: "tmux.unavailable" });
-        }
-      }
-
-      if (!entry) {
-        // Re-read after creation
-        this._refreshSessions();
-        entry = this._byName.get(name);
-        if (!entry) {
-          throw Object.assign(
-            new Error(`Session '${name}' not found after creation`),
-            { code: "internal" },
-          );
         }
       }
     }

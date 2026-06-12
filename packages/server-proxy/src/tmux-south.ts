@@ -87,9 +87,17 @@ export interface TmuxSessionRow {
  * Run `tmux -L <socketName> list-sessions -F '...'` synchronously and
  * return the parsed rows.
  *
- * Returns an empty array if the tmux server is not running or has no sessions.
+ * Returns an empty array if the tmux server is not running or has no sessions
+ * (status 0 with empty stdout, OR stderr says "no server running").
+ *
+ * Returns `null` for ANY other failure (timeout, spawn error, unexpected
+ * non-zero status with stderr).  tc-zcqr: callers (e.g. `_refreshSessions`)
+ * MUST distinguish "no sessions" (clear the cache) from "transient failure"
+ * (leave the cache alone).  The previous behaviour conflated both as `[]`,
+ * which silently dropped the just-created session out of `_byName` and
+ * surfaced as the "Session not found after creation" claim race.
  */
-export function listSessions(socketName: string): TmuxSessionRow[] {
+export function listSessions(socketName: string): TmuxSessionRow[] | null {
   const FORMAT = "#{session_id} #{session_name} #{session_windows} #{session_attached}";
   const result = spawnSync(
     "tmux",
@@ -97,9 +105,21 @@ export function listSessions(socketName: string): TmuxSessionRow[] {
     { encoding: "utf8", timeout: 5_000 },
   );
 
-  if (result.status !== 0 || result.error) {
-    // Server not running or no sessions — return empty
-    return [];
+  // Spawn-level failure (timeout, ENOENT on tmux binary, etc.) — transient,
+  // do NOT degrade to "empty session list".
+  if (result.error) {
+    return null;
+  }
+
+  if (result.status !== 0) {
+    // tmux 3.x: server-not-running prints "no server running on /tmp/tmux-.../<socket>"
+    // to stderr with status 1.  Treat that as "no sessions" (empty).  Any other
+    // non-zero exit is a transient failure (null) — same caller semantics.
+    const stderr = (result.stderr ?? "").toLowerCase();
+    if (stderr.includes("no server running") || stderr.includes("no sessions") || stderr.includes("error connecting")) {
+      return [];
+    }
+    return null;
   }
 
   return (result.stdout ?? "")
@@ -207,8 +227,22 @@ export function countTmuxccClientsBySession(socketName: string): Map<string, num
 }
 
 /**
- * Run `tmux -L <socketName> new-session -d -s <name>` to create a detached
- * session.  Throws if the command fails (including name-already-taken).
+ * Run `tmux -L <socketName> new-session -d -s <name> -P -F '#{session_id}'`
+ * to create a detached session and authoritatively return its newly-minted
+ * tmux session id (`"$N"`) in the same round-trip.  Throws if the command
+ * fails (including name-already-taken).
+ *
+ * tc-zcqr: returning the session id from `new-session` itself avoids a
+ * post-create `list-sessions` query.  The previous code shape was
+ *
+ *     createSession(...)            // tmux new-session (status 0)
+ *     setSessionMarker(...)         // tmux set-option (best-effort)
+ *     _refreshSessions()            // tmux list-sessions  <-- race window
+ *     entry = _byName.get(name)     // sometimes undefined => "not found after creation"
+ *
+ * The race was a transient `list-sessions` failure being silently coerced to
+ * "no sessions" by `listSessions`.  Now `createSession` is the authority and
+ * `_doClaimSession` can synchronously inject the new row into its cache.
  *
  * After a successful `new-session`, immediately sets the Phase 2 marker
  * `@tmuxcc 1` on the session (tc-w61) so that `listTmuxccSessions` can
@@ -217,10 +251,10 @@ export function countTmuxccClientsBySession(socketName: string): Map<string, num
  * session-proxy will start; the session just won't appear in the attach-picker until
  * the marker is applied on the next claim.
  */
-export function createSession(socketName: string, name: string): void {
+export function createSession(socketName: string, name: string): { tmuxId: string } {
   const result = spawnSync(
     "tmux",
-    ["-L", socketName, "new-session", "-d", "-s", name],
+    ["-L", socketName, "new-session", "-d", "-s", name, "-P", "-F", "#{session_id}"],
     { encoding: "utf8", timeout: 10_000 },
   );
   if (result.status !== 0 || result.error) {
@@ -229,8 +263,20 @@ export function createSession(socketName: string, name: string): void {
     );
   }
 
+  const tmuxId = (result.stdout ?? "").trim();
+  if (!tmuxId.startsWith("$")) {
+    // tmux's `-P -F '#{session_id}'` always emits a `$N` id on success.  Empty
+    // or malformed stdout means we cannot trust the create — surface it as
+    // an error rather than fabricating an id.
+    throw new Error(
+      `tmux new-session returned no session id (stdout: ${JSON.stringify(result.stdout ?? "")})`,
+    );
+  }
+
   // Set the @tmuxcc 1 marker so the Phase 2 probe can discover this session.
   setSessionMarker(socketName, name);
+
+  return { tmuxId };
 }
 
 /**
@@ -459,8 +505,11 @@ export function createTmuxWatcher(
     // Check if the server is actually running before attaching.
     // `tmux -CC attach` without sessions exits immediately; we defer until
     // there's at least one session or until the server is reachable.
+    //
+    // tc-zcqr: listSessions returns null on transient failure; treat that
+    // the same as "no sessions yet" — schedule a retry.
     const rows = listSessions(socketName);
-    if (rows.length === 0) {
+    if (rows === null || rows.length === 0) {
       // Nothing to attach to yet — schedule a retry
       schedulePoll();
       return;

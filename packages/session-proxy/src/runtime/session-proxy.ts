@@ -594,9 +594,15 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
         metricsRegistry.stop();
         pipeline.stop();
 
-        // Push session.unavailable to every connected client so they know the
-        // session is gone and should treat the connection as dead.
-        server.broadcastError({
+        // tc-zcqr / tc-1a9d: push session.unavailable AND close client
+        // transports.  The transport close is the wire-level signal the
+        // extension's `ServerProxySessionProxyHandle.onDisconnect` watches —
+        // without it, `handleTransportDisconnect` never fires after a tmux
+        // kill-server, so `showReconnectNotification` ("tmuxcc: connection
+        // lost.") doesn't run.  The "switch-client" outcome="unavailable"
+        // branch above (line ~399) already uses broadcastErrorAndClose for
+        // the same reason; the tmux-death path now matches.
+        server.broadcastErrorAndClose({
           type: "error",
           code: "session.unavailable",
           message: "The tmux session has exited unexpectedly.",
