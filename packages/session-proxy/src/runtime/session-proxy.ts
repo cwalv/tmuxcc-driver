@@ -58,6 +58,7 @@ import type { SwitchClientOutcome } from "../state/switch-client.js";
 import { createSessionProxyRegistry, createStormAlarm } from "../metrics/index.js";
 import type { SessionProxyRegistry, StormAlarmOptions } from "../metrics/index.js";
 import type { CommandResult } from "../parser/correlator.js";
+import { hydrateTransport } from "./hydration.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -177,6 +178,29 @@ export interface SessionProxy {
    * Returns the NegotiatedSession from the handshake.
    */
   addClient(transport: Transport): Promise<import("../wire/handshake.js").NegotiatedSession>;
+
+  /**
+   * tc-5quo — clear-then-replay hydration for the given transport.
+   *
+   * For every pane currently in the pipeline's model, send the canonical
+   * full-history `capture-pane` command, then deliver
+   * `\x1b[H\x1b[2J\x1b[3J` + capture body (with `\n`→`\r\n`) to `transport`
+   * via `transport.sendData(paneId, ...)`.
+   *
+   * Used by `addClient` to provide the single hydration contract for all
+   * bind paths (first attach, warm rebind, reconnect).  Exposed on the
+   * interface so tests can drive it directly without re-running the full
+   * handshake + snapshot dance.
+   *
+   * Fire-and-forget at the call site: returns a Promise that resolves
+   * when every pane's capture-pane round-trip has completed (per-pane
+   * errors are swallowed; one slow pane does not block siblings — all
+   * panes run concurrently).  Callers may `await` to gate readiness in
+   * tests; production wires it as `void hydrateClient(...)`.
+   *
+   * @internal — for the session-proxy's own `addClient` and for tests.
+   */
+  hydrateClient(transport: Transport): Promise<void>;
 
   /**
    * Send a tmux command through the pipeline's slotted, instrumented path (tc-3si.9).
@@ -624,6 +648,37 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
       };
       const detach = demux.attachTransport(drainingTransport);
 
+      // 2a. tc-5quo: clear-then-replay hydration for every pane known to the
+      //     model at attach time.
+      //
+      //     Without this step, a warm-rebind / reconnect leaves the client's
+      //     terminal buffer holding whatever was there before the disconnect
+      //     gap, and the gap's output is silently lost.  We unify the
+      //     hydration contract for ALL bind paths (first bind, warm rebind,
+      //     reconnect) by shelling `capture-pane -t %N -p -e -S - -E -`
+      //     through the slotted pipeline for each known pane, then sending
+      //     `\x1b[H\x1b[2J\x1b[3J` (cursor home + erase screen + erase
+      //     scrollback) followed by the capture body (with `\n` → `\r\n` for
+      //     terminal display) to THIS transport only.
+      //
+      //     Race trade-off: between `capture-pane` send and the reply, %output
+      //     for the same pane may already have been fanned out to this
+      //     transport's sendData.  The clear escape wipes those, and the
+      //     capture body includes pre-reply bytes; any post-reply bytes are
+      //     not in the capture body and are delivered live afterwards.  The
+      //     race window is bounded by one tmux command round-trip and only
+      //     matters for panes actively producing output at the instant of
+      //     attach — rare in practice.
+      //
+      //     Fire-and-forget: we do NOT await before returning from addClient.
+      //     Holding addClient until hydration completes would delay the
+      //     client's "session established" signal by ~one capture-pane RTT
+      //     per pane; clients already render live deltas correctly while
+      //     hydration is in flight (any pre-hydration deltas land on the
+      //     replayed history, then the clear+replay arrives and the live
+      //     stream resumes from there).
+      void hydrateTransport(pipeline, drainingTransport, pipeline.getModel().panes.keys());
+
       // 3. Wire input path: forward client control messages to tmux.
       //
       //    NOTE: transport.onControl is single-slot (replace semantics), so this
@@ -681,6 +736,14 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
 
     send(command: string): Promise<CommandResult> {
       return pipeline.send(command);
+    },
+
+    hydrateClient(transport: Transport): Promise<void> {
+      // tc-5quo: public entry point — drives the same hydration helper used
+      // by addClient.  Tests use this to drive the hydration round-trip
+      // directly against a recording transport without re-running the
+      // handshake.
+      return hydrateTransport(pipeline, transport, pipeline.getModel().panes.keys());
     },
 
     stop(): Promise<void> {

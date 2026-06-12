@@ -302,6 +302,13 @@ describe("capturePane", () => {
       "capture-pane -t %7 -p -e -S -200 -E -1",
     );
   });
+
+  it("accepts the '-' sentinel for full-history start/end (tc-5quo)", () => {
+    assert.equal(
+      capturePane(4, { escapes: true, startLine: "-", endLine: "-" }),
+      "capture-pane -t %4 -p -e -S - -E -",
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

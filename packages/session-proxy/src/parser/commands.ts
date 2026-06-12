@@ -245,13 +245,21 @@ export interface CapturePaneOptions {
   /**
    * First line to capture (inclusive, may be negative for scrollback).
    * Passed as `-S <startLine>`.  Omitted when undefined.
+   *
+   * Use the literal string `"-"` for tmux's "start of the retained history"
+   * sentinel (the canonical "give me everything I've kept" knob; capped by
+   * the pane's `history-limit`).  Numeric values are emitted verbatim.
    */
-  startLine?: number;
+  startLine?: number | "-";
   /**
    * Last line to capture (inclusive).
    * Passed as `-E <endLine>`.  Omitted when undefined.
+   *
+   * Use the literal string `"-"` for tmux's "end of the visible region"
+   * sentinel (the bottom of the current viewport, i.e. the live cursor row).
+   * Numeric values are emitted verbatim.
    */
-  endLine?: number;
+  endLine?: number | "-";
 }
 
 /**
@@ -262,6 +270,9 @@ export interface CapturePaneOptions {
  *
  * Flags confirmed in cmd-capture-pane.c: `-p` (print), `-e` (escape
  * sequences), `-S <start-line>`, `-E <end-line>`, `-t <target-pane>`.
+ *
+ * For full-history rehydration (tc-5quo) the canonical form is
+ * `capture-pane -t %N -p -e -S - -E -`.
  *
  * @param paneId  Numeric pane ID.
  * @param opts    Optional capture options.
