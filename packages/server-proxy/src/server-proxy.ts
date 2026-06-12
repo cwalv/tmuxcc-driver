@@ -60,6 +60,7 @@ import type {
   ServerProxySessionAddedMessage,
   ServerProxySessionRemovedMessage,
   ServerProxySessionRenamedMessage,
+  ServerProxyExitingMessage,
   ServerProxyCommandRequestMessage,
   ServerProxyCommandResponseMessage,
   ServerProxyInfoPayload,
@@ -667,10 +668,29 @@ class ServerProxyImpl implements ServerProxyHandle {
    * required so the next launcher's probe doesn't get connect-then-reset),
    * then notify onSelfExit listeners.  The entry point maps that notification
    * to `process.exit(0)`.
+   *
+   * # Exit-reason wire contract (tc-xnay / tc-ymxe)
+   *
+   * Before shutdown runs we broadcast a `server-proxy.exiting` control message
+   * to every connected client carrying the reason.  This is the on-wire
+   * signal the extension's classification locus uses to distinguish a
+   * DESIGNED quiescence from an unexpected death — for self-spawned AND
+   * externally-started brokers alike.  Without it, the next event the
+   * extension sees is the socket close (and possibly a child-exit notification
+   * for self-spawned brokers), and the two failure modes look identical.
+   *
+   * Best-effort: sendControl is fire-and-forget; transports that have already
+   * closed silently drop the message and the extension falls back to the
+   * "no announcement seen → unexpected death" classification (safe default).
    */
   private async _selfExit(reason: ServerProxySelfExitReason): Promise<void> {
     if (this._selfExited || !this._started) return;
     this._selfExited = true;
+
+    // tc-xnay / tc-ymxe: announce designed exit BEFORE shutdown closes
+    // transports.  Mirrors `_broadcastToAll` shape; inlined here so the
+    // shutdown path doesn't have to know about the announcement seq.
+    this._broadcastExiting(reason);
 
     try {
       await this.shutdown();
@@ -685,6 +705,30 @@ class ServerProxyImpl implements ServerProxyHandle {
         cb(reason);
       } catch {
         // Listener errors must not break the exit path
+      }
+    }
+  }
+
+  /**
+   * Broadcast `server-proxy.exiting` to every connected client (tc-xnay /
+   * tc-ymxe).  Called from `_selfExit` immediately before `shutdown()` runs.
+   *
+   * Best-effort per-client send; a transport that has already closed (or
+   * whose write fails) is silently skipped — the connection-count change
+   * listener will reap it during shutdown's transport.close() loop.
+   */
+  private _broadcastExiting(reason: ServerProxySelfExitReason): void {
+    for (const [transport, state] of this._clients) {
+      const msg: ServerProxyExitingMessage = {
+        type: "server-proxy.exiting",
+        seq: state.nextSeq,
+        reason,
+      };
+      state.nextSeq++;
+      try {
+        transport.sendControl(msg as unknown as Parameters<typeof transport.sendControl>[0]);
+      } catch {
+        // Transport already closed — nothing to do; shutdown will clean up.
       }
     }
   }

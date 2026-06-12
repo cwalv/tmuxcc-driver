@@ -139,6 +139,76 @@ export interface ServerProxySessionRenamedMessage extends MessageBase {
 }
 
 // ---------------------------------------------------------------------------
+// ServerProxy → Client: designed self-exit announcement (tc-xnay / tc-ymxe)
+// ---------------------------------------------------------------------------
+
+/**
+ * Reasons the server-proxy may DESIGN-exit (broadcast in `server-proxy.exiting`).
+ *
+ * Mirrors `ServerProxySelfExitReason` in @tmuxcc/server-proxy's runtime; defined
+ * on the wire so clients can interpret an `exiting` announcement without
+ * importing the runtime package.
+ *
+ *   "idle"      — zero IPC clients AND zero live session-proxy children for the
+ *                 full hysteresis window (§6.2 / tc-eqgp).  Routine quiescence;
+ *                 no user UX.
+ *   "tmux-gone" — the tmux server vanished (watcher EOF + failed `tmux ls`
+ *                 probe).  User's sessions are gone — informational, not an
+ *                 error.
+ *
+ * Open union to keep the wire forward-compatible: a future designed reason
+ * the extension does not yet recognise must NOT be classified as a crash —
+ * the presence of an `exiting` message is the load-bearing signal, not the
+ * reason string.
+ */
+export type ServerProxyExitReason =
+  | "idle"
+  | "tmux-gone"
+  | (string & Record<never, never>);
+
+/**
+ * The server-proxy is about to perform a DESIGNED self-exit (tc-xnay / tc-ymxe).
+ *
+ * direction: server-proxy→client (broadcast immediately before `_selfExit`'s
+ * shutdown() runs)
+ *
+ * # Why this message exists
+ *
+ * Before this message, every broker process death looked identical to the
+ * extension: socket close on the keepalive (tc-eqgp) and/or a non-zero
+ * child-exit watchdog signal.  Two failure modes resulted:
+ *   1. tc-xnay — clean idle exits (exit code 0, designed) were surfaced as
+ *      crash error notifications.
+ *   2. tc-ymxe — externally-started brokers had no child-exit watchdog at
+ *      all; SIGKILL silently degraded the extension.
+ *
+ * `server-proxy.exiting` makes the broker's intent EXPLICIT on the wire so the
+ * extension's classification locus can distinguish designed quiescence from
+ * unexpected death for BOTH self-spawned and externally-started brokers.
+ *
+ * # Delivery guarantees
+ *
+ * - Broadcast to every connected client immediately before `shutdown()` runs.
+ * - Best-effort: a transport that has already closed (or whose buffer is
+ *   full) silently drops the message — the keepalive then falls back to the
+ *   "no announcement seen → unexpected death" classification, which is the
+ *   safe default.
+ * - One announcement per broker exit; the broker does NOT re-broadcast on
+ *   shutdown-via-SIGTERM (the launcher knows SIGTERM was deliberate from its
+ *   own `dispose()` flag).
+ *
+ * Additive addition — non-breaking per the versioning policy.  Older
+ * extensions ignore unknown control messages (the keepalive's `onControl`
+ * is a drain-only handler), so a new broker talking to an old extension
+ * loses ONLY the classification refinement; lifecycle is unchanged.
+ */
+export interface ServerProxyExitingMessage extends MessageBase {
+  readonly type: "server-proxy.exiting";
+  /** Why the broker is exiting.  See {@link ServerProxyExitReason}. */
+  readonly reason: ServerProxyExitReason;
+}
+
+// ---------------------------------------------------------------------------
 // Client → ServerProxy: commands
 // ---------------------------------------------------------------------------
 
@@ -461,6 +531,7 @@ export type ServerProxyMessage =
   | ServerProxySessionAddedMessage
   | ServerProxySessionRemovedMessage
   | ServerProxySessionRenamedMessage
+  | ServerProxyExitingMessage
   | ServerProxyCommandResponseMessage;
 // Note: ErrorMessage (type: "error") is shared with the session-proxy wire and
 // is re-exported from session-proxy-control.ts. ServerProxy wire uses the same shape.
@@ -482,6 +553,7 @@ export function isServerProxyMessage(msg: MessageBase): msg is ServerProxyMessag
     t === "sessions.added" ||
     t === "sessions.removed" ||
     t === "sessions.renamed" ||
+    t === "server-proxy.exiting" ||
     t === "command.response"
   );
 }

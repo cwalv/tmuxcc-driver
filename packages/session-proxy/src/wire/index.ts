@@ -48,6 +48,9 @@ export type {
   ServerProxySessionAddedMessage,
   ServerProxySessionRemovedMessage,
   ServerProxySessionRenamedMessage,
+  // tc-xnay / tc-ymxe: designed self-exit announcement
+  ServerProxyExitReason,
+  ServerProxyExitingMessage,
   ServerProxyCommand,
   SessionClaimCommand,
   SessionCreateCommand,
