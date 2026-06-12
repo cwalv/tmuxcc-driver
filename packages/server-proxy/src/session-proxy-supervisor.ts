@@ -158,6 +158,27 @@ export interface SessionProxySupervisor {
   sessionProxyPid(sessionId: string): number | null;
 
   /**
+   * Number of live session-proxy children — both ready entries and in-flight
+   * spawns.  Used by the idle-exit policy (tc-eqgp): the server-proxy must
+   * never idle-exit while it has live session-proxy children, because those
+   * children represent active VS Code terminals whose data path
+   * (EDH ↔ session-proxy over per-session sockets) is invisible to the
+   * server-proxy's own IPC client count.  An in-flight spawn counts too —
+   * a claim is in progress and tearing the server-proxy out from under it
+   * would cascade-kill that nascent terminal too.
+   */
+  aliveCount(): number;
+
+  /**
+   * Register a callback fired whenever the alive-child count changes
+   * (spawn registered, ready entry recorded, entry reaped, or unexpected
+   * exit).  The handler receives the new count.  Used by the server-proxy
+   * to re-check the idle policy when the last child goes away
+   * (tc-eqgp).
+   */
+  onAliveCountChange(handler: (count: number) => void): void;
+
+  /**
    * Kill the session-proxy for a session (if running). Called on session removal.
    */
   reapSessionProxy(sessionId: string): void;
@@ -185,9 +206,33 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
    */
   private _sessionProxies = new Map<string, SessionProxyEntry | Promise<SessionProxyEntry>>();
   private _crashHandler: SessionProxyCrashHandler | null = null;
+  private _aliveCountHandlers: Array<(count: number) => void> = [];
 
   onCrash(handler: SessionProxyCrashHandler): void {
     this._crashHandler = handler;
+  }
+
+  aliveCount(): number {
+    // Every map entry — ready entry or in-flight spawn promise — represents a
+    // live (or imminently-live) session-proxy child whose existence the idle
+    // policy must respect.  reapSessionProxy() / the crash handler delete the
+    // entry synchronously with the kill/exit, so the size is the alive count.
+    return this._sessionProxies.size;
+  }
+
+  onAliveCountChange(handler: (count: number) => void): void {
+    this._aliveCountHandlers.push(handler);
+  }
+
+  private _fireAliveCount(): void {
+    const count = this._sessionProxies.size;
+    for (const h of this._aliveCountHandlers.slice()) {
+      try {
+        h(count);
+      } catch {
+        // Listener errors must not break the supervisor.
+      }
+    }
   }
 
   async ensureSessionProxy(
@@ -215,8 +260,12 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
       sessionProxySockPath,
     );
 
-    // Register the promise immediately so concurrent callers share it
+    // Register the promise immediately so concurrent callers share it.
+    // tc-eqgp: count an in-flight spawn as a live child for idle-exit
+    // purposes — a claim is in progress and the server-proxy must stay up
+    // until that nascent terminal is wired.
     this._sessionProxies.set(sessionId, spawnPromise);
+    this._fireAliveCount();
 
     let entry: SessionProxyEntry;
     try {
@@ -224,10 +273,12 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
     } catch (err) {
       // Spawn failed — remove the stale promise
       this._sessionProxies.delete(sessionId);
+      this._fireAliveCount();
       throw err;
     }
 
-    // Replace promise with resolved entry
+    // Replace promise with resolved entry (no count change — promise → entry
+    // is still one alive child).
     this._sessionProxies.set(sessionId, entry);
     return entry.socketPath;
   }
@@ -243,6 +294,7 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
     if (!entry) return;
 
     this._sessionProxies.delete(sessionId);
+    this._fireAliveCount();
 
     if (entry instanceof Promise) {
       // In-flight spawn — kill after it resolves
@@ -351,6 +403,7 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
         // replacement entry.
         if (current !== undefined && !(current instanceof Promise) && current.proc === proc) {
           this._sessionProxies.delete(sessionId);
+          this._fireAliveCount();
           this._crashHandler?.(sessionId, { sessionName, code, signal });
         }
       };

@@ -7,8 +7,19 @@
  *
  * Optional arguments:
  *   --runtime-dir <path>    override the base runtime directory
- *   --idle-exit-ms <n>      zero-client self-exit hysteresis (default 5 min;
- *                           injectable so tests don't wait 5 real minutes)
+ *   --idle-exit-ms <n>      idle self-exit grace (default 5 min; injectable
+ *                           so tests don't wait 5 real minutes).  Self-exit
+ *                           requires zero IPC clients AND zero live
+ *                           session-proxy children (tc-eqgp).
+ *
+ * Environment variables:
+ *   TMUXCC_IDLE_EXIT_MS     idle self-exit grace (tc-eqgp).  Same shape as
+ *                           --idle-exit-ms — must be a positive integer
+ *                           number of milliseconds.  Used by deployments
+ *                           (and the e2e harness, tc-nt3n) that want a
+ *                           shorter grace without passing CLI flags.  When
+ *                           both are supplied, --idle-exit-ms wins (the
+ *                           caller passed it explicitly).
  *
  * Protocol:
  *   1. Parse arguments.
@@ -29,6 +40,8 @@
  * @module server-proxy-entry
  */
 
+import { fileURLToPath } from "node:url";
+
 import { createServerProxy } from "./server-proxy.js";
 import type { ServerProxyOptions } from "./server-proxy.js";
 import { serverProxyLogPath } from "./runtime-dir.js";
@@ -38,29 +51,91 @@ import { openServerProxyLog, installStderrMirror } from "./server-proxy-log.js";
 // Argument parsing
 // ---------------------------------------------------------------------------
 
-function parseArgs(): { socketName: string; runtimeDir?: string; idleExitMs?: number } {
-  const args = process.argv.slice(2);
+/**
+ * Parsed entry-point configuration: the result of folding the CLI argv and
+ * the relevant env vars into a single `ServerProxyOptions`-shaped object.
+ *
+ * `socketName` is `null` when the caller did not supply `--socket-name` —
+ * the CLI driver treats that as a usage error; tests use the same shape to
+ * assert the env-var path lands in `idleExitMs` correctly.
+ */
+export interface ParsedEntryConfig {
+  socketName: string | null;
+  runtimeDir?: string;
+  idleExitMs?: number;
+}
+
+/**
+ * Parse a positive-integer-milliseconds value from a string.  Returns
+ * `undefined` if the input is missing, non-numeric, or non-positive.
+ *
+ * Shared between the `--idle-exit-ms` CLI flag and the
+ * `TMUXCC_IDLE_EXIT_MS` env var so the two paths accept exactly the same
+ * shape (tc-eqgp).  Exported for unit tests.
+ *
+ * @internal
+ */
+export function _parseIdleExitMs(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const parsed = parseInt(raw, 10);
+  if (Number.isNaN(parsed) || parsed <= 0) return undefined;
+  return parsed;
+}
+
+/**
+ * Fold CLI argv (after the node + script slots) and env vars into a parsed
+ * config.  Pure: no I/O, no process.exit; the caller decides what to do
+ * when `socketName` is null.
+ *
+ * Exported so unit tests can drive the parser without spawning a child
+ * process — see `_parseEntryConfig` callers in `server-proxy.test.ts`
+ * (tc-eqgp env-precedence assertions).
+ *
+ * @param argv  argv slice — `process.argv.slice(2)` in production.
+ * @param env   environment table — `process.env` in production.
+ * @internal
+ */
+export function _parseEntryConfig(
+  argv: readonly string[],
+  env: NodeJS.ProcessEnv,
+): ParsedEntryConfig {
   let socketName = "";
   let runtimeDir: string | undefined;
   let idleExitMs: number | undefined;
 
-  for (let i = 0; i < args.length; i++) {
-    switch (args[i]) {
+  for (let i = 0; i < argv.length; i++) {
+    switch (argv[i]) {
       case "--socket-name":
-        socketName = args[++i] ?? "";
+        socketName = argv[++i] ?? "";
         break;
       case "--runtime-dir":
-        runtimeDir = args[++i] ?? undefined;
+        runtimeDir = argv[++i] ?? undefined;
         break;
       case "--idle-exit-ms": {
-        const parsed = parseInt(args[++i] ?? "", 10);
-        if (!Number.isNaN(parsed) && parsed > 0) idleExitMs = parsed;
+        idleExitMs = _parseIdleExitMs(argv[++i]);
         break;
       }
     }
   }
 
-  if (!socketName) {
+  // tc-eqgp: TMUXCC_IDLE_EXIT_MS env fallback (the e2e harness path).  The
+  // CLI flag wins when both are present: an explicit `--idle-exit-ms` on the
+  // command line is more local intent than an inherited env var.
+  if (idleExitMs === undefined) {
+    idleExitMs = _parseIdleExitMs(env.TMUXCC_IDLE_EXIT_MS);
+  }
+
+  return {
+    socketName: socketName.length > 0 ? socketName : null,
+    ...(runtimeDir !== undefined ? { runtimeDir } : {}),
+    ...(idleExitMs !== undefined ? { idleExitMs } : {}),
+  };
+}
+
+function parseArgs(): { socketName: string; runtimeDir?: string; idleExitMs?: number } {
+  const cfg = _parseEntryConfig(process.argv.slice(2), process.env);
+
+  if (cfg.socketName === null) {
     process.stderr.write(
       "Usage: server-proxy-entry --socket-name <name> [--runtime-dir <path>] [--idle-exit-ms <n>]\n",
     );
@@ -68,9 +143,9 @@ function parseArgs(): { socketName: string; runtimeDir?: string; idleExitMs?: nu
   }
 
   return {
-    socketName,
-    ...(runtimeDir !== undefined ? { runtimeDir } : {}),
-    ...(idleExitMs !== undefined ? { idleExitMs } : {}),
+    socketName: cfg.socketName,
+    ...(cfg.runtimeDir !== undefined ? { runtimeDir: cfg.runtimeDir } : {}),
+    ...(cfg.idleExitMs !== undefined ? { idleExitMs: cfg.idleExitMs } : {}),
   };
 }
 
@@ -123,8 +198,22 @@ async function main(): Promise<void> {
   });
 }
 
-// Run
-main().catch((err: unknown) => {
-  process.stderr.write(`server-proxy-entry fatal: ${String(err)}\n`);
-  process.exit(1);
-});
+// Run only when this module is the process entry point.  Tests that import
+// the module to exercise `_parseEntryConfig` / `_parseIdleExitMs` must not
+// spawn a real server-proxy as a side effect of import.
+//
+// Detection mirrors the standard Node pattern: compare the resolved URL of
+// this module against the script the user actually launched.  The session-
+// proxy supervisor and the extension launcher both invoke this script via
+// `node <path>` (or `node --import tsx <path>` in dev), so
+// `process.argv[1]` is the absolute path of either the .js or .ts entry —
+// `fileURLToPath(import.meta.url)` will match.
+{
+  const argvEntry = process.argv[1];
+  if (argvEntry !== undefined && fileURLToPath(import.meta.url) === argvEntry) {
+    main().catch((err: unknown) => {
+      process.stderr.write(`server-proxy-entry fatal: ${String(err)}\n`);
+      process.exit(1);
+    });
+  }
+}
