@@ -44,7 +44,7 @@ import { fileURLToPath } from "node:url";
 
 import { createServerProxy } from "./server-proxy.js";
 import type { ServerProxyOptions } from "./server-proxy.js";
-import { serverProxyLogPath } from "./runtime-dir.js";
+import { serverProxyLogPath, resolveBaseRuntimeDir, gcStaleRuntimeDirs } from "./runtime-dir.js";
 import { openServerProxyLog, installStderrMirror } from "./server-proxy-log.js";
 
 // ---------------------------------------------------------------------------
@@ -165,6 +165,18 @@ async function main(): Promise<void> {
   if (log !== null) {
     installStderrMirror(log);
     process.stderr.write(`serverProxy: starting pid=${process.pid} socket=${socketName} log=${log.path}\n`);
+  }
+
+  // tc-s1sm: GC stale sibling runtime dirs before binding our own socket.
+  // Runs before start() so we cannot race a LIVE broker: any dir whose
+  // server-proxy.sock accepts a connection is skipped; only dirs with a
+  // dead/absent socket are removed.  Our own dir (socketName) is never
+  // touched.  Errors are non-fatal — GC failure must not block startup.
+  const baseRtDir = resolveBaseRuntimeDir(runtimeDir !== undefined ? { runtimeDir } : {});
+  try {
+    await gcStaleRuntimeDirs(baseRtDir, socketName);
+  } catch (err: unknown) {
+    process.stderr.write(`serverProxy: gc sweep error (non-fatal): ${String(err)}\n`);
   }
 
   const serverProxyOpts: ServerProxyOptions = {

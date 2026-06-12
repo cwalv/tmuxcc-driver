@@ -28,4 +28,4 @@ export type { ServerProxyHandle, ServerProxyOptions, ServerProxySelfExitReason }
 export { createSocketTransport, connectSocketTransport, createSocketServer } from "./socket-transport.js";
 
 // Runtime directory helpers (useful for clients that need to compute socket paths)
-export { serverProxySocketPath, sessionProxySocketPath, serverProxyLogPath } from "./runtime-dir.js";
+export { serverProxySocketPath, sessionProxySocketPath, serverProxyLogPath, resolveBaseRuntimeDir, gcStaleRuntimeDirs, probeLiveSocket } from "./runtime-dir.js";

@@ -13,6 +13,7 @@
  */
 
 import * as fs from "node:fs";
+import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -136,5 +137,124 @@ export function restrictSocket(socketPath: string): void {
     fs.chmodSync(socketPath, 0o600);
   } catch {
     // Non-fatal — best effort on platforms where this is not supported
+  }
+}
+
+// ---------------------------------------------------------------------------
+// GC — stale runtime directory sweep (tc-s1sm)
+// ---------------------------------------------------------------------------
+
+/**
+ * Probe whether a unix-domain socket at `sockPath` is accepting connections.
+ *
+ * Returns `true` if a connection can be established within `timeoutMs`
+ * (default 200 ms), `false` for ECONNREFUSED / ENOENT / EACCES / timeout.
+ * All other errors are treated as "not alive" (conservative).
+ */
+export function probeLiveSocket(sockPath: string, timeoutMs = 200): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = new net.Socket();
+    let settled = false;
+
+    const done = (alive: boolean): void => {
+      if (settled) return;
+      settled = true;
+      try { socket.destroy(); } catch { /* ignore */ }
+      resolve(alive);
+    };
+
+    const timer = setTimeout(() => done(false), timeoutMs);
+    // Unref the timer so this probe never holds the event loop open on its own.
+    if (typeof timer.unref === "function") timer.unref();
+
+    socket.once("connect", () => {
+      clearTimeout(timer);
+      done(true);
+    });
+
+    socket.once("error", () => {
+      clearTimeout(timer);
+      done(false);
+    });
+
+    socket.connect(sockPath);
+  });
+}
+
+/**
+ * GC sweep: remove stale per-socket-name runtime directories from `baseDir`.
+ *
+ * A directory `<baseDir>/<entry>/` is stale when:
+ *   - it contains `server-proxy.sock`, AND
+ *   - that socket does NOT accept a connection (ECONNREFUSED / ENOENT / timeout).
+ *
+ * A directory without `server-proxy.sock` is also removed (orphan from a
+ * crashed process that never created the socket).
+ *
+ * Safety rules:
+ *   - `currentSocketName` is always skipped — never remove the dir this
+ *     process is about to use.
+ *   - A successful `connect()` means a live broker is present → skip.
+ *   - ENOENT during `rmSync` (race: another process just removed it) is
+ *     silently ignored.
+ *   - All other errors during removal are silently suppressed — GC is
+ *     best-effort; a failed removal does not affect the broker's operation.
+ *
+ * @param baseDir          The tmuxcc base runtime dir (e.g. `$XDG_RUNTIME_DIR/tmuxcc`).
+ * @param currentSocketName The socket name this broker is about to bind — never removed.
+ * @param probeTimeoutMs   Per-socket connection probe timeout (default 200 ms).
+ */
+export async function gcStaleRuntimeDirs(
+  baseDir: string,
+  currentSocketName: string,
+  probeTimeoutMs = 200,
+): Promise<void> {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(baseDir);
+  } catch {
+    // Base dir does not exist yet or is unreadable — nothing to GC.
+    return;
+  }
+
+  for (const entry of entries) {
+    // Never touch the current broker's own directory.
+    if (entry === currentSocketName) continue;
+
+    const dirPath = path.join(baseDir, entry);
+
+    // Skip non-directories (e.g. stray files).
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(dirPath);
+    } catch {
+      continue;
+    }
+    if (!stat.isDirectory()) continue;
+
+    const sockPath = path.join(dirPath, "server-proxy.sock");
+
+    // Check liveness only if the socket file exists.
+    const sockExists = fs.existsSync(sockPath);
+    if (sockExists) {
+      const alive = await probeLiveSocket(sockPath, probeTimeoutMs);
+      if (alive) {
+        // Live broker — never touch.
+        continue;
+      }
+    }
+
+    // Stale or orphan — remove the whole directory tree.
+    try {
+      fs.rmSync(dirPath, { recursive: true, force: true });
+    } catch (err: unknown) {
+      // ENOENT: another process already removed it (race) — fine.
+      // Anything else: log to stderr but do NOT abort startup.
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        process.stderr.write(
+          `tmuxcc: gc: failed to remove stale dir ${dirPath}: ${String(err)}\n`,
+        );
+      }
+    }
   }
 }
