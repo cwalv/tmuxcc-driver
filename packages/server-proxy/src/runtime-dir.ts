@@ -195,6 +195,10 @@ export function probeLiveSocket(sockPath: string, timeoutMs = 200): Promise<bool
  *   - `currentSocketName` is always skipped — never remove the dir this
  *     process is about to use.
  *   - A successful `connect()` means a live broker is present → skip.
+ *   - Dirs younger than `minAgeMs` (dir mtime, default 60 s) are skipped: a
+ *     sibling broker that is mid-startup (dir created, socket not yet bound)
+ *     or briefly accept-stalled under load must not be swept.  Genuinely
+ *     stale dirs are crash leftovers and are minutes-to-days old.
  *   - ENOENT during `rmSync` (race: another process just removed it) is
  *     silently ignored.
  *   - All other errors during removal are silently suppressed — GC is
@@ -202,13 +206,17 @@ export function probeLiveSocket(sockPath: string, timeoutMs = 200): Promise<bool
  *
  * @param baseDir          The tmuxcc base runtime dir (e.g. `$XDG_RUNTIME_DIR/tmuxcc`).
  * @param currentSocketName The socket name this broker is about to bind — never removed.
- * @param probeTimeoutMs   Per-socket connection probe timeout (default 200 ms).
+ * @param opts.probeTimeoutMs Per-socket connection probe timeout (default 200 ms).
+ * @param opts.minAgeMs       Minimum dir age before it is eligible for removal
+ *                            (default 60 000 ms; tests pass 0).
  */
 export async function gcStaleRuntimeDirs(
   baseDir: string,
   currentSocketName: string,
-  probeTimeoutMs = 200,
+  opts: { probeTimeoutMs?: number; minAgeMs?: number } = {},
 ): Promise<void> {
+  const probeTimeoutMs = opts.probeTimeoutMs ?? 200;
+  const minAgeMs = opts.minAgeMs ?? 60_000;
   let entries: string[];
   try {
     entries = fs.readdirSync(baseDir);
@@ -231,6 +239,10 @@ export async function gcStaleRuntimeDirs(
       continue;
     }
     if (!stat.isDirectory()) continue;
+
+    // Age guard: a freshly-created dir may belong to a sibling broker that is
+    // mid-startup (socket not bound yet) — never sweep the young.
+    if (Date.now() - stat.mtimeMs < minAgeMs) continue;
 
     const sockPath = path.join(dirPath, "server-proxy.sock");
 

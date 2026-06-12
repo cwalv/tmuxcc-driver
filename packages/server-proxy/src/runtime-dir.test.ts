@@ -122,7 +122,7 @@ describe("gcStaleRuntimeDirs (tc-s1sm)", () => {
       const currentName = nextSocketName();
       // currentName dir does not need to exist — we just pass it as the guard.
 
-      await gcStaleRuntimeDirs(baseDir, currentName, 200);
+      await gcStaleRuntimeDirs(baseDir, currentName, { probeTimeoutMs: 200, minAgeMs: 0 });
 
       assert.equal(
         fs.existsSync(staleDir),
@@ -142,7 +142,7 @@ describe("gcStaleRuntimeDirs (tc-s1sm)", () => {
       // No server-proxy.sock — just an empty dir.
 
       const currentName = nextSocketName();
-      await gcStaleRuntimeDirs(baseDir, currentName, 200);
+      await gcStaleRuntimeDirs(baseDir, currentName, { probeTimeoutMs: 200, minAgeMs: 0 });
 
       assert.equal(
         fs.existsSync(orphanDir),
@@ -164,7 +164,7 @@ describe("gcStaleRuntimeDirs (tc-s1sm)", () => {
       stop = await startListeningServer(sockPath);
 
       const currentName = nextSocketName();
-      await gcStaleRuntimeDirs(baseDir, currentName, 500);
+      await gcStaleRuntimeDirs(baseDir, currentName, { probeTimeoutMs: 500, minAgeMs: 0 });
 
       assert.equal(
         fs.existsSync(liveDir),
@@ -184,7 +184,7 @@ describe("gcStaleRuntimeDirs (tc-s1sm)", () => {
       const currentDir = makeSubDir(baseDir, currentName);
       // No socket file — this is the dir the new broker is about to use.
 
-      await gcStaleRuntimeDirs(baseDir, currentName, 200);
+      await gcStaleRuntimeDirs(baseDir, currentName, { probeTimeoutMs: 200, minAgeMs: 0 });
 
       assert.equal(
         fs.existsSync(currentDir),
@@ -218,7 +218,7 @@ describe("gcStaleRuntimeDirs (tc-s1sm)", () => {
       const currentName = nextSocketName();
       // Must not throw.
       await assert.doesNotReject(
-        () => gcStaleRuntimeDirs(baseDir, currentName, 200),
+        () => gcStaleRuntimeDirs(baseDir, currentName, { probeTimeoutMs: 200, minAgeMs: 0 }),
         "gcStaleRuntimeDirs must tolerate ENOENT races without throwing",
       );
 
@@ -236,7 +236,7 @@ describe("gcStaleRuntimeDirs (tc-s1sm)", () => {
   it("does not throw when baseDir does not exist", async () => {
     const nonExistent = path.join(os.tmpdir(), `tmuxcc-test-noexist-${Date.now()}`);
     await assert.doesNotReject(
-      () => gcStaleRuntimeDirs(nonExistent, "any-socket-name", 200),
+      () => gcStaleRuntimeDirs(nonExistent, "any-socket-name", { probeTimeoutMs: 200, minAgeMs: 0 }),
       "gcStaleRuntimeDirs must not throw when the base dir does not exist",
     );
   });
@@ -249,13 +249,41 @@ describe("gcStaleRuntimeDirs (tc-s1sm)", () => {
       fs.writeFileSync(filePath, "hello");
 
       const currentName = nextSocketName();
-      await gcStaleRuntimeDirs(baseDir, currentName, 200);
+      await gcStaleRuntimeDirs(baseDir, currentName, { probeTimeoutMs: 200, minAgeMs: 0 });
 
       // The file should still be there (only directories are considered).
       assert.equal(
         fs.existsSync(filePath),
         true,
         "plain files in baseDir must not be removed by GC",
+      );
+    } finally {
+      fs.rmSync(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  it("age guard: keeps a fresh sock-less dir (sibling broker mid-startup)", async () => {
+    const baseDir = makeBaseDir();
+    try {
+      // A just-created dir with no server-proxy.sock yet — exactly what a
+      // sibling broker's runtime dir looks like between mkdir and listen().
+      const youngDir = makeSubDir(baseDir, nextSocketName());
+
+      const currentName = nextSocketName();
+      // Default minAgeMs (60s) — the young dir must survive the sweep.
+      await gcStaleRuntimeDirs(baseDir, currentName, { probeTimeoutMs: 200 });
+      assert.equal(
+        fs.existsSync(youngDir),
+        true,
+        "a dir younger than minAgeMs must not be swept even without a socket",
+      );
+
+      // With the guard disabled the same dir is treated as an orphan.
+      await gcStaleRuntimeDirs(baseDir, currentName, { probeTimeoutMs: 200, minAgeMs: 0 });
+      assert.equal(
+        fs.existsSync(youngDir),
+        false,
+        "with minAgeMs=0 the sock-less orphan is removed",
       );
     } finally {
       fs.rmSync(baseDir, { recursive: true, force: true });
