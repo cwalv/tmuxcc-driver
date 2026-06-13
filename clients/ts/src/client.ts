@@ -118,6 +118,20 @@ export interface ClientHandle {
   sendVerb(cmd: WireCommand): Promise<VerbResult>;
 
   /**
+   * Send a `pane.capture` wire command and await the captured text
+   * (tc-295a.17 / E3.2).
+   *
+   * Issues `{ kind: "pane.capture", paneId }` as a correlated command request
+   * and resolves with the full UTF-8 scrollback text when the session-proxy
+   * replies with `result.ok = true`.
+   *
+   * Rejects (fail-loud) when the session-proxy returns `result.ok = false`
+   * (e.g. code `"pane.not-found"`) or the connection closes before the
+   * response arrives.
+   */
+  capturePane(paneId: PaneId): Promise<string>;
+
+  /**
    * Detach the render hook (if any), close the connection, and tear down all
    * subscriptions.  Safe to call more than once.
    */
@@ -204,7 +218,7 @@ export async function connectClient(
   function disconnect(): void {
     if (_disconnected) return;
     _disconnected = true;
-    // tc-ozk.1: fail any in-flight sendVerb() awaits so callers don't hang.
+    // tc-ozk.1: fail any in-flight sendVerb() / sendPaneCapture() awaits so callers don't hang.
     inputApi.rejectAllPending("connection disconnected before verb response arrived");
     mirror.detachHook();
     connection.close();
@@ -217,6 +231,7 @@ export async function connectClient(
     mirror,
     session,
     sendVerb: (cmd: WireCommand) => inputApi.sendVerb(cmd),
+    capturePane: (paneId: PaneId) => inputApi.sendPaneCapture(paneId),
     disconnect,
   };
 }

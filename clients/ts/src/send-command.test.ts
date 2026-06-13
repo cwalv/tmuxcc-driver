@@ -183,6 +183,117 @@ describe("InputApi.sendVerb — returns effect ids (tc-ozk.1)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 1c. InputApi.sendPaneCapture — tc-295a.17 / E3.2 pane.capture round-trip
+// ---------------------------------------------------------------------------
+
+describe("InputApi.sendPaneCapture — pane.capture wire round-trip (tc-295a.17)", () => {
+  it("sends command.request { kind: pane.capture, paneId } and resolves with text on success", async () => {
+    const messages: CommandRequestMessage[] = [];
+    const sender: InputSender = {
+      send(msg) { messages.push(msg as CommandRequestMessage); },
+    };
+    const api = createInputApi(sender);
+
+    const capturePromise = api.sendPaneCapture(paneId("p3"));
+
+    assert.equal(messages.length, 1, "exactly one message should be sent");
+    const msg = messages[0]!;
+    assert.equal(msg.type, "command.request");
+    assert.deepEqual(msg.command, { kind: "pane.capture", paneId: paneId("p3") });
+    assert.ok(typeof msg.correlationId === "string" && msg.correlationId.length > 0);
+
+    // Session-proxy replies with the captured text.
+    const response: SessionProxyCommandResponseMessage = {
+      type: "command.response",
+      seq: 10,
+      correlationId: msg.correlationId,
+      result: { ok: true, payload: { text: "hello world\nfoo bar\n" } },
+    };
+    api.handleCommandResponse(response);
+
+    const text = await capturePromise;
+    assert.equal(text, "hello world\nfoo bar\n");
+  });
+
+  it("rejects (fail-loud) when result.ok=false (pane.not-found)", async () => {
+    const messages: CommandRequestMessage[] = [];
+    const sender: InputSender = {
+      send(msg) { messages.push(msg as CommandRequestMessage); },
+    };
+    const api = createInputApi(sender);
+
+    const capturePromise = api.sendPaneCapture(paneId("p99"));
+    const correlationId = messages[0]!.correlationId;
+
+    api.handleCommandResponse({
+      type: "command.response",
+      seq: 11,
+      correlationId,
+      result: { ok: false, code: "pane.not-found", message: "Pane p99 not in model" },
+    });
+
+    await assert.rejects(capturePromise, (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /pane\.not-found/);
+      return true;
+    });
+  });
+
+  it("rejects when ok=true but payload.text is absent (protocol violation)", async () => {
+    const messages: CommandRequestMessage[] = [];
+    const sender: InputSender = {
+      send(msg) { messages.push(msg as CommandRequestMessage); },
+    };
+    const api = createInputApi(sender);
+
+    const capturePromise = api.sendPaneCapture(paneId("p1"));
+    const correlationId = messages[0]!.correlationId;
+
+    api.handleCommandResponse({
+      type: "command.response",
+      seq: 12,
+      correlationId,
+      result: { ok: true, payload: {} },
+    });
+
+    await assert.rejects(capturePromise, /payload\.text was absent/);
+  });
+
+  it("rejectAllPending rejects in-flight sendPaneCapture awaits", async () => {
+    const sender: InputSender = { send() { /* drop */ } };
+    const api = createInputApi(sender);
+
+    const p1 = api.sendPaneCapture(paneId("p1"));
+    const p2 = api.sendPaneCapture(paneId("p2"));
+    api.rejectAllPending("connection closed");
+
+    await assert.rejects(p1, /connection closed/);
+    await assert.rejects(p2, /connection closed/);
+  });
+
+  it("sendPaneCapture and sendVerb each use distinct correlationIds", async () => {
+    const messages: CommandRequestMessage[] = [];
+    const sender: InputSender = {
+      send(msg) { messages.push(msg as CommandRequestMessage); },
+    };
+    const api = createInputApi(sender);
+
+    // Attach .catch() before rejectAllPending so the rejections are handled.
+    const captureP = api.sendPaneCapture(paneId("p0")).catch(() => { /* swallow cleanup rejection */ });
+    const verbP = api.sendVerb({ kind: "open-window" }).catch(() => { /* swallow cleanup rejection */ });
+
+    assert.equal(messages.length, 2);
+    assert.notEqual(messages[0]!.correlationId, messages[1]!.correlationId);
+    // Cleanup: reject pending to avoid test leak.
+    api.rejectAllPending("test cleanup");
+
+    // Await so the test runner sees the rejections were handled before teardown.
+    await captureP;
+    await verbP;
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 2. createClient + createInMemoryTransportPair — integration
 // ---------------------------------------------------------------------------
 

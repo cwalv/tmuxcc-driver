@@ -243,6 +243,26 @@ export interface InputApi {
    * @param paneId - The pane to attach + hydrate.
    */
   attachPane(paneId: PaneId): void;
+
+  /**
+   * Send a `pane.capture` command and await the full scrollback text
+   * (tc-295a.17 / E3.2).
+   *
+   * Issues a correlated `command.request { kind: "pane.capture", paneId }` and
+   * resolves with the full UTF-8 scrollback text from the `command.response`
+   * payload when the session-proxy replies with `result.ok = true`.
+   *
+   * Rejects (fail-loud) when:
+   *   - `result.ok = false` (e.g. code `"pane.not-found"`)
+   *   - The connection closes before the response arrives
+   *     (`rejectAllPending` is called on disconnect)
+   *
+   * Routing: requires `handleCommandResponse` to be called with matching
+   * `command.response` messages (connectClient wires this via the mirror).
+   *
+   * @param paneId - The pane to capture.
+   */
+  sendPaneCapture(paneId: PaneId): Promise<string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -289,6 +309,14 @@ export function createInputApi(
   const pendingVerbs = new Map<
     string,
     { resolve: (result: VerbResult) => void; reject: (err: Error) => void }
+  >();
+
+  // tc-295a.17 / E3.2: pending sendPaneCapture() promises keyed by correlationId.
+  // Resolved with the captured text string on success; rejected on wire error or
+  // disconnect.  Shared rejectAllPending sweep.
+  const pendingCaptures = new Map<
+    string,
+    { resolve: (text: string) => void; reject: (err: Error) => void }
   >();
 
   // Pending resize buffer: paneId → {cols, rows}.  Only populated when
@@ -390,6 +418,28 @@ export function createInputApi(
     },
 
     handleCommandResponse(msg: SessionProxyCommandResponseMessage): void {
+      // tc-295a.17 / E3.2: dispatch pane.capture responses before verb responses.
+      // A correlationId is owned by exactly one pending map — capture OR verb, never both.
+      const captureDeferred = pendingCaptures.get(msg.correlationId);
+      if (captureDeferred !== undefined) {
+        pendingCaptures.delete(msg.correlationId);
+        if (msg.result.ok) {
+          const text = msg.result.payload?.text;
+          if (text !== undefined) {
+            captureDeferred.resolve(text);
+          } else {
+            captureDeferred.reject(new Error(
+              `tmuxcc: pane.capture — response ok=true but payload.text was absent: ${JSON.stringify(msg.result.payload)}`,
+            ));
+          }
+        } else {
+          captureDeferred.reject(new Error(
+            `tmuxcc: pane.capture — ${msg.result.code}: ${msg.result.message}`,
+          ));
+        }
+        return;
+      }
+
       const deferred = pendingVerbs.get(msg.correlationId);
       if (deferred === undefined) return; // not an awaited verb (e.g. fire-and-forget)
       pendingVerbs.delete(msg.correlationId);
@@ -426,6 +476,11 @@ export function createInputApi(
         deferred.reject(new Error(reason));
       }
       pendingVerbs.clear();
+      // tc-295a.17 / E3.2: also reject in-flight pane.capture awaits.
+      for (const deferred of pendingCaptures.values()) {
+        deferred.reject(new Error(reason));
+      }
+      pendingCaptures.clear();
     },
 
     attachPane(paneId: PaneId): void {
@@ -437,6 +492,30 @@ export function createInputApi(
         paneId,
       };
       sender.send(msg);
+    },
+
+    sendPaneCapture(paneId: PaneId): Promise<string> {
+      // tc-295a.17 / E3.2: one-shot pane text snapshot via the W3.3 wire command.
+      // Sends command.request { kind: "pane.capture", paneId } and awaits the
+      // matching command.response where result.ok=true and payload.text carries
+      // the full scrollback.  Fail-loud on pane.not-found or transport close.
+      const correlationId = String(nextSeq());
+      const msg: CommandRequestMessage = {
+        type: "command.request",
+        seq: Number(correlationId),
+        correlationId,
+        command: { kind: "pane.capture", paneId },
+      };
+      return new Promise<string>((resolve, reject) => {
+        pendingCaptures.set(correlationId, { resolve, reject });
+        try {
+          sender.send(msg);
+        } catch (err) {
+          // The send itself failed — don't leak the pending entry.
+          pendingCaptures.delete(correlationId);
+          reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      });
     },
   };
 }
