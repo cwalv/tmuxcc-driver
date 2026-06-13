@@ -530,9 +530,23 @@ export function createInputPath(
     void resultPromise.then(
       (result) => {
         if (!result.ok) {
-          // %error → command-attributable failure. Surface loudly.
-          const message = `tmux rejected ${verbKind}`;
-          console.warn(`[input-path] ${message} (correlationId=${correlationId})`);
+          // %error → command-attributable failure (the "+ B5b" %error mapping).
+          //
+          // tc-yudx: surface tmux's VERBATIM refusal text, not a generic
+          // "tmux rejected" string.  In control mode a failed command emits its
+          // error reason as the body of the %begin…%error block (e.g.
+          // "create pane failed: pane too small"); the correlator accumulates
+          // that into `result.body` for error blocks exactly as it does for
+          // %end blocks.  Pass it through as the message so the host can show
+          // the user WHY tmux refused — distinct from a transport/timeout
+          // stall (tc-yudx: a vague "no response within Ns" hides the cause).
+          // Fall back to the generic phrasing only when tmux emitted no body.
+          const errorBody =
+            result.body !== undefined
+              ? new TextDecoder().decode(result.body).trim()
+              : "";
+          const message = errorBody !== "" ? errorBody : `tmux rejected ${verbKind}`;
+          console.warn(`[input-path] tmux rejected ${verbKind}: ${message} (correlationId=${correlationId})`);
           respond(correlationId, { ok: false, code: "verb.failed", message });
           return;
         }

@@ -891,6 +891,42 @@ describe("createInputPath — creating verbs return effect ids (tc-ozk.1)", () =
     }
   });
 
+  it("tc-yudx: %error with a body → respond ok=false carrying the VERBATIM tmux refusal text", async () => {
+    // A real tmux split refusal (window too small to divide) emits its reason
+    // as the %begin…%error block body, e.g. "create pane failed: pane too
+    // small".  The correlator accumulates that into CommandResult.body for
+    // error blocks; the verb must surface it VERBATIM so the host can show the
+    // user WHY tmux refused — NOT a generic "tmux rejected" (tc-yudx) and NOT
+    // a vague transport timeout.
+    const host = makeFakeDeps();
+    const path = createInputPath(host);
+    const results: Array<{ correlationId: string; result: VerbResult }> = [];
+
+    host.enqueueSendResult(
+      Promise.resolve({ ok: false, body: enc("create pane failed: pane too small") }),
+    );
+
+    path.handleClientMessage(
+      {
+        type: "command.request",
+        seq: nextSeq(),
+        correlationId: "v4b",
+        command: { kind: "split-pane", paneId: paneId("p3"), direction: "vertical" },
+      },
+      (correlationId, result) => results.push({ correlationId, result }),
+    );
+
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    assert.equal(results.length, 1);
+    assert.equal(results[0]!.result.ok, false);
+    if (results[0]!.result.ok === false) {
+      assert.equal(results[0]!.result.code, "verb.failed");
+      // The EXACT tmux text, not a synthesized generic message.
+      assert.equal(results[0]!.result.message, "create pane failed: pane too small");
+    }
+  });
+
   it("%end but unparseable -P body → respond ok=false (fail-loud, not silent ok)", async () => {
     const host = makeFakeDeps();
     const path = createInputPath(host);
