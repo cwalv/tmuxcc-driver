@@ -318,14 +318,51 @@ export function createInputPath(
    */
   async function sendInputChunked(tmuxPaneNum: number, bytes: Uint8Array): Promise<void> {
     if (bytes.length <= INPUT_CHUNK_BYTES) {
-      // Fast path: single chunk — equivalent to the pre-chunking code path.
+      // Single chunk (incl. the empty-input no-op) — equivalent to the
+      // pre-chunking code path.
       await sendCommand(sendKeysHex(tmuxPaneNum, bytes));
       return;
     }
     for (let offset = 0; offset < bytes.length; offset += INPUT_CHUNK_BYTES) {
       const chunk = bytes.subarray(offset, offset + INPUT_CHUNK_BYTES);
-      await sendCommand(sendKeysHex(tmuxPaneNum, chunk));
+      const result = await sendCommand(sendKeysHex(tmuxPaneNum, chunk));
+      // %error on a chunk: abort the remainder. Continuing would deliver the
+      // later chunks with a hole where the failed one was; a truncated prefix
+      // is the lesser corruption and closest to the all-or-nothing semantics
+      // of the pre-chunking single command.
+      if (!result.ok) return;
     }
+  }
+
+  /**
+   * Tail of the in-flight chunked-input chain (tc-n4ct cross-message order).
+   *
+   * Pre-chunking, every input message's command was WRITTEN synchronously at
+   * arrival, so arrival order == write order across messages. A multi-chunk
+   * send yields between chunks (each chunk awaits tmux's reply), opening a
+   * window where a later input message's write could land BETWEEN chunks —
+   * e.g. a keystroke typed during a 50KB paste would splice into the middle
+   * of the pasted bytes. While a chunked send is in flight, subsequent input
+   * messages chain onto this tail instead of writing directly; once the chain
+   * drains it resets to null and single-chunk inputs return to the
+   * synchronous-write fast path.
+   */
+  let inputTail: Promise<void> | null = null;
+
+  function enqueueInput(tmuxPaneNum: number, bytes: Uint8Array): void {
+    const prev = inputTail;
+    const chained = (
+      prev === null
+        ? sendInputChunked(tmuxPaneNum, bytes)
+        : prev.then(() => sendInputChunked(tmuxPaneNum, bytes))
+    )
+      // A rejected send must not poison the chain for subsequent inputs;
+      // send rejections were unobserved fire-and-forget before chunking too.
+      .catch(() => {});
+    inputTail = chained;
+    void chained.then(() => {
+      if (inputTail === chained) inputTail = null;
+    });
   }
 
   /**
@@ -415,12 +452,20 @@ export function createInputPath(
       // To stay safely below the limit we chunk the byte array into ≤5000-byte
       // segments and issue one send-keys -H call per segment.  Chunks are sent
       // sequentially (await each before the next) so byte order is preserved
-      // across the correlator FIFO.
+      // across the correlator FIFO; while a chunked send is in flight, later
+      // input messages queue behind it (inputTail) so cross-message byte order
+      // is preserved too.
       // -----------------------------------------------------------------------
       case "input": {
         const tmuxPaneNum = toTmuxPane(msg.paneId);
         const bytes = new TextEncoder().encode(msg.data);
-        void sendInputChunked(tmuxPaneNum, bytes);
+        if (inputTail === null && bytes.length <= INPUT_CHUNK_BYTES) {
+          // Fast path: synchronous write at arrival — identical to the
+          // pre-chunking code path (and to every other handler here).
+          sendCommand(sendKeysHex(tmuxPaneNum, bytes));
+        } else {
+          enqueueInput(tmuxPaneNum, bytes);
+        }
         break;
       }
 

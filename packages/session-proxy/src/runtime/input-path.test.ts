@@ -1772,3 +1772,77 @@ describe("createInputPath — tc-n4ct send-keys -H chunking", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Suite: tc-n4ct — cross-message input ordering while a chunked send is in
+// flight (review hardening).
+//
+// Pre-chunking, every input message's command was written synchronously at
+// arrival, so arrival order == write order across messages. The chunk loop
+// yields between chunks (awaiting tmux's reply), so a later input message
+// must QUEUE behind the in-flight chain rather than write into the gap.
+// ---------------------------------------------------------------------------
+
+describe("createInputPath — tc-n4ct cross-message ordering", () => {
+  /** Drain microtasks until the expected number of writes (bounded). */
+  async function drainUntil(host: FakeDeps, expected: number): Promise<void> {
+    for (let i = 0; i < 100 && host.writes.length < expected; i++) {
+      await Promise.resolve();
+    }
+  }
+
+  it("input arriving during a multi-chunk send queues behind it (no interleave)", async () => {
+    const host = makeResolvingFakeDeps();
+    const path = createInputPath(host);
+
+    // 5001 bytes → 2 chunks; chunk 1 writes synchronously, chunk 2 after a tick.
+    path.handleClientMessage(makeInput("1", "a".repeat(5001)));
+    // Arrives while chunk 2 is still pending — must NOT write between chunks.
+    path.handleClientMessage(makeInput("1", "X"));
+
+    await drainUntil(host, 3);
+    assert.equal(host.writes.length, 3, "expected 2 chunks + 1 queued input");
+
+    const tokens = (w: string) =>
+      w.replace(/^send-keys -H -t %\d+ /, "").trim().split(" ");
+    assert.equal(tokens(host.writes[0]!).length, 5000, "chunk 1 first");
+    assert.equal(tokens(host.writes[1]!).length, 1, "chunk 2 second");
+    // "X" = 0x58 — must come AFTER both chunks of the first message.
+    assert.deepEqual(tokens(host.writes[2]!), ["58"], "queued input written last");
+  });
+
+  it("single-chunk input with no in-flight chain writes synchronously (fast path)", () => {
+    const host = makeResolvingFakeDeps();
+    const path = createInputPath(host);
+
+    path.handleClientMessage(makeInput("1", "hi"));
+    // No await: the write must already have happened at arrival.
+    assert.equal(host.writes.length, 1, "fast path must write synchronously");
+  });
+
+  it("a %error chunk aborts the remainder of THAT message but not queued ones", async () => {
+    const host = makeFakeDeps();
+    // Message A: 3 chunks (10001 bytes). Chunk 1 rejected by tmux (%error).
+    const d1 = defer<InputPathCommandResult>();
+    host.enqueueSendResult(d1.promise);
+    // Message B's single send resolves ok.
+    const d2 = defer<InputPathCommandResult>();
+    host.enqueueSendResult(d2.promise);
+
+    const path = createInputPath(host);
+    path.handleClientMessage(makeInput("1", "a".repeat(10001)));
+    path.handleClientMessage(makeInput("1", "X"));
+
+    assert.equal(host.writes.length, 1, "only chunk 1 of A written so far");
+    d1.resolve({ ok: false }); // tmux rejects chunk 1 → A's chunks 2..3 abort.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    assert.equal(host.writes.length, 2, "A aborted after chunk 1; B still sent");
+    const tokens = (w: string) =>
+      w.replace(/^send-keys -H -t %\d+ /, "").trim().split(" ");
+    assert.deepEqual(tokens(host.writes[1]!), ["58"], "B's byte follows the abort");
+    d2.resolve({ ok: true });
+  });
+});
