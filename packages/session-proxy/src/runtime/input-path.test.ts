@@ -1588,3 +1588,187 @@ describe("createInputPath — tc-3si.1 atomic slot+write contract", () => {
     assert.deepEqual(sendCalls, ["set-option -wt @30 synchronize-panes on"]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Suite: tc-n4ct — send-keys -H chunking for large input
+//
+// tmux's control-mode command-line length limit is empirically ~5447 bytes.
+// The session-proxy must chunk large byte arrays into ≤5000-byte segments,
+// each emitted as a separate send-keys -H call, in order.
+//
+// Boundary cases:
+//   - Exactly 5000 bytes  → 1 chunk (fast path)
+//   - Exactly 5001 bytes  → 2 chunks (first boundary crossing)
+//   - 51200 bytes (50KB)  → 11 chunks (the original bug payload)
+//
+// Each test resolves each send() Promise immediately so the async chain
+// completes before we assert.
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a fake deps where every send() immediately resolves with ok=true.
+ * This lets us await the full async chain in the test.
+ */
+function makeResolvingFakeDeps(): FakeDeps {
+  const base = makeFakeDeps();
+  // Override send() to resolve immediately instead of returning a stub Promise.
+  const originalSend = base.send.bind(base);
+  (base as unknown as { send: (cmd: string) => Promise<CommandResult> }).send = (cmd: string) => {
+    const p = originalSend(cmd);
+    // The base send() already pushed to writes; return a resolved Promise.
+    void p; // discard the stub
+    return Promise.resolve({ ok: true } as unknown as CommandResult);
+  };
+  return base;
+}
+
+describe("createInputPath — tc-n4ct send-keys -H chunking", () => {
+  it("payload of exactly 5000 bytes (boundary) emits exactly 1 send-keys -H chunk", async () => {
+    const host = makeResolvingFakeDeps();
+    const path = createInputPath(host);
+
+    // 5000 ASCII bytes = 5000 UTF-8 bytes → should stay in the fast path.
+    const data = "a".repeat(5000);
+    path.handleClientMessage(makeInput("1", data));
+
+    // Allow the async chain to complete.
+    await Promise.resolve();
+
+    assert.equal(host.writes.length, 1, "5000-byte input must produce exactly 1 chunk");
+    // The single chunk should start with the correct command prefix.
+    assert.ok(
+      host.writes[0]?.startsWith("send-keys -H -t %1 "),
+      `expected send-keys -H -t %1 …, got: ${host.writes[0]?.slice(0, 40)}`,
+    );
+    // 5000 bytes × 3 chars each = 15 000 hex token chars + (5000-1) spaces = 19 999
+    // total hex section.  Verify length indirectly: count space-separated tokens.
+    const tokens = host.writes[0]!
+      .replace("send-keys -H -t %1 ", "")
+      .trim()
+      .split(" ");
+    assert.equal(tokens.length, 5000, "should be 5000 hex tokens in the single chunk");
+  });
+
+  it("payload of exactly 5001 bytes (first boundary crossing) emits exactly 2 chunks", async () => {
+    const host = makeResolvingFakeDeps();
+    const path = createInputPath(host);
+
+    // 5001 ASCII bytes — first byte past the chunk boundary.
+    const data = "b".repeat(5001);
+    path.handleClientMessage(makeInput("2", data));
+
+    // Allow the full async chain (2 awaited send() calls) to complete.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    assert.equal(host.writes.length, 2, "5001-byte input must produce exactly 2 chunks");
+    // Chunk 1: 5000 tokens.
+    const chunk1Tokens = host.writes[0]!
+      .replace("send-keys -H -t %2 ", "")
+      .trim()
+      .split(" ");
+    assert.equal(chunk1Tokens.length, 5000, "chunk 1 should contain 5000 hex tokens");
+    // Chunk 2: 1 token.
+    const chunk2Tokens = host.writes[1]!
+      .replace("send-keys -H -t %2 ", "")
+      .trim()
+      .split(" ");
+    assert.equal(chunk2Tokens.length, 1, "chunk 2 should contain the 1 remaining byte");
+    // Verify pane target is preserved in both chunks.
+    assert.ok(host.writes[0]!.includes("-t %2"), "chunk 1 pane target");
+    assert.ok(host.writes[1]!.includes("-t %2"), "chunk 2 pane target");
+  });
+
+  it("51200-byte payload (original bug: 50KB paste) emits 11 ordered chunks", async () => {
+    const host = makeResolvingFakeDeps();
+    const path = createInputPath(host);
+
+    // Replicate the bug payload: 25600 random bytes → 51200 hex chars.
+    // For predictability use a fixed ASCII pattern (0x61 = 'a').
+    const PAYLOAD_BYTES = 51200;
+    const data = "a".repeat(PAYLOAD_BYTES); // ASCII: 1 byte/char, 51200 UTF-8 bytes.
+    path.handleClientMessage(makeInput("1", data));
+
+    // Drain: ceil(51200 / 5000) = 11 chunks → 11 await ticks.
+    for (let i = 0; i < 12; i++) {
+      await Promise.resolve();
+    }
+
+    // ceil(51200 / 5000) = 11 (10 × 5000 + 1 × 1200).
+    const expectedChunks = Math.ceil(PAYLOAD_BYTES / 5000); // 11
+    assert.equal(
+      host.writes.length,
+      expectedChunks,
+      `51200-byte input must produce ${expectedChunks} chunks, got ${host.writes.length}`,
+    );
+
+    // Verify chunk sizes: chunks 0..9 → 5000 tokens each; chunk 10 → 1200.
+    for (let i = 0; i < 10; i++) {
+      const tokens = host.writes[i]!
+        .replace(/^send-keys -H -t %\d+ /, "")
+        .trim()
+        .split(" ");
+      assert.equal(tokens.length, 5000, `chunk ${i} should have 5000 hex tokens`);
+    }
+    const lastTokens = host.writes[10]!
+      .replace(/^send-keys -H -t %\d+ /, "")
+      .trim()
+      .split(" ");
+    assert.equal(lastTokens.length, 1200, "last chunk should have 1200 hex tokens (51200 mod 5000)");
+
+    // Verify all chunks target the same pane.
+    for (let i = 0; i < expectedChunks; i++) {
+      assert.ok(host.writes[i]!.includes("-t %1"), `chunk ${i} must target -t %1`);
+    }
+  });
+
+  it("byte order is preserved across chunk boundaries (sequential hex content)", async () => {
+    const host = makeResolvingFakeDeps();
+    const path = createInputPath(host);
+
+    // 10001 bytes with a known pattern: bytes 0..255 repeated.
+    const PAYLOAD_BYTES = 10001;
+    const rawBytes = new Uint8Array(PAYLOAD_BYTES);
+    for (let i = 0; i < PAYLOAD_BYTES; i++) {
+      rawBytes[i] = i % 256;
+    }
+    // Encode to a string via latin-1 (byte values 0-255 map to code points 0-255).
+    // TextEncoder will re-encode code points > 127 as multi-byte UTF-8.  Use only
+    // bytes 0..127 (pure ASCII) to keep the test predictable: 10001 ASCII chars =
+    // 10001 UTF-8 bytes.
+    const asciiBytes = new Uint8Array(PAYLOAD_BYTES);
+    for (let i = 0; i < PAYLOAD_BYTES; i++) {
+      asciiBytes[i] = i % 128; // 0x00..0x7F → single-byte UTF-8.
+    }
+    // Build the string from ASCII code points.
+    const data = Array.from(asciiBytes, (b) => String.fromCharCode(b)).join("");
+
+    path.handleClientMessage(makeInput("3", data));
+
+    // 3 chunks: [5000, 5000, 1]
+    for (let i = 0; i < 4; i++) {
+      await Promise.resolve();
+    }
+
+    assert.equal(host.writes.length, 3, "10001-byte input must produce 3 chunks");
+
+    // Reconstruct the hex tokens from all chunks and verify order.
+    const allTokens: string[] = [];
+    for (const w of host.writes) {
+      const hexSection = w.replace(/^send-keys -H -t %\d+ /, "").trim();
+      allTokens.push(...hexSection.split(" "));
+    }
+
+    assert.equal(allTokens.length, PAYLOAD_BYTES, "total token count should equal payload byte count");
+
+    // Verify each token matches the expected byte value.
+    for (let i = 0; i < PAYLOAD_BYTES; i++) {
+      const expected = (i % 128).toString(16).padStart(2, "0");
+      assert.equal(
+        allTokens[i],
+        expected,
+        `token at position ${i}: expected ${expected}, got ${allTokens[i]}`,
+      );
+    }
+  });
+});

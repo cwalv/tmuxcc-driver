@@ -290,6 +290,45 @@ export function createInputPath(
   }
 
   /**
+   * Maximum number of UTF-8 bytes per send-keys -H command (tc-n4ct).
+   *
+   * tmux's control-mode command-line length limit is empirically ~5447 bytes
+   * (5447 OK, 5448 → "failed to send command").  We use 5000 as a comfortable
+   * round-number margin.  Each byte encodes to 3 chars in the command line
+   * ("XX "), so 5000 bytes → 14 999 chars — well within the ~5447-byte
+   * tmux protocol limit.
+   *
+   * Note: the tmux limit is on the *command string* length, not on the byte
+   * count of the payload.  1 byte → 3 chars ("XX "), so the effective
+   * payload-byte limit at the 5447-char tmux boundary is ≈1815 bytes.
+   * Choosing 5000 payload bytes keeps the command string at ≤14 999 chars,
+   * providing a factor-of-3 safety margin over the 5447-char tmux limit.
+   */
+  const INPUT_CHUNK_BYTES = 5000;
+
+  /**
+   * Send a large input byte array as one or more chunked send-keys -H commands.
+   *
+   * Chunks the byte array into segments of at most INPUT_CHUNK_BYTES and sends
+   * each segment sequentially (await each send before the next) to preserve
+   * byte order across the correlator FIFO.
+   *
+   * An empty byte array is still sent as a single send-keys -H (no-op but
+   * preserves the existing empty-input behaviour tested by the existing suite).
+   */
+  async function sendInputChunked(tmuxPaneNum: number, bytes: Uint8Array): Promise<void> {
+    if (bytes.length <= INPUT_CHUNK_BYTES) {
+      // Fast path: single chunk — equivalent to the pre-chunking code path.
+      await sendCommand(sendKeysHex(tmuxPaneNum, bytes));
+      return;
+    }
+    for (let offset = 0; offset < bytes.length; offset += INPUT_CHUNK_BYTES) {
+      const chunk = bytes.subarray(offset, offset + INPUT_CHUNK_BYTES);
+      await sendCommand(sendKeysHex(tmuxPaneNum, chunk));
+    }
+  }
+
+  /**
    * Send an optimistic window-option update with error reversal (tc-7xv.37).
    *
    * Pattern:
@@ -369,12 +408,19 @@ export function createInputPath(
       // preserved exactly.  The client pre-encodes special keys as their byte
       // sequences (e.g. ESC-[ sequences for arrow keys) so we just encode the
       // string verbatim.
+      //
+      // Chunking (tc-n4ct): tmux's control-mode command-line length limit is
+      // empirically ~5447 bytes (5447 OK, 5448 → "failed to send command").
+      // A 51200-byte paste encodes to a 153618-char command — 28× over limit.
+      // To stay safely below the limit we chunk the byte array into ≤5000-byte
+      // segments and issue one send-keys -H call per segment.  Chunks are sent
+      // sequentially (await each before the next) so byte order is preserved
+      // across the correlator FIFO.
       // -----------------------------------------------------------------------
       case "input": {
         const tmuxPaneNum = toTmuxPane(msg.paneId);
         const bytes = new TextEncoder().encode(msg.data);
-        const cmd = sendKeysHex(tmuxPaneNum, bytes);
-        sendCommand(cmd);
+        void sendInputChunked(tmuxPaneNum, bytes);
         break;
       }
 
