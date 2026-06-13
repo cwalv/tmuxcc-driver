@@ -830,5 +830,36 @@ describe("protocol schema conformance", () => {
       };
       assert.ok(validateClientMsg(msg as ClientMessage), JSON.stringify(validateClientMsg.errors));
     });
+
+    // tc-295a.11: pane.capture
+    it("SessionProxyCommandRequestMessage (pane.capture) — tc-295a.11", () => {
+      const msg: SessionProxyCommandRequestMessage = {
+        type: "command.request",
+        seq: 13,
+        correlationId: "req-019",
+        command: { kind: "pane.capture", paneId: P0 },
+      };
+      assert.ok(validateClientMsg(msg as ClientMessage), JSON.stringify(validateClientMsg.errors));
+    });
+
+    it("SessionProxyCommandResponseMessage (pane.capture success with text) — tc-295a.11", () => {
+      const msg: SessionProxyCommandResponseMessage = {
+        type: "command.response",
+        seq: 14,
+        correlationId: "req-019",
+        result: { ok: true, payload: { text: "$ ls -la\ntotal 8\ndrwxr-xr-x 2 user user 4096 Jan  1 00:00 .\n" } },
+      };
+      assert.ok(validateSessionProxyMsg(msg as SessionProxyMessage), JSON.stringify(validateSessionProxyMsg.errors));
+    });
+
+    it("SessionProxyCommandResponseMessage (pane.capture failure pane.not-found) — tc-295a.11", () => {
+      const msg: SessionProxyCommandResponseMessage = {
+        type: "command.response",
+        seq: 15,
+        correlationId: "req-019",
+        result: { ok: false, code: "pane.not-found", message: "Pane p0 is not present in the session model." },
+      };
+      assert.ok(validateSessionProxyMsg(msg as SessionProxyMessage), JSON.stringify(validateSessionProxyMsg.errors));
+    });
   });
 });

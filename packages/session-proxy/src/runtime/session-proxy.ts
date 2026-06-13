@@ -58,7 +58,7 @@ import type { SwitchClientOutcome } from "../state/switch-client.js";
 import { createSessionProxyRegistry, createStormAlarm } from "../metrics/index.js";
 import type { SessionProxyRegistry, StormAlarmOptions } from "../metrics/index.js";
 import type { CommandResult } from "../parser/correlator.js";
-import { hydrateTransport, hydratePane } from "./hydration.js";
+import { hydrateTransport, hydratePane, captureText } from "./hydration.js";
 import type { HydrationSentinels } from "./hydration.js";
 
 // ---------------------------------------------------------------------------
@@ -825,6 +825,48 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
             makeSentinels(transport, drainingTransport),
             attach.paneId,
           );
+          return;
+        }
+
+        // tc-295a.11: pane.capture — one-shot pane text snapshot.
+        // Handled here (not in input-path) because it:
+        //   a) requires a directed command.response via the per-connection seq counter,
+        //   b) must validate pane existence + REUSE captureText from hydration.ts,
+        //   c) returns text in the payload, which does not fit input-path's fire-and-
+        //      forget verb model (the response carries custom payload, not created ids).
+        //
+        // FAIL-LOUD: a vanished pane produces command.response { ok: false,
+        // code: "pane.not-found" } — never a silent empty string.
+        if (msg.type === "command.request" && msg.command.kind === "pane.capture") {
+          const req = msg as import("../wire/session-proxy-control.js").SessionProxyCommandRequestMessage;
+          const captureCmd = req.command as import("../wire/session-proxy-control.js").PaneCaptureCommand;
+          const pid = captureCmd.paneId;
+
+          // Model check: fail-loud if the pane is not present.
+          if (!pipeline.getModel().panes.has(pid)) {
+            server.sendCommandError(
+              transport,
+              req.correlationId,
+              "pane.not-found",
+              `Pane ${pid as string} is not present in the session model.`,
+            );
+            return;
+          }
+
+          // Capture via the same capturePane machinery the hydration path uses.
+          void captureText(pipeline, pid).then((result) => {
+            if (!result.ok) {
+              // Pane vanished between the model check and the capture reply.
+              server.sendCommandError(
+                transport,
+                req.correlationId,
+                "pane.not-found",
+                `Pane ${pid as string} could not be captured (it may have closed mid-request).`,
+              );
+              return;
+            }
+            server.sendCommandResponse(transport, req.correlationId, { text: result.text });
+          });
           return;
         }
 

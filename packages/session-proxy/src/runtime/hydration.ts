@@ -158,6 +158,57 @@ export function hydratePane(
   return _hydrateOnePane(pipeline, transport, pid, sentinels);
 }
 
+/**
+ * tc-295a.11 (W3.3): one-shot pane text capture, returned as a string.
+ *
+ * REUSES the same `capturePane` command the hydration path uses
+ * (`capture-pane -t %N -p -e -S - -E -`), but delivers the raw UTF-8 text as
+ * a string instead of piping it through the clear-then-replay data-plane path.
+ * No transport.sendData, no clear escape, no LF→CRLF translation — the caller
+ * receives the text exactly as tmux emits it (rows separated by bare LF `\n`).
+ *
+ * This is the foundation that kills C15's out-of-band `tmux capture-pane`
+ * shell-out: instead of forking a tmux client from the extension, the extension
+ * can issue a `pane.capture` command.request over the existing wire connection
+ * (E3.2 wires the extension switch; this bead adds the driver machinery only).
+ *
+ * @param pipeline  The slotted pipeline (used to send capture-pane).
+ * @param pid       Wire PaneId whose text is requested.
+ * @returns         `{ ok: true, text }` — the captured UTF-8 text; or
+ *                  `{ ok: false }` — the pane was not found / capture refused.
+ *                  Never rejects; the caller is responsible for surfacing
+ *                  pane.not-found loudly.
+ */
+export async function captureText(
+  pipeline: HydrationPipeline,
+  pid: PaneId,
+): Promise<{ ok: true; text: string } | { ok: false }> {
+  // PaneId convention (ids.ts): "p" + tmux pane number. Mirror of _hydrateOnePane.
+  const s = pid as unknown as string;
+  if (s.length < 2 || s.charCodeAt(0) !== 0x70 /* 'p' */) return { ok: false };
+  const tmuxN = parseInt(s.slice(1), 10);
+  if (!Number.isFinite(tmuxN)) return { ok: false };
+
+  const cmd = capturePane(tmuxN, { escapes: true, startLine: "-", endLine: "-" });
+  let result: CommandResult;
+  try {
+    result = await pipeline.send(cmd);
+  } catch {
+    // Host dead or pipeline torn down.
+    return { ok: false };
+  }
+  if (!result.ok) {
+    // Pane gone or capture-pane refused (e.g. pane closed mid-command).
+    return { ok: false };
+  }
+
+  // Decode the raw bytes as UTF-8. tmux emits scrollback rows separated by
+  // bare LF; the caller receives the text as-is (no LF→CRLF here — that is a
+  // rendering concern, not a wire concern).
+  const text = new TextDecoder().decode(result.body);
+  return { ok: true, text };
+}
+
 async function _hydrateOnePane(
   pipeline: HydrationPipeline,
   transport: Transport,

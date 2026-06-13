@@ -345,6 +345,17 @@
       "additionalProperties": false
     },
 
+    "PaneCaptureCommand": {
+      "type": "object",
+      "description": "One-shot pane text snapshot (tc-295a.11 / W3.3 / gap A1d). Requests the full scrollback text for a live pane in a single correlated round-trip. Reuses the same capture-pane machinery as the hydration path. Response: command.response { result: { ok: true, payload: { text } } } on success; result.ok=false code=\"pane.not-found\" for a vanished pane (FAIL-LOUD). Extension consumer (E3.2) uses this to kill the C15 out-of-band tmux capture-pane shell-out.",
+      "required": ["kind", "paneId"],
+      "properties": {
+        "kind": { "const": "pane.capture" },
+        "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" }
+      },
+      "additionalProperties": false
+    },
+
     "WireCommand": {
       "oneOf": [
         { "$ref": "#/$defs/OpenWindowCommand" },
@@ -363,7 +374,8 @@
         { "$ref": "#/$defs/KillWindowCommand" },
         { "$ref": "#/$defs/SwapWindowCommand" },
         { "$ref": "#/$defs/ResizeManagedWindowCommand" },
-        { "$ref": "#/$defs/SessionProxyInfoCommand" }
+        { "$ref": "#/$defs/SessionProxyInfoCommand" },
+        { "$ref": "#/$defs/PaneCaptureCommand" }
       ],
       "description": "Discriminated union of all model-level commands a client may issue. Narrow on `kind`. All commands are model-level — no raw tmux command strings are exposed."
     },

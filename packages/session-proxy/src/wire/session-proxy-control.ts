@@ -754,6 +754,39 @@ export interface ResizeManagedWindowCommand {
 }
 
 /**
+ * One-shot pane text snapshot (tc-295a.11 / W3.3 / gap A1d).
+ *
+ * Requests the current scrollback text for a live pane in a single correlated
+ * round-trip.  This REUSES the existing `capturePane` machinery from the
+ * hydration path (runtime/hydration.ts) — it is the same tmux `capture-pane
+ * -t %N -p -e -S - -E -` command the W2.2/W2.3 hydration path uses, but the
+ * raw text is returned in the `command.response` payload instead of being
+ * delivered as clear-then-replay bytes on the data plane.
+ *
+ * On success:   `command.response { result: { ok: true, payload: { text } } }`
+ *               where `text` is the full UTF-8 scrollback string (LF-terminated
+ *               lines, as tmux emits).  Clients that want CRLF can run their
+ *               own LF→CRLF pass; the wire is the raw tmux output.
+ *
+ * On failure:   `command.response { result: { ok: false, code: "pane.not-found",
+ *               message: "..." } }` — the pane is not in the model or the
+ *               capture-pane call came back as %error (pane vanished between
+ *               the model check and the capture reply).  FAIL-LOUD; the driver
+ *               never returns a silent empty string.
+ *
+ * Extension consumer (E3.2): the VS Code extension switch that consumes this
+ * command to kill the C15 out-of-band `tmux capture-pane` shell-out lives in
+ * E3.2 — NOT this bead.  This bead adds the wire command + driver impl + tests.
+ *
+ * Additive addition — non-breaking per the versioning policy. Older session-proxies
+ * respond with `protocol.unknown-message`; consumers may display a fallback.
+ */
+export interface PaneCaptureCommand {
+  readonly kind: "pane.capture";
+  readonly paneId: PaneId;
+}
+
+/**
  * Read-only diagnostics snapshot for the session-proxy (tc-x6l).
  *
  * Issued by debug surfaces to inspect runtime metrics without a side-effect.
@@ -1018,7 +1051,9 @@ export type WireCommand =
   // tc-zna.3: VS-Code-authoritative managed-window resize transaction
   | ResizeManagedWindowCommand
   // tc-x6l: read-only diagnostics + metrics
-  | SessionProxyInfoCommand;
+  | SessionProxyInfoCommand
+  // tc-295a.11: one-shot pane text snapshot (kills C15 third authority)
+  | PaneCaptureCommand;
 
 /**
  * Client issues a model-level command to the session-proxy.
@@ -1051,12 +1086,23 @@ export interface SessionProxyCommandRequestMessage extends MessageBase {
  * never by ordering, and needs no observer/claim correlation.
  *
  * tc-x6l: `info` carries the `session-proxy.info` diagnostic payload.
+ *
+ * tc-295a.11: `text` carries the captured pane text for `pane.capture` responses.
  */
 export interface SessionProxyCommandOkPayload {
   readonly windowId?: WindowId;
   readonly paneId?: PaneId;
   /** session-proxy.info diagnostics payload (tc-x6l). Present only in session-proxy.info responses. */
   readonly info?: SessionProxyInfoPayload;
+  /**
+   * Captured pane text for `pane.capture` responses (tc-295a.11 / W3.3).
+   *
+   * Full UTF-8 scrollback string as tmux emits it: rows separated by bare LF
+   * (`\n`).  Clients that need CRLF can apply their own LF→CRLF pass — the
+   * wire carries the raw tmux output so callers can choose their own rendering.
+   * Present only in `pane.capture` command responses; absent otherwise.
+   */
+  readonly text?: string;
 }
 
 /**
