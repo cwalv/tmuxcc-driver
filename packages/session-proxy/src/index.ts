@@ -46,7 +46,18 @@ export {
 } from "./state/index.js";
 // Projection functions for client round-trip tests:
 export { projectSnapshot, diffModel } from "./state/projection.js";
-export type { ProjectSnapshotOpts } from "./state/projection.js";
+export type { ProjectSnapshotOpts, OriginLookup } from "./state/projection.js";
+
+// Verb-origin registry (tc-ozk.2) — re-exported so the SDK test harness
+// (clients/ts, tc-ozk.4) can seed origin attribution when replaying conformance
+// transcripts against the REAL session-proxy (createControlServer + originLookup).
+// The barrel is the only sanctioned import path from clients/ts (its
+// dependency-cruiser boundary forbids @tmuxcc/session-proxy/src/* sub-paths).
+export { createVerbOriginRegistry } from "./runtime/verb-origin.js";
+export type {
+  VerbOriginRegistry,
+  VerbOriginRegistryOptions,
+} from "./runtime/verb-origin.js";
 
 // Runtime — createSessionProxy and supporting types (tc-93a).
 // Re-exported from src/index so consumers can import from "@tmuxcc/session-proxy"

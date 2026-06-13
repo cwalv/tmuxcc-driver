@@ -1,0 +1,227 @@
+{
+  "$schema": "../schemas/session-proxy/server-push.json",
+  "description": "Conformance transcript (tc-ozk.4): full session-proxy wire conversation — handshake, snapshot (with the client's own connectionId), input, an open-window verb (returns effect ids paneId/windowId per tc-ozk.1; emits origin-tagged window.added + pane.opened + focus.changed per tc-ozk.2), and pane.capture (success with text + failure pane.not-found per tc-295a.11). Replayed against BOTH the SDK parser/mirror and the real session-proxy daemon.",
+
+  "protocolVersion": 3,
+
+  "initialModel": {
+    "session": { "sessionId": "s0", "name": "main" },
+    "windows": [
+      {
+        "windowId": "w0",
+        "name": "editor",
+        "active": true,
+        "paneIds": ["p0", "p1"],
+        "activePaneId": "p0",
+        "synchronizePanes": false,
+        "monitorActivity": true,
+        "monitorSilence": 0,
+        "layout": {
+          "cols": 80,
+          "rows": 24,
+          "root": {
+            "kind": "hsplit",
+            "rect": { "x": 0, "y": 0, "cols": 80, "rows": 24 },
+            "children": [
+              { "kind": "pane", "paneId": "p0", "rect": { "x": 0, "y": 0, "cols": 40, "rows": 24 } },
+              { "kind": "pane", "paneId": "p1", "rect": { "x": 40, "y": 0, "cols": 40, "rows": 24 } }
+            ]
+          }
+        }
+      }
+    ],
+    "panes": [
+      { "paneId": "p0", "windowId": "w0", "cols": 40, "rows": 24 },
+      { "paneId": "p1", "windowId": "w0", "cols": 40, "rows": 24 }
+    ],
+    "focus": { "paneId": "p0", "windowId": "w0" },
+    "connectionId": "conn1"
+  },
+
+  "verbs": {
+    "req-001": {
+      "response": { "ok": true, "payload": { "windowId": "w1", "paneId": "p2" } },
+      "creates": { "newWindowId": "w1", "newPaneId": "p2", "windowName": "logs", "cols": 80, "rows": 24, "focus": true }
+    },
+    "req-002": {
+      "response": { "ok": true, "payload": { "text": "$ ls -la\ntotal 8\ndrwxr-xr-x 2 user user 4096 Jan  1 00:00 .\n" } }
+    },
+    "req-003": {
+      "response": { "ok": false, "code": "pane.not-found", "message": "Pane p9 is not present in the session model." }
+    }
+  },
+
+  "transcript": [
+    {
+      "direction": "session-proxy→client",
+      "step": 1,
+      "label": "session-proxy advertises capabilities",
+      "message": {
+        "type": "session-proxy.capabilities",
+        "seq": 1,
+        "capabilities": {
+          "protocolVersion": 3,
+          "features": ["pane-lifecycle", "layout-updates", "focus-events", "input-forwarding"]
+        }
+      }
+    },
+    {
+      "direction": "client→session-proxy",
+      "step": 2,
+      "label": "client responds with its own capabilities",
+      "message": {
+        "type": "client.capabilities",
+        "seq": 1,
+        "capabilities": {
+          "protocolVersion": 3,
+          "features": ["pane-lifecycle", "layout-updates", "focus-events", "input-forwarding"]
+        }
+      }
+    },
+    {
+      "direction": "session-proxy→client",
+      "step": 3,
+      "label": "session-proxy sends full-state snapshot (carries this client's own connectionId — tc-ozk.2)",
+      "syncPoint": "After this message the client has a consistent model baseline; subsequent deltas apply on top.",
+      "message": {
+        "type": "snapshot",
+        "seq": 2,
+        "session": { "sessionId": "s0", "name": "main" },
+        "windows": [
+          {
+            "windowId": "w0",
+            "name": "editor",
+            "active": true,
+            "synchronizePanes": false,
+            "monitorActivity": true,
+            "monitorSilence": 0,
+            "layout": {
+              "cols": 80,
+              "rows": 24,
+              "root": {
+                "kind": "hsplit",
+                "rect": { "x": 0, "y": 0, "cols": 80, "rows": 24 },
+                "children": [
+                  { "kind": "pane", "paneId": "p0", "rect": { "x": 0, "y": 0, "cols": 40, "rows": 24 } },
+                  { "kind": "pane", "paneId": "p1", "rect": { "x": 40, "y": 0, "cols": 40, "rows": 24 } }
+                ]
+              }
+            }
+          }
+        ],
+        "panes": [
+          { "paneId": "p0", "windowId": "w0", "cols": 40, "rows": 24 },
+          { "paneId": "p1", "windowId": "w0", "cols": 40, "rows": 24 }
+        ],
+        "focus": { "paneId": "p0", "windowId": "w0" },
+        "connectionId": "conn1"
+      }
+    },
+    {
+      "direction": "client→session-proxy",
+      "step": 4,
+      "label": "client sends input to pane p0",
+      "message": { "type": "input", "seq": 2, "paneId": "p0", "data": "ls -la\r" }
+    },
+    {
+      "direction": "client→session-proxy",
+      "step": 5,
+      "label": "client requests a new window (open-window verb, tc-ozk.1)",
+      "message": {
+        "type": "command.request",
+        "seq": 3,
+        "correlationId": "req-001",
+        "command": { "kind": "open-window", "name": "logs" }
+      }
+    },
+    {
+      "direction": "session-proxy→client",
+      "step": 6,
+      "label": "session-proxy returns the verb's effect ids (tc-ozk.1): the windowId + paneId tmux actually created",
+      "message": {
+        "type": "command.response",
+        "seq": 3,
+        "correlationId": "req-001",
+        "result": { "ok": true, "payload": { "windowId": "w1", "paneId": "p2" } }
+      }
+    },
+    {
+      "direction": "session-proxy→client",
+      "step": 7,
+      "label": "window.added — origin-tagged (tc-ozk.2): caused by req-001 from conn1",
+      "message": {
+        "type": "window.added",
+        "seq": 4,
+        "windowId": "w1",
+        "name": "logs",
+        "active": true,
+        "origin": { "connectionId": "conn1", "requestId": "req-001" }
+      }
+    },
+    {
+      "direction": "session-proxy→client",
+      "step": 8,
+      "label": "pane.opened — origin-tagged (tc-ozk.2), same verb (req-001) from conn1",
+      "message": {
+        "type": "pane.opened",
+        "seq": 5,
+        "paneId": "p2",
+        "windowId": "w1",
+        "cols": 80,
+        "rows": 24,
+        "active": true,
+        "origin": { "connectionId": "conn1", "requestId": "req-001" }
+      }
+    },
+    {
+      "direction": "session-proxy→client",
+      "step": 9,
+      "label": "focus.changed to the new pane",
+      "message": { "type": "focus.changed", "seq": 6, "paneId": "p2", "windowId": "w1" }
+    },
+    {
+      "direction": "client→session-proxy",
+      "step": 10,
+      "label": "client captures pane p0 scrollback (pane.capture verb, tc-295a.11)",
+      "message": {
+        "type": "command.request",
+        "seq": 4,
+        "correlationId": "req-002",
+        "command": { "kind": "pane.capture", "paneId": "p0" }
+      }
+    },
+    {
+      "direction": "session-proxy→client",
+      "step": 11,
+      "label": "pane.capture success — command.response carries {ok:true, payload:{text}} (tc-295a.11)",
+      "message": {
+        "type": "command.response",
+        "seq": 7,
+        "correlationId": "req-002",
+        "result": { "ok": true, "payload": { "text": "$ ls -la\ntotal 8\ndrwxr-xr-x 2 user user 4096 Jan  1 00:00 .\n" } }
+      }
+    },
+    {
+      "direction": "client→session-proxy",
+      "step": 12,
+      "label": "client captures a vanished pane p9 (pane.capture verb, tc-295a.11)",
+      "message": {
+        "type": "command.request",
+        "seq": 5,
+        "correlationId": "req-003",
+        "command": { "kind": "pane.capture", "paneId": "p9" }
+      }
+    },
+    {
+      "direction": "session-proxy→client",
+      "step": 13,
+      "label": "pane.capture failure — command.response {ok:false, code:pane.not-found} (FAIL-LOUD, tc-295a.11)",
+      "message": {
+        "type": "command.response",
+        "seq": 8,
+        "correlationId": "req-003",
+        "result": { "ok": false, "code": "pane.not-found", "message": "Pane p9 is not present in the session model." }
+      }
+    }
+  ]
+}

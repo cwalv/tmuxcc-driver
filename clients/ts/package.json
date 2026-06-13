@@ -12,6 +12,11 @@
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
+    "./harness": {
+      "types": "./dist/harness/index.d.ts",
+      "import": "./dist/harness/index.js",
+      "default": "./dist/harness/index.js"
+    },
     "./src/*": "./src/*"
   },
   "main": "./dist/index.js",
