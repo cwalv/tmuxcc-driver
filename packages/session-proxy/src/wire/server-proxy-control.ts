@@ -286,6 +286,33 @@ export interface SessionCreateCommand {
 }
 
 /**
+ * Broker-minted unique session creation (tc-295a.5 / W1.4).
+ *
+ * Semantics:
+ *   - The broker derives a unique name from `baseName` by checking its live
+ *     `_byName` truth table (never the extension's in-process defaultRegistry).
+ *   - If `baseName` is already taken, the broker appends `-2`, `-3`, … until
+ *     a slot is free, then creates the session atomically (name-check and
+ *     `tmux new-session` are serialized via the same `_claimLocks` mechanism
+ *     used by `session.create`).
+ *   - Always creates a new session — never silently attaches to an existing
+ *     one.  The response always reports `created: true`.
+ *
+ * Use case: the extension's `startNew` path — the user asked for a FRESH
+ * session, so the broker must not silently recycle a released base name that
+ * still lives in tmux (the tc-d6dn root-cause bug).
+ *
+ * Wire-contract note: `baseName` may be empty or omitted; the broker falls
+ * back to `"tmuxcc"` in that case.  `name` in the response is the final
+ * uniquified name that was actually created.
+ */
+export interface SessionCreateUniqueCommand {
+  readonly kind: "session.createUnique";
+  /** Base session name.  The broker appends `-2`, `-3`, … as needed. */
+  readonly baseName: string;
+}
+
+/**
  * Destroy an existing session and reap its session-proxy.
  */
 export interface SessionDestroyCommand {
@@ -446,6 +473,7 @@ export interface ServerProxyInfoPayload {
 export type ServerProxyCommand =
   | SessionClaimCommand
   | SessionCreateCommand
+  | SessionCreateUniqueCommand
   | SessionDestroyCommand
   | PaneAttachCommand
   | ServerProxyInfoCommand;
@@ -469,10 +497,10 @@ export interface ServerProxyCommandRequestMessage extends MessageBase {
  * Successful server-proxy command result payload.
  *
  * Per-kind payloads:
- *   session.claim / session.create → { sessionId, endpoint, created }
+ *   session.claim / session.create / session.createUnique → { sessionId, name, endpoint, created }
  *   session.destroy                → { ok: true }
  *   pane.attach                    → { sessionId, endpoint, paneId }
- *   server-proxy.info                    → { info }
+ *   server-proxy.info              → { info }
  */
 export interface ServerProxyCommandOkPayload {
   readonly sessionId?: SessionId;
@@ -503,6 +531,15 @@ export interface ServerProxyCommandOkPayload {
    * treat absent as `false`.
    */
   readonly created?: boolean;
+  /**
+   * The final uniquified session name minted by `session.createUnique` (tc-295a.5 / W1.4).
+   *
+   * Present only on `session.createUnique` responses — absent on all other
+   * command kinds.  The broker derives this from the supplied `baseName` by
+   * appending `-2`, `-3`, … until a name not already in its live `_byName`
+   * table is found, then creates the session atomically.
+   */
+  readonly name?: string;
   /**
    * Diagnostics snapshot for a `server-proxy.info` response (tc-k6v).
    * Absent on all other command kinds.

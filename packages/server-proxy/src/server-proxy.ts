@@ -271,9 +271,10 @@ const SERVER_PROXY_CAPABILITIES: Capabilities = {
   protocolVersion: WIRE_PROTOCOL_VERSION,
   features: [
     "sessions-watch",
-    "session-create",
-    "session-destroy",
     "session-claim",
+    "session-create",
+    "session-unique-create", // tc-295a.5 / W1.4: broker-minted unique names
+    "session-destroy",
     "pane-attach", // tc-7xv.36
     "server-proxy-info", // tc-k6v
   ],
@@ -364,7 +365,7 @@ class ServerProxyImpl implements ServerProxyHandle {
    * `_claimSession` so exactly one claimant observes `created: true` per
    * session creation (the authority for create-time-only profile apply).
    */
-  private _claimLocks = new Map<string, Promise<{ sessionId: SessionId; endpoint: string; created: boolean }>>();
+  private _claimLocks = new Map<string, Promise<{ sessionId: SessionId; endpoint: string; created: boolean; name?: string }>>();
 
   // ── tc-x6l server-proxy metrics ───────────────────────────────────────────────
   private readonly _metrics: ServerProxyMetrics = createServerProxyMetrics();
@@ -1007,7 +1008,7 @@ class ServerProxyImpl implements ServerProxyHandle {
     this._metrics.incCommand(command.kind);
 
     try {
-      let payload: { sessionId?: SessionId; endpoint?: string; paneId?: PaneId; created?: boolean; ok?: true; info?: ServerProxyInfoPayload };
+      let payload: { sessionId?: SessionId; endpoint?: string; paneId?: PaneId; created?: boolean; ok?: true; info?: ServerProxyInfoPayload; name?: string };
 
       switch (command.kind) {
         case "session.claim":
@@ -1015,6 +1016,9 @@ class ServerProxyImpl implements ServerProxyHandle {
           break;
         case "session.create":
           payload = await this._createSession(command.name);
+          break;
+        case "session.createUnique":
+          payload = await this._createUniqueSession(command.baseName);
           break;
         case "session.destroy":
           payload = await this._destroySession(command.sessionId);
@@ -1111,7 +1115,7 @@ class ServerProxyImpl implements ServerProxyHandle {
 
   private async _doClaimSession(
     name: string,
-  ): Promise<{ sessionId: SessionId; endpoint: string; created: boolean }> {
+  ): Promise<{ sessionId: SessionId; endpoint: string; created: boolean; name?: string }> {
     // Refresh session list from tmux
     this._refreshSessions();
 
@@ -1239,6 +1243,64 @@ class ServerProxyImpl implements ServerProxyHandle {
     }
 
     return result;
+  }
+
+  /**
+   * Broker-minted unique session creation (tc-295a.5 / W1.4).
+   *
+   * Derives a unique name from `baseName` by consulting the broker's live
+   * `_byName` truth table (NOT the extension's in-process `defaultRegistry`
+   * whose release-on-gone recycles base names — tc-d6dn root cause #1).
+   *
+   * Uniquification algorithm:
+   *   1. Refresh the live session table from tmux.
+   *   2. If `baseName` is not in `_byName` AND not in `_claimLocks`, use it.
+   *   3. Otherwise try `baseName-2`, `baseName-3`, … until a free slot is found.
+   *   4. Claim the chosen name via `_claimSession` (which creates the tmux
+   *      session and spawns the session-proxy atomically with the per-name lock).
+   *
+   * Atomicity guarantee: two concurrent `createUnique({baseName})` calls
+   * cannot collide because:
+   *   - `_claimLocks` is checked and set synchronously before `_claimSession`
+   *     yields (single-threaded JS event loop).
+   *   - `_doClaimSession` uses `_claimLocks` as a per-name mutex — a second
+   *     caller who picks the same uniquified name will join the in-flight claim
+   *     and observe `created: false`, which this method treats as a collision
+   *     and re-tries with the next suffix.
+   *
+   * Returns `{ sessionId, name, endpoint, created: true }` — `created` is
+   * always `true` because this command never silently attaches.
+   */
+  private async _createUniqueSession(
+    baseName: string,
+  ): Promise<{ sessionId: SessionId; endpoint: string; created: boolean; name: string }> {
+    // Normalise: empty / whitespace-only baseName → "tmuxcc".
+    const base = (baseName ?? "").trim() || "tmuxcc";
+
+    // eslint-disable-next-line no-constant-condition
+    for (let attempt = 0; ; attempt++) {
+      // Refresh on the first pass; subsequent passes skip the refresh because
+      // the session we just tried to claim is now in _byName.
+      if (attempt === 0) {
+        this._refreshSessions();
+      }
+
+      const candidate = attempt === 0 ? base : `${base}-${attempt + 1}`;
+
+      // Skip names already live in tmux or in-flight.
+      if (this._byName.has(candidate) || this._claimLocks.has(candidate)) {
+        continue;
+      }
+
+      // Attempt to claim the candidate.  If another concurrent caller beats
+      // us (race between the check above and _claimSession below), the claim
+      // resolves with created=false — that means the name was taken; loop.
+      const result = await this._claimSession(candidate);
+      if (result.created) {
+        return { sessionId: result.sessionId, endpoint: result.endpoint, created: true, name: candidate };
+      }
+      // Name was taken by a concurrent caller — try the next suffix.
+    }
   }
 
   /**

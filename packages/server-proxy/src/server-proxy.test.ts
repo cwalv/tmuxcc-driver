@@ -431,6 +431,88 @@ describe("server-proxy – integration (requires tmux)", { skip: !TMUX_AVAILABLE
     mux.transport.close();
   });
 
+  // ── session.createUnique (tc-295a.5 / W1.4) ──────────────────────────────
+  //
+  // AC (2): two startNew calls without names yield two distinct sessions
+  // with distinct handles — verified against the broker's live _byName truth.
+
+  it("I4a (tc-295a.5): two sequential session.createUnique calls with the same baseName yield distinct names, sessionIds, and endpoints", async () => {
+    const { mux } = await connectToServerProxy(serverProxy.endpoint());
+    const seq = { value: 1 };
+
+    const r1 = await sendServerProxyCommand(
+      mux,
+      { kind: "session.createUnique", baseName: "myws" },
+      seq,
+    );
+    assert.ok(r1.result.ok, `First createUnique failed: ${JSON.stringify(r1.result)}`);
+    const p1 = (r1.result as {
+      ok: true;
+      payload: { sessionId: string; endpoint: string; name: string; created: boolean };
+    }).payload;
+    assert.ok(p1.name, "createUnique response must include a name");
+    assert.ok(p1.sessionId, "createUnique response must include a sessionId");
+    assert.ok(p1.endpoint, "createUnique response must include an endpoint");
+    assert.equal(p1.created, true, "createUnique must always report created=true");
+
+    const r2 = await sendServerProxyCommand(
+      mux,
+      { kind: "session.createUnique", baseName: "myws" },
+      seq,
+    );
+    assert.ok(r2.result.ok, `Second createUnique failed: ${JSON.stringify(r2.result)}`);
+    const p2 = (r2.result as {
+      ok: true;
+      payload: { sessionId: string; endpoint: string; name: string; created: boolean };
+    }).payload;
+    assert.ok(p2.name, "second createUnique response must include a name");
+    assert.equal(p2.created, true, "second createUnique must also report created=true");
+
+    // The two calls must have produced two distinct sessions.
+    assert.notEqual(p1.name, p2.name, `Both createUnique calls got the same name '${p1.name}' — uniquification failed`);
+    assert.notEqual(p1.sessionId, p2.sessionId, "createUnique calls must return distinct sessionIds");
+    assert.notEqual(p1.endpoint, p2.endpoint, "createUnique calls must return distinct session-proxy endpoints");
+
+    mux.transport.close();
+  });
+
+  it("I4b (tc-295a.5): two concurrent session.createUnique calls with the same baseName yield distinct sessions", async () => {
+    // AC (2): two startNew calls without names yield two distinct sessions
+    // with distinct handles.  This tests the concurrent/race path — both
+    // requests are in-flight simultaneously; the broker must not collide.
+    const endpoint = serverProxy.endpoint();
+    const [c1, c2] = await Promise.all([
+      connectToServerProxy(endpoint),
+      connectToServerProxy(endpoint),
+    ]);
+
+    const [r1, r2] = await Promise.all([
+      sendServerProxyCommand(c1.mux, { kind: "session.createUnique", baseName: "concws" }, { value: 1 }),
+      sendServerProxyCommand(c2.mux, { kind: "session.createUnique", baseName: "concws" }, { value: 1 }),
+    ]);
+
+    assert.ok(r1.result.ok, `createUnique #1 failed: ${JSON.stringify(r1.result)}`);
+    assert.ok(r2.result.ok, `createUnique #2 failed: ${JSON.stringify(r2.result)}`);
+
+    const p1 = (r1.result as {
+      ok: true;
+      payload: { sessionId: string; endpoint: string; name: string; created: boolean };
+    }).payload;
+    const p2 = (r2.result as {
+      ok: true;
+      payload: { sessionId: string; endpoint: string; name: string; created: boolean };
+    }).payload;
+
+    assert.notEqual(p1.name, p2.name, `Concurrent createUnique calls got the same name '${p1.name}' — uniquification race`);
+    assert.notEqual(p1.sessionId, p2.sessionId, "Concurrent createUnique must yield distinct sessionIds");
+    assert.notEqual(p1.endpoint, p2.endpoint, "Concurrent createUnique must yield distinct endpoints");
+    assert.equal(p1.created, true, "createUnique #1 must report created=true");
+    assert.equal(p2.created, true, "createUnique #2 must report created=true");
+
+    c1.mux.transport.close();
+    c2.mux.transport.close();
+  });
+
   it("I5: session.destroy kills session and reaps session-proxy", async () => {
     const { mux } = await connectToServerProxy(serverProxy.endpoint());
     const seq = { value: 1 };
