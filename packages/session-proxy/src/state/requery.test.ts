@@ -377,6 +377,103 @@ describe("requeryDiff: dead-pane wire shape (tc-4bv2 / tc-295a.10)", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// W2.4 (tc-295a.10): pane.closed strong contract — removal matrix
+//
+// EXACTLY ONE pane.closed per removed slot, across the three removal causes:
+//   - shell-exit (no remain-on-exit): slot vanishes directly; exit code
+//     unknowable (no corpse phase) → exitCode absent.
+//   - external kill-pane: a sibling pane removed from a multi-pane window;
+//     window survives; exactly one pane.closed; exitCode absent.
+//   - kill-window: the whole window goes; one pane.closed per pane in it +
+//     one window.closed; exitCode absent.
+//
+// "Cause" is structural, not a wire enum — see the bd design comment. The
+// matrix asserts cardinality + exitCode presence/absence per cause.
+// ---------------------------------------------------------------------------
+
+describe("requeryDiff: pane.closed strong contract matrix (tc-295a.10 W2.4)", () => {
+  it("shell-exit (no remain-on-exit): exactly one pane.closed, exitCode absent (no corpse phase)", () => {
+    // Single-pane window with a live pane; shell exits and tmux drops the slot
+    // (and the now-empty window) in one requery — there was no corpse phase to
+    // read pane_dead_status from.
+    const win = winLine({
+      sessNum: 0, sessName: "main", winNum: 1, winName: "shell",
+      layout: SINGLE_PANE_LAYOUT(1), active: true,
+    });
+    const live = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true });
+    const prev = requeryDiff(emptyModel(), okResult(win), okResult(live)).next;
+
+    const { deltas } = requeryDiff(prev, okResult(""), okResult(""));
+    const closed = deltas.filter((d) => d.type === "pane.closed");
+    assert.equal(closed.length, 1, "exactly one pane.closed");
+    assert.equal((closed[0] as { paneId: PaneId }).paneId, paneId("p1"));
+    assert.ok(!("exitCode" in (closed[0] as object)), "exitCode absent — no corpse to read");
+  });
+
+  it("external kill-pane: sibling removed from a multi-pane window → exactly one pane.closed, window survives", () => {
+    const winBoth = winLine({
+      sessNum: 0, sessName: "main", winNum: 1, winName: "shell",
+      layout: TWO_PANE_HSPLIT_LAYOUT(1, 2), active: true,
+    });
+    const both =
+      paneLine({ paneNum: 1, winNum: 1, sessNum: 0, width: 40, active: true }) +
+      paneLine({ paneNum: 2, winNum: 1, sessNum: 0, width: 39, left: 41 });
+    const prev = requeryDiff(emptyModel(), okResult(winBoth), okResult(both)).next;
+
+    // p2 killed externally; window reflows to single pane.
+    const winSolo = winLine({
+      sessNum: 0, sessName: "main", winNum: 1, winName: "shell",
+      layout: SINGLE_PANE_LAYOUT(1), active: true,
+    });
+    const solo = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true });
+    const { deltas } = requeryDiff(prev, okResult(winSolo), okResult(solo));
+
+    const closed = deltas.filter((d) => d.type === "pane.closed");
+    assert.equal(closed.length, 1, "exactly one pane.closed");
+    assert.equal((closed[0] as { paneId: PaneId }).paneId, paneId("p2"));
+    assert.ok(!("exitCode" in (closed[0] as object)), "exitCode absent for external kill");
+    assert.equal(deltas.filter((d) => d.type === "window.closed").length, 0, "window survives");
+  });
+
+  it("kill-window: one pane.closed per pane + one window.closed", () => {
+    const winBoth = winLine({
+      sessNum: 0, sessName: "main", winNum: 1, winName: "shell",
+      layout: TWO_PANE_HSPLIT_LAYOUT(1, 2), active: true,
+    });
+    const both =
+      paneLine({ paneNum: 1, winNum: 1, sessNum: 0, width: 40, active: true }) +
+      paneLine({ paneNum: 2, winNum: 1, sessNum: 0, width: 39, left: 41 });
+    const prev = requeryDiff(emptyModel(), okResult(winBoth), okResult(both)).next;
+
+    // Whole window killed: gone from both list-windows and list-panes.
+    const { deltas } = requeryDiff(prev, okResult(""), okResult(""));
+    const closed = deltas.filter((d) => d.type === "pane.closed");
+    assert.equal(closed.length, 2, "one pane.closed per pane");
+    const closedIds = new Set(closed.map((d) => (d as { paneId: PaneId }).paneId));
+    assert.ok(closedIds.has(paneId("p1")) && closedIds.has(paneId("p2")));
+    for (const d of closed) {
+      assert.ok(!("exitCode" in (d as object)), "exitCode absent for kill-window");
+    }
+    assert.equal(deltas.filter((d) => d.type === "window.closed").length, 1, "exactly one window.closed");
+  });
+
+  it("idempotent: a removal seen once does not re-emit pane.closed on the next clean cycle", () => {
+    const win = winLine({
+      sessNum: 0, sessName: "main", winNum: 1, winName: "shell",
+      layout: SINGLE_PANE_LAYOUT(1), active: true,
+    });
+    const live = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true });
+    const prev = requeryDiff(emptyModel(), okResult(win), okResult(live)).next;
+
+    const afterClose = requeryDiff(prev, okResult(""), okResult(""));
+    assert.equal(afterClose.deltas.filter((d) => d.type === "pane.closed").length, 1);
+    // Next requery against the post-close model: nothing to close again.
+    const stable = requeryDiff(afterClose.next, okResult(""), okResult(""));
+    assert.deepEqual(stable.deltas, [], "no duplicate pane.closed");
+  });
+});
+
 describe("requeryDiff: reparenting (break-pane)", () => {
   it("same pane id, new window → no pane.opened/pane.closed, layouts update", () => {
     // prev: w1 has p1+p2; next: w1 has p1, new window w2 has p2.
