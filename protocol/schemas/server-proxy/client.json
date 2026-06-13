@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tmuxcc:server-proxy/client",
+  "title": "tmuxcc client → server-proxy messages",
+  "description": "All control-plane messages sent by the client to the server-proxy. The client uses the server-proxy wire to discover sessions, claim session-proxy endpoints, and issue lifecycle commands.",
+
+  "$defs": {
+    "SessionClaimCommand": {
+      "type": "object",
+      "description": "Claim or obtain the session-proxy endpoint for a named session. Creates the session if it does not exist. Per-name atomic: concurrent claims are serialized. The created flag in the response indicates whether this claim minted the tmux session.",
+      "required": ["kind", "name"],
+      "properties": {
+        "kind": { "const": "session.claim" },
+        "name": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+
+    "SessionCreateCommand": {
+      "type": "object",
+      "description": "Create a brand-new session with the given name. Fails (session.name-taken) if a session with that name already exists.",
+      "required": ["kind", "name"],
+      "properties": {
+        "kind": { "const": "session.create" },
+        "name": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+
+    "SessionDestroyCommand": {
+      "type": "object",
+      "description": "Destroy an existing session and reap its session-proxy.",
+      "required": ["kind", "sessionId"],
+      "properties": {
+        "kind": { "const": "session.destroy" },
+        "sessionId": { "$ref": "tmuxcc:shared/primitives#/$defs/SessionId" }
+      },
+      "additionalProperties": false
+    },
+
+    "PaneAttachCommand": {
+      "type": "object",
+      "description": "Attach a new client to a specific pane within a session (tc-7xv.36). Returns the same session-proxy endpoint as session.claim; paneId is echoed back as an attach intent hint. The server-proxy does NOT validate pane existence — that is a session-proxy concern.",
+      "required": ["kind", "sessionId", "paneId"],
+      "properties": {
+        "kind": { "const": "pane.attach" },
+        "sessionId": { "$ref": "tmuxcc:shared/primitives#/$defs/SessionId" },
+        "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" }
+      },
+      "additionalProperties": false
+    },
+
+    "ServerProxyInfoCommand": {
+      "type": "object",
+      "description": "Read-only server-proxy diagnostics snapshot (tc-k6v). No side-effects. Older server-proxies respond with protocol.unknown-message.",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "server-proxy.info" }
+      },
+      "additionalProperties": false
+    },
+
+    "ServerProxyCommand": {
+      "oneOf": [
+        { "$ref": "#/$defs/SessionClaimCommand" },
+        { "$ref": "#/$defs/SessionCreateCommand" },
+        { "$ref": "#/$defs/SessionDestroyCommand" },
+        { "$ref": "#/$defs/PaneAttachCommand" },
+        { "$ref": "#/$defs/ServerProxyInfoCommand" }
+      ],
+      "description": "Discriminated union of all server-proxy commands a client may issue. Narrow on `kind`."
+    },
+
+    "ServerProxyCommandRequestMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "Client issues a server-proxy-level command. direction: client→server-proxy.",
+      "required": ["type", "seq", "correlationId", "command"],
+      "properties": {
+        "type": { "const": "command.request" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "correlationId": {
+          "type": "string",
+          "description": "Client-generated opaque string, echoed in the matching response."
+        },
+        "command": { "$ref": "#/$defs/ServerProxyCommand" }
+      },
+      "additionalProperties": false
+    },
+
+    "ServerProxyClientMessage": {
+      "oneOf": [
+        { "$ref": "tmuxcc:session-proxy/client#/$defs/ClientCapabilitiesMessage" },
+        { "$ref": "#/$defs/ServerProxyCommandRequestMessage" }
+      ],
+      "description": "Discriminated union of all messages the client sends to the server-proxy. Note: ClientCapabilitiesMessage is shared between both wires."
+    }
+  }
+}

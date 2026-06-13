@@ -1,0 +1,386 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tmuxcc:session-proxy/client",
+  "title": "tmuxcc client → session-proxy messages",
+  "description": "All control-plane messages sent by the client to the session-proxy. These are input, resize, capabilities, command requests, and resync requests.",
+
+  "$defs": {
+    "ClientCapabilitiesMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "Client capabilities advertisement, sent once at handshake time (step 2 of the server-initiates handshake). Shared between both wires — the same type discriminant is used on both the server-proxy wire and the session-proxy wire. direction: client→session-proxy (and client→server-proxy).",
+      "required": ["type", "seq", "capabilities"],
+      "properties": {
+        "type": { "const": "client.capabilities" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "capabilities": { "$ref": "tmuxcc:shared/primitives#/$defs/Capabilities" }
+      },
+      "additionalProperties": false
+    },
+
+    "InputMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "Client sends text/key input destined for a pane. Input is a UTF-8 string; the session-proxy forwards bytes to the pane's pty without tmux-level interpretation. Special keys should be pre-encoded as byte sequences. Raw byte streams go through the data plane (framing.json), not here. direction: client→session-proxy.",
+      "required": ["type", "seq", "paneId", "data"],
+      "properties": {
+        "type": { "const": "input" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" },
+        "data": {
+          "type": "string",
+          "description": "UTF-8 text to write to the pane's stdin. Not tmux send-keys syntax; raw bytes."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "ResizeRequestMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "Client requests that a pane be resized (host viewport changed). The session-proxy applies the resize and emits a PaneResizedMessage confirming the new dimensions. Distinct from ResizePaneCommand (explicit user action). direction: client→session-proxy.",
+      "required": ["type", "seq", "paneId", "cols", "rows"],
+      "properties": {
+        "type": { "const": "resize.request" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" },
+        "cols": { "type": "integer", "minimum": 1 },
+        "rows": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+
+    "ResyncRequestMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "Client requests that the session-proxy re-send a full snapshot for this connection. Sent when the mirror detects a seq gap. Session-proxy responds with a fresh SnapshotMessage. Added in protocol v2 (tc-7ml.4). direction: client→session-proxy.",
+      "required": ["type", "seq"],
+      "properties": {
+        "type": { "const": "resync.request" },
+        "seq": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+
+    "OpenWindowCommand": {
+      "type": "object",
+      "description": "Open a new window in the bound session. The session-proxy chooses the pane id(s); created window/pane ids arrive in the command response.",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "open-window" },
+        "name": {
+          "type": "string",
+          "description": "Optional name for the new window. If omitted the session-proxy picks one."
+        },
+        "cwd": {
+          "type": "string",
+          "description": "Working directory for the first pane (`-c <dir>`). Additive optional. tc-cr4dz."
+        },
+        "shellCommand": {
+          "type": "string",
+          "description": "Shell command to run in the first pane. Additive optional. tc-cr4dz."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "SplitPaneCommand": {
+      "type": "object",
+      "description": "Split an existing pane into two. The new pane's id arrives in the command response.",
+      "required": ["kind", "direction"],
+      "properties": {
+        "kind": { "const": "split-pane" },
+        "paneId": {
+          "$ref": "tmuxcc:shared/primitives#/$defs/PaneId",
+          "description": "The pane to split. When absent, the session-proxy splits the current pane. Additive optional."
+        },
+        "direction": {
+          "type": "string",
+          "enum": ["horizontal", "vertical"],
+          "description": "\"horizontal\" = side-by-side; \"vertical\" = stacked top-to-bottom."
+        },
+        "cwd": {
+          "type": "string",
+          "description": "Working directory for the new pane. Additive optional. tc-cr4dz."
+        },
+        "shellCommand": {
+          "type": "string",
+          "description": "Shell command to run in the new pane. Additive optional. tc-cr4dz."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "ClosePaneCommand": {
+      "type": "object",
+      "description": "Close (kill) a pane. The session-proxy emits a pane.closed delta on success.",
+      "required": ["kind", "paneId"],
+      "properties": {
+        "kind": { "const": "close-pane" },
+        "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" }
+      },
+      "additionalProperties": false
+    },
+
+    "RenameWindowCommand": {
+      "type": "object",
+      "description": "Rename a window. The session-proxy emits a window.renamed delta on success.",
+      "required": ["kind", "windowId", "name"],
+      "properties": {
+        "kind": { "const": "rename-window" },
+        "windowId": { "$ref": "tmuxcc:shared/primitives#/$defs/WindowId" },
+        "name": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+
+    "SelectPaneCommand": {
+      "type": "object",
+      "description": "Focus (select) a pane. The session-proxy emits a focus.changed delta on success.",
+      "required": ["kind", "paneId"],
+      "properties": {
+        "kind": { "const": "select-pane" },
+        "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" }
+      },
+      "additionalProperties": false
+    },
+
+    "ResizePaneCommand": {
+      "type": "object",
+      "description": "Resize a pane (explicit user-initiated). Distinct from ResizeRequestMessage (viewport-driven).",
+      "required": ["kind", "paneId", "cols", "rows"],
+      "properties": {
+        "kind": { "const": "resize-pane" },
+        "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" },
+        "cols": { "type": "integer", "minimum": 1 },
+        "rows": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+
+    "ResizeManagedWindowCommand": {
+      "type": "object",
+      "description": "Atomic per-window resize transaction for VS-Code-managed strips. Added tc-zna.3. The session-proxy translates to: set-window-option manual + resize-window + resize-pane per pane.",
+      "required": ["kind", "windowId", "cols", "rows", "panes"],
+      "properties": {
+        "kind": { "const": "resize-managed-window" },
+        "windowId": { "$ref": "tmuxcc:shared/primitives#/$defs/WindowId" },
+        "cols": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Authoritative window dims (strip sum, separator-inclusive)."
+        },
+        "rows": { "type": "integer", "minimum": 1 },
+        "panes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["paneId", "cols", "rows"],
+            "properties": {
+              "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" },
+              "cols": { "type": "integer", "minimum": 1 },
+              "rows": { "type": "integer", "minimum": 1 }
+            },
+            "additionalProperties": false
+          },
+          "description": "Per-pane dims for every pane in the strip."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "KillSessionCommand": {
+      "type": "object",
+      "description": "Kill the tmux session entirely. Used when killSessionOnLastWindowClose is true. The session-proxy emits ErrorMessage{code:\"session.unavailable\"}. Uses sessionName (not sessionId) so the session-proxy can pass to kill-session directly (tc-91o).",
+      "required": ["kind", "sessionName"],
+      "properties": {
+        "kind": { "const": "kill-session" },
+        "sessionName": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+
+    "SetSynchronizePanesCommand": {
+      "type": "object",
+      "description": "Toggle synchronize-panes for a window. The session-proxy emits window.sync.changed delta. Added tc-7xv.12.",
+      "required": ["kind", "windowId", "on"],
+      "properties": {
+        "kind": { "const": "set-synchronize-panes" },
+        "windowId": { "$ref": "tmuxcc:shared/primitives#/$defs/WindowId" },
+        "on": {
+          "type": "boolean",
+          "description": "True to enable synchronize-panes; false to disable."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "SetMonitorActivityCommand": {
+      "type": "object",
+      "description": "Set monitor-activity for a window. Added tc-7xv.15.",
+      "required": ["kind", "windowId", "on"],
+      "properties": {
+        "kind": { "const": "set-monitor-activity" },
+        "windowId": { "$ref": "tmuxcc:shared/primitives#/$defs/WindowId" },
+        "on": {
+          "type": "boolean",
+          "description": "True to enable monitor-activity; false to disable."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "SetMonitorSilenceCommand": {
+      "type": "object",
+      "description": "Set monitor-silence for a window. Added tc-7xv.15.",
+      "required": ["kind", "windowId", "seconds"],
+      "properties": {
+        "kind": { "const": "set-monitor-silence" },
+        "windowId": { "$ref": "tmuxcc:shared/primitives#/$defs/WindowId" },
+        "seconds": {
+          "oneOf": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "null" }
+          ],
+          "description": "Silence threshold in seconds (1..N to enable), or 0/null to disable."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "BreakPaneCommand": {
+      "type": "object",
+      "description": "Break a pane out of its window into a new window. Corresponds to break-pane -dP. Added tc-7xv.9.",
+      "required": ["kind", "paneId"],
+      "properties": {
+        "kind": { "const": "break-pane" },
+        "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" }
+      },
+      "additionalProperties": false
+    },
+
+    "SwapPaneCommand": {
+      "type": "object",
+      "description": "Swap a pane with another. When targetPaneId is absent, rotates with -D (next pane). When supplied, calls swap-pane -s src -t tgt. Added tc-7xv.9.",
+      "required": ["kind", "paneId"],
+      "properties": {
+        "kind": { "const": "swap-pane" },
+        "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" },
+        "targetPaneId": {
+          "$ref": "tmuxcc:shared/primitives#/$defs/PaneId",
+          "description": "Optional explicit target pane. When absent, rotates with -D."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "RenamePaneCommand": {
+      "type": "object",
+      "description": "Set a display title on a pane (select-pane -T). Empty string clears the tmux title. Added tc-7xv.9.",
+      "required": ["kind", "paneId", "title"],
+      "properties": {
+        "kind": { "const": "rename-pane" },
+        "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" },
+        "title": {
+          "type": "string",
+          "description": "New display title. Empty string clears the tmux title (resets to process name)."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "KillWindowCommand": {
+      "type": "object",
+      "description": "Kill a tmux window and all its panes. Issues kill-window -t @<N>. Added tc-7xv.18.",
+      "required": ["kind", "windowId"],
+      "properties": {
+        "kind": { "const": "kill-window" },
+        "windowId": { "$ref": "tmuxcc:shared/primitives#/$defs/WindowId" }
+      },
+      "additionalProperties": false
+    },
+
+    "SwapWindowCommand": {
+      "type": "object",
+      "description": "Swap two windows within the session. Issues swap-window -s @S -t @T. Added tc-7xv.18.",
+      "required": ["kind", "sourceWindowId", "targetWindowId"],
+      "properties": {
+        "kind": { "const": "swap-window" },
+        "sourceWindowId": { "$ref": "tmuxcc:shared/primitives#/$defs/WindowId" },
+        "targetWindowId": { "$ref": "tmuxcc:shared/primitives#/$defs/WindowId" }
+      },
+      "additionalProperties": false
+    },
+
+    "SessionProxyInfoCommand": {
+      "type": "object",
+      "description": "Read-only diagnostics snapshot for the session-proxy (tc-x6l). No side-effects.",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "session-proxy.info" }
+      },
+      "additionalProperties": false
+    },
+
+    "WireCommand": {
+      "oneOf": [
+        { "$ref": "#/$defs/OpenWindowCommand" },
+        { "$ref": "#/$defs/SplitPaneCommand" },
+        { "$ref": "#/$defs/ClosePaneCommand" },
+        { "$ref": "#/$defs/RenameWindowCommand" },
+        { "$ref": "#/$defs/SelectPaneCommand" },
+        { "$ref": "#/$defs/ResizePaneCommand" },
+        { "$ref": "#/$defs/KillSessionCommand" },
+        { "$ref": "#/$defs/SetSynchronizePanesCommand" },
+        { "$ref": "#/$defs/SetMonitorActivityCommand" },
+        { "$ref": "#/$defs/SetMonitorSilenceCommand" },
+        { "$ref": "#/$defs/BreakPaneCommand" },
+        { "$ref": "#/$defs/SwapPaneCommand" },
+        { "$ref": "#/$defs/RenamePaneCommand" },
+        { "$ref": "#/$defs/KillWindowCommand" },
+        { "$ref": "#/$defs/SwapWindowCommand" },
+        { "$ref": "#/$defs/ResizeManagedWindowCommand" },
+        { "$ref": "#/$defs/SessionProxyInfoCommand" }
+      ],
+      "description": "Discriminated union of all model-level commands a client may issue. Narrow on `kind`. All commands are model-level — no raw tmux command strings are exposed."
+    },
+
+    "SessionProxyCommandRequestMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "Client issues a model-level command to the session-proxy. direction: client→session-proxy.",
+      "required": ["type", "seq", "correlationId", "command"],
+      "properties": {
+        "type": { "const": "command.request" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "correlationId": {
+          "type": "string",
+          "description": "Client-generated opaque string (e.g. UUID), echoed in the matching response. The session-proxy does NOT assign correlation ids."
+        },
+        "command": { "$ref": "#/$defs/WireCommand" }
+      },
+      "additionalProperties": false
+    },
+
+    "ClientMessage": {
+      "oneOf": [
+        { "$ref": "#/$defs/ClientCapabilitiesMessage" },
+        { "$ref": "#/$defs/InputMessage" },
+        { "$ref": "#/$defs/ResizeRequestMessage" },
+        { "$ref": "#/$defs/ResyncRequestMessage" },
+        { "$ref": "#/$defs/SessionProxyCommandRequestMessage" }
+      ],
+      "description": "Discriminated union of all messages the client sends to the session-proxy. Narrow on `type`."
+    }
+  }
+}

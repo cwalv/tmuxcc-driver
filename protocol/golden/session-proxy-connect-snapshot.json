@@ -1,0 +1,173 @@
+{
+  "$schema": "../schemas/session-proxy/server-push.json",
+  "description": "Golden transcript: session-proxy connect + capabilities handshake + snapshot flow. This represents the minimal exchange for a client attaching to a session that has one window with two panes.",
+
+  "protocolVersion": 3,
+
+  "transcript": [
+    {
+      "direction": "session-proxy→client",
+      "step": 1,
+      "label": "session-proxy advertises capabilities",
+      "message": {
+        "type": "session-proxy.capabilities",
+        "seq": 1,
+        "capabilities": {
+          "protocolVersion": 3,
+          "features": [
+            "pane-lifecycle",
+            "layout-updates",
+            "focus-events",
+            "input-forwarding"
+          ]
+        }
+      }
+    },
+    {
+      "direction": "client→session-proxy",
+      "step": 2,
+      "label": "client responds with its own capabilities",
+      "message": {
+        "type": "client.capabilities",
+        "seq": 1,
+        "capabilities": {
+          "protocolVersion": 3,
+          "features": [
+            "pane-lifecycle",
+            "layout-updates",
+            "focus-events",
+            "input-forwarding"
+          ]
+        }
+      }
+    },
+    {
+      "direction": "session-proxy→client",
+      "step": 3,
+      "label": "session-proxy sends full-state snapshot",
+      "syncPoint": "After this message, the client has a consistent model baseline. All subsequent deltas (higher seq numbers) are applied on top.",
+      "message": {
+        "type": "snapshot",
+        "seq": 2,
+        "session": {
+          "sessionId": "s0",
+          "name": "main"
+        },
+        "windows": [
+          {
+            "windowId": "w0",
+            "name": "editor",
+            "active": true,
+            "synchronizePanes": false,
+            "monitorActivity": true,
+            "monitorSilence": 0,
+            "layout": {
+              "cols": 80,
+              "rows": 24,
+              "root": {
+                "kind": "hsplit",
+                "rect": { "x": 0, "y": 0, "cols": 80, "rows": 24 },
+                "children": [
+                  {
+                    "kind": "pane",
+                    "paneId": "p0",
+                    "rect": { "x": 0, "y": 0, "cols": 40, "rows": 24 }
+                  },
+                  {
+                    "kind": "pane",
+                    "paneId": "p1",
+                    "rect": { "x": 40, "y": 0, "cols": 40, "rows": 24 }
+                  }
+                ]
+              }
+            }
+          }
+        ],
+        "panes": [
+          { "paneId": "p0", "windowId": "w0", "cols": 40, "rows": 24 },
+          { "paneId": "p1", "windowId": "w0", "cols": 40, "rows": 24 }
+        ],
+        "focus": { "paneId": "p0", "windowId": "w0" }
+      }
+    },
+    {
+      "direction": "client→session-proxy",
+      "step": 4,
+      "label": "client sends input to pane p0",
+      "message": {
+        "type": "input",
+        "seq": 2,
+        "paneId": "p0",
+        "data": "ls -la\r"
+      }
+    },
+    {
+      "direction": "client→session-proxy",
+      "step": 5,
+      "label": "client requests a new window via command.request",
+      "message": {
+        "type": "command.request",
+        "seq": 3,
+        "correlationId": "req-001",
+        "command": {
+          "kind": "open-window",
+          "name": "logs"
+        }
+      }
+    },
+    {
+      "direction": "session-proxy→client",
+      "step": 6,
+      "label": "session-proxy confirms new window",
+      "message": {
+        "type": "command.response",
+        "seq": 3,
+        "correlationId": "req-001",
+        "result": {
+          "ok": true,
+          "payload": {
+            "windowId": "w1",
+            "paneId": "p2"
+          }
+        }
+      }
+    },
+    {
+      "direction": "session-proxy→client",
+      "step": 7,
+      "label": "session-proxy emits window.added delta",
+      "message": {
+        "type": "window.added",
+        "seq": 4,
+        "windowId": "w1",
+        "name": "logs",
+        "active": true
+      }
+    },
+    {
+      "direction": "session-proxy→client",
+      "step": 8,
+      "label": "session-proxy emits pane.opened delta for the new pane",
+      "message": {
+        "type": "pane.opened",
+        "seq": 5,
+        "paneId": "p2",
+        "windowId": "w1",
+        "cols": 80,
+        "rows": 24,
+        "active": true
+      }
+    },
+    {
+      "direction": "session-proxy→client",
+      "step": 9,
+      "label": "session-proxy emits focus.changed to new pane",
+      "message": {
+        "type": "focus.changed",
+        "seq": 6,
+        "paneId": "p2",
+        "windowId": "w1"
+      }
+    }
+  ]
+}

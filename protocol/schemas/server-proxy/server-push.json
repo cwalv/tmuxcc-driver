@@ -1,0 +1,259 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tmuxcc:server-proxy/server-push",
+  "title": "tmuxcc server-proxy → client messages",
+  "description": "All control-plane messages pushed by the server-proxy to a connected client. The server-proxy is a per-tmux-socket discovery and lifecycle service. Status: Stage 0 placeholder — the server-proxy process, transport, and runtime are implemented in Stage 2 (tc-j9c.3). Types are defined now so the file layout matches the target shape.",
+
+  "$defs": {
+    "ServerProxyCapabilitiesMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "Server-proxy capabilities advertisement, sent once at handshake time. direction: server-proxy→client.",
+      "required": ["type", "seq", "capabilities"],
+      "properties": {
+        "type": { "const": "server-proxy.capabilities" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "capabilities": { "$ref": "tmuxcc:shared/primitives#/$defs/Capabilities" }
+      },
+      "additionalProperties": false
+    },
+
+    "ServerProxySessionInfo": {
+      "type": "object",
+      "description": "A session as known to the server-proxy. Counts are static at snapshot/delta time.",
+      "required": ["sessionId", "name", "windowCount", "attachedClientCount"],
+      "properties": {
+        "sessionId": { "$ref": "tmuxcc:shared/primitives#/$defs/SessionId" },
+        "name": { "type": "string" },
+        "windowCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of windows currently in this session at snapshot/delta time."
+        },
+        "attachedClientCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of tmuxcc clients currently attached at snapshot/delta time."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "ServerProxySnapshotMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "Full session-list snapshot, sent once by the server-proxy immediately after the capabilities handshake. direction: server-proxy→client.",
+      "required": ["type", "seq", "sessions"],
+      "properties": {
+        "type": { "const": "sessions.snapshot" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "sessions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ServerProxySessionInfo" },
+          "description": "All sessions known to this server-proxy at snapshot time."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "ServerProxySessionAddedMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "A new session has become visible to the server-proxy. Only pushed when the \"sessions-watch\" feature is negotiated. direction: server-proxy→client.",
+      "required": ["type", "seq", "sessionId", "name", "windowCount", "attachedClientCount"],
+      "properties": {
+        "type": { "const": "sessions.added" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "sessionId": { "$ref": "tmuxcc:shared/primitives#/$defs/SessionId" },
+        "name": { "type": "string" },
+        "windowCount": { "type": "integer", "minimum": 0 },
+        "attachedClientCount": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+
+    "ServerProxySessionRemovedMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "A session has disappeared from the server-proxy. The server-proxy reaps the session-proxy (if any) before emitting this. direction: server-proxy→client.",
+      "required": ["type", "seq", "sessionId"],
+      "properties": {
+        "type": { "const": "sessions.removed" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "sessionId": { "$ref": "tmuxcc:shared/primitives#/$defs/SessionId" }
+      },
+      "additionalProperties": false
+    },
+
+    "ServerProxySessionRenamedMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "A session was renamed. Emitted alongside the session-proxy wire's session.renamed. direction: server-proxy→client.",
+      "required": ["type", "seq", "sessionId", "newName"],
+      "properties": {
+        "type": { "const": "sessions.renamed" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "sessionId": { "$ref": "tmuxcc:shared/primitives#/$defs/SessionId" },
+        "newName": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+
+    "ServerProxyExitingMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "The server-proxy is about to perform a DESIGNED self-exit (tc-xnay / tc-ymxe). Broadcast immediately before shutdown() runs. Best-effort: may be dropped if transport is already closed. Distinguishes designed quiescence from unexpected death for both self-spawned and externally-started brokers. direction: server-proxy→client (broadcast).",
+      "required": ["type", "seq", "reason"],
+      "properties": {
+        "type": { "const": "server-proxy.exiting" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "reason": {
+          "type": "string",
+          "description": "Why the broker is exiting. Known values: \"idle\" (zero clients + zero session-proxy children for hysteresis window), \"tmux-gone\" (tmux server vanished). Open-ended for forward compatibility — the presence of this message is the load-bearing signal, not the reason string.",
+          "examples": ["idle", "tmux-gone"]
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "ServerProxyCommandOkPayload": {
+      "type": "object",
+      "description": "Successful server-proxy command result payload. Per-kind: session.claim/session.create → {sessionId, endpoint, created}; session.destroy → {}; pane.attach → {sessionId, endpoint, paneId}; server-proxy.info → {info}.",
+      "properties": {
+        "sessionId": { "$ref": "tmuxcc:shared/primitives#/$defs/SessionId" },
+        "endpoint": {
+          "type": "string",
+          "description": "Opaque connection string (unix socket path). Clients pass to createSessionProxyTransport(endpoint)."
+        },
+        "paneId": {
+          "$ref": "tmuxcc:shared/primitives#/$defs/PaneId",
+          "description": "Echoed target paneId for a pane.attach response. The server-proxy does not validate pane existence."
+        },
+        "created": {
+          "type": "boolean",
+          "description": "True if this claim/create minted the tmux session. False if attached to pre-existing. Absent on session.destroy / pane.attach responses."
+        },
+        "info": {
+          "type": "object",
+          "description": "Diagnostics snapshot for a server-proxy.info response (tc-k6v). Absent on all other command kinds.",
+          "required": ["socketName", "serverProxySocketPath", "serverProxyPid", "uptimeMs", "tmuxServerPid", "adoptedExistingServer", "connectedClientCount", "logPath", "sessions", "metricsText"],
+          "properties": {
+            "socketName": { "type": "string" },
+            "serverProxySocketPath": { "type": "string" },
+            "serverProxyPid": { "type": "integer", "minimum": 1 },
+            "uptimeMs": { "type": "integer", "minimum": 0 },
+            "tmuxServerPid": {
+              "oneOf": [
+                { "type": "integer", "minimum": 1 },
+                { "type": "null" }
+              ]
+            },
+            "adoptedExistingServer": { "type": "boolean" },
+            "connectedClientCount": { "type": "integer", "minimum": 0 },
+            "logPath": {
+              "oneOf": [
+                { "type": "string" },
+                { "type": "null" }
+              ]
+            },
+            "sessions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["sessionId", "name", "sessionProxyPid", "windowCount", "paneCount", "attachedClientCount"],
+                "properties": {
+                  "sessionId": { "$ref": "tmuxcc:shared/primitives#/$defs/SessionId" },
+                  "name": { "type": "string" },
+                  "sessionProxyPid": {
+                    "oneOf": [
+                      { "type": "integer", "minimum": 1 },
+                      { "type": "null" }
+                    ]
+                  },
+                  "windowCount": { "type": "integer", "minimum": 0 },
+                  "paneCount": { "type": "integer", "minimum": 0 },
+                  "attachedClientCount": { "type": "integer", "minimum": 0 }
+                },
+                "additionalProperties": false
+              }
+            },
+            "metricsText": {
+              "oneOf": [
+                { "type": "string" },
+                { "type": "null" }
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "ServerProxyCommandResponseMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "The server-proxy's response to a ServerProxyCommandRequestMessage. direction: server-proxy→client.",
+      "required": ["type", "seq", "correlationId", "result"],
+      "properties": {
+        "type": { "const": "command.response" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "correlationId": { "type": "string" },
+        "result": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["ok"],
+              "properties": {
+                "ok": { "const": true },
+                "payload": { "$ref": "#/$defs/ServerProxyCommandOkPayload" }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": ["ok", "code", "message"],
+              "properties": {
+                "ok": { "const": false },
+                "code": {
+                  "type": "string",
+                  "description": "Error code. Known values: protocol.unknown-message, protocol.malformed, protocol.version-mismatch, session.not-found, session.name-taken, tmux.unavailable, internal."
+                },
+                "message": { "type": "string" }
+              },
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "ServerProxyMessage": {
+      "oneOf": [
+        { "$ref": "#/$defs/ServerProxyCapabilitiesMessage" },
+        { "$ref": "#/$defs/ServerProxySnapshotMessage" },
+        { "$ref": "#/$defs/ServerProxySessionAddedMessage" },
+        { "$ref": "#/$defs/ServerProxySessionRemovedMessage" },
+        { "$ref": "#/$defs/ServerProxySessionRenamedMessage" },
+        { "$ref": "#/$defs/ServerProxyExitingMessage" },
+        { "$ref": "#/$defs/ServerProxyCommandResponseMessage" }
+      ],
+      "description": "Discriminated union of all messages the server-proxy pushes to the client. Narrow on `type`. Note: ErrorMessage (type: \"error\") is shared with the session-proxy wire — use the session-proxy/server-push schema's ErrorMessage definition."
+    }
+  }
+}

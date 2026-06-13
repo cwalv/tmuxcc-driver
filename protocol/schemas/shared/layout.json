@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tmuxcc:shared/layout",
+  "title": "tmuxcc structured window layout",
+  "description": "Structured layout representation for the tmuxcc wire protocol. The session-proxy parses tmux south-side layout strings and converts them into this transport-agnostic tree. Layout strings NEVER appear on the wire.",
+
+  "$defs": {
+    "Rect": {
+      "type": "object",
+      "description": "A rectangle in terminal-cell coordinates, origin at top-left of the tmux client area.",
+      "required": ["x", "y", "cols", "rows"],
+      "properties": {
+        "x": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Column of the top-left corner (0-based)."
+        },
+        "y": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Row of the top-left corner (0-based)."
+        },
+        "cols": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Width in columns."
+        },
+        "rows": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Height in rows."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "LayoutPane": {
+      "type": "object",
+      "description": "A leaf node in the layout tree: a single pane occupying a rectangle.",
+      "required": ["kind", "paneId", "rect"],
+      "properties": {
+        "kind": { "const": "pane" },
+        "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" },
+        "rect": { "$ref": "#/$defs/Rect" }
+      },
+      "additionalProperties": false
+    },
+
+    "LayoutHSplit": {
+      "type": "object",
+      "description": "A horizontal split node: children are arranged side-by-side (left to right). Corresponds to tmux's '[…]' horizontal notation, expressed semantically.",
+      "required": ["kind", "rect", "children"],
+      "properties": {
+        "kind": { "const": "hsplit" },
+        "rect": { "$ref": "#/$defs/Rect" },
+        "children": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/LayoutNode" },
+          "minItems": 2,
+          "description": "Child layout nodes arranged left to right."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "LayoutVSplit": {
+      "type": "object",
+      "description": "A vertical split node: children are stacked top-to-bottom. Corresponds to tmux's '{…}' vertical notation, expressed semantically.",
+      "required": ["kind", "rect", "children"],
+      "properties": {
+        "kind": { "const": "vsplit" },
+        "rect": { "$ref": "#/$defs/Rect" },
+        "children": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/LayoutNode" },
+          "minItems": 2,
+          "description": "Child layout nodes stacked top to bottom."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "LayoutNode": {
+      "oneOf": [
+        { "$ref": "#/$defs/LayoutPane" },
+        { "$ref": "#/$defs/LayoutHSplit" },
+        { "$ref": "#/$defs/LayoutVSplit" }
+      ],
+      "description": "Any node in the layout tree. Discriminate on `kind`: \"pane\", \"hsplit\", or \"vsplit\"."
+    },
+
+    "WindowLayout": {
+      "type": "object",
+      "description": "The complete layout for a single window: a tree rooted at one LayoutNode, plus the window's total dimensions.",
+      "required": ["cols", "rows", "root"],
+      "properties": {
+        "cols": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Total width of the window in columns."
+        },
+        "rows": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Total height of the window in rows."
+        },
+        "root": { "$ref": "#/$defs/LayoutNode" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

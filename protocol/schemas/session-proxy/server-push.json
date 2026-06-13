@@ -1,0 +1,553 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tmuxcc:session-proxy/server-push",
+  "title": "tmuxcc session-proxy → client messages",
+  "description": "All control-plane messages pushed by the session-proxy to a connected client. The session-proxy is the source of truth and pushes state changes; these are read-only events from the client's perspective.",
+
+  "$defs": {
+    "SessionProxyCapabilitiesMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "Session-proxy capabilities advertisement, sent once at handshake time (step 1 of the server-initiates handshake). direction: session-proxy→client.",
+      "required": ["type", "seq", "capabilities"],
+      "properties": {
+        "type": { "const": "session-proxy.capabilities" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "capabilities": { "$ref": "tmuxcc:shared/primitives#/$defs/Capabilities" }
+      },
+      "additionalProperties": false
+    },
+
+    "SnapshotSession": {
+      "type": "object",
+      "description": "The bound session as represented in a snapshot. Only carries identity — the session is always the bound session (always active) on the session-proxy wire.",
+      "required": ["sessionId", "name"],
+      "properties": {
+        "sessionId": { "$ref": "tmuxcc:shared/primitives#/$defs/SessionId" },
+        "name": {
+          "type": "string",
+          "description": "Human-readable session name."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "SnapshotWindow": {
+      "type": "object",
+      "description": "A window as represented in a snapshot.",
+      "required": ["windowId", "name", "active", "layout", "synchronizePanes", "monitorActivity", "monitorSilence"],
+      "properties": {
+        "windowId": { "$ref": "tmuxcc:shared/primitives#/$defs/WindowId" },
+        "name": {
+          "type": "string",
+          "description": "Window name."
+        },
+        "active": {
+          "type": "boolean",
+          "description": "True if this is the active window in the session."
+        },
+        "layout": { "$ref": "tmuxcc:shared/layout#/$defs/WindowLayout" },
+        "synchronizePanes": {
+          "type": "boolean",
+          "description": "True when synchronize-panes is on for this window at snapshot time. Added tc-7xv.12."
+        },
+        "monitorActivity": {
+          "type": "boolean",
+          "description": "True when monitor-activity is on for this window at snapshot time. Added tc-7xv.15."
+        },
+        "monitorSilence": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Current monitor-silence threshold in seconds, or 0 when disabled. Added tc-7xv.15."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "SnapshotPane": {
+      "type": "object",
+      "description": "A pane as represented in a snapshot.",
+      "required": ["paneId", "windowId", "cols", "rows"],
+      "properties": {
+        "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" },
+        "windowId": { "$ref": "tmuxcc:shared/primitives#/$defs/WindowId" },
+        "cols": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Width in columns."
+        },
+        "rows": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Height in rows."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "SnapshotMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "Full-state snapshot, sent once by the session-proxy immediately after the capabilities handshake. Normalized flat arrays; clients build their own in-memory tree by joining on ids. The session-proxy is bound to exactly one session (v3: single-session). direction: session-proxy→client.",
+      "required": ["type", "seq", "session", "windows", "panes", "focus"],
+      "properties": {
+        "type": { "const": "snapshot" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "session": { "$ref": "#/$defs/SnapshotSession" },
+        "windows": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/SnapshotWindow" },
+          "description": "All windows in the bound session."
+        },
+        "panes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/SnapshotPane" },
+          "description": "All panes across all windows."
+        },
+        "focus": {
+          "type": "object",
+          "description": "Currently focused pane/window pair. Both are null if no pane is focused.",
+          "required": ["paneId", "windowId"],
+          "properties": {
+            "paneId": {
+              "oneOf": [
+                { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" },
+                { "type": "null" }
+              ]
+            },
+            "windowId": {
+              "oneOf": [
+                { "$ref": "tmuxcc:shared/primitives#/$defs/WindowId" },
+                { "type": "null" }
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "attachedClientCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of session-proxy-protocol clients connected at snapshot time. Additive optional field (tc-1elae Phase 2). Live updates arrive via ClientCountChangedMessage (tc-44wu0)."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "PaneOpenedMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "A new pane has been created. direction: session-proxy→client.",
+      "required": ["type", "seq", "paneId", "windowId", "cols", "rows", "active"],
+      "properties": {
+        "type": { "const": "pane.opened" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" },
+        "windowId": { "$ref": "tmuxcc:shared/primitives#/$defs/WindowId" },
+        "cols": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Initial width in columns."
+        },
+        "rows": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Initial height in rows."
+        },
+        "active": {
+          "type": "boolean",
+          "description": "True if this pane is the active (focused) pane at the moment of opening."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "PaneClosedMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "A pane has been closed (exited or killed). direction: session-proxy→client.",
+      "required": ["type", "seq", "paneId", "windowId"],
+      "properties": {
+        "type": { "const": "pane.closed" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" },
+        "windowId": { "$ref": "tmuxcc:shared/primitives#/$defs/WindowId" },
+        "exitCode": {
+          "type": "integer",
+          "description": "Exit code of the pane's process, if known. Absent when the session-proxy could not determine the exit code (non-breaking optional field)."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "PaneResizedMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "A pane's dimensions have changed. Distinct from ResizeRequestMessage (client→session-proxy). direction: session-proxy→client.",
+      "required": ["type", "seq", "paneId", "cols", "rows"],
+      "properties": {
+        "type": { "const": "pane.resized" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" },
+        "cols": { "type": "integer", "minimum": 1 },
+        "rows": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+
+    "PaneModeChangedMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "A pane entered or left a mode (e.g. copy mode, normal mode). Open-ended mode string for forward compatibility. direction: session-proxy→client.",
+      "required": ["type", "seq", "paneId", "mode"],
+      "properties": {
+        "type": { "const": "pane.mode-changed" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" },
+        "mode": {
+          "type": "string",
+          "description": "Model-level pane mode. Known values: \"normal\", \"copy\", \"view\". Unknown future modes must be treated as opaque strings.",
+          "examples": ["normal", "copy", "view"]
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "LayoutUpdatedMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "The layout of a window has changed. Clients should apply atomically. direction: session-proxy→client.",
+      "required": ["type", "seq", "windowId", "layout"],
+      "properties": {
+        "type": { "const": "layout.updated" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "windowId": { "$ref": "tmuxcc:shared/primitives#/$defs/WindowId" },
+        "layout": { "$ref": "tmuxcc:shared/layout#/$defs/WindowLayout" }
+      },
+      "additionalProperties": false
+    },
+
+    "FocusChangedMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "The active (focused) pane has changed. If no pane is active, both paneId and windowId are null. direction: session-proxy→client.",
+      "required": ["type", "seq", "paneId", "windowId"],
+      "properties": {
+        "type": { "const": "focus.changed" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "paneId": {
+          "oneOf": [
+            { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" },
+            { "type": "null" }
+          ]
+        },
+        "windowId": {
+          "oneOf": [
+            { "$ref": "tmuxcc:shared/primitives#/$defs/WindowId" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "WindowAddedMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "A new window was added to the bound session. direction: session-proxy→client.",
+      "required": ["type", "seq", "windowId", "name", "active"],
+      "properties": {
+        "type": { "const": "window.added" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "windowId": { "$ref": "tmuxcc:shared/primitives#/$defs/WindowId" },
+        "name": { "type": "string" },
+        "active": {
+          "type": "boolean",
+          "description": "True if the new window immediately became the active window."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "WindowClosedMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "A window was closed. direction: session-proxy→client.",
+      "required": ["type", "seq", "windowId"],
+      "properties": {
+        "type": { "const": "window.closed" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "windowId": { "$ref": "tmuxcc:shared/primitives#/$defs/WindowId" }
+      },
+      "additionalProperties": false
+    },
+
+    "WindowRenamedMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "A window was renamed. direction: session-proxy→client.",
+      "required": ["type", "seq", "windowId", "newName"],
+      "properties": {
+        "type": { "const": "window.renamed" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "windowId": { "$ref": "tmuxcc:shared/primitives#/$defs/WindowId" },
+        "newName": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+
+    "WindowSyncChangedMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "The synchronize-panes state of a window has changed. Added tc-7xv.12. direction: session-proxy→client.",
+      "required": ["type", "seq", "windowId", "on"],
+      "properties": {
+        "type": { "const": "window.sync.changed" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "windowId": { "$ref": "tmuxcc:shared/primitives#/$defs/WindowId" },
+        "on": {
+          "type": "boolean",
+          "description": "True when synchronize-panes is on for this window."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "WindowMonitorActivityChangedMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "The monitor-activity state of a window has changed. Added tc-7xv.15. direction: session-proxy→client.",
+      "required": ["type", "seq", "windowId", "on"],
+      "properties": {
+        "type": { "const": "window.monitor.activity.changed" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "windowId": { "$ref": "tmuxcc:shared/primitives#/$defs/WindowId" },
+        "on": {
+          "type": "boolean",
+          "description": "True when monitor-activity is on for this window."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "WindowMonitorSilenceChangedMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "The monitor-silence state of a window has changed. Added tc-7xv.15. direction: session-proxy→client.",
+      "required": ["type", "seq", "windowId", "seconds"],
+      "properties": {
+        "type": { "const": "window.monitor.silence.changed" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "windowId": { "$ref": "tmuxcc:shared/primitives#/$defs/WindowId" },
+        "seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Silence threshold in seconds (positive = on), or 0 when disabled."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "SessionProxySessionRenamedMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "The bound session was renamed. No sessionId field — the bound session is implicit on the session-proxy wire (v3, tc-j9c). direction: session-proxy→client.",
+      "required": ["type", "seq", "newName"],
+      "properties": {
+        "type": { "const": "session.renamed" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "newName": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+
+    "ClientCountChangedMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "The number of session-proxy-protocol clients connected to this session has changed. Added tc-44wu0. direction: session-proxy→client.",
+      "required": ["type", "seq", "count"],
+      "properties": {
+        "type": { "const": "client-count.changed" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Authoritative connected-client count at the moment the event is sent. On connect: includes the newly-connected client (≥1). On disconnect: excludes the just-disconnected client (≥0)."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "SessionProxyCommandOkPayload": {
+      "type": "object",
+      "description": "Successful command result payload. Fields are optional because not every command produces a new entity.",
+      "properties": {
+        "windowId": { "$ref": "tmuxcc:shared/primitives#/$defs/WindowId" },
+        "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" },
+        "info": {
+          "type": "object",
+          "description": "session-proxy.info diagnostics payload (tc-x6l). Present only in session-proxy.info responses.",
+          "required": ["metricsText", "stormWindowTotal", "stormWindowBreakdown", "stormThreshold"],
+          "properties": {
+            "metricsText": {
+              "type": "string",
+              "description": "Prometheus text exposition of all per-session-proxy counters and histograms."
+            },
+            "stormWindowTotal": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Total topology events in the current sliding window."
+            },
+            "stormWindowBreakdown": {
+              "type": "object",
+              "additionalProperties": { "type": "integer", "minimum": 0 },
+              "description": "Per-kind breakdown of events in the current sliding window."
+            },
+            "stormThreshold": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Configured storm alarm threshold."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "SessionProxyCommandResponseMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "The session-proxy's response to a SessionProxyCommandRequestMessage. Command-specific failures arrive here as result.ok=false; the separate ErrorMessage is for unsolicited/protocol-level errors. direction: session-proxy→client.",
+      "required": ["type", "seq", "correlationId", "result"],
+      "properties": {
+        "type": { "const": "command.response" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "correlationId": {
+          "type": "string",
+          "description": "Echoed from the matching SessionProxyCommandRequestMessage."
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["ok"],
+              "properties": {
+                "ok": { "const": true },
+                "payload": { "$ref": "#/$defs/SessionProxyCommandOkPayload" }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": ["ok", "code", "message"],
+              "properties": {
+                "ok": { "const": false },
+                "code": {
+                  "type": "string",
+                  "description": "Error code. See WireErrorCode for known values."
+                },
+                "message": {
+                  "type": "string",
+                  "description": "Human-readable error description."
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "ErrorMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "Unsolicited error pushed by the session-proxy. ONLY for errors not attributable to a specific outstanding command request. For command-specific errors, the session-proxy sends a SessionProxyCommandResponseMessage with result.ok=false. direction: session-proxy→client.",
+      "required": ["type", "seq", "code", "message"],
+      "properties": {
+        "type": { "const": "error" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "code": {
+          "type": "string",
+          "description": "Error code. Known values: \"protocol.unknown-message\", \"protocol.malformed\", \"protocol.version-mismatch\", \"session.unavailable\", \"internal\". Open-ended for forward compatibility.",
+          "examples": [
+            "protocol.unknown-message",
+            "protocol.malformed",
+            "protocol.version-mismatch",
+            "session.unavailable",
+            "internal"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "description": "Human-readable error description (English, for logging/debugging)."
+        },
+        "correlationId": {
+          "type": "string",
+          "description": "If set, ties this error to a prior SessionProxyCommandRequestMessage. Absent for fully unsolicited errors."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "SessionProxyMessage": {
+      "oneOf": [
+        { "$ref": "#/$defs/SessionProxyCapabilitiesMessage" },
+        { "$ref": "#/$defs/SnapshotMessage" },
+        { "$ref": "#/$defs/PaneOpenedMessage" },
+        { "$ref": "#/$defs/PaneClosedMessage" },
+        { "$ref": "#/$defs/PaneResizedMessage" },
+        { "$ref": "#/$defs/PaneModeChangedMessage" },
+        { "$ref": "#/$defs/LayoutUpdatedMessage" },
+        { "$ref": "#/$defs/FocusChangedMessage" },
+        { "$ref": "#/$defs/WindowAddedMessage" },
+        { "$ref": "#/$defs/WindowClosedMessage" },
+        { "$ref": "#/$defs/WindowRenamedMessage" },
+        { "$ref": "#/$defs/WindowSyncChangedMessage" },
+        { "$ref": "#/$defs/WindowMonitorActivityChangedMessage" },
+        { "$ref": "#/$defs/WindowMonitorSilenceChangedMessage" },
+        { "$ref": "#/$defs/SessionProxySessionRenamedMessage" },
+        { "$ref": "#/$defs/ClientCountChangedMessage" },
+        { "$ref": "#/$defs/SessionProxyCommandResponseMessage" },
+        { "$ref": "#/$defs/ErrorMessage" }
+      ],
+      "description": "Discriminated union of all messages the session-proxy pushes to the client. Narrow on `type`."
+    }
+  }
+}

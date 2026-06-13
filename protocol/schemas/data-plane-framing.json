@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tmuxcc:data-plane-framing",
+  "title": "tmuxcc data-plane binary frame format",
+  "description": "Documentation schema for the data-plane binary frame format. The data plane carries raw terminal output bytes for panes. This is NOT a JSON Schema for validation — binary frames are not JSON and cannot be validated with ajv. This file documents the layout for language-neutral implementations.\n\nFrame layout (every frame is a contiguous byte sequence):\n\n  Offset  Size  Field\n  ------  ----  -------------------------------------------------------\n       0     1  MAGIC  — 0xCC (mnemonic: control-client)\n       1     4  SEQ    — uint32 big-endian; per-pane monotonic counter\n       5     4  PAYLEN — uint32 big-endian; payload byte length\n       9     2  IDLEN  — uint16 big-endian; paneId UTF-8 byte length\n      11  IDLEN  PANEID — paneId encoded as UTF-8 bytes (variable length)\n  11+IDLEN PAYLEN PAYLOAD — raw terminal output bytes (opaque; any byte value)\n\nConstants:\n  FRAME_MAGIC = 0xCC\n  MAX_FRAME   = 8,388,608 bytes (8 MiB)\n\nSequence numbers:\n  SEQ is a per-pane monotonically-increasing uint32 starting at 0.\n  The session-proxy owns the counter for each pane and increments per frame.\n  Clients use SEQ to detect frame drops and restore ordering.\n  Wrapping at 0xFFFFFFFF is allowed.\n\nDecoding:\n  1. Read 11 bytes (MIN_HEADER_BYTES).\n  2. Verify buf[0] === 0xCC; throw RangeError on mismatch.\n  3. Read PAYLEN (uint32 BE at offset 5); reject if > MAX_FRAME.\n  4. Read IDLEN (uint16 BE at offset 9).\n  5. Total frame length = 11 + IDLEN + PAYLEN.\n  6. Wait until all bytes are buffered; emit DataFrame {paneId, seq, payload}.\n\nWhy binary, not JSON/base64?\n  A busy terminal can push megabytes per second. JSON encoding adds per-byte\n  string-escape overhead; base64 inflates every payload by 33%.\n  The control plane (JSON) is low-volume and benefits from human-readability;\n  the data plane does not.",
+
+  "$defs": {
+    "DataFrame": {
+      "type": "object",
+      "description": "Logical representation of a decoded data-plane frame. This JSON shape is used in golden transcripts and tests to describe frame content — it is NOT the binary wire format.",
+      "required": ["paneId", "seq", "payloadHex"],
+      "properties": {
+        "paneId": {
+          "$ref": "tmuxcc:shared/primitives#/$defs/PaneId",
+          "description": "Which pane's output stream this frame belongs to."
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "Per-pane monotonic sequence number (uint32)."
+        },
+        "payloadHex": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{2})*$",
+          "description": "Payload bytes encoded as a lowercase hex string (2 hex chars per byte). The actual wire payload is raw binary; hex is used here for JSON representability."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,93 @@
+{
+  "$schema": "../schemas/server-proxy/server-push.json",
+  "description": "Golden transcript: server-proxy connect + capabilities handshake + session-list snapshot + session.claim flow. This is the typical first connection a client makes before attaching to a specific session.",
+
+  "protocolVersion": 3,
+
+  "transcript": [
+    {
+      "direction": "server-proxy→client",
+      "step": 1,
+      "label": "server-proxy advertises capabilities",
+      "message": {
+        "type": "server-proxy.capabilities",
+        "seq": 1,
+        "capabilities": {
+          "protocolVersion": 3,
+          "features": [
+            "sessions-watch",
+            "session-claim",
+            "session-create",
+            "session-destroy"
+          ]
+        }
+      }
+    },
+    {
+      "direction": "client→server-proxy",
+      "step": 2,
+      "label": "client responds with its own capabilities",
+      "message": {
+        "type": "client.capabilities",
+        "seq": 1,
+        "capabilities": {
+          "protocolVersion": 3,
+          "features": [
+            "sessions-watch",
+            "session-claim"
+          ]
+        }
+      }
+    },
+    {
+      "direction": "server-proxy→client",
+      "step": 3,
+      "label": "server-proxy sends session-list snapshot",
+      "syncPoint": "After this message, the client has the current session list. If sessions-watch is in the negotiated feature set, the server-proxy subsequently pushes sessions.added/removed/renamed deltas.",
+      "message": {
+        "type": "sessions.snapshot",
+        "seq": 2,
+        "sessions": [
+          {
+            "sessionId": "s0",
+            "name": "main",
+            "windowCount": 2,
+            "attachedClientCount": 1
+          }
+        ]
+      }
+    },
+    {
+      "direction": "client→server-proxy",
+      "step": 4,
+      "label": "client claims (or creates) session 'main' to obtain a session-proxy endpoint",
+      "message": {
+        "type": "command.request",
+        "seq": 2,
+        "correlationId": "claim-001",
+        "command": {
+          "kind": "session.claim",
+          "name": "main"
+        }
+      }
+    },
+    {
+      "direction": "server-proxy→client",
+      "step": 5,
+      "label": "server-proxy responds with the session-proxy endpoint",
+      "message": {
+        "type": "command.response",
+        "seq": 3,
+        "correlationId": "claim-001",
+        "result": {
+          "ok": true,
+          "payload": {
+            "sessionId": "s0",
+            "endpoint": "/run/user/1000/tmuxcc/default/session-proxy.sock",
+            "created": false
+          }
+        }
+      }
+    }
+  ]
+}

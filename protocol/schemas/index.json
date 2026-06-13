@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tmuxcc:index",
+  "title": "tmuxcc wire protocol schema index",
+  "description": "Index of all JSON Schema files in the tmuxcc protocol package.\n\nVERSION: 3 (WIRE_PROTOCOL_VERSION = 3)\n\nSchema files:\n  shared/primitives.json     — PaneId, WindowId, SessionId, MessageBase, Capabilities, WireFeature\n  shared/layout.json         — Rect, LayoutPane, LayoutHSplit, LayoutVSplit, LayoutNode, WindowLayout\n  session-proxy/server-push.json — All session-proxy→client messages (SessionProxyMessage union)\n  session-proxy/client.json  — All client→session-proxy messages (ClientMessage union + WireCommand)\n  server-proxy/server-push.json  — All server-proxy→client messages (ServerProxyMessage union)\n  server-proxy/client.json   — All client→server-proxy messages (ServerProxyCommand union)\n  data-plane-framing.json    — Binary frame layout documentation + DataFrame JSON representation\n\nAmendment history:\n  v3 (tc-j9c): ServerProxy wire introduced; session-proxy wire becomes single-session.\n    SnapshotMessage: plural sessions[] → singular session.\n    PaneOpenedMessage/PaneClosedMessage/etc.: sessionId stripped (bound session implicit).\n    SessionRenamedMessage renamed to SessionProxySessionRenamedMessage; sessionId dropped.\n    SessionClosedMessage removed; destruction surfaces as ErrorMessage{code:\"session.unavailable\"}.\n    CommandRequestMessage/ResponseMessage/OkPayload renamed with SessionProxy prefix.\n    OpenWindowCommand: sessionId dropped.\n\nAmendability guidance for future beads:\n  - W2.1 (verbs-with-effects): Add new WireCommand variants to session-proxy/client.json\n    $defs/WireCommand oneOf array. Add corresponding new $def entries.\n  - W3.1 (causality tags): Add a `causeId` or similar field to MessageBase in\n    shared/primitives.json. Document the sequencing invariants in protocol/PROTOCOL.md.\n  - W1.3 (SessionEntry enrichment): Amend ServerProxySessionInfo in\n    server-proxy/server-push.json to add tmuxccMarked, paneCount, lastActivity.\n    These fields are NOT present in this version.\n\nConformance:\n  Implementations MUST validate against these schemas (in CI: packages/session-proxy\n  uses ajv via src/wire/protocol-conformance.test.ts).\n  Golden transcripts live in protocol/golden/.",
+
+  "$defs": {
+    "SchemaRef": {
+      "type": "object",
+      "required": ["id", "path", "description"],
+      "properties": {
+        "id": { "type": "string" },
+        "path": { "type": "string" },
+        "description": { "type": "string" }
+      }
+    }
+  },
+
+  "type": "object",
+  "required": ["protocolVersion", "schemas"],
+  "properties": {
+    "protocolVersion": {
+      "const": 3,
+      "description": "WIRE_PROTOCOL_VERSION. Monotonically-increasing integer identifying this schema revision."
+    },
+    "schemas": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/SchemaRef" }
+    }
+  },
+
+  "examples": [
+    {
+      "protocolVersion": 3,
+      "schemas": [
+        {
+          "id": "tmuxcc:shared/primitives",
+          "path": "shared/primitives.json",
+          "description": "PaneId, WindowId, SessionId, MessageBase, Capabilities, WireFeature"
+        },
+        {
+          "id": "tmuxcc:shared/layout",
+          "path": "shared/layout.json",
+          "description": "Rect, LayoutNode tree, WindowLayout"
+        },
+        {
+          "id": "tmuxcc:session-proxy/server-push",
+          "path": "session-proxy/server-push.json",
+          "description": "All session-proxy→client messages"
+        },
+        {
+          "id": "tmuxcc:session-proxy/client",
+          "path": "session-proxy/client.json",
+          "description": "All client→session-proxy messages and WireCommand variants"
+        },
+        {
+          "id": "tmuxcc:server-proxy/server-push",
+          "path": "server-proxy/server-push.json",
+          "description": "All server-proxy→client messages"
+        },
+        {
+          "id": "tmuxcc:server-proxy/client",
+          "path": "server-proxy/client.json",
+          "description": "All client→server-proxy messages and ServerProxyCommand variants"
+        },
+        {
+          "id": "tmuxcc:data-plane-framing",
+          "path": "data-plane-framing.json",
+          "description": "Binary data-plane frame format documentation"
+        }
+      ]
+    }
+  ]
+}
