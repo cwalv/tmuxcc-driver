@@ -256,7 +256,7 @@ describe("tc-4sg: hot-path throughput benchmark", () => {
       sendControl(_msg: unknown): void { /**/ },
       onControl(_cb: (_msg: unknown) => void): () => void { return () => {}; },
       onData(_cb: (_pid: ReturnType<typeof paneId>, _bytes: Uint8Array) => void): () => void { return () => {}; },
-      onClose(_cb: (_err?: Error) => void): void { /**/ },
+      onClose(_cb: (_err?: Error) => void): () => void { return () => {}; },
       close(_err?: Error): void { /**/ },
     };
 

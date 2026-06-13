@@ -447,7 +447,7 @@ function createRecordingPair(): RecordingPair {
     onControl(handler) { rawSessionProxy.onControl(handler); },
     sendData(paneId, bytes) { return rawSessionProxy.sendData(paneId, bytes); },
     onData(handler) { rawSessionProxy.onData(handler); },
-    onClose(handler) { rawSessionProxy.onClose(handler); },
+    onClose(handler) { return rawSessionProxy.onClose(handler); },
     close(err) { rawSessionProxy.close(err); },
   };
 
@@ -463,7 +463,7 @@ function createRecordingPair(): RecordingPair {
       return rawClient.sendData(paneId, bytes);
     },
     onData(handler) { rawClient.onData(handler); },
-    onClose(handler) { rawClient.onClose(handler); },
+    onClose(handler) { return rawClient.onClose(handler); },
     close(err) { rawClient.close(err); },
   };
 

@@ -101,7 +101,7 @@ function makeRecordingTransport(): {
       frames.push({ paneId: pid, bytes });
     },
     onData(_handler: (pid: PaneId, bytes: Uint8Array) => void): void { /* not exercised */ },
-    onClose(_handler: (err?: Error) => void): void { /* not exercised */ },
+    onClose(_handler: (err?: Error) => void): () => void { return () => {}; },
     close(_err?: Error): void { /* not exercised */ },
   };
   return { transport, frames };

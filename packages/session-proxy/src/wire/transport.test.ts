@@ -7,7 +7,7 @@
  *   2. Data-plane round-trip: raw bytes (including non-UTF-8 sequences)
  *      sent on one endpoint arrive byte-identical on the other.
  *   3. Close propagation: closing one endpoint notifies the other's onClose
- *      handler.
+ *      handlers (multi-handler subscription, tc-b55u).
  */
 
 import { describe, it } from "node:test";
@@ -251,5 +251,87 @@ describe("InMemoryTransportPair — lifecycle", () => {
     sessionProxy.sendControl(msg); // should silently drop
 
     assert.equal(received.length, 0, "messages after close should be dropped");
+  });
+
+  // ── Multi-handler onClose tests (tc-b55u) ────────────────────────────────
+
+  it("multiple onClose handlers all fire on close", () => {
+    const { sessionProxy, client } = createInMemoryTransportPair();
+
+    let first = false;
+    let second = false;
+    let third = false;
+
+    client.onClose(() => { first = true; });
+    client.onClose(() => { second = true; });
+    client.onClose(() => { third = true; });
+
+    sessionProxy.close();
+
+    assert.ok(first, "first handler should fire");
+    assert.ok(second, "second handler should fire");
+    assert.ok(third, "third handler should fire");
+  });
+
+  it("unsubscribe removes only that handler, others still fire", () => {
+    const { sessionProxy, client } = createInMemoryTransportPair();
+
+    let earlyFired = false;
+    let laterFired = false;
+    let removedFired = false;
+
+    // Register early handler, then a handler we will remove, then a late handler.
+    client.onClose(() => { earlyFired = true; });
+    const unsub = client.onClose(() => { removedFired = true; });
+    client.onClose(() => { laterFired = true; });
+
+    // Remove the middle handler before close fires.
+    unsub();
+
+    sessionProxy.close();
+
+    assert.ok(earlyFired, "early handler should still fire after unsubscribe of a different handler");
+    assert.ok(laterFired, "late handler should still fire after unsubscribe of a different handler");
+    assert.equal(removedFired, false, "unsubscribed handler must NOT fire (tc-1a9d regression shape)");
+  });
+
+  it("a late subscriber does not disarm earlier ones (tc-1a9d regression shape)", () => {
+    // Regression guard: with the OLD single-slot setter, calling onClose() a second
+    // time replaced the first handler, silently disarming it.  This test encodes
+    // the specific shape that caused tc-1a9d: a pre-handshake disconnect subscriber
+    // is clobbered by a post-handshake subscriber.
+    const { sessionProxy, client } = createInMemoryTransportPair();
+
+    let preHandshakeDisconnectFired = false;
+    let postHandshakeDisconnectFired = false;
+
+    // Simulate pre-handshake subscriber (e.g. ServerProxySessionProxyHandle).
+    client.onClose(() => { preHandshakeDisconnectFired = true; });
+
+    // Simulate post-handshake subscriber (e.g. SessionProxyConnection.#installPostHandshakeRouting).
+    client.onClose(() => { postHandshakeDisconnectFired = true; });
+
+    // The remote closes (e.g. session-proxy disconnects).
+    sessionProxy.close();
+
+    assert.ok(preHandshakeDisconnectFired,
+      "pre-handshake disconnect handler must fire — late subscriber must not disarm it");
+    assert.ok(postHandshakeDisconnectFired,
+      "post-handshake disconnect handler must also fire");
+  });
+
+  it("onClose returns an unsubscribe function that is callable multiple times (idempotent unsub)", () => {
+    const { sessionProxy, client } = createInMemoryTransportPair();
+
+    let callCount = 0;
+    const unsub = client.onClose(() => { callCount++; });
+
+    // Calling unsub twice should not throw.
+    unsub();
+    unsub();
+
+    sessionProxy.close();
+
+    assert.equal(callCount, 0, "handler must not fire after unsubscribe");
   });
 });

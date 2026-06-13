@@ -78,8 +78,14 @@ export type CloseHandler = (err?: Error) => void;
  * to back-pressure (e.g. when the socket send-buffer is full) may return a
  * Promise that resolves when the data has been accepted.
  *
- * `on*` methods register a single handler for the lifetime of the transport.
- * Calling an `on*` method a second time replaces the previous handler.
+ * `onControl` and `onData` register a single handler for the lifetime of the
+ * transport. Calling them a second time replaces the previous handler.
+ *
+ * `onClose` is a multi-handler subscription: each call registers an additional
+ * handler and returns an unsubscribe function. All registered handlers fire
+ * when the transport closes.  Calling the returned unsubscribe deregisters only
+ * that handler; other subscribers are unaffected.
+ *
  * Handlers are invoked synchronously in the in-memory implementation; real
  * transports may invoke them on the next event-loop tick.
  *
@@ -128,12 +134,15 @@ export interface Transport {
 
   /**
    * Register a handler called when the transport closes (cleanly or with an
-   * error).  Replaces any previously registered handler.
+   * error).  Multiple handlers may be registered; all fire on close.
+   *
+   * Returns an unsubscribe function.  Call it to deregister this specific
+   * handler without affecting other subscribers.
    *
    * If the transport closes with an error, the handler receives the Error
    * object.  A clean close passes no argument (err is undefined).
    */
-  onClose(handler: CloseHandler): void;
+  onClose(handler: CloseHandler): () => void;
 
   /**
    * Close the transport.  Delivers a close notification to the onClose handler
@@ -185,11 +194,11 @@ export interface InMemoryTransportPair {
 export function createInMemoryTransportPair(): InMemoryTransportPair {
   let sessionProxyControlHandler: ControlHandler | null = null;
   let sessionProxyDataHandler: DataHandler | null = null;
-  let sessionProxyCloseHandler: CloseHandler | null = null;
+  const sessionProxyCloseHandlers = new Set<CloseHandler>();
 
   let clientControlHandler: ControlHandler | null = null;
   let clientDataHandler: DataHandler | null = null;
-  let clientCloseHandler: CloseHandler | null = null;
+  const clientCloseHandlers = new Set<CloseHandler>();
 
   let closed = false;
 
@@ -209,14 +218,15 @@ export function createInMemoryTransportPair(): InMemoryTransportPair {
       sessionProxyDataHandler = handler;
     },
     onClose(handler) {
-      sessionProxyCloseHandler = handler;
+      sessionProxyCloseHandlers.add(handler);
+      return () => { sessionProxyCloseHandlers.delete(handler); };
     },
     close(err) {
       if (closed) return;
       closed = true;
       // Notify the remote (client) side first, then self.
-      clientCloseHandler?.(err);
-      sessionProxyCloseHandler?.(err);
+      for (const h of clientCloseHandlers) h(err);
+      for (const h of sessionProxyCloseHandlers) h(err);
     },
   };
 
@@ -236,14 +246,15 @@ export function createInMemoryTransportPair(): InMemoryTransportPair {
       clientDataHandler = handler;
     },
     onClose(handler) {
-      clientCloseHandler = handler;
+      clientCloseHandlers.add(handler);
+      return () => { clientCloseHandlers.delete(handler); };
     },
     close(err) {
       if (closed) return;
       closed = true;
       // Notify the remote (sessionProxy) side first, then self.
-      sessionProxyCloseHandler?.(err);
-      clientCloseHandler?.(err);
+      for (const h of sessionProxyCloseHandlers) h(err);
+      for (const h of clientCloseHandlers) h(err);
     },
   };
 

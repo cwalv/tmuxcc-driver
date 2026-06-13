@@ -254,8 +254,10 @@ async function connectToSessionProxy(endpoint: string): Promise<{
 }> {
   const transport = await connectSocketTransport(endpoint);
   await runClientHandshake(transport, SESSION_PROXY_CLIENT_CAPS, "session-proxy.capabilities");
-  // onClose is single-slot like onControl, and runClientHandshake installs
-  // (then no-ops) its own handler — install ours AFTER the handshake.
+  // onClose is now a multi-handler subscription (tc-b55u): registering here
+  // after the handshake is fine, but there is no longer a single-slot hazard —
+  // the handshake's close subscriber has already unsubscribed itself via
+  // settle().
   let isClosed = false;
   transport.onClose(() => {
     isClosed = true;

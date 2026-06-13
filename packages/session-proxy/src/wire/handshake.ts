@@ -193,13 +193,17 @@ export function runServerHandshake(
   return new Promise<NegotiatedSession>((resolve, reject) => {
     let settled = false;
 
+    // Capture unsubscribe so settle() can remove the handshake close handler
+    // without affecting other onClose subscribers on the same transport.
+    let unsubClose: (() => void) | null = null;
+
     const settle = (fn: () => void) => {
       if (settled) return;
       settled = true;
       // Unregister our temporary handlers before resolving/rejecting so that
       // the caller can install its own handlers without seeing handshake traffic.
       transport.onControl(() => {});
-      transport.onClose(() => {});
+      unsubClose?.();
       fn();
     };
 
@@ -229,7 +233,7 @@ export function runServerHandshake(
     });
 
     // Handle transport closure before client responds
-    transport.onClose(() => {
+    unsubClose = transport.onClose(() => {
       settle(() =>
         reject(
           new HandshakeError(
@@ -289,11 +293,15 @@ export function runClientHandshake(
   return new Promise<NegotiatedSession>((resolve, reject) => {
     let settled = false;
 
+    // Capture unsubscribe so settle() can remove the handshake close handler
+    // without affecting other onClose subscribers on the same transport.
+    let unsubClose: (() => void) | null = null;
+
     const settle = (fn: () => void) => {
       if (settled) return;
       settled = true;
       transport.onControl(() => {});
-      transport.onClose(() => {});
+      unsubClose?.();
       fn();
     };
 
@@ -333,7 +341,7 @@ export function runClientHandshake(
     });
 
     // Handle transport closure before server advertises
-    transport.onClose(() => {
+    unsubClose = transport.onClose(() => {
       settle(() =>
         reject(
           new HandshakeError(

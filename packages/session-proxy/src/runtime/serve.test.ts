@@ -699,10 +699,10 @@ function createAsyncTransportPair(): { sessionProxy: Transport; client: Transpor
   // Simpler: build our own minimal async transport pair from scratch.
 
   let sessionProxyControlHandler: ControlHandler = () => {};
-  let sessionProxyCloseHandler: CloseHandler = () => {};
+  const sessionProxyCloseHandlers = new Set<CloseHandler>();
 
   let clientControlHandler: ControlHandler = () => {};
-  let clientCloseHandler: CloseHandler = () => {};
+  const clientCloseHandlers = new Set<CloseHandler>();
 
   let closed = false;
 
@@ -721,12 +721,15 @@ function createAsyncTransportPair(): { sessionProxy: Transport; client: Transpor
       // Data plane: synchronous for test simplicity.
     },
     onData(_handler) { /* not used in this test */ },
-    onClose(handler) { sessionProxyCloseHandler = handler; },
+    onClose(handler) {
+      sessionProxyCloseHandlers.add(handler);
+      return () => { sessionProxyCloseHandlers.delete(handler); };
+    },
     close(err) {
       if (closed) return;
       closed = true;
-      clientCloseHandler(err);
-      sessionProxyCloseHandler(err);
+      for (const h of clientCloseHandlers) h(err);
+      for (const h of sessionProxyCloseHandlers) h(err);
     },
   };
 
@@ -742,12 +745,15 @@ function createAsyncTransportPair(): { sessionProxy: Transport; client: Transpor
       if (closed) return;
     },
     onData(_handler) { /* not used in this test */ },
-    onClose(handler) { clientCloseHandler = handler; },
+    onClose(handler) {
+      clientCloseHandlers.add(handler);
+      return () => { clientCloseHandlers.delete(handler); };
+    },
     close(err) {
       if (closed) return;
       closed = true;
-      sessionProxyCloseHandler(err);
-      clientCloseHandler(err);
+      for (const h of sessionProxyCloseHandlers) h(err);
+      for (const h of clientCloseHandlers) h(err);
     },
   };
 

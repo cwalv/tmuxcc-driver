@@ -72,7 +72,7 @@ class SocketTransport implements Transport {
   private _socket: net.Socket;
   private _controlHandler: ControlHandler | null = null;
   private _dataHandler: DataHandler | null = null;
-  private _closeHandler: CloseHandler | null = null;
+  private readonly _closeHandlers = new Set<CloseHandler>();
 
   private _buf = Buffer.alloc(0);
   private _closed = false;
@@ -168,8 +168,9 @@ class SocketTransport implements Transport {
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
-  onClose(handler: CloseHandler): void {
-    this._closeHandler = handler;
+  onClose(handler: CloseHandler): () => void {
+    this._closeHandlers.add(handler);
+    return () => { this._closeHandlers.delete(handler); };
   }
 
   close(err?: Error): void {
@@ -182,8 +183,8 @@ class SocketTransport implements Transport {
     this._drainResolve = null;
     if (r !== null) r();
     this._socket.destroy(err);
-    this._closeHandler?.(err);
-    this._closeHandler = null;
+    for (const h of this._closeHandlers) h(err);
+    this._closeHandlers.clear();
   }
 
   // ── Incoming data parser ───────────────────────────────────────────────────
@@ -343,8 +344,8 @@ class SocketTransport implements Transport {
     this._drainPromise = null;
     this._drainResolve = null;
     if (r !== null) r();
-    this._closeHandler?.(err);
-    this._closeHandler = null;
+    for (const h of this._closeHandlers) h(err);
+    this._closeHandlers.clear();
   }
 }
 
@@ -381,11 +382,11 @@ export interface SocketServerOptions {
    * or an accepted connection fully closes (tc-3iv idle-exit tracking).
    *
    * Counting happens at the raw `net.Socket` level — NOT via
-   * `Transport.onClose` — because the transport's close handler is a
-   * single-slot field that the wire handshake temporarily replaces; a
-   * connection that dies mid-handshake would leak a transport-level count.
-   * A socket `close` event fires exactly once per accepted connection, no
-   * matter how the connection ends.
+   * `Transport.onClose` — because the wire handshake registers and then
+   * unsubscribes its own close handler, and any consumer registered before
+   * the handshake completes would see the close whether or not the handshake
+   * succeeded; a socket `close` event fires exactly once per accepted
+   * connection, no matter how the connection ends.
    */
   onConnectionCountChange?: (count: number) => void;
 }
