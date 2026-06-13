@@ -81,11 +81,35 @@ export interface TmuxSessionRow {
   windowCount: number;
   /** number of attached clients */
   attachedCount: number;
+  /**
+   * Whether this session carries the `@tmuxcc 1` user option (tc-295a.4 /
+   * W1.3).  True iff the session was created or claimed by tmuxcc; false for
+   * foreign sessions that tmuxcc has never touched.
+   */
+  tmuxccMarked: boolean;
+  /**
+   * Total number of panes across all windows in this session (tc-295a.4 /
+   * W1.3).  Sourced from a companion `list-panes -a` call inside
+   * `listSessions`; 0 when the server has no panes for this session.
+   */
+  paneCount: number;
+  /**
+   * Unix epoch (seconds) of the most-recent activity in this session
+   * (tc-295a.4 / W1.3).  Sourced from tmux's `#{session_activity}` format
+   * variable.  0 when tmux cannot report an activity time (should not
+   * happen in practice).
+   */
+  lastActivity: number;
 }
 
 /**
  * Run `tmux -L <socketName> list-sessions -F '...'` synchronously and
  * return the parsed rows.
+ *
+ * tc-295a.4 (W1.3): the format string now also fetches `#{@tmuxcc}` (the
+ * Phase-2 marker) and `#{session_activity}` (Unix epoch of last activity).
+ * `paneCount` is sourced from a companion `list-panes -a` call so that a
+ * single `listSessions` call provides all enriched fields the broker needs.
  *
  * Returns an empty array if the tmux server is not running or has no sessions
  * (status 0 with empty stdout, OR stderr says "no server running").
@@ -98,7 +122,10 @@ export interface TmuxSessionRow {
  * surfaced as the "Session not found after creation" claim race.
  */
 export function listSessions(socketName: string): TmuxSessionRow[] | null {
-  const FORMAT = "#{session_id} #{session_name} #{session_windows} #{session_attached}";
+  // Fields: session_id  session_name  session_windows  session_attached
+  //         @tmuxcc  session_activity
+  // Delimiter: tab (\t) avoids accidental splits on spaces in session names.
+  const FORMAT = "#{session_id}\t#{session_name}\t#{session_windows}\t#{session_attached}\t#{@tmuxcc}\t#{session_activity}";
   const result = spawnSync(
     "tmux",
     ["-L", socketName, "list-sessions", "-F", FORMAT],
@@ -122,17 +149,24 @@ export function listSessions(socketName: string): TmuxSessionRow[] | null {
     return null;
   }
 
+  // Pane counts per session id, used to enrich each row.
+  const paneCounts = countPanesBySession(socketName);
+
   return (result.stdout ?? "")
     .trim()
     .split("\n")
     .filter(Boolean)
     .map((line) => {
-      const [tmuxId, name, windows, attached] = line.split(" ");
+      const [tmuxId, name, windows, attached, marker, activity] = line.split("\t");
+      const id = tmuxId ?? "";
       return {
-        tmuxId: tmuxId ?? "",
+        tmuxId: id,
         name: name ?? "",
         windowCount: parseInt(windows ?? "0", 10) || 0,
         attachedCount: parseInt(attached ?? "0", 10) || 0,
+        tmuxccMarked: (marker ?? "").trim() === "1",
+        paneCount: paneCounts.get(id) ?? 0,
+        lastActivity: parseInt(activity ?? "0", 10) || 0,
       };
     });
 }

@@ -75,7 +75,7 @@ import { createSocketServer, createSocketTransport } from "./socket-transport.js
 import { serverProxySocketPath, sessionProxySocketPath, removeSocket, restrictSocket } from "./runtime-dir.js";
 import { createServerProxyMetrics } from "./metrics.js";
 import type { ServerProxyMetrics } from "./metrics.js";
-import { listSessions, createSession, killSession, createTmuxWatcher, probeTmuxAlive, setWindowSynchronizePanes, setWindowMonitorActivity, setWindowMonitorSilence, setSessionMarker, getTmuxServerPid, countPanesBySession, countTmuxccClientsBySession } from "./tmux-south.js";
+import { listSessions, createSession, killSession, createTmuxWatcher, probeTmuxAlive, setWindowSynchronizePanes, setWindowMonitorActivity, setWindowMonitorSilence, setSessionMarker, getTmuxServerPid, countTmuxccClientsBySession } from "./tmux-south.js";
 import type { TmuxWatcher } from "./tmux-south.js";
 import { createSessionProxySupervisor } from "./session-proxy-supervisor.js";
 import type { SessionProxySupervisor, SessionProxyExitInfo } from "./session-proxy-supervisor.js";
@@ -236,6 +236,21 @@ interface SessionEntry {
   windowCount: number;
   /** Count of tmuxcc clients attached (tracked per sessionProxy, 0 until a session-proxy is spawned) */
   attachedClientCount: number;
+  /**
+   * Whether the session carries the `@tmuxcc 1` user option (tc-295a.4 / W1.3).
+   * True for all sessions created/claimed by tmuxcc; false for foreign sessions.
+   */
+  tmuxccMarked: boolean;
+  /**
+   * Total panes across all windows in this session (tc-295a.4 / W1.3).
+   * Sourced from `list-panes -a` via `listSessions`.
+   */
+  paneCount: number;
+  /**
+   * Unix epoch (seconds) of most-recent session activity (tc-295a.4 / W1.3).
+   * Sourced from tmux's `#{session_activity}` format variable.
+   */
+  lastActivity: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -829,6 +844,10 @@ class ServerProxyImpl implements ServerProxyHandle {
           name: row.name,
           windowCount: row.windowCount,
           attachedClientCount: externalCount,
+          // tc-295a.4 (W1.3): enriched fields from the extended listSessions format.
+          tmuxccMarked: row.tmuxccMarked,
+          paneCount: row.paneCount,
+          lastActivity: row.lastActivity,
         };
         this._sessions.set(sessionId, entry);
         this._byName.set(row.name, entry);
@@ -838,12 +857,20 @@ class ServerProxyImpl implements ServerProxyHandle {
         this._byName.delete(existing.name);
         existing.name = row.name;
         existing.windowCount = row.windowCount;
+        // tc-295a.4 (W1.3): keep enriched fields current on rename.
+        existing.tmuxccMarked = row.tmuxccMarked;
+        existing.paneCount = row.paneCount;
+        existing.lastActivity = row.lastActivity;
         this._byName.set(row.name, existing);
         this._broadcastRenamed(existing.sessionId, row.name);
       } else {
         // Update counts
         existing.windowCount = row.windowCount;
         existing.attachedClientCount = externalCount;
+        // tc-295a.4 (W1.3): keep enriched fields current on every refresh.
+        existing.tmuxccMarked = row.tmuxccMarked;
+        existing.paneCount = row.paneCount;
+        existing.lastActivity = row.lastActivity;
       }
     }
 
@@ -902,6 +929,10 @@ class ServerProxyImpl implements ServerProxyHandle {
         name: entry.name,
         windowCount: entry.windowCount,
         attachedClientCount: entry.attachedClientCount,
+        // tc-295a.4 (W1.3): enriched fields carried in snapshot.
+        tmuxccMarked: entry.tmuxccMarked,
+        paneCount: entry.paneCount,
+        lastActivity: entry.lastActivity,
       });
     }
     return { type: "sessions.snapshot", seq, sessions };
@@ -915,15 +946,13 @@ class ServerProxyImpl implements ServerProxyHandle {
    * Build the read-only diagnostics snapshot for a `server-proxy.info` command.
    *
    * Refreshes the session table first so counts are current, then augments
-   * each session row with the session-proxy PID (from the supervisor) and the pane
-   * count (one `tmux list-panes -a` shell-out, tallied per session).  All
-   * queries are cheap and synchronous; nothing is mutated beyond the routine
-   * session-table refresh.
+   * each session row with the session-proxy PID (from the supervisor).  Pane
+   * counts are now sourced from the SessionEntry (populated by `listSessions`
+   * via a companion `list-panes -a` call) — no extra shell-out here.
    */
   private _buildInfo(): ServerProxyInfoPayload {
     this._refreshSessions();
 
-    const paneCounts = countPanesBySession(this._opts.socketName);
     const sessions: ServerProxyInfoSession[] = [];
     for (const entry of this._sessions.values()) {
       sessions.push({
@@ -931,7 +960,7 @@ class ServerProxyImpl implements ServerProxyHandle {
         name: entry.name,
         sessionProxyPid: this._supervisor.sessionProxyPid(entry.sessionId),
         windowCount: entry.windowCount,
-        paneCount: paneCounts.get(entry.tmuxId) ?? 0,
+        paneCount: entry.paneCount,
         attachedClientCount: entry.attachedClientCount,
       });
     }
@@ -1119,6 +1148,14 @@ class ServerProxyImpl implements ServerProxyHandle {
             name,
             windowCount: 1,
             attachedClientCount: 0,
+            // tc-295a.4 (W1.3): newly-created sessions are always marked
+            // (createSession calls setSessionMarker internally), have 1 pane
+            // (tmux new-session creates a default window with one pane), and
+            // have current-epoch activity.  These are overwritten on the first
+            // _refreshSessions tick; the values here prevent a brief 0-gap.
+            tmuxccMarked: true,
+            paneCount: 1,
+            lastActivity: Math.floor(Date.now() / 1_000),
           };
           this._sessions.set(sessionId, entry);
           this._byName.set(name, entry);
@@ -1288,6 +1325,10 @@ class ServerProxyImpl implements ServerProxyHandle {
       name: entry.name,
       windowCount: entry.windowCount,
       attachedClientCount: entry.attachedClientCount,
+      // tc-295a.4 (W1.3): enriched fields carried in sessions.added delta.
+      tmuxccMarked: entry.tmuxccMarked,
+      paneCount: entry.paneCount,
+      lastActivity: entry.lastActivity,
     };
     this._broadcastToAll(delta);
   }

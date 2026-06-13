@@ -27,7 +27,7 @@ import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 
-import { createSession, listSessions } from "./tmux-south.js";
+import { createSession, listSessions, setSessionMarker } from "./tmux-south.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -162,4 +162,126 @@ describe("tmux-south listSessions (tc-zcqr)", () => {
       }
     },
   );
+});
+
+// ---------------------------------------------------------------------------
+// listSessions enriched fields (tc-295a.4 / W1.3)
+// ---------------------------------------------------------------------------
+
+describe("tmux-south listSessions enriched fields (tc-295a.4)", { skip: !TMUX_AVAILABLE }, () => {
+  afterEach(() => {
+    for (const sock of [...liveSockets]) killServer(sock);
+  });
+
+  it("tmuxccMarked is true for a session created by createSession (which stamps @tmuxcc 1)", () => {
+    const socketName = nextSocketName();
+    try {
+      createSession(socketName, "marked-sess");
+      const rows = listSessions(socketName);
+      assert.ok(Array.isArray(rows) && rows.length > 0, "Expected at least one row");
+      const row = rows!.find((r) => r.name === "marked-sess");
+      assert.ok(row, "Expected a row for 'marked-sess'");
+      assert.equal(
+        row!.tmuxccMarked,
+        true,
+        "createSession stamps @tmuxcc 1 — tmuxccMarked must be true",
+      );
+    } finally {
+      killServer(socketName);
+    }
+  });
+
+  it("tmuxccMarked is false for a session created outside tmuxcc (no @tmuxcc option set)", () => {
+    const socketName = nextSocketName();
+    try {
+      // Create a session without the tmuxcc marker by calling tmux new-session directly.
+      const r = spawnSync(
+        "tmux",
+        ["-L", socketName, "new-session", "-d", "-s", "foreign-sess"],
+        { encoding: "utf8", timeout: 10_000 },
+      );
+      assert.equal(r.status, 0, `tmux new-session failed: ${r.stderr}`);
+
+      const rows = listSessions(socketName);
+      assert.ok(Array.isArray(rows) && rows.length > 0, "Expected at least one row");
+      const row = rows!.find((r) => r.name === "foreign-sess");
+      assert.ok(row, "Expected a row for 'foreign-sess'");
+      assert.equal(
+        row!.tmuxccMarked,
+        false,
+        "Session created without @tmuxcc option — tmuxccMarked must be false",
+      );
+    } finally {
+      killServer(socketName);
+    }
+  });
+
+  it("tmuxccMarked transitions to true after setSessionMarker is called on a foreign session", () => {
+    const socketName = nextSocketName();
+    try {
+      // Create a foreign session.
+      const r = spawnSync(
+        "tmux",
+        ["-L", socketName, "new-session", "-d", "-s", "adopt-sess"],
+        { encoding: "utf8", timeout: 10_000 },
+      );
+      assert.equal(r.status, 0, `tmux new-session failed: ${r.stderr}`);
+
+      // Verify it starts unmarked.
+      const before = listSessions(socketName);
+      const rowBefore = before!.find((r) => r.name === "adopt-sess");
+      assert.ok(rowBefore, "Expected a row for 'adopt-sess' before marking");
+      assert.equal(rowBefore!.tmuxccMarked, false, "Must be false before mark-on-attach");
+
+      // Apply the marker (mirrors mark-on-attach in _doClaimSession).
+      setSessionMarker(socketName, "adopt-sess");
+
+      // Now tmuxccMarked must be true.
+      const after = listSessions(socketName);
+      const rowAfter = after!.find((r) => r.name === "adopt-sess");
+      assert.ok(rowAfter, "Expected a row for 'adopt-sess' after marking");
+      assert.equal(
+        rowAfter!.tmuxccMarked,
+        true,
+        "setSessionMarker must flip tmuxccMarked to true",
+      );
+    } finally {
+      killServer(socketName);
+    }
+  });
+
+  it("paneCount is >= 1 for a newly-created session (at least 1 pane from new-session)", () => {
+    const socketName = nextSocketName();
+    try {
+      createSession(socketName, "pane-sess");
+      const rows = listSessions(socketName);
+      assert.ok(Array.isArray(rows) && rows.length > 0, "Expected at least one row");
+      const row = rows!.find((r) => r.name === "pane-sess");
+      assert.ok(row, "Expected a row for 'pane-sess'");
+      assert.ok(
+        row!.paneCount >= 1,
+        `paneCount must be >= 1 for a fresh session, got ${String(row!.paneCount)}`,
+      );
+    } finally {
+      killServer(socketName);
+    }
+  });
+
+  it("lastActivity is a positive Unix epoch for a live session", () => {
+    const socketName = nextSocketName();
+    try {
+      const beforeEpoch = Math.floor(Date.now() / 1_000) - 2; // 2s slack for clock jitter
+      createSession(socketName, "activity-sess");
+      const rows = listSessions(socketName);
+      assert.ok(Array.isArray(rows) && rows.length > 0, "Expected at least one row");
+      const row = rows!.find((r) => r.name === "activity-sess");
+      assert.ok(row, "Expected a row for 'activity-sess'");
+      assert.ok(
+        row!.lastActivity > beforeEpoch,
+        `lastActivity (${String(row!.lastActivity)}) must be a recent Unix epoch > ${beforeEpoch}`,
+      );
+    } finally {
+      killServer(socketName);
+    }
+  });
 });

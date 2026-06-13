@@ -1414,3 +1414,143 @@ describe("server-proxy – tc-xnay / tc-ymxe: designed-exit announcement", () =>
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// tc-295a.4 (W1.3): enriched SessionEntry fields in snapshot and deltas
+// ---------------------------------------------------------------------------
+
+describe("server-proxy – enriched session fields (tc-295a.4)", { skip: !TMUX_AVAILABLE }, () => {
+  let serverProxy: ServerProxyHandle;
+  let socketName: string;
+
+  beforeEach(async () => {
+    socketName = nextSocketName();
+    serverProxy = createServerProxy({ socketName });
+    await serverProxy.start();
+  });
+
+  afterEach(async () => {
+    await serverProxy.shutdown();
+    spawnSync("tmux", ["-L", socketName, "kill-server"], { stdio: "ignore", timeout: 5_000 });
+  });
+
+  it("E1: snapshot carries tmuxccMarked=true, paneCount>=1, lastActivity>0 after session.claim", async () => {
+    const { mux } = await connectToServerProxy(serverProxy.endpoint());
+    const seq = { value: 1 };
+
+    const claimResp = await sendServerProxyCommand(mux, { kind: "session.claim", name: "e1-marked" }, seq);
+    assert.ok(claimResp.result.ok, `Claim failed: ${JSON.stringify(claimResp.result)}`);
+
+    // Reconnect to get a fresh snapshot with the session present.
+    mux.transport.close();
+    const { snapshot } = await connectToServerProxy(serverProxy.endpoint());
+
+    const info = snapshot.sessions.find((s) => s.name === "e1-marked");
+    assert.ok(info, `sessions.snapshot must include 'e1-marked': ${JSON.stringify(snapshot.sessions)}`);
+
+    assert.equal(
+      info.tmuxccMarked,
+      true,
+      `tmuxccMarked must be true for a session claimed by tmuxcc; got ${String(info.tmuxccMarked)}`,
+    );
+    assert.ok(
+      info.paneCount >= 1,
+      `paneCount must be >= 1 in snapshot; got ${String(info.paneCount)}`,
+    );
+    const nowEpoch = Math.floor(Date.now() / 1_000);
+    assert.ok(
+      info.lastActivity > 0 && info.lastActivity <= nowEpoch + 5,
+      `lastActivity must be a positive recent Unix epoch; got ${String(info.lastActivity)}`,
+    );
+  });
+
+  it("E2: snapshot carries tmuxccMarked=false for a foreign session (no @tmuxcc option)", async () => {
+    // Connect first so we can subscribe to sessions.added before creating the session.
+    const { mux } = await connectToServerProxy(serverProxy.endpoint());
+
+    // Subscribe to sessions.added to await discovery of the foreign session.
+    const foreignAddedPromise = new Promise<ServerProxySessionAddedMessage>((resolve) => {
+      const unsub = mux.subscribe((msg) => {
+        if (msg.type === "sessions.added" && (msg as unknown as ServerProxySessionAddedMessage).name === "e2-foreign") {
+          unsub();
+          resolve(msg as unknown as ServerProxySessionAddedMessage);
+        }
+      });
+    });
+
+    // Create a session outside tmuxcc — no @tmuxcc 1 option set.
+    const foreignResult = spawnSync(
+      "tmux",
+      ["-L", socketName, "new-session", "-d", "-s", "e2-foreign", "-P", "-F", "#{session_id}"],
+      { encoding: "utf8", timeout: 10_000 },
+    );
+    assert.equal(foreignResult.status, 0, `tmux new-session failed: ${foreignResult.stderr}`);
+
+    // Wait for the server-proxy to discover the foreign session via the watcher
+    // firing %sessions-changed (up to 5 s).
+    const [timeoutP, clearTimeout_] = rejectAfter(5_000, "Timeout waiting for e2-foreign sessions.added");
+    const added = await Promise.race([foreignAddedPromise, timeoutP]);
+    clearTimeout_();
+
+    assert.equal(added.type, "sessions.added");
+    assert.equal(added.name, "e2-foreign");
+    assert.equal(
+      (added as unknown as { tmuxccMarked: boolean }).tmuxccMarked,
+      false,
+      `sessions.added for a foreign session must carry tmuxccMarked=false; got ${String((added as unknown as { tmuxccMarked: unknown }).tmuxccMarked)}`,
+    );
+
+    // Verify the snapshot also reflects tmuxccMarked=false (redundant but exhaustive).
+    const { snapshot } = await connectToServerProxy(serverProxy.endpoint());
+    const info = snapshot.sessions.find((s) => s.name === "e2-foreign");
+    assert.ok(info, `sessions.snapshot must include 'e2-foreign': ${JSON.stringify(snapshot.sessions)}`);
+    assert.equal(
+      info!.tmuxccMarked,
+      false,
+      `tmuxccMarked must be false for a foreign session in snapshot; got ${String(info!.tmuxccMarked)}`,
+    );
+
+    mux.transport.close();
+  });
+
+  it("E3: sessions.added delta carries tmuxccMarked, paneCount, lastActivity for a claimed session", async () => {
+    const { mux } = await connectToServerProxy(serverProxy.endpoint());
+    const seq = { value: 1 };
+
+    // Subscribe to sessions.added before triggering the claim.
+    const addedPromise = new Promise<ServerProxySessionAddedMessage>((resolve) => {
+      const unsub = mux.subscribe((msg) => {
+        if (msg.type === "sessions.added" && (msg as unknown as ServerProxySessionAddedMessage).name === "e3-delta") {
+          unsub();
+          resolve(msg as unknown as ServerProxySessionAddedMessage);
+        }
+      });
+    });
+
+    await sendServerProxyCommand(mux, { kind: "session.claim", name: "e3-delta" }, seq);
+
+    const [timeoutP, clearTimeout_] = rejectAfter(3_000, "Timeout waiting for sessions.added e3-delta");
+    const added = await Promise.race([addedPromise, timeoutP]);
+    clearTimeout_();
+
+    assert.equal(added.type, "sessions.added");
+    assert.equal(added.name, "e3-delta");
+    assert.equal(
+      (added as unknown as { tmuxccMarked: boolean }).tmuxccMarked,
+      true,
+      `sessions.added must carry tmuxccMarked=true for a claimed session; got ${String((added as unknown as { tmuxccMarked: unknown }).tmuxccMarked)}`,
+    );
+    assert.ok(
+      (added as unknown as { paneCount: number }).paneCount >= 1,
+      `sessions.added must carry paneCount>=1; got ${String((added as unknown as { paneCount: unknown }).paneCount)}`,
+    );
+    const nowEpoch = Math.floor(Date.now() / 1_000);
+    const la = (added as unknown as { lastActivity: number }).lastActivity;
+    assert.ok(
+      la > 0 && la <= nowEpoch + 5,
+      `sessions.added must carry a positive recent lastActivity; got ${String(la)}`,
+    );
+
+    mux.transport.close();
+  });
+});

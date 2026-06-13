@@ -63,6 +63,11 @@ export interface ServerProxyCapabilitiesMessage extends MessageBase {
  * Counts are static at snapshot/delta time; the server-proxy does not push
  * live count updates. Clients that need fresh counts may issue a new
  * session.claim or reconnect to get a fresh snapshot.
+ *
+ * tc-295a.4 (W1.3): enriched with tmuxccMarked, paneCount, lastActivity.
+ * These fields are carried in snapshots and all session-added deltas so the
+ * session picker (S1/W1.6) can render foreign-session rows without extra
+ * round-trips.
  */
 export interface ServerProxySessionInfo {
   readonly sessionId: SessionId;
@@ -71,6 +76,22 @@ export interface ServerProxySessionInfo {
   readonly windowCount: number;
   /** Number of tmuxcc clients currently attached (at snapshot/delta time). */
   readonly attachedClientCount: number;
+  /**
+   * Whether this session carries the `@tmuxcc 1` user option (tc-295a.4 /
+   * W1.3).  True for all sessions created/claimed by tmuxcc; false for
+   * foreign sessions (e.g. user-created or managed by another tool).
+   */
+  readonly tmuxccMarked: boolean;
+  /**
+   * Total panes across all windows in this session at snapshot/delta time
+   * (tc-295a.4 / W1.3).  Sourced from `tmux list-panes -a`.
+   */
+  readonly paneCount: number;
+  /**
+   * Unix epoch (seconds) of the most-recent activity in this session
+   * (tc-295a.4 / W1.3).  Sourced from tmux's `#{session_activity}`.
+   */
+  readonly lastActivity: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -83,6 +104,11 @@ export interface ServerProxySessionInfo {
  * direction: server-proxy→client
  *
  * Clients use this to populate their session picker without polling.
+ *
+ * BD-COMMENT tc-295a.4: sessions.snapshot shape changed — each ServerProxySessionInfo
+ * entry now carries three new fields: tmuxccMarked (boolean), paneCount (number),
+ * lastActivity (number).  TL: amend the JSON Schema for sessions.snapshot in the
+ * protocol/ package at merge.
  */
 export interface ServerProxySnapshotMessage extends MessageBase {
   readonly type: "sessions.snapshot";
@@ -100,6 +126,13 @@ export interface ServerProxySnapshotMessage extends MessageBase {
  *
  * Shape mirrors ServerProxySessionInfo so clients can update their session model
  * without polling.
+ *
+ * tc-295a.4 (W1.3): enriched with tmuxccMarked, paneCount, lastActivity
+ * (same fields as ServerProxySessionInfo).
+ *
+ * BD-COMMENT tc-295a.4: sessions.added message shape changed — three new fields
+ * added: tmuxccMarked (boolean), paneCount (number), lastActivity (number).
+ * TL: amend the JSON Schema for sessions.added in the protocol/ package at merge.
  */
 export interface ServerProxySessionAddedMessage extends MessageBase {
   readonly type: "sessions.added";
@@ -109,6 +142,12 @@ export interface ServerProxySessionAddedMessage extends MessageBase {
   readonly windowCount: number;
   /** Attached-client count at add time. */
   readonly attachedClientCount: number;
+  /** Whether this session carries the `@tmuxcc 1` marker (tc-295a.4 / W1.3). */
+  readonly tmuxccMarked: boolean;
+  /** Total pane count at add time (tc-295a.4 / W1.3). */
+  readonly paneCount: number;
+  /** Unix epoch (seconds) of last activity at add time (tc-295a.4 / W1.3). */
+  readonly lastActivity: number;
 }
 
 /**
