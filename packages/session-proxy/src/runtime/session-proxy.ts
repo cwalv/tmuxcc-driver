@@ -60,6 +60,7 @@ import type { SessionProxyRegistry, StormAlarmOptions } from "../metrics/index.j
 import type { CommandResult } from "../parser/correlator.js";
 import { hydrateTransport, hydratePane, captureText } from "./hydration.js";
 import type { HydrationSentinels } from "./hydration.js";
+import { createVerbOriginRegistry } from "./verb-origin.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -271,6 +272,14 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
   const metricsRegistry = createSessionProxyRegistry();
   const stormAlarm = createStormAlarm(opts.stormAlarm ?? {});
 
+  // tc-ozk.2: verb-origin registry — correlates a creating verb's returned
+  // effect ids (tc-ozk.1) to the connection + requestId that caused them, so
+  // the creation deltas (pane.opened / window.added) the daemon emits carry
+  // their `origin`. Recorded by the per-transport verb responder in addClient;
+  // looked up by the control server's per-client diffModel; cleared when a
+  // pane/window leaves the model (it can never be re-announced for that id).
+  const verbOrigins = createVerbOriginRegistry();
+
   // 1. Host
   const host = createTmuxHost(opts.host);
 
@@ -433,6 +442,8 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
   const server = createControlServer(pipeline, {
     ...opts.server,
     metrics: metricsRegistry,
+    // tc-ozk.2: per-client delta tagging consults the verb-origin registry.
+    originLookup: (id) => verbOrigins.lookup(id),
   });
 
   // 6a. Patch the late-binding reference so the switch-client callback
@@ -537,6 +548,16 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
     for (const pid of prev.panes.keys()) {
       if (!next.panes.has(pid)) {
         demux.notifyPaneClosed(pid);
+        // tc-ozk.2: a removed pane's creation can never be re-announced for that
+        // id, so drop any recorded verb-origin (bounds the registry alongside
+        // its TTL/size cap).
+        verbOrigins.clear(pid);
+      }
+    }
+    for (const wid of prev.windows.keys()) {
+      if (!next.windows.has(wid)) {
+        // tc-ozk.2: same for a removed window.
+        verbOrigins.clear(wid);
       }
     }
   });
@@ -910,6 +931,17 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
           msg as import("../wire/session-proxy-control.js").ClientMessage,
           (correlationId, result) => {
             if (result.ok) {
+              // tc-ozk.2: record the verb→effect-ids correlation BEFORE sending
+              // the response, so the daemon can stamp `origin` on the
+              // pane.opened / window.added it emits for these ids. connectionId
+              // names THIS connection (the verb's issuer); requestId is the
+              // verb's correlationId. The pane's delta may arrive before or
+              // after this responder fires — the registry decouples them (a
+              // late delta is emitted untagged but still bound by id, tc-ozk.1).
+              const connId = server.connectionIdFor(transport);
+              if (connId !== undefined) {
+                verbOrigins.record(result.newPaneId, result.newWindowId, connId, correlationId);
+              }
               server.sendCommandResponse(transport, correlationId, {
                 paneId: result.newPaneId,
                 windowId: result.newWindowId,

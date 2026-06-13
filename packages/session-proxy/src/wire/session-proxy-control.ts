@@ -51,9 +51,39 @@
  *   - "session.closed" removed from WireErrorCode; "session.unavailable" remains.
  */
 
-import type { PaneId, WindowId } from "./ids.js";
+import type { PaneId, WindowId, ConnectionId } from "./ids.js";
 import type { WindowLayout } from "./layout.js";
 import type { MessageBase, Capabilities } from "./envelope.js";
+
+// ---------------------------------------------------------------------------
+// Causality tag for creation deltas (tc-ozk.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * The origin of a verb-caused creation delta (tc-ozk.2).
+ *
+ * Stamped by the session-proxy on a `pane.opened` / `window.added` when the
+ * creation was caused by a wire verb (split-pane / open-window / break-pane).
+ * The session-proxy is the only party that knows who caused what — it
+ * correlates the verb's returned effect ids (tc-ozk.1) to the creation it
+ * emits — so it stamps this rather than every host guessing.
+ *
+ * ABSENT (the `origin` field omitted from the delta) means FOREIGN: a native
+ * tmux client, a script, or any non-wire cause. This formalises and supersedes
+ * the bare `created` flag (tc-3y8.2). A client compares `connectionId` against
+ * its OWN connectionId (advertised in the snapshot) to decide whether the
+ * creation is its own — a FIELD CHECK, including the multi-client case (client
+ * B sees client A's connectionId and correctly treats it as not-its-own).
+ */
+export interface Origin {
+  /** The connection whose wire verb caused this creation. */
+  readonly connectionId: ConnectionId;
+  /**
+   * The `correlationId` of the originating `command.request` (echoed verbatim).
+   * Lets the causing client match the creation to the specific verb it issued.
+   */
+  readonly requestId: string;
+}
 
 // ---------------------------------------------------------------------------
 // SessionProxy → Client messages (server push)
@@ -96,6 +126,13 @@ export interface PaneOpenedMessage extends MessageBase {
    * unknowable. Additive optional field — non-breaking.
    */
   readonly exitCode?: number;
+  /**
+   * Causality tag (tc-ozk.2). PRESENT when this pane was created by a wire verb
+   * (split-pane / open-window): names the connection + requestId that caused
+   * it. ABSENT when foreign (native client, script). Additive optional field
+   * that supersedes the bare `created` flag (tc-3y8.2). See {@link Origin}.
+   */
+  readonly origin?: Origin;
 }
 
 /**
@@ -332,6 +369,21 @@ export interface SnapshotMessage extends MessageBase {
    * unaffected (non-breaking per the versioning policy above).
    */
   readonly attachedClientCount?: number;
+  /**
+   * THIS client's own connectionId, assigned by the session-proxy when the
+   * connection was accepted (tc-ozk.2).
+   *
+   * A client stores this and compares it against `origin.connectionId` on each
+   * `pane.opened` / `window.added` to decide whether a creation is its own
+   * (`===` ⇒ mine) versus foreign / another client's (`!==` or absent ⇒ not
+   * mine). This is what makes bind-on-provenance a FIELD CHECK rather than a
+   * stateful gate, including the multi-client case.
+   *
+   * Additive optional field — older clients that do not read it are unaffected.
+   * Re-sent on every snapshot (including resync) so a reconnecting client always
+   * re-learns its current connectionId.
+   */
+  readonly connectionId?: ConnectionId;
 }
 
 // ---------------------------------------------------------------------------
@@ -351,6 +403,14 @@ export interface WindowAddedMessage extends MessageBase {
    * Clients may use this to avoid a separate focus event.
    */
   readonly active: boolean;
+  /**
+   * Causality tag (tc-ozk.2). PRESENT when this window was created by a wire
+   * verb (open-window, or the new window break-pane re-homes a pane into):
+   * names the connection + requestId that caused it. ABSENT when foreign
+   * (native client, script). Additive optional field that supersedes the bare
+   * `created` flag (tc-3y8.2). See {@link Origin}.
+   */
+  readonly origin?: Origin;
 }
 
 /**

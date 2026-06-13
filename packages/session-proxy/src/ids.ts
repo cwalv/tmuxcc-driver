@@ -48,6 +48,20 @@ export type WindowId = Brand<string, "WindowId">;
 /** Opaque session identifier on the wire. */
 export type SessionId = Brand<string, "SessionId">;
 
+/**
+ * Opaque per-connection identifier on the wire (tc-ozk.2).
+ *
+ * Minted by the session-proxy's ControlServer when a client connects (e.g.
+ * "conn1", "conn2"). Stable for the life of one connection; reused from a slot
+ * pool after disconnect (bounded by max concurrent clients — NOT a stable
+ * client identity). Used to attribute the origin of a verb-caused creation
+ * delta: a `pane.opened` / `window.added` carries `origin.connectionId` naming
+ * the connection whose wire verb caused it; a client compares it against its
+ * own connectionId (advertised in the snapshot) to decide whether the creation
+ * is its own.
+ */
+export type ConnectionId = Brand<string, "ConnectionId">;
+
 // ---------------------------------------------------------------------------
 // Constructor helpers (for use inside the session-proxy only — clients receive ids
 // from session-proxy-pushed messages and must not construct them independently).
@@ -66,4 +80,9 @@ export function windowId(raw: string): WindowId {
 /** @internal Mint a SessionId from a raw string (session-proxy use only). */
 export function sessionId(raw: string): SessionId {
   return raw as SessionId;
+}
+
+/** @internal Mint a ConnectionId from a raw string (session-proxy use only). */
+export function connectionId(raw: string): ConnectionId {
+  return raw as ConnectionId;
 }

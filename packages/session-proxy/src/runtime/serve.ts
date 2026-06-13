@@ -83,6 +83,9 @@ import type {
 } from "../wire/session-proxy-control.js";
 import { projectSnapshot } from "../state/projection.js";
 import { diffModel } from "../state/projection.js";
+import type { OriginLookup } from "../state/projection.js";
+import type { ConnectionId } from "../wire/ids.js";
+import { connectionId as mintConnectionId } from "../wire/ids.js";
 import type { SessionProxyRegistry } from "../metrics/registry.js";
 
 // ---------------------------------------------------------------------------
@@ -112,6 +115,16 @@ export interface ControlServerOptions {
    * attached-client count.
    */
   metrics?: SessionProxyRegistry;
+
+  /**
+   * Origin attribution lookup (tc-ozk.2). When provided, the per-client delta
+   * stream passes it to `diffModel`, so every `pane.opened` / `window.added`
+   * for a verb-caused creation is stamped with its `origin`. Omit to leave all
+   * creations untagged (the default — tests / callers without verb-correlation
+   * state). The session-proxy factory wires this to the shared
+   * VerbOriginRegistry's `lookup`.
+   */
+  originLookup?: OriginLookup;
 }
 
 /**
@@ -181,6 +194,15 @@ export interface ControlServer {
    * Useful for monitoring and tests.
    */
   clientCount(): number;
+
+  /**
+   * The connectionId assigned to `transport` at `addClient` time (tc-ozk.2).
+   *
+   * Returns `undefined` if the transport is not in the active client set. Used
+   * by the session-proxy's verb responder to stamp the origin of a verb-caused
+   * creation with the connection that issued the verb.
+   */
+  connectionIdFor(transport: Transport): ConnectionId | undefined;
 
   /**
    * Push an unsolicited `ErrorMessage` to ALL currently connected clients.
@@ -328,6 +350,13 @@ interface ClientState {
   transport: Transport;
   /** Next seq number for outbound session-proxy messages. Starts at 1. */
   nextSeq: number;
+  /**
+   * tc-ozk.2: this connection's stable connectionId (`conn<N>`). Minted at
+   * addClient, sent to the client in the snapshot, and used to stamp the origin
+   * of creations this connection's verbs cause. Slot-pooled like
+   * `metricsClientLabel` so cardinality is bounded by max concurrent clients.
+   */
+  connectionId: ConnectionId;
   /** Unsubscribe from pipeline.onModelChange. */
   unsubModelChange: (() => void) | null;
   /**
@@ -377,6 +406,8 @@ class ControlServerImpl implements ControlServer {
   private readonly _pipeline: RuntimePipeline;
   private readonly _capabilities: Capabilities;
   private readonly _metrics: SessionProxyRegistry | undefined;
+  /** tc-ozk.2: origin attribution lookup passed to per-client diffModel. */
+  private readonly _originLookup: OriginLookup | undefined;
 
   /**
    * Active clients keyed by transport reference. Using the Transport object as
@@ -401,10 +432,26 @@ class ControlServerImpl implements ControlServer {
     return this._freeClientLabels.pop() ?? `c${this._nextClientLabelSeq++}`;
   }
 
+  /**
+   * tc-ozk.2: per-connection connectionId slot pool. Like the metrics label
+   * pool, connectionIds are slot-pooled (released on disconnect, reused on the
+   * next connect) so their cardinality is bounded by the max concurrent client
+   * count rather than growing forever under reconnect churn. NOT a stable
+   * client identity across reconnects — only a stable name for the duration of
+   * ONE connection, which is exactly what verb-origin attribution needs.
+   */
+  private readonly _freeConnectionIds: ConnectionId[] = [];
+  private _nextConnectionSeq = 1;
+
+  private _mintConnectionId(): ConnectionId {
+    return this._freeConnectionIds.pop() ?? mintConnectionId(`conn${this._nextConnectionSeq++}`);
+  }
+
   constructor(pipeline: RuntimePipeline, opts: ControlServerOptions = {}) {
     this._pipeline = pipeline;
     this._capabilities = opts.capabilities ?? DEFAULT_CAPABILITIES;
     this._metrics = opts.metrics;
+    this._originLookup = opts.originLookup;
   }
 
   async addClient(transport: Transport): Promise<NegotiatedSession> {
@@ -444,6 +491,7 @@ class ControlServerImpl implements ControlServer {
     const state: ClientState = {
       transport,
       nextSeq: 1,
+      connectionId: this._mintConnectionId(),
       unsubModelChange: null,
       metricsClientLabel: this._mintClientLabel(),
       lastResyncAtMs: null,
@@ -458,7 +506,10 @@ class ControlServerImpl implements ControlServer {
       // Guard: client may have been removed before this fires.
       if (!this._clients.has(transport)) return;
 
-      const deltas: SessionProxyMessage[] = diffModel(prevModel, newModel);
+      // tc-ozk.2: pass the origin lookup so verb-caused creations this client
+      // sees carry their origin (incl. another client's verb — the multi-client
+      // case: client B sees origin.connectionId=A and treats it as not-its-own).
+      const deltas: SessionProxyMessage[] = diffModel(prevModel, newModel, this._originLookup);
       for (const delta of deltas) {
         // Stamp seq on a new object (SessionProxyMessage fields are readonly; spread).
         const stamped = { ...delta, seq: state.nextSeq };
@@ -515,6 +566,8 @@ class ControlServerImpl implements ControlServer {
       const snapshot = projectSnapshot(this._pipeline.getModel(), {
         seq: state.nextSeq,
         attachedClientCount: this._clients.size,
+        // tc-ozk.2: tell this client its own connectionId.
+        connectionId: state.connectionId,
       });
       state.nextSeq++;
       transport.sendControl(snapshot);
@@ -535,6 +588,10 @@ class ControlServerImpl implements ControlServer {
 
   clientCount(): number {
     return this._clients.size;
+  }
+
+  connectionIdFor(transport: Transport): ConnectionId | undefined {
+    return this._clients.get(transport)?.connectionId;
   }
 
   broadcastError(error: Omit<ErrorMessage, "seq">): void {
@@ -646,6 +703,8 @@ class ControlServerImpl implements ControlServer {
     const snapshot = projectSnapshot(this._pipeline.getModel(), {
       seq: state.nextSeq,
       attachedClientCount: this._clients.size,
+      // tc-ozk.2: re-send the connectionId so a reconnecting client re-learns it.
+      connectionId: state.connectionId,
     });
     state.nextSeq++;
     transport.sendControl(snapshot);
@@ -720,6 +779,8 @@ class ControlServerImpl implements ControlServer {
     state.unsubModelChange = null;
     this._clients.delete(transport);
     this._freeClientLabels.push(state.metricsClientLabel);
+    // tc-ozk.2: return the connectionId to the slot pool for reuse.
+    this._freeConnectionIds.push(state.connectionId);
 
     // tc-44wu0: notify remaining clients that the count has decreased.
     // Only broadcast if there are still clients to notify (no-op if the

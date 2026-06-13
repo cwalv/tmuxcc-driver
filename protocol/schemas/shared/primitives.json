@@ -23,6 +23,26 @@
       "examples": ["s0", "s1"]
     },
 
+    "ConnectionId": {
+      "type": "string",
+      "description": "Opaque per-connection identifier minted by the session-proxy when a client connects (e.g. \"conn1\", \"conn2\"). Stable for the life of one client connection; reused from a slot pool after disconnect (bounded by max concurrent clients). Used to attribute the origin of a verb-caused creation delta (tc-ozk.2): a `pane.opened` / `window.added` carries `origin.connectionId` naming the connection whose wire verb caused it. A client compares against its OWN connectionId (advertised in the snapshot) to decide whether a creation is its own.",
+      "examples": ["conn1", "conn2"]
+    },
+
+    "Origin": {
+      "type": "object",
+      "description": "Causality tag on a creation delta (tc-ozk.2). PRESENT means the delta was caused by a wire verb (split-pane / open-window / break-pane) from `connectionId`, whose `command.request` carried `requestId` as its correlationId. ABSENT (the field is omitted) means the creation is FOREIGN — a native tmux client, a script, or any non-wire cause. The session-proxy is the only party that knows who caused what (it correlates the verb's returned effect ids, tc-ozk.1, to the creation it emits), so it stamps this; clients never guess.",
+      "required": ["connectionId", "requestId"],
+      "properties": {
+        "connectionId": { "$ref": "#/$defs/ConnectionId" },
+        "requestId": {
+          "type": "string",
+          "description": "The correlationId of the originating `command.request` (echoed verbatim). Lets the causing client match the creation to the specific verb it issued."
+        }
+      },
+      "additionalProperties": false
+    },
+
     "MessageBase": {
       "type": "object",
       "description": "Every control-plane message on both wires carries a `type` discriminant and a per-connection per-sender monotonically-increasing sequence number starting at 1.",

@@ -27,6 +27,7 @@ import assert from "node:assert/strict";
 
 import { createControlServer } from "./serve.js";
 import type { ControlServer } from "./serve.js";
+import { createVerbOriginRegistry } from "./verb-origin.js";
 import {
   createInMemoryTransportPair,
   runClientHandshake,
@@ -554,6 +555,104 @@ describe("createControlServer", () => {
 
       // Intersection = ["pane-lifecycle"]
       assert.deepEqual(negotiated.features, ["pane-lifecycle"]);
+    });
+
+  });
+
+  // --------------------------------------------------------------------------
+  // tc-ozk.2 — causality-tagged creation deltas (origin attribution)
+  //
+  // The ACCEPTANCE scenario: two connections share one session-proxy. Conn A
+  // issues a creating verb (open-window / split-pane); the daemon records the
+  // verb's returned effect ids against A's connectionId in the
+  // VerbOriginRegistry. When the new pane materialises in the model, BOTH
+  // connections' per-client diffModel passes the SAME origin lookup, so:
+  //   - conn A's pane.opened carries origin.connectionId === A  (its own)
+  //   - conn B's pane.opened carries the SAME origin.connectionId === A,
+  //     which is ≠ B's own connectionId — so B treats it as not-its-own.
+  // A FOREIGN creation (no verb recorded) carries no origin on either side.
+  // --------------------------------------------------------------------------
+  describe("origin attribution (tc-ozk.2)", () => {
+
+    /** Read the connectionId the server assigned a connection from its snapshot. */
+    function connIdOf(received: ControlMessage[]): string {
+      const snap = received[0]! as SnapshotMessage;
+      assert.equal(snap.type, "snapshot");
+      assert.ok((snap as SnapshotMessage).connectionId !== undefined, "snapshot must carry connectionId");
+      return String((snap as SnapshotMessage).connectionId);
+    }
+
+    function firstPaneOpened(received: ControlMessage[]): SessionProxyMessage & { type: "pane.opened" } {
+      const d = received.find((m) => m.type === "pane.opened");
+      assert.ok(d !== undefined, "expected a pane.opened delta");
+      return d as SessionProxyMessage & { type: "pane.opened" };
+    }
+
+    it("two-connection: A's verb-caused pane carries origin.connectionId=A; B sees it as not-its-own", async () => {
+      const model1 = makeModel1();
+      const model2 = makeModel2(); // adds P2
+      const pipeline = createFakePipeline(model1);
+      const verbOrigins = createVerbOriginRegistry();
+      const server = createControlServer(pipeline, {
+        originLookup: (id) => verbOrigins.lookup(id),
+      });
+
+      // Two connections share the server.
+      const { received: recvA, sessionProxyTransport: tA } = await connectClient(server);
+      const { received: recvB } = await connectClient(server);
+
+      const connA = connIdOf(recvA);
+      const connB = connIdOf(recvB);
+      assert.notEqual(connA, connB, "the two connections must get distinct connectionIds");
+
+      // Conn A issued an open-window verb (correlationId "req-A"); the daemon
+      // correlated its returned effect ids (P2 + W1) to A. We record that here
+      // exactly as session-proxy.ts's verb responder does, using A's id.
+      const aId = server.connectionIdFor(tA);
+      assert.ok(aId !== undefined);
+      verbOrigins.record(P2, W1, aId!, "req-A");
+
+      // The new pane materialises in the model → both connections diff it.
+      pipeline.fireChange(model2, model1);
+
+      const openedA = firstPaneOpened(recvA);
+      const openedB = firstPaneOpened(recvB);
+      assert.equal(openedA.paneId, P2);
+      assert.equal(openedB.paneId, P2);
+
+      // A's view: origin names A (its own creation).
+      assert.ok(openedA.origin !== undefined, "A's pane.opened must carry origin");
+      assert.equal(String(openedA.origin!.connectionId), connA);
+      assert.equal(openedA.origin!.requestId, "req-A");
+
+      // B's view: origin names A (NOT B) — B treats it as not-its-own.
+      assert.ok(openedB.origin !== undefined, "B's pane.opened must also carry the origin");
+      assert.equal(String(openedB.origin!.connectionId), connA);
+      assert.notEqual(String(openedB.origin!.connectionId), connB,
+        "B must see origin.connectionId != its own → foreign-to-B");
+    });
+
+    it("foreign creation (no verb recorded) carries NO origin on either connection", async () => {
+      const model1 = makeModel1();
+      const model2 = makeModel2(); // adds P2
+      const pipeline = createFakePipeline(model1);
+      const verbOrigins = createVerbOriginRegistry();
+      const server = createControlServer(pipeline, {
+        originLookup: (id) => verbOrigins.lookup(id),
+      });
+
+      const { received: recvA } = await connectClient(server);
+      const { received: recvB } = await connectClient(server);
+
+      // No verb recorded — P2 is a native-client / script creation.
+      pipeline.fireChange(model2, model1);
+
+      const openedA = firstPaneOpened(recvA);
+      const openedB = firstPaneOpened(recvB);
+      assert.equal(openedA.paneId, P2);
+      assert.equal(openedB.paneId, P2);
+      assert.equal(openedA.origin, undefined, "foreign pane.opened must be untagged for A");
+      assert.equal(openedB.origin, undefined, "foreign pane.opened must be untagged for B");
     });
 
   });

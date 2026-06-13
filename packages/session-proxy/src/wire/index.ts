@@ -22,8 +22,8 @@
  */
 
 // Shared primitives — used by both planes
-export type { PaneId, WindowId, SessionId } from "./ids.js";
-export { paneId, windowId, sessionId } from "./ids.js";
+export type { PaneId, WindowId, SessionId, ConnectionId } from "./ids.js";
+export { paneId, windowId, sessionId, connectionId } from "./ids.js";
 
 // Layout types
 export type {
@@ -76,6 +76,8 @@ export type {
   SnapshotWindow,
   SnapshotPane,
   SnapshotMessage,
+  // Causality tag for creation deltas (tc-ozk.2)
+  Origin,
   // SessionProxy → Client (pane deltas)
   PaneOpenedMessage,
   PaneClosedMessage,

@@ -87,7 +87,8 @@
           { "paneId": "p0", "windowId": "w0", "cols": 40, "rows": 24 },
           { "paneId": "p1", "windowId": "w0", "cols": 40, "rows": 24 }
         ],
-        "focus": { "paneId": "p0", "windowId": "w0" }
+        "focus": { "paneId": "p0", "windowId": "w0" },
+        "connectionId": "conn1"
       }
     },
     {
@@ -135,19 +136,20 @@
     {
       "direction": "session-proxy→client",
       "step": 7,
-      "label": "session-proxy emits window.added delta",
+      "label": "session-proxy emits window.added delta — origin-tagged (tc-ozk.2): this window was caused by the open-window verb at step 5 (correlationId req-001) from connection conn1, so the daemon stamps origin. The causing client matches origin.connectionId against its own (conn1, from the snapshot) to recognise it as its own creation.",
       "message": {
         "type": "window.added",
         "seq": 4,
         "windowId": "w1",
         "name": "logs",
-        "active": true
+        "active": true,
+        "origin": { "connectionId": "conn1", "requestId": "req-001" }
       }
     },
     {
       "direction": "session-proxy→client",
       "step": 8,
-      "label": "session-proxy emits pane.opened delta for the new pane",
+      "label": "session-proxy emits pane.opened delta for the new pane — origin-tagged (tc-ozk.2), same verb (req-001) from conn1. A foreign creation (native client / script) would carry NO origin field.",
       "message": {
         "type": "pane.opened",
         "seq": 5,
@@ -155,7 +157,8 @@
         "windowId": "w1",
         "cols": 80,
         "rows": 24,
-        "active": true
+        "active": true,
+        "origin": { "connectionId": "conn1", "requestId": "req-001" }
       }
     },
     {

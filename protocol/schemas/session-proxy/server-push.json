@@ -140,6 +140,10 @@
           "type": "integer",
           "minimum": 0,
           "description": "Number of session-proxy-protocol clients connected at snapshot time. Additive optional field (tc-1elae Phase 2). Live updates arrive via ClientCountChangedMessage (tc-44wu0)."
+        },
+        "connectionId": {
+          "$ref": "tmuxcc:shared/primitives#/$defs/ConnectionId",
+          "description": "THIS client's own connectionId, assigned by the session-proxy on accept (tc-ozk.2). The client compares it against origin.connectionId on pane.opened / window.added to decide whether a creation is its own. Additive optional field; re-sent on every snapshot (incl. resync)."
         }
       },
       "additionalProperties": false
@@ -178,6 +182,10 @@
         "exitCode": {
           "type": "integer",
           "description": "Exit code when dead is true and known (tmux pane_dead_status); absent otherwise. Additive optional field."
+        },
+        "origin": {
+          "$ref": "tmuxcc:shared/primitives#/$defs/Origin",
+          "description": "Causality tag (tc-ozk.2). PRESENT when this pane was created by a wire verb (split-pane / open-window): names the connection + requestId that caused it. ABSENT when foreign (native client, script). Additive optional field; supersedes the bare `created` flag (tc-3y8.2). A client compares origin.connectionId against its own connectionId to decide whether this pane is its own."
         }
       },
       "additionalProperties": false
@@ -320,6 +328,10 @@
         "active": {
           "type": "boolean",
           "description": "True if the new window immediately became the active window."
+        },
+        "origin": {
+          "$ref": "tmuxcc:shared/primitives#/$defs/Origin",
+          "description": "Causality tag (tc-ozk.2). PRESENT when this window was created by a wire verb (open-window, or break-pane's new window): names the connection + requestId that caused it. ABSENT when foreign (native client, script). Additive optional field; supersedes the bare `created` flag (tc-3y8.2)."
         }
       },
       "additionalProperties": false

@@ -62,8 +62,10 @@ import type {
   PaneId,
   WindowId,
   SessionId,
+  ConnectionId,
   WindowLayout,
   PaneMode,
+  Origin,
 } from "@tmuxcc/session-proxy";
 import type { SessionProxyConnection } from "./connection.js";
 import type { RenderHook, ByteSource } from "./render-hook.js";
@@ -103,6 +105,16 @@ export interface ClientPane {
    * undefined.
    */
   readonly exitCode: number | undefined;
+  /**
+   * tc-ozk.2: causality tag, set from the `pane.opened` delta that introduced
+   * this pane. PRESENT when a wire verb caused the creation (carries the
+   * verb's `{connectionId, requestId}`); ABSENT for foreign panes and for
+   * panes that entered via the initial snapshot replay (the snapshot carries
+   * no per-pane origin — a snapshot pane is, from this client's perspective,
+   * pre-existing rather than freshly created). Read by the diff path to pass
+   * `origin` through to `onPaneOpened`. Supersedes the bare `created` flag.
+   */
+  readonly origin: Origin | undefined;
 }
 
 /**
@@ -212,6 +224,17 @@ export interface ClientModel {
    * falls back to 1 when absent.
    */
   readonly attachedClientCount: number | undefined;
+  /**
+   * tc-ozk.2: THIS client's own connectionId, learned from the snapshot's
+   * `connectionId` field. Renderers compare it against `PaneInfo.origin?.
+   * connectionId` to decide whether a creation is their own (`===` ⇒ mine).
+   *
+   * Absent (undefined) before the first snapshot or when the session-proxy
+   * predates tc-ozk.2 (no connectionId in the snapshot). A renderer that does
+   * not know its own connectionId treats every pane as foreign-by-default and
+   * relies on the tc-ozk.1 `sendVerb`-returned id to bind its own panes.
+   */
+  readonly ownConnectionId: ConnectionId | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -245,6 +268,7 @@ function emptyClientModel(): ClientModel {
     focus: { paneId: null, windowId: null },
     exitCodes: new Map(),
     attachedClientCount: undefined,
+    ownConnectionId: undefined,
   };
 }
 
@@ -297,6 +321,9 @@ export function applySnapshot(snapshot: SnapshotMessage): {
       // corpse). Additive optional fields; absent means alive / unknown.
       dead: p.dead ?? false,
       exitCode: p.dead ? p.exitCode : undefined,
+      // tc-ozk.2: snapshot panes carry no per-pane origin — they are
+      // pre-existing from this client's perspective, not freshly created.
+      origin: undefined,
     });
   }
 
@@ -314,6 +341,9 @@ export function applySnapshot(snapshot: SnapshotMessage): {
     // tc-1elae (§11.4): propagate the attached-client count from the snapshot
     // so TmuxccSessionHandle can surface it in the status-bar tooltip.
     attachedClientCount: snapshot.attachedClientCount,
+    // tc-ozk.2: learn this client's own connectionId so the renderer can do the
+    // bind-on-provenance field check (origin.connectionId === ownConnectionId).
+    ownConnectionId: snapshot.connectionId,
   };
 
   return { model, seq: snapshot.seq };
@@ -352,6 +382,9 @@ export function applyDelta(model: ClientModel, msg: SessionProxyMessage): Client
         // for the first time on requery / reconnect).
         dead: msg.dead ?? false,
         exitCode: msg.dead ? msg.exitCode : undefined,
+        // tc-ozk.2: carry the verb-origin tag through to the diff path so
+        // onPaneOpened reports it. Absent on the wire ⇒ foreign creation.
+        origin: msg.origin,
       });
       return { ...model, panes };
     }
@@ -1105,8 +1138,9 @@ export class Mirror {
             cols: pane.cols,
             rows: pane.rows,
             active: pane.paneId === curr.focus.paneId,
-            // tc-zna.12: post-attach delta — this is a freshly-arriving pane.
-            created: true,
+            // tc-ozk.2: pass the verb-origin tag through (PRESENT ⇒ caused by a
+            // wire verb; ABSENT ⇒ foreign). Supersedes the bare `created` flag.
+            ...(pane.origin !== undefined ? { origin: pane.origin } : {}),
             // tc-4bv2 / tc-295a.10: carry born-dead state so the renderer can
             // mark the corpse without waiting for a separate event.
             ...(pane.dead ? { dead: true } : {}),
@@ -1179,11 +1213,13 @@ export class Mirror {
         cols: pane.cols,
         rows: pane.rows,
         active: pane.paneId === initial.focus.paneId,
-        // tc-zna.12: initial-snapshot replay — these panes existed before
-        // attach() ran, so the call is a catch-up replay rather than a fresh
-        // pane creation.  The factory's bind-on-provenance gate uses this to
-        // refuse to consume an own-verb claim for a replay-race pane.
-        created: false,
+        // tc-ozk.2: initial-snapshot replay panes carry no origin (the snapshot
+        // has no per-pane origin; from this client's perspective they are
+        // pre-existing, not freshly created). The bind-on-provenance gate sees
+        // an absent origin and treats them as foreign — except the factory's
+        // first-snapshot-pane / target-pane claims, which are independent of
+        // origin (they intentionally bind a replay). Supersedes `created`.
+        ...(pane.origin !== undefined ? { origin: pane.origin } : {}),
         // tc-4bv2 / tc-295a.10: a pre-existing dead corpse replays into the
         // renderer already-dead. This is the all-dead-pane-session path: the
         // session is in the snapshot and its panes are dead on first render.

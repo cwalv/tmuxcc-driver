@@ -38,6 +38,7 @@ import {
   paneId,
   windowId,
   sessionId,
+  connectionId,
 } from "./index.js";
 
 import type {
@@ -47,6 +48,7 @@ import type {
   PaneOpenedMessage,
   PaneClosedMessage,
   PaneResizedMessage,
+  WindowAddedMessage,
   LayoutUpdatedMessage,
   FocusChangedMessage,
   SessionProxyCapabilitiesMessage,
@@ -349,6 +351,36 @@ describe("protocol schema conformance", () => {
       assert.strictEqual(valid, false, "missing paneId should fail validation");
     });
 
+    it("rejects pane.opened whose origin is missing requestId — tc-ozk.2", () => {
+      const bad = {
+        type: "pane.opened",
+        seq: 1,
+        paneId: "p0",
+        windowId: "w0",
+        cols: 80,
+        rows: 24,
+        active: true,
+        origin: { connectionId: "conn1" },
+      };
+      const valid = validateSessionProxyMsg(bad);
+      assert.strictEqual(valid, false, "origin missing requestId should fail validation");
+    });
+
+    it("rejects pane.opened whose origin carries an extra property — tc-ozk.2", () => {
+      const bad = {
+        type: "pane.opened",
+        seq: 1,
+        paneId: "p0",
+        windowId: "w0",
+        cols: 80,
+        rows: 24,
+        active: true,
+        origin: { connectionId: "conn1", requestId: "5", extra: true },
+      };
+      const valid = validateSessionProxyMsg(bad);
+      assert.strictEqual(valid, false, "origin with extra property should fail validation");
+    });
+
     it("rejects input message with non-string data", () => {
       const bad = {
         type: "input",
@@ -403,6 +435,7 @@ describe("protocol schema conformance", () => {
     const P1 = paneId("p1");
     const W0 = windowId("w0");
     const S0 = sessionId("s0");
+    const C0 = connectionId("conn1");
 
     const sampleLayout: WindowLayout = {
       cols: 80,
@@ -490,6 +523,56 @@ describe("protocol schema conformance", () => {
         active: true,
         dead: true,
         exitCode: 0,
+      };
+      assert.ok(validateSessionProxyMsg(msg as SessionProxyMessage), JSON.stringify(validateSessionProxyMsg.errors));
+    });
+
+    it("PaneOpenedMessage (with verb origin) — tc-ozk.2", () => {
+      const msg: PaneOpenedMessage = {
+        type: "pane.opened",
+        seq: 3,
+        paneId: P0,
+        windowId: W0,
+        cols: 80,
+        rows: 24,
+        active: true,
+        origin: { connectionId: C0, requestId: "7" },
+      };
+      assert.ok(validateSessionProxyMsg(msg as SessionProxyMessage), JSON.stringify(validateSessionProxyMsg.errors));
+    });
+
+    it("WindowAddedMessage (with verb origin) — tc-ozk.2", () => {
+      const msg: WindowAddedMessage = {
+        type: "window.added",
+        seq: 3,
+        windowId: W0,
+        name: "shell",
+        active: true,
+        origin: { connectionId: C0, requestId: "12" },
+      };
+      assert.ok(validateSessionProxyMsg(msg as SessionProxyMessage), JSON.stringify(validateSessionProxyMsg.errors));
+    });
+
+    it("WindowAddedMessage (foreign — no origin) — tc-ozk.2", () => {
+      const msg: WindowAddedMessage = {
+        type: "window.added",
+        seq: 3,
+        windowId: W0,
+        name: "shell",
+        active: false,
+      };
+      assert.ok(validateSessionProxyMsg(msg as SessionProxyMessage), JSON.stringify(validateSessionProxyMsg.errors));
+    });
+
+    it("SnapshotMessage (with own connectionId) — tc-ozk.2", () => {
+      const msg: SnapshotMessage = {
+        type: "snapshot",
+        seq: 2,
+        session: { sessionId: S0, name: "main" },
+        windows: [],
+        panes: [],
+        focus: { paneId: null, windowId: null },
+        connectionId: C0,
       };
       assert.ok(validateSessionProxyMsg(msg as SessionProxyMessage), JSON.stringify(validateSessionProxyMsg.errors));
     });

@@ -36,13 +36,13 @@
  * lives in tmuxcc-vscode, not here.
  */
 
-import type { PaneId, WindowId, SessionId, WindowLayout, PaneMode, WireCommand } from "@tmuxcc/session-proxy";
+import type { PaneId, WindowId, SessionId, ConnectionId, WindowLayout, PaneMode, WireCommand, Origin } from "@tmuxcc/session-proxy";
 
 // ---------------------------------------------------------------------------
 // Re-export wire primitives that renderers reference (convenience)
 // ---------------------------------------------------------------------------
 
-export type { PaneId, WindowId, SessionId, WindowLayout, PaneMode, WireCommand };
+export type { PaneId, WindowId, SessionId, ConnectionId, WindowLayout, PaneMode, WireCommand, Origin };
 
 // ---------------------------------------------------------------------------
 // Value types used in callbacks
@@ -67,18 +67,23 @@ export interface PaneInfo {
    */
   readonly active: boolean;
   /**
-   * tc-zna.12: True iff this onPaneOpened call corresponds to a freshly-arriving
-   * pane delta (a `pane.opened` event the Mirror just received and applied).
-   * False when the pane is replayed from the initial snapshot during
-   * `Mirror.attach()` — the pane was already in the model before the renderer
-   * attached, so the call is a catch-up replay, not a new pane creation.
+   * tc-ozk.2: causality tag — PRESENT when this pane was created by a wire verb
+   * (split-pane / open-window), carrying the `{connectionId, requestId}` of the
+   * verb that caused it; ABSENT when foreign (native tmux client, script,
+   * sibling client, or a snapshot-replay pane that existed before this client
+   * attached).
    *
-   * Renderers that gate provenance / own-verb attribution (e.g. the VS Code
-   * `PerPaneTerminalFactory` bind-on-provenance gate) consume this to avoid
-   * letting a snapshot-replay pane race past the next-pane-open observer
-   * before the verb's real pane arrives.  Other renderers MAY ignore it.
+   * Supersedes the bare `created` flag (tc-3y8.2 / tc-zna.12). Renderers that
+   * gate provenance / own-verb attribution (e.g. the VS Code
+   * `PerPaneTerminalFactory` bind-on-provenance gate) compare
+   * `origin?.connectionId` against the client's OWN connectionId (see
+   * `ConnectedHandle.connectionId` / `RenderHook.onConnectionId`): `===` ⇒ this
+   * client's own verb caused it (auto-bind); anything else (another client's
+   * connectionId, or absent) ⇒ not this client's (foreign). This is a FIELD
+   * CHECK — it works for the multi-client case for free. Other renderers MAY
+   * ignore it.
    */
-  readonly created: boolean;
+  readonly origin?: Origin;
   /**
    * tc-4bv2 / tc-295a.10: True when this pane is already dead at the moment it
    * enters the model — a `remain-on-exit` corpse observed on cold attach /

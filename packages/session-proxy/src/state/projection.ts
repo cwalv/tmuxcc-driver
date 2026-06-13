@@ -59,6 +59,7 @@
  */
 
 import type { SessionModel } from "./model.js";
+import type { PaneId, WindowId } from "../wire/ids.js";
 import type {
   SnapshotMessage,
   SnapshotSession,
@@ -79,7 +80,30 @@ import type {
   LayoutUpdatedMessage,
   FocusChangedMessage,
   SessionProxySessionRenamedMessage,
+  Origin,
 } from "../wire/session-proxy-control.js";
+
+// ---------------------------------------------------------------------------
+// Origin attribution (tc-ozk.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Lookup the causality {@link Origin} for a newly-created pane or window
+ * (tc-ozk.2).
+ *
+ * Threaded into {@link diffModel} so the SINGLE place that emits
+ * `pane.opened` / `window.added` — used by BOTH the event path (serve.ts
+ * per-client `onModelChange`) AND the diff path (requery.ts `requeryDiff`) —
+ * can stamp the origin uniformly. Called once per newly-appearing pane id and
+ * once per newly-appearing window id.
+ *
+ * Returns the verb's `{connectionId, requestId}` when the id matches a recent
+ * wire verb's returned effect ids (the daemon recorded the correlation when
+ * the verb replied, tc-ozk.1), or `undefined` for a FOREIGN creation (no
+ * matching verb — native client, script). An `undefined` result leaves the
+ * delta untagged.
+ */
+export type OriginLookup = (id: PaneId | WindowId) => Origin | undefined;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -101,6 +125,13 @@ import type {
 export interface ProjectSnapshotOpts {
   readonly seq?: number;
   readonly attachedClientCount?: number;
+  /**
+   * tc-ozk.2: THIS client's own connectionId, stamped into the snapshot so the
+   * client can compare it against `origin.connectionId` on creation deltas to
+   * decide whether a creation is its own. Omit to leave the field absent
+   * (callers without per-connection identity — tests).
+   */
+  readonly connectionId?: import("../wire/ids.js").ConnectionId;
 }
 
 /**
@@ -185,10 +216,12 @@ export function projectSnapshot(
       paneId: model.focus.paneId,
       windowId: model.focus.windowId,
     },
+    // tc-1elae: attached-client count (additive optional).
+    ...(attachedClientCount !== undefined ? { attachedClientCount } : {}),
+    // tc-ozk.2: this client's own connectionId (additive optional) so it can
+    // compare against origin.connectionId on creation deltas.
+    ...(opts.connectionId !== undefined ? { connectionId: opts.connectionId } : {}),
   };
-  if (attachedClientCount !== undefined) {
-    return { ...msg, attachedClientCount };
-  }
   return msg;
 }
 
@@ -202,8 +235,22 @@ export function projectSnapshot(
  * apply the deltas without referencing a not-yet-announced entity.
  *
  * Returns an empty array if `prev` and `next` are observably identical.
+ *
+ * `originLookup` (tc-ozk.2): optional causality resolver. When supplied, each
+ * newly-appearing pane / window has its id passed to the lookup; a non-undefined
+ * result is stamped as the `origin` field on the emitted `pane.opened` /
+ * `window.added` (verb-caused), and `undefined` leaves it untagged (foreign).
+ * Omitting `originLookup` leaves every creation untagged — the correct default
+ * for callers without verb-correlation state (tests, the metrics-only patch
+ * path). This is the SINGLE choke point that both the event path (serve.ts) and
+ * the diff/requery path (requery.ts) pass the lookup through, so attribution is
+ * uniform across both.
  */
-export function diffModel(prev: SessionModel, next: SessionModel): SessionProxyMessage[] {
+export function diffModel(
+  prev: SessionModel,
+  next: SessionModel,
+  originLookup?: OriginLookup,
+): SessionProxyMessage[] {
   const out: SessionProxyMessage[] = [];
 
   // Placeholder seq — the E4 caller assigns real values before sending.
@@ -216,12 +263,15 @@ export function diffModel(prev: SessionModel, next: SessionModel): SessionProxyM
     if (!prev.windows.has(id)) {
       // Determine active flag: is this the activeWindowId in its owning session?
       const sess = next.sessions.get(win.sessionId);
+      // tc-ozk.2: stamp origin when this window was created by a wire verb.
+      const origin = originLookup?.(win.windowId);
       const msg: WindowAddedMessage = {
         type: "window.added",
         seq: SEQ,
         windowId: win.windowId,
         name: win.name,
         active: sess?.activeWindowId === win.windowId,
+        ...(origin !== undefined ? { origin } : {}),
       };
       out.push(msg);
     }
@@ -237,6 +287,8 @@ export function diffModel(prev: SessionModel, next: SessionModel): SessionProxyM
       // sight (cold attach / reconnect to a remain-on-exit corpse). Carry the
       // dead flag + exitCode so the client renders it dead without waiting for
       // a follow-up delta. Keep the fields off when alive (additive optional).
+      // tc-ozk.2: stamp origin when this pane was created by a wire verb.
+      const origin = originLookup?.(pane.paneId);
       const msg: PaneOpenedMessage = {
         type: "pane.opened",
         seq: SEQ,
@@ -247,6 +299,7 @@ export function diffModel(prev: SessionModel, next: SessionModel): SessionProxyM
         active: win?.activePaneId === pane.paneId,
         ...(pane.dead ? { dead: true } : {}),
         ...(pane.dead && pane.exitCode !== undefined ? { exitCode: pane.exitCode } : {}),
+        ...(origin !== undefined ? { origin } : {}),
       };
       out.push(msg);
     }
