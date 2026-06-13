@@ -1015,6 +1015,90 @@ describe("seq-gap detection", () => {
     assert.equal(mirror.getModel().panes.get(P2)!.cols, 40);
   });
 
+  it("tc-295a.31: an interleaved command.response consumes a seq slot and does NOT cause a false gap", () => {
+    // Regression for the W2 integration break (tc-295a.31): the server stamps
+    // command.response from the same per-connection monotonic seq counter as
+    // snapshot+deltas (serve.ts), so the mirror MUST advance #lastSeq for it.
+    // Pre-fix the mirror skipped command.response without advancing #lastSeq,
+    // so the NEXT real delta read as a gap → resync → the split's pane.opened
+    // was dropped (pane in tmux but absent from the tree).
+    const mirror = new Mirror();
+    let resyncFired = false;
+    mirror.onResyncNeeded(() => {
+      resyncFired = true;
+    });
+    let respSeen: string | undefined;
+    mirror.onCommandResponse((m) => {
+      respSeen = m.correlationId;
+    });
+
+    mirror.receiveSnapshot(makeSnapshot(2)); // lastSeq = 2
+
+    // seq 3: a real delta (the split's pane.opened analogue) applies.
+    mirror.receiveDelta({
+      type: "pane.resized",
+      seq: 3,
+      paneId: P1,
+      cols: 100,
+      rows: 30,
+    });
+    assert.equal(mirror.getModel().panes.get(P1)!.cols, 100);
+
+    // seq 4: the creating verb's command.response. It is forwarded to the
+    // handler AND consumes its seq slot (advances #lastSeq to 4).
+    mirror.receiveDelta({
+      type: "command.response",
+      seq: 4,
+      correlationId: "42",
+      result: { ok: true, payload: { paneId: P2, windowId: W1 } },
+    });
+    assert.equal(respSeen, "42"); // handler fired
+    assert.equal(resyncFired, false); // no gap
+
+    // seq 5: the NEXT real delta must apply (pre-fix this read as a gap because
+    // #lastSeq was stuck at 3).
+    mirror.receiveDelta({
+      type: "pane.resized",
+      seq: 5,
+      paneId: P2,
+      cols: 200,
+      rows: 50,
+    });
+    assert.equal(resyncFired, false); // STILL no gap — the bug is fixed
+    assert.equal(mirror.getModel().panes.get(P2)!.cols, 200); // applied
+  });
+
+  it("tc-295a.31: an interleaved error message consumes a seq slot and does NOT cause a false gap", () => {
+    // Same seq-accounting contract as command.response: broadcastError stamps
+    // and increments state.nextSeq, so the mirror must advance #lastSeq for it.
+    const mirror = new Mirror();
+    let resyncFired = false;
+    mirror.onResyncNeeded(() => {
+      resyncFired = true;
+    });
+
+    mirror.receiveSnapshot(makeSnapshot(2)); // lastSeq = 2
+
+    mirror.receiveDelta({
+      type: "error",
+      seq: 3,
+      code: "internal",
+      message: "boom",
+    });
+    assert.equal(resyncFired, false);
+
+    // seq 4 must apply (pre-fix #lastSeq stuck at 2 → false gap).
+    mirror.receiveDelta({
+      type: "pane.resized",
+      seq: 4,
+      paneId: P1,
+      cols: 77,
+      rows: 25,
+    });
+    assert.equal(resyncFired, false);
+    assert.equal(mirror.getModel().panes.get(P1)!.cols, 77);
+  });
+
   it("delta before snapshot is silently ignored (mirror not initialized)", () => {
     const mirror = new Mirror();
     let resyncFired = false;

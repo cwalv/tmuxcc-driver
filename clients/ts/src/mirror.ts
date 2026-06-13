@@ -828,32 +828,39 @@ export class Mirror {
    * Fires `onModelChange` handlers on successful apply.
    */
   receiveDelta(msg: SessionProxyMessage): void {
-    // command.response is non-state-bearing and order-independent — forward it
-    // to registered handlers regardless of init/seq state so awaited sendVerb
-    // promises can resolve (tc-ozk.1). The verb reply may legitimately arrive
-    // before OR after the pane's delta; the seq machinery below must not gate it.
+    // command.response is non-state-bearing for the topology model, but it
+    // still must reach the sendVerb-correlation handlers (tc-ozk.1) — and it
+    // may legitimately arrive BEFORE the mirror is initialized (a verb issued
+    // on a connection whose snapshot is still in flight). Forward it to the
+    // handlers up front, regardless of init/seq state, so awaited sendVerb
+    // promises resolve. Seq accounting (below) is still applied once
+    // initialized — see the non-state-bearing seq-tracking block.
     if (msg.type === "command.response") {
       for (const handler of this.#commandResponseHandlers) {
         handler(msg);
       }
-      return;
     }
 
-    // Not yet initialized — ignore.
+    // Not yet initialized — ignore (command.response handlers already fired).
     if (!this.#initialized || this.#lastSeq === null) return;
 
     // Snapshot messages should go to receiveSnapshot, not here.
     if (msg.type === "snapshot") return;
 
-    // Non-state-bearing messages — skip seq check and silently ignore.
-    if (
-      msg.type === "session-proxy.capabilities" ||
-      msg.type === "error"
-    ) {
-      return;
-    }
-
     // Seq-gap detection.
+    //
+    // tc-295a.31: EVERY server-sent control message consumes a seq slot from
+    // the per-connection monotonic counter (envelope.ts MessageBase) — incl.
+    // the non-state-bearing command.response / error / capabilities. The server
+    // (serve.ts sendCommandResponse / broadcastError) stamps and increments
+    // `state.nextSeq` for them, so the mirror MUST account for their seq too.
+    // Pre-fix, command.response/error/capabilities were early-returned without
+    // advancing #lastSeq; once W2.1 (tc-ozk.1) started emitting a seq-stamped
+    // command.response on every creating verb, the next real delta read as a
+    // false gap → resync → the split's pane.opened was dropped (the regression).
+    // The fix: run gap detection on these too, then advance #lastSeq without
+    // applying any model change (same shape as the pane.hydration.* handling
+    // below, which W2.2 already seq-tracks for the identical reason).
     const expected = this.#lastSeq + 1;
     if (msg.seq !== expected) {
       // Always fire the legacy onResyncNeeded handlers (backward-compat).
@@ -880,6 +887,20 @@ export class Mirror {
         };
         this.#sendFn(msg);
       }
+      return;
+    }
+
+    // tc-295a.31: non-state-bearing server messages (command.response / error /
+    // capabilities) are seq-tracked — advance #lastSeq so they don't create a
+    // false gap on the NEXT real delta — but they carry no topology change, so
+    // no applyDelta / onModelChange. command.response handlers already fired at
+    // the top of this method; here we only consume its seq slot.
+    if (
+      msg.type === "command.response" ||
+      msg.type === "error" ||
+      msg.type === "session-proxy.capabilities"
+    ) {
+      this.#lastSeq = msg.seq;
       return;
     }
 
