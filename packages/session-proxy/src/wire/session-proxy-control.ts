@@ -878,8 +878,16 @@ export interface SessionProxyCommandRequestMessage extends MessageBase {
 
 /**
  * Successful command result payload. Fields are optional because not every
- * command produces a new entity. The session-proxy includes ids for newly created
- * entities (open-window → windowId + paneId, split-pane → paneId).
+ * command produces a new entity.
+ *
+ * tc-ozk.1: the pane/window-CREATING verbs RETURN their effect ids here —
+ * split-pane → {paneId, windowId}, open-window → {paneId, windowId},
+ * break-pane → {paneId (re-homed), windowId (new)}.  The session-proxy recovers
+ * them from tmux's `-P -F '#{pane_id} #{window_id}'` reply (it no longer infers
+ * the ids from a later %window-add / %layout-change notification).  The host
+ * binds by these returned ids the moment the pane materialises — the verb reply
+ * may arrive before OR after the pane's pane.opened delta, so binding is by id,
+ * never by ordering, and needs no observer/claim correlation.
  *
  * tc-x6l: `info` carries the `session-proxy.info` diagnostic payload.
  */

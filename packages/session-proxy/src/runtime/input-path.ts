@@ -63,6 +63,7 @@
 
 import type { ClientMessage } from "../wire/index.js";
 import type { PaneId, WindowId } from "../wire/index.js";
+import { paneId as mkPaneId, windowId as mkWindowId } from "../wire/index.js";
 import type { CommandResult } from "../parser/correlator.js";
 import {
   sendKeysHex,
@@ -70,6 +71,8 @@ import {
   refreshClientWindowSize,
   splitWindow,
   newWindow,
+  breakPane,
+  parseEffectIds,
   setOptionForWindow,
   setWindowSizeManual,
   resizeWindow,
@@ -149,13 +152,49 @@ function defaultWindowIdToTmux(id: WindowId): number {
 /**
  * Minimal shape of a CommandCorrelator result that input-path observes.
  *
- * Only `ok` is read here; the body/commandNumber fields are unused at this
- * layer.  The full type lives in `parser/correlator.ts` (`CommandResult`).
+ * `ok` is read on every command; `body` is read only by the creating verbs
+ * (tc-ozk.1) to recover the printed `-P -F` effect ids.  The full type lives in
+ * `parser/correlator.ts` (`CommandResult`).
  */
 export interface InputPathCommandResult {
   /** True on `%end` (tmux accepted); false on `%error` (tmux rejected). */
   readonly ok: boolean;
+  /**
+   * Raw reply-block body bytes (joined by `\n`).  Carries the `-P -F`
+   * effect-id line for creating verbs.  Optional in the minimal interface so
+   * non-verb call sites and the existing FakeDeps need not supply it.
+   */
+  readonly body?: Uint8Array;
 }
+
+/**
+ * The result of a pane/window-CREATING verb, as returned to the client in the
+ * `command.response` payload (tc-ozk.1).
+ *
+ * On success the verb RETURNS the ids tmux actually created — the host binds by
+ * these ids whenever the pane materialises, no observer/claim correlation
+ * needed.  On failure (tmux `%error`, or a success reply whose `-P` body we
+ * could not parse) it carries a loud error.
+ *
+ * Field naming mirrors the bead's VerbResult contract:
+ *   { ok: true,  newPaneId, newWindowId? }
+ *   { ok: false, code, message }
+ */
+export type VerbResult =
+  | {
+      readonly ok: true;
+      /** Wire id of the created pane (`p<N>`). Always present for the creating verbs. */
+      readonly newPaneId: PaneId;
+      /** Wire id of the window the new pane lives in (`w<N>`). */
+      readonly newWindowId: WindowId;
+    }
+  | {
+      readonly ok: false;
+      /** Machine-readable error code. */
+      readonly code: string;
+      /** Human-readable error description (for logging / surfacing loudly). */
+      readonly message: string;
+    };
 
 /** Required dependencies for createInputPath. */
 export interface InputPathDeps {
@@ -227,18 +266,45 @@ export interface InputPathOptions {
   getModel?: () => SessionModel;
 }
 
+/**
+ * Per-call sink for the VerbResult of a pane/window-CREATING verb (tc-ozk.1).
+ *
+ * `handleClientMessage` receives ONE of these per call, bound by the caller to
+ * the originating transport.  For `split-pane` / `open-window` / `break-pane`,
+ * input-path issues the tmux command with `-P -F` (so the created ids are
+ * PRINTED into the reply block), awaits the reply, parses the ids, and calls
+ * this responder with the request's `correlationId` and the `VerbResult`.
+ *
+ * The session-proxy wiring binds this to `server.sendCommandResponse` /
+ * `sendCommandError` so the ids (or the %error) reach the client as a
+ * `command.response` on the right per-connection seq.
+ *
+ * Threading it per-call (rather than as a factory option) is required because
+ * input-path is a singleton while the response must go to the SPECIFIC client
+ * that issued the verb.  When omitted, the verb's tmux command is still issued
+ * (the extra `-P -F` body is harmless) but no `command.response` is sent —
+ * preserving the fire-and-forget path for tests / non-server callers.
+ */
+export type VerbResponder = (correlationId: string, result: VerbResult) => void;
+
 /** The input path handle returned by createInputPath. */
 export interface InputPath {
   /**
    * Route a ClientMessage to the appropriate tmux command and write it to the
    * host's stdin.  Unrecognised or handshake-only messages are silently ignored.
    *
+   * For pane/window-CREATING verbs (split-pane / open-window / break-pane) pass
+   * a `respond` callback bound to the originating transport (tc-ozk.1): once the
+   * verb's `-P -F` reply arrives, input-path parses the created ids and calls
+   * `respond(correlationId, verbResult)`.  Omit `respond` to fire-and-forget
+   * (no `command.response` is sent).
+   *
    * Throws a TypeError if a message carries an id that the id-mapping function
    * cannot convert (e.g. a tmux-format id like "%1" or "@9" passed where the
    * internal model format "p1" / "w9" is expected).  Callers should ensure they
    * pass model-format ids; catching the TypeError surfaces a programming error.
    */
-  handleClientMessage(msg: ClientMessage): void;
+  handleClientMessage(msg: ClientMessage, respond?: VerbResponder): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -434,7 +500,70 @@ export function createInputPath(
     );
   }
 
-  function handleClientMessage(msg: ClientMessage): void {
+  /**
+   * Issue a pane/window-CREATING verb and RETURN its effect ids (tc-ozk.1).
+   *
+   * The command MUST already carry `-P -F EFFECT_IDS_FORMAT` so tmux prints the
+   * created `<pane_id> <window_id>` into the reply block. We:
+   *   1. send the command (atomic slot+write, tc-3si.1);
+   *   2. await the matching CommandResult;
+   *   3. on `%error` → emit a failed VerbResult (the "+ B5b" %error mapping —
+   *      a command-attributable failure, delivered as command.response
+   *      ok=false, surfaced loudly);
+   *   4. on `%end` → parse the printed ids; if parsing fails we ALSO fail loud
+   *      (tmux said ok but we cannot honour the contract of returning the ids);
+   *   5. otherwise emit the ids, minting wire ids from the tmux numbers.
+   *
+   * When no `respond` callback is wired the command is still issued (the extra
+   * `-P -F` body is harmless), but no response is delivered — preserving the
+   * fire-and-forget path for tests / callers that don't consume the result.
+   */
+  function runCreatingVerb(
+    respond: VerbResponder | undefined,
+    correlationId: string,
+    verbKind: string,
+    cmd: string,
+  ): void {
+    const resultPromise = sendCommand(cmd);
+    if (respond === undefined) return; // no return path wired.
+
+    void resultPromise.then(
+      (result) => {
+        if (!result.ok) {
+          // %error → command-attributable failure. Surface loudly.
+          const message = `tmux rejected ${verbKind}`;
+          console.warn(`[input-path] ${message} (correlationId=${correlationId})`);
+          respond(correlationId, { ok: false, code: "verb.failed", message });
+          return;
+        }
+        const bodyText = result.body !== undefined ? new TextDecoder().decode(result.body) : "";
+        const ids = parseEffectIds(bodyText);
+        if (ids === null) {
+          // tmux accepted the command but we could not recover the printed ids.
+          // This breaks the verb's contract — fail LOUD rather than silently
+          // returning ok with no ids (FAIL-LOUD policy).
+          const message = `${verbKind} succeeded but its -P -F effect-id reply was unparseable: ${JSON.stringify(bodyText)}`;
+          console.error(`[input-path] ${message} (correlationId=${correlationId})`);
+          respond(correlationId, { ok: false, code: "verb.no-effect-ids", message });
+          return;
+        }
+        respond(correlationId, {
+          ok: true,
+          newPaneId: mkPaneId("p" + ids.paneNum),
+          newWindowId: mkWindowId("w" + ids.windowNum),
+        });
+      },
+      (err) => {
+        // Protocol-level rejection (e.g. correlator cmdnum mismatch). Rare;
+        // surface loudly as a failed verb so the client's await doesn't hang.
+        const message = `${verbKind} command failed at the correlator: ${String(err)}`;
+        console.error(`[input-path] ${message} (correlationId=${correlationId})`);
+        respond(correlationId, { ok: false, code: "verb.internal", message });
+      },
+    );
+  }
+
+  function handleClientMessage(msg: ClientMessage, respond?: VerbResponder): void {
     switch (msg.type) {
       // -----------------------------------------------------------------------
       // input → send-keys -H
@@ -496,25 +625,22 @@ export function createInputPath(
       // for which a direct serializer exists.  Each branch maps kind → tmux cmd.
       // -----------------------------------------------------------------------
       case "command.request": {
-        const { command } = msg;
+        const { command, correlationId } = msg;
         switch (command.kind) {
           case "open-window": {
             // new-window with optional name, cwd, and shellCommand.
             // tc-cr4dz: cwd and shellCommand are additive optional fields set
             // by the cold-start profile applicator after substitution.
-            const hasOpts =
-              command.name !== undefined ||
-              command.cwd !== undefined ||
-              command.shellCommand !== undefined;
-            const openOpts = hasOpts
-              ? {
-                  ...(command.name !== undefined ? { name: command.name } : {}),
-                  ...(command.cwd !== undefined ? { startDirectory: command.cwd } : {}),
-                  ...(command.shellCommand !== undefined ? { shellCommand: command.shellCommand } : {}),
-                }
-              : undefined;
-            const cmd = newWindow(openOpts);
-            sendCommand(cmd);
+            //
+            // tc-ozk.1: always print the created ids (-P -F) and RETURN them in
+            // the VerbResult via runCreatingVerb.
+            const cmd = newWindow({
+              printIds: true,
+              ...(command.name !== undefined ? { name: command.name } : {}),
+              ...(command.cwd !== undefined ? { startDirectory: command.cwd } : {}),
+              ...(command.shellCommand !== undefined ? { shellCommand: command.shellCommand } : {}),
+            });
+            runCreatingVerb(respond, correlationId, "open-window", cmd);
             break;
           }
 
@@ -524,19 +650,18 @@ export function createInputPath(
             // (when absent, splitWindow emits no -t flag so tmux targets the
             // current pane — used when the new window's first pane ID is not
             // yet known).
+            //
+            // tc-ozk.1: always print the created ids (-P -F) and RETURN them.
             let tmuxPaneNum: number | undefined;
             if (command.paneId !== undefined) {
               tmuxPaneNum = toTmuxPane(command.paneId);
             }
-            const hasSplitOpts =
-              command.cwd !== undefined || command.shellCommand !== undefined;
-            const splitOpts = hasSplitOpts
-              ? {
-                  ...(command.cwd !== undefined ? { startDirectory: command.cwd } : {}),
-                  ...(command.shellCommand !== undefined ? { shellCommand: command.shellCommand } : {}),
-                }
-              : undefined;
-            sendCommand(splitWindow(tmuxPaneNum, command.direction, splitOpts));
+            const cmd = splitWindow(tmuxPaneNum, command.direction, {
+              printIds: true,
+              ...(command.cwd !== undefined ? { startDirectory: command.cwd } : {}),
+              ...(command.shellCommand !== undefined ? { shellCommand: command.shellCommand } : {}),
+            });
+            runCreatingVerb(respond, correlationId, "split-pane", cmd);
             break;
           }
 
@@ -713,12 +838,15 @@ export function createInputPath(
           // ── tc-7xv.9: pane verbs ───────────────────────────────────────────
 
           case "break-pane": {
-            // break-pane -dP -t %<N>
+            // break-pane -d -P -F '#{pane_id} #{window_id}' -t %<N>
             // -d keeps the new window in the background (no focus steal).
-            // -P would print the new window ID but control-mode captures it
-            // as a command response; we don't parse the response here.
+            // tc-ozk.1: -P -F now PRINTS the broken-out pane id + its new
+            // window id into the reply block; runCreatingVerb parses them and
+            // RETURNS them in the VerbResult.  For break-pane the "new" entity
+            // is the window (the pane is re-homed, not freshly created) — see
+            // breakPane() docs.
             const tmuxPaneNum = toTmuxPane(command.paneId);
-            sendCommand(`break-pane -d -t %${tmuxPaneNum}`);
+            runCreatingVerb(respond, correlationId, "break-pane", breakPane(tmuxPaneNum, { printIds: true }));
             break;
           }
 

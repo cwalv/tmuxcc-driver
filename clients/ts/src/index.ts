@@ -35,6 +35,7 @@ export type {
   SeqGapInfo,
   ModelChangeHandler,
   ResyncNeededHandler,
+  CommandResponseHandler,
 } from "./mirror.js";
 
 // ---------------------------------------------------------------------------

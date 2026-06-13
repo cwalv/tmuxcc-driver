@@ -78,6 +78,8 @@ import type {
   Transport,
   SnapshotMessage,
   SessionProxyMessage,
+  SessionProxyCommandRequestMessage,
+  SessionProxyCommandResponseMessage,
   InputMessage,
   ResizeRequestMessage,
   PaneId,
@@ -1799,6 +1801,111 @@ describe(
       await new Promise((r) => setTimeout(r, 100));
 
       assert.equal(live.size, 0, "no storm-alarm timer may remain armed after host exit");
+    });
+
+    // -------------------------------------------------------------------------
+    // R7 (tc-ozk.1). LOAD-BEARING PROOF: split → bind-by-returned-ID.
+    //
+    // The whole bead in one test: issue a `split-pane` verb, get the created
+    // pane id back IN THE command.response (driver RETURNS its effect), then
+    // BIND by that returned id — assert the pane the model materialises is
+    // exactly the one the verb said it created.  ZERO observer machinery is
+    // engaged: there is no observeNextPaneOpen / beginOwnVerb claim anywhere in
+    // this path; binding is purely by the returned id.
+    //
+    // We deliberately use `sessionProxy.addClient` (the full assembly) because
+    // that is where the verb responder is wired (runtime/session-proxy.ts) —
+    // `server.addClient` alone would not install it.
+    //
+    // The verb reply may arrive before OR after the pane's pane.opened delta;
+    // we bind by id whenever the pane appears, asserting no ordering dependency.
+    // -------------------------------------------------------------------------
+
+    it("R7 (tc-ozk.1): split verb RETURNS the created pane id; bind-by-returned-id finds it (zero observer machinery)", async () => {
+      const sock = realSockName("split-bind");
+      after(() => killRealServer(sock));
+
+      const sessionProxy = createSessionProxy({
+        host: { socketName: sock, sessionName: "r7session", cols: 80, rows: 24 },
+      });
+      sessionProxy.host.onError(() => {});
+
+      await sessionProxy.start();
+
+      const { sessionProxyTransport: dt, clientTransport: ct, controlMessages } = createRecordingPair();
+      sessionProxy.demux.attachTransport(dt);
+      // IMPORTANT: sessionProxy.addClient (assembly) installs the verb responder.
+      const addPromise = sessionProxy.addClient(dt);
+      const clientPromise = runClientHandshake(ct, CLIENT_CAPS);
+      await Promise.all([addPromise, clientPromise]);
+
+      // Baseline: snapshot must carry exactly the bootstrap pane.
+      const snapshot = controlMessages.find((m) => m.type === "snapshot") as SnapshotMessage | undefined;
+      assert.ok(snapshot !== undefined, "snapshot must arrive before splitting");
+      assert.ok(snapshot!.panes.length >= 1, "need a pane to split");
+      const sourcePane = snapshot!.panes[0]!.paneId;
+      const preExistingPaneIds = new Set(snapshot!.panes.map((p) => p.paneId));
+
+      // Issue the split verb from the CLIENT side with a known correlationId.
+      const correlationId = "verb-split-1";
+      const req: SessionProxyCommandRequestMessage = {
+        type: "command.request",
+        seq: 1,
+        correlationId,
+        command: { kind: "split-pane", paneId: sourcePane, direction: "horizontal" },
+      };
+      ct.sendControl(req);
+
+      // The driver RETURNS the effect: a command.response with the created ids.
+      const response = (await waitFor(
+        () =>
+          controlMessages.find(
+            (m) => m.type === "command.response" && (m as SessionProxyCommandResponseMessage).correlationId === correlationId,
+          ) as SessionProxyCommandResponseMessage | undefined,
+        8000,
+        "no command.response for the split verb within 8s",
+      )) as SessionProxyCommandResponseMessage;
+
+      assert.equal(response.result.ok, true, `split verb must succeed; got ${JSON.stringify(response.result)}`);
+      assert.ok(response.result.ok === true);
+      const returnedPaneId = response.result.payload?.paneId;
+      const returnedWindowId = response.result.payload?.windowId;
+      assert.ok(returnedPaneId !== undefined, "split verb must RETURN the created paneId");
+      assert.ok(returnedWindowId !== undefined, "split verb must RETURN the created windowId");
+
+      // The returned pane must be a NEW pane (not the one we split).
+      assert.ok(
+        !preExistingPaneIds.has(returnedPaneId!),
+        `returned paneId ${returnedPaneId} must be a newly-created pane, not a pre-existing one`,
+      );
+
+      // BIND-BY-RETURNED-ID: the model must materialise a pane with EXACTLY the
+      // returned id (it may arrive before or after the verb reply — we poll).
+      // This is the proof the host can bind by the returned id with no observer.
+      const boundPane = await waitFor(
+        () => sessionProxy.pipeline.getModel().panes.get(returnedPaneId!),
+        8000,
+        `model never materialised a pane for the returned id ${returnedPaneId}`,
+      );
+      assert.ok(boundPane !== undefined, "bind-by-returned-id must find the created pane in the model");
+
+      // Cross-check against tmux ground truth: the returned wire id "p<N>" must
+      // correspond to a real tmux pane "%N" that exists in the session.
+      const tmuxPaneNum = parseInt((returnedPaneId! as string).slice(1), 10);
+      const list = spawnSync(
+        "tmux",
+        ["-L", sock, "list-panes", "-s", "-t", "r7session", "-F", "#{pane_id}"],
+        { encoding: "utf8", timeout: 4000 },
+      );
+      assert.equal(list.status, 0, `list-panes failed: ${list.stderr}`);
+      const realPaneIds = (list.stdout ?? "").split("\n").map((s) => s.trim()).filter(Boolean);
+      assert.ok(
+        realPaneIds.includes(`%${tmuxPaneNum}`),
+        `returned pane %${tmuxPaneNum} must exist in real tmux; tmux has: ${realPaneIds.join(", ")}`,
+      );
+
+      sessionProxy.kill();
+      await new Promise<void>((r) => { sessionProxy.host.onExit(() => r()); });
     });
   },
 );

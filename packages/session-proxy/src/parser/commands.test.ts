@@ -26,6 +26,9 @@ import {
   capturePane,
   newWindow,
   splitWindow,
+  breakPane,
+  parseEffectIds,
+  EFFECT_IDS_FORMAT,
   setOption,
   setOptionForWindow,
   showOptionsForWindow,
@@ -423,6 +426,88 @@ describe("splitWindow", () => {
       splitWindow(undefined, "vertical", { startDirectory: "/path with spaces" }),
       "split-window -v -c '/path with spaces'",
     );
+  });
+
+  it("printIds adds -P -F EFFECT_IDS_FORMAT (tc-ozk.1)", () => {
+    assert.equal(
+      splitWindow(3, "horizontal", { printIds: true }),
+      "split-window -h -t %3 -P -F '#{pane_id} #{window_id}'",
+    );
+    assert.equal(
+      splitWindow(undefined, "vertical", { printIds: true }),
+      "split-window -v -P -F '#{pane_id} #{window_id}'",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// break-pane (tc-ozk.1)
+// ---------------------------------------------------------------------------
+
+describe("breakPane", () => {
+  it("bare break-pane is -d -t %N (no print)", () => {
+    assert.equal(breakPane(3), "break-pane -d -t %3");
+  });
+
+  it("printIds adds -P -F EFFECT_IDS_FORMAT before -t", () => {
+    assert.equal(
+      breakPane(3, { printIds: true }),
+      "break-pane -d -P -F '#{pane_id} #{window_id}' -t %3",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// new-window printIds (tc-ozk.1)
+// ---------------------------------------------------------------------------
+
+describe("newWindow printIds (tc-ozk.1)", () => {
+  it("bare printIds", () => {
+    assert.equal(
+      newWindow({ printIds: true }),
+      "new-window -P -F '#{pane_id} #{window_id}'",
+    );
+  });
+
+  it("printIds is placed before -n name", () => {
+    assert.equal(
+      newWindow({ printIds: true, name: "editor" }),
+      "new-window -P -F '#{pane_id} #{window_id}' -n editor",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseEffectIds (tc-ozk.1)
+// ---------------------------------------------------------------------------
+
+describe("parseEffectIds", () => {
+  it("parses '%5 @2' into numeric ids", () => {
+    assert.deepEqual(parseEffectIds("%5 @2"), { paneNum: 5, windowNum: 2 });
+  });
+
+  it("tolerates surrounding whitespace / leading blank line / trailing newline", () => {
+    assert.deepEqual(parseEffectIds("\n%5 @2\n"), { paneNum: 5, windowNum: 2 });
+    assert.deepEqual(parseEffectIds("  %12 @34  "), { paneNum: 12, windowNum: 34 });
+  });
+
+  it("returns null for an empty body", () => {
+    assert.equal(parseEffectIds(""), null);
+    assert.equal(parseEffectIds("\n\n"), null);
+  });
+
+  it("returns null for a malformed body (fail-loud signal)", () => {
+    assert.equal(parseEffectIds("garbage"), null);
+    assert.equal(parseEffectIds("@2 %5"), null); // wrong order
+    assert.equal(parseEffectIds("%5"), null); // missing window id
+    assert.equal(parseEffectIds("5 2"), null); // missing sigils
+  });
+
+  it("round-trips with EFFECT_IDS_FORMAT shape (pane first, window second)", () => {
+    // EFFECT_IDS_FORMAT expands #{pane_id} #{window_id}; a realistic expansion
+    // is "%<n> @<n>".
+    assert.ok(EFFECT_IDS_FORMAT.indexOf("pane_id") < EFFECT_IDS_FORMAT.indexOf("window_id"));
+    assert.deepEqual(parseEffectIds("%7 @1"), { paneNum: 7, windowNum: 1 });
   });
 });
 

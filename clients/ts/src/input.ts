@@ -61,7 +61,48 @@
  * # NO DOM, NO vscode, NO host API, NO Pseudoterminal
  */
 
-import type { PaneId, InputMessage, ResizeRequestMessage, CommandRequestMessage, WireCommand } from "@tmuxcc/session-proxy";
+import type {
+  PaneId,
+  WindowId,
+  InputMessage,
+  ResizeRequestMessage,
+  CommandRequestMessage,
+  WireCommand,
+  SessionProxyCommandResponseMessage,
+} from "@tmuxcc/session-proxy";
+
+// ---------------------------------------------------------------------------
+// VerbResult (tc-ozk.1)
+// ---------------------------------------------------------------------------
+
+/**
+ * The result of a pane/window-CREATING verb, as RETURNED by the session-proxy
+ * in the `command.response` payload (tc-ozk.1).
+ *
+ * On success the verb carries the ids tmux actually created — the host binds by
+ * these ids whenever the pane materialises (which may arrive before OR after
+ * this result), with NO observer/claim correlation needed.  On failure it
+ * carries a loud error mapped from the tmux `%error` (or an unparseable `-P`
+ * reply on the session-proxy side).
+ *
+ *   { ok: true,  newPaneId, newWindowId }
+ *   { ok: false, code, message }
+ */
+export type VerbResult =
+  | {
+      readonly ok: true;
+      /** Wire id of the created pane (`p<N>`). */
+      readonly newPaneId: PaneId;
+      /** Wire id of the window the new pane lives in (`w<N>`). */
+      readonly newWindowId: WindowId;
+    }
+  | {
+      readonly ok: false;
+      /** Machine-readable error code (e.g. "verb.failed"). */
+      readonly code: string;
+      /** Human-readable error description. */
+      readonly message: string;
+    };
 
 // ---------------------------------------------------------------------------
 // Public interface
@@ -148,6 +189,47 @@ export interface InputApi {
    * @param cmd - The model-level command to send.
    */
   sendCommand(cmd: WireCommand): void;
+
+  /**
+   * Send a pane/window-CREATING verb and RESOLVE with its effect ids (tc-ozk.1).
+   *
+   * Like `sendCommand`, but returns a Promise that resolves when the matching
+   * `command.response` arrives (correlated by correlationId).  On success the
+   * `VerbResult` carries `{ ok: true, newPaneId, newWindowId }` — the ids tmux
+   * actually created — so the caller can bind by id the moment the pane shows
+   * up, with zero observer/claim machinery.  On a tmux `%error` (or an
+   * unparseable effect-id reply on the session-proxy side) it resolves
+   * `{ ok: false, code, message }` (the response is never rejected; failures
+   * are values, not exceptions).
+   *
+   * Routing: the caller MUST feed `command.response` messages to
+   * `handleCommandResponse` (connectClient wires this via the mirror).  If the
+   * connection closes before the response arrives, the pending verb is rejected
+   * via `rejectAllPending`.
+   *
+   * @param cmd - A creating verb (split-pane / open-window / break-pane).
+   *              Other command kinds will also work but only resolve if the
+   *              session-proxy sends a command.response for them.
+   */
+  sendVerb(cmd: WireCommand): Promise<VerbResult>;
+
+  /**
+   * Resolve the pending `sendVerb` Promise that matches this response's
+   * correlationId (tc-ozk.1).  No-op if no verb is awaiting this id (e.g. a
+   * response to a fire-and-forget `sendCommand`, or a duplicate response).
+   *
+   * connectClient routes every `command.response` here from the mirror's
+   * control stream.
+   */
+  handleCommandResponse(msg: SessionProxyCommandResponseMessage): void;
+
+  /**
+   * Reject every in-flight `sendVerb` Promise (tc-ozk.1).
+   *
+   * Called on disconnect so awaiting callers don't hang forever.  The rejection
+   * reason is an Error carrying `reason`.
+   */
+  rejectAllPending(reason: string): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -187,6 +269,14 @@ export function createInputApi(
 
   // Per-api-instance seq counter.  Starts at 1 per wire spec (control.ts:107).
   let seq = 1;
+
+  // tc-ozk.1: pending sendVerb() promises keyed by correlationId.  Resolved by
+  // handleCommandResponse when the matching command.response arrives; rejected
+  // en masse by rejectAllPending on disconnect.
+  const pendingVerbs = new Map<
+    string,
+    { resolve: (result: VerbResult) => void; reject: (err: Error) => void }
+  >();
 
   // Pending resize buffer: paneId → {cols, rows}.  Only populated when
   // coalesceResizes is true and a flush is scheduled.
@@ -263,6 +353,66 @@ export function createInputApi(
         command: cmd,
       };
       sender.send(msg);
+    },
+
+    sendVerb(cmd: WireCommand): Promise<VerbResult> {
+      const correlationId = String(nextSeq());
+      const msg: CommandRequestMessage = {
+        type: "command.request",
+        seq: Number(correlationId),
+        correlationId,
+        command: cmd,
+      };
+      return new Promise<VerbResult>((resolve, reject) => {
+        pendingVerbs.set(correlationId, { resolve, reject });
+        try {
+          sender.send(msg);
+        } catch (err) {
+          // The send itself failed (e.g. connection not ready) — don't leak the
+          // pending entry.
+          pendingVerbs.delete(correlationId);
+          reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      });
+    },
+
+    handleCommandResponse(msg: SessionProxyCommandResponseMessage): void {
+      const deferred = pendingVerbs.get(msg.correlationId);
+      if (deferred === undefined) return; // not an awaited verb (e.g. fire-and-forget)
+      pendingVerbs.delete(msg.correlationId);
+      if (msg.result.ok) {
+        const payload = msg.result.payload;
+        if (payload?.paneId !== undefined && payload?.windowId !== undefined) {
+          deferred.resolve({
+            ok: true,
+            newPaneId: payload.paneId,
+            newWindowId: payload.windowId,
+          });
+        } else {
+          // ok=true but the creating-verb ids are missing — the session-proxy
+          // promises to return them for creating verbs (tc-ozk.1), so this is a
+          // contract violation.  Surface it as a failure rather than a
+          // half-populated success.
+          deferred.resolve({
+            ok: false,
+            code: "verb.no-effect-ids",
+            message: `command.response ok=true but payload lacked paneId/windowId: ${JSON.stringify(payload)}`,
+          });
+        }
+      } else {
+        deferred.resolve({
+          ok: false,
+          code: msg.result.code,
+          message: msg.result.message,
+        });
+      }
+    },
+
+    rejectAllPending(reason: string): void {
+      for (const deferred of pendingVerbs.values()) {
+        deferred.reject(new Error(reason));
+      }
+      pendingVerbs.clear();
     },
   };
 }

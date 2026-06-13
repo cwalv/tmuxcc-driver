@@ -16,7 +16,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import { createInputPath, defaultPaneIdToTmux, defaultWindowIdToTmux } from "./input-path.js";
-import type { InputPath, InputPathDeps } from "./input-path.js";
+import type { InputPath, InputPathDeps, VerbResult } from "./input-path.js";
 import type { CommandResult } from "../parser/correlator.js";
 import type {
   InputMessage,
@@ -42,24 +42,25 @@ interface FakeDeps extends InputPathDeps {
   /**
    * Queue a Promise to be returned by the NEXT `send()` call (FIFO across
    * multiple queued promises). Used by the tc-7xv.37 reversal tests to wire a
-   * deferred resolution that the test controls. Accepts `Promise<{ ok }>`
-   * because input-path only reads the `ok` field — the test doesn't have to
-   * mock commandNumber/body.
+   * deferred resolution that the test controls. Accepts `Promise<{ ok, body? }>`
+   * because input-path reads `ok` everywhere and `body` only for the
+   * tc-ozk.1 creating-verb effect-id path — the test doesn't have to mock
+   * commandNumber.
    */
-  enqueueSendResult(promise: Promise<{ ok: boolean }>): void;
+  enqueueSendResult(promise: Promise<{ ok: boolean; body?: Uint8Array }>): void;
 }
 
 function makeFakeDeps(): FakeDeps {
   const writes: string[] = [];
-  const queue: Promise<{ ok: boolean }>[] = [];
+  const queue: Promise<{ ok: boolean; body?: Uint8Array }>[] = [];
   // Default: when no test-supplied Promise is queued, `send` returns a
   // never-resolving stub so the test isn't forced to await it.
   const stubPromise = (): Promise<CommandResult> => new Promise<CommandResult>(() => {});
-  // Cast: input-path treats the resolved shape as InputPathCommandResult (just
-  // `{ ok }`), so a `{ ok }`-shaped Promise is structurally compatible for
-  // the test's purposes even though the formal CommandResult adds
-  // commandNumber/body.
-  const cast = (p: Promise<{ ok: boolean }>): Promise<CommandResult> => p as Promise<CommandResult>;
+  // Cast: input-path treats the resolved shape as InputPathCommandResult
+  // (`{ ok, body? }`), so a `{ ok, body? }`-shaped Promise is structurally
+  // compatible for the test's purposes even though the formal CommandResult
+  // adds commandNumber.
+  const cast = (p: Promise<{ ok: boolean; body?: Uint8Array }>): Promise<CommandResult> => p as Promise<CommandResult>;
   const deps: FakeDeps = {
     writes,
     get lastWrite() { return writes[writes.length - 1]; },
@@ -75,7 +76,7 @@ function makeFakeDeps(): FakeDeps {
         return queued !== undefined ? cast(queued) : stubPromise();
       });
     },
-    enqueueSendResult(promise: Promise<{ ok: boolean }>): void {
+    enqueueSendResult(promise: Promise<{ ok: boolean; body?: Uint8Array }>): void {
       queue.push(promise);
     },
   };
@@ -384,7 +385,9 @@ describe("createInputPath — CommandRequestMessage", () => {
     };
     path.handleClientMessage(msg);
 
-    assert.equal(host.lastWrite, "split-window -h -t %3\n");
+    // tc-ozk.1: split-window now prints its effect ids via -P -F so the daemon
+    // can RETURN them in the VerbResult.
+    assert.equal(host.lastWrite, "split-window -h -t %3 -P -F '#{pane_id} #{window_id}'\n");
   });
 
   it("split-pane vertical → split-window -v -t %5", () => {
@@ -403,7 +406,7 @@ describe("createInputPath — CommandRequestMessage", () => {
     };
     path.handleClientMessage(msg);
 
-    assert.equal(host.lastWrite, "split-window -v -t %5\n");
+    assert.equal(host.lastWrite, "split-window -v -t %5 -P -F '#{pane_id} #{window_id}'\n");
   });
 
   it("open-window without name → new-window", () => {
@@ -420,7 +423,8 @@ describe("createInputPath — CommandRequestMessage", () => {
     };
     path.handleClientMessage(msg);
 
-    assert.equal(host.lastWrite, "new-window\n");
+    // tc-ozk.1: new-window prints its effect ids via -P -F (placed before -n).
+    assert.equal(host.lastWrite, "new-window -P -F '#{pane_id} #{window_id}'\n");
   });
 
   it("open-window with name → new-window -n <name>", () => {
@@ -438,7 +442,7 @@ describe("createInputPath — CommandRequestMessage", () => {
     };
     path.handleClientMessage(msg);
 
-    assert.equal(host.lastWrite, "new-window -n editor\n");
+    assert.equal(host.lastWrite, "new-window -P -F '#{pane_id} #{window_id}' -n editor\n");
   });
 
   it("close-pane → kill-pane -t %2", () => {
@@ -730,7 +734,7 @@ describe("createInputPath — mixed message sequence", () => {
 // ---------------------------------------------------------------------------
 
 describe("createInputPath — break-pane command (tc-7xv.9)", () => {
-  it("break-pane → break-pane -d -t %<N>", () => {
+  it("break-pane → break-pane -d -P -F '#{pane_id} #{window_id}' -t %<N>", () => {
     const host = makeFakeDeps();
     const path = createInputPath(host);
 
@@ -742,7 +746,8 @@ describe("createInputPath — break-pane command (tc-7xv.9)", () => {
     };
     path.handleClientMessage(msg);
 
-    assert.equal(host.lastWrite, "break-pane -d -t %3\n");
+    // tc-ozk.1: break-pane now prints its effect ids via -P -F.
+    assert.equal(host.lastWrite, "break-pane -d -P -F '#{pane_id} #{window_id}' -t %3\n");
   });
 
   it("invalid pane id throws TypeError", () => {
@@ -760,6 +765,171 @@ describe("createInputPath — break-pane command (tc-7xv.9)", () => {
       (err: unknown) => err instanceof TypeError && /p<N>/.test((err as TypeError).message),
     );
     assert.equal(host.writes.length, 0, "no partial write on bad pane id");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite: tc-ozk.1 — creating verbs RETURN their effect ids + %error mapping
+// ---------------------------------------------------------------------------
+
+describe("createInputPath — creating verbs return effect ids (tc-ozk.1)", () => {
+  const enc = (s: string) => new TextEncoder().encode(s);
+
+  it("split-pane: %end with -P body → respond ok with newPaneId/newWindowId", async () => {
+    const host = makeFakeDeps();
+    const path = createInputPath(host);
+    const results: Array<{ correlationId: string; result: VerbResult }> = [];
+
+    // tmux prints "%5 @2" into the reply body for the created pane/window.
+    host.enqueueSendResult(Promise.resolve({ ok: true, body: enc("%5 @2") }));
+
+    path.handleClientMessage(
+      {
+        type: "command.request",
+        seq: nextSeq(),
+        correlationId: "v1",
+        command: { kind: "split-pane", paneId: paneId("p3"), direction: "horizontal" },
+      },
+      (correlationId, result) => results.push({ correlationId, result }),
+    );
+
+    // The -P -F command was written.
+    assert.equal(host.lastWrite, "split-window -h -t %3 -P -F '#{pane_id} #{window_id}'\n");
+
+    // Let the awaited send result resolve.
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    assert.equal(results.length, 1);
+    assert.equal(results[0]!.correlationId, "v1");
+    assert.deepEqual(results[0]!.result, {
+      ok: true,
+      newPaneId: paneId("p5"),
+      newWindowId: windowId("w2"),
+    });
+  });
+
+  it("open-window: %end with -P body → respond ok with the created ids", async () => {
+    const host = makeFakeDeps();
+    const path = createInputPath(host);
+    const results: Array<{ correlationId: string; result: VerbResult }> = [];
+
+    host.enqueueSendResult(Promise.resolve({ ok: true, body: enc("%9 @4") }));
+
+    path.handleClientMessage(
+      {
+        type: "command.request",
+        seq: nextSeq(),
+        correlationId: "v2",
+        command: { kind: "open-window", name: "logs" },
+      },
+      (correlationId, result) => results.push({ correlationId, result }),
+    );
+
+    assert.equal(host.lastWrite, "new-window -P -F '#{pane_id} #{window_id}' -n logs\n");
+
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    assert.equal(results.length, 1);
+    assert.deepEqual(results[0]!.result, {
+      ok: true,
+      newPaneId: paneId("p9"),
+      newWindowId: windowId("w4"),
+    });
+  });
+
+  it("break-pane: %end with -P body → respond ok with the re-homed pane + new window", async () => {
+    const host = makeFakeDeps();
+    const path = createInputPath(host);
+    const results: Array<{ correlationId: string; result: VerbResult }> = [];
+
+    host.enqueueSendResult(Promise.resolve({ ok: true, body: enc("%3 @7") }));
+
+    path.handleClientMessage(
+      {
+        type: "command.request",
+        seq: nextSeq(),
+        correlationId: "v3",
+        command: { kind: "break-pane", paneId: paneId("p3") },
+      },
+      (correlationId, result) => results.push({ correlationId, result }),
+    );
+
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    assert.equal(results.length, 1);
+    assert.deepEqual(results[0]!.result, {
+      ok: true,
+      newPaneId: paneId("p3"),
+      newWindowId: windowId("w7"),
+    });
+  });
+
+  it("%error → respond ok=false (the +B5b %error mapping)", async () => {
+    const host = makeFakeDeps();
+    const path = createInputPath(host);
+    const results: Array<{ correlationId: string; result: VerbResult }> = [];
+
+    host.enqueueSendResult(Promise.resolve({ ok: false }));
+
+    path.handleClientMessage(
+      {
+        type: "command.request",
+        seq: nextSeq(),
+        correlationId: "v4",
+        command: { kind: "split-pane", paneId: paneId("p3"), direction: "vertical" },
+      },
+      (correlationId, result) => results.push({ correlationId, result }),
+    );
+
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    assert.equal(results.length, 1);
+    assert.equal(results[0]!.result.ok, false);
+    if (results[0]!.result.ok === false) {
+      assert.equal(results[0]!.result.code, "verb.failed");
+      assert.ok(results[0]!.result.message.includes("split-pane"));
+    }
+  });
+
+  it("%end but unparseable -P body → respond ok=false (fail-loud, not silent ok)", async () => {
+    const host = makeFakeDeps();
+    const path = createInputPath(host);
+    const results: Array<{ correlationId: string; result: VerbResult }> = [];
+
+    host.enqueueSendResult(Promise.resolve({ ok: true, body: enc("garbage-not-ids") }));
+
+    path.handleClientMessage(
+      {
+        type: "command.request",
+        seq: nextSeq(),
+        correlationId: "v5",
+        command: { kind: "split-pane", paneId: paneId("p3"), direction: "horizontal" },
+      },
+      (correlationId, result) => results.push({ correlationId, result }),
+    );
+
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    assert.equal(results.length, 1);
+    assert.equal(results[0]!.result.ok, false);
+    if (results[0]!.result.ok === false) {
+      assert.equal(results[0]!.result.code, "verb.no-effect-ids");
+    }
+  });
+
+  it("no responder wired → command still issued with -P -F, no throw", () => {
+    const host = makeFakeDeps();
+    const path = createInputPath(host);
+
+    // No respond callback — fire-and-forget path.
+    path.handleClientMessage({
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "v6",
+      command: { kind: "split-pane", paneId: paneId("p3"), direction: "horizontal" },
+    });
+
+    assert.equal(host.lastWrite, "split-window -h -t %3 -P -F '#{pane_id} #{window_id}'\n");
   });
 });
 

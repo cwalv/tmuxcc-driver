@@ -24,7 +24,7 @@ import { SessionProxyConnection } from "./connection.js";
 import { Mirror } from "./mirror.js";
 import { PaneStreamConsumer, connectPaneStream } from "./pane-stream.js";
 import { createInputApi } from "./input.js";
-import type { InputApiOptions } from "./input.js";
+import type { InputApiOptions, VerbResult } from "./input.js";
 import type {
   ClientController,
   ByteSource,
@@ -105,6 +105,19 @@ export interface ClientHandle {
   readonly session: NegotiatedSession;
 
   /**
+   * Send a pane/window-CREATING verb and await its effect ids (tc-ozk.1).
+   *
+   * Resolves with `{ ok: true, newPaneId, newWindowId }` carrying the ids tmux
+   * actually created, or `{ ok: false, code, message }` on a tmux `%error`.
+   * The caller binds by the returned ids the moment the pane materialises — no
+   * observer/claim correlation needed (the reply may arrive before OR after the
+   * pane's `pane.opened` delta; binding is by id, not by ordering).
+   *
+   * Rejects only if the connection closes before the response arrives.
+   */
+  sendVerb(cmd: WireCommand): Promise<VerbResult>;
+
+  /**
    * Detach the render hook (if any), close the connection, and tear down all
    * subscriptions.  Safe to call more than once.
    */
@@ -155,6 +168,12 @@ export async function connectClient(
   // Must be called AFTER connect() so buffered messages are delivered.
   mirror.connectTo(connection);
 
+  // tc-ozk.1: route command.response messages from the mirror's control stream
+  // to the InputApi so awaited sendVerb() promises resolve with the returned
+  // effect ids.  The mirror owns the single-slot onControl handler; this is the
+  // forwarding seam.
+  mirror.onCommandResponse((msg) => inputApi.handleCommandResponse(msg));
+
   // Wire the pane-stream consumer to the connection's data stream.
   connectPaneStream(connection, paneConsumer);
 
@@ -182,11 +201,19 @@ export async function connectClient(
   function disconnect(): void {
     if (_disconnected) return;
     _disconnected = true;
+    // tc-ozk.1: fail any in-flight sendVerb() awaits so callers don't hang.
+    inputApi.rejectAllPending("connection disconnected before verb response arrived");
     mirror.detachHook();
     connection.close();
   }
 
   // ── Return fully-built handle ───────────────────────────────────────────────
 
-  return { controller, mirror, session, disconnect };
+  return {
+    controller,
+    mirror,
+    session,
+    sendVerb: (cmd: WireCommand) => inputApi.sendVerb(cmd),
+    disconnect,
+  };
 }

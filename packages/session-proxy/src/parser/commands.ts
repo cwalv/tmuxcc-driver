@@ -41,6 +41,15 @@
  * - split-window: `-h` creates a horizontal split (left/right panes, the new
  *   pane appears to the right); `-v` creates a vertical split (top/bottom,
  *   new pane appears below).  This matches tmux's own usage string.
+ *
+ * - effect-id printing (tc-ozk.1): the pane/window-CREATING verbs accept a
+ *   `-P -F '#{pane_id} #{window_id}'` pair.  `-P` tells tmux to PRINT
+ *   information about the created entity into the command-reply block (the
+ *   `%begin … %end` body), and `-F` selects exactly which fields.  Available on
+ *   split-window, new-window and break-pane since tmux 1.8/2.4 respectively —
+ *   well within the supported floor.  The session-proxy parses the printed line
+ *   with `parseEffectIds` to recover the created ids and returns them in the
+ *   VerbResult, replacing the old fire-and-observe correlation.
  */
 
 // ---------------------------------------------------------------------------
@@ -63,6 +72,66 @@ function quoteArg(arg: string): string {
   // Single-quote the whole value; escape embedded single quotes.
   const escaped = arg.replace(/'/g, "'\\''");
   return `'${escaped}'`;
+}
+
+// ---------------------------------------------------------------------------
+// Effect-id printing (tc-ozk.1)
+//
+// The pane/window-creating verbs (split-window, new-window, break-pane) can be
+// told to PRINT the created entity's ids into their command-reply block via
+// `-P -F <format>`.  We use a single canonical format — tmux pane id first,
+// then window id — and parse it back with `parseEffectIds`.  This is what lets
+// the daemon RETURN the created ids in the VerbResult instead of inferring them
+// from a later %window-add / %layout-change notification.
+// ---------------------------------------------------------------------------
+
+/**
+ * Canonical `-F` format for the created-entity ids of a creating verb.
+ *
+ * Emits `<pane_id> <window_id>` — e.g. `%5 @2` — into the command-reply body.
+ * Both are always present for split-window / new-window / break-pane (each
+ * yields exactly one new pane that lives in exactly one window).
+ *
+ * Space-separated (not tab): tmux's `#{pane_id}` / `#{window_id}` never contain
+ * spaces (`%<n>` / `@<n>`), so a single space is an unambiguous separator and
+ * keeps the parser trivial.
+ */
+export const EFFECT_IDS_FORMAT = "#{pane_id} #{window_id}";
+
+/**
+ * The created-entity ids recovered from a `-P -F EFFECT_IDS_FORMAT` reply body.
+ *
+ * Both are tmux-internal numeric ids (the N in `%N` / `@N`) — NOT the wire
+ * `p<N>` / `w<N>` form.  Callers mint the wire ids from these.
+ */
+export interface EffectIds {
+  /** Numeric tmux pane id (the N in `%N`) of the newly-created pane. */
+  readonly paneNum: number;
+  /** Numeric tmux window id (the N in `@N`) the new pane lives in. */
+  readonly windowNum: number;
+}
+
+/**
+ * Parse a `-P -F EFFECT_IDS_FORMAT` reply body into its numeric tmux ids.
+ *
+ * Accepts the raw reply body (e.g. `"%5 @2"`, possibly with surrounding
+ * whitespace or a trailing newline).  Returns `null` when the body does not
+ * match the expected `%<n> @<n>` shape — callers MUST treat null as a loud
+ * failure (the verb said it succeeded but we could not recover its effect),
+ * not as "no ids".
+ *
+ * Robust to extra body lines (takes the first non-empty line) because some
+ * tmux builds prepend an empty line before the `-P` output.
+ */
+export function parseEffectIds(body: string): EffectIds | null {
+  for (const rawLine of body.split("\n")) {
+    const line = rawLine.trim();
+    if (line === "") continue;
+    const m = /^%(\d+)\s+@(\d+)$/.exec(line);
+    if (m === null) return null;
+    return { paneNum: parseInt(m[1]!, 10), windowNum: parseInt(m[2]!, 10) };
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -312,19 +381,32 @@ export interface NewWindowOptions {
    * Starting directory (`-c <dir>`).
    */
   startDirectory?: string;
+  /**
+   * Print the created pane/window ids into the command-reply body via
+   * `-P -F EFFECT_IDS_FORMAT` (tc-ozk.1).  When true the caller can recover the
+   * created ids with `parseEffectIds(result.body)` instead of correlating a
+   * later notification.  Default: false (preserves the legacy fire-and-observe
+   * call sites that don't need the ids).
+   */
+  printIds?: boolean;
 }
 
 /**
  * Serialize a `new-window` command.
  *
- * Flags used: `-n <name>` for window name, `-c <dir>` for start directory.
+ * Flags used: `-n <name>` for window name, `-c <dir>` for start directory,
+ * `-P -F EFFECT_IDS_FORMAT` to print the created ids (tc-ozk.1).
  * Trailing unquoted arguments are treated as a shell command by tmux.
  *
  * @param opts  Optional window creation options.
  * @returns     e.g. `new-window -n 'my window'`
+ *              or   `new-window -P -F '#{pane_id} #{window_id}'`
  */
 export function newWindow(opts?: NewWindowOptions): string {
   const parts: string[] = ["new-window"];
+  if (opts?.printIds === true) {
+    parts.push(`-P -F ${quoteArg(EFFECT_IDS_FORMAT)}`);
+  }
   if (opts?.name !== undefined) {
     parts.push(`-n ${quoteArg(opts.name)}`);
   }
@@ -454,6 +536,11 @@ export interface SplitWindowOptions {
    * Size of the new pane as a percentage of the parent (`-p <percent>`).
    */
   percent?: number;
+  /**
+   * Print the created pane/window ids into the command-reply body via
+   * `-P -F EFFECT_IDS_FORMAT` (tc-ozk.1).  See NewWindowOptions.printIds.
+   */
+  printIds?: boolean;
 }
 
 /**
@@ -486,6 +573,9 @@ export function splitWindow(
   const flag = orientation === "horizontal" ? "-h" : "-v";
   const head = paneId !== undefined ? `split-window ${flag} -t %${paneId}` : `split-window ${flag}`;
   const parts: string[] = [head];
+  if (opts?.printIds === true) {
+    parts.push(`-P -F ${quoteArg(EFFECT_IDS_FORMAT)}`);
+  }
   if (opts?.percent !== undefined) {
     parts.push(`-p ${opts.percent}`);
   }
@@ -495,6 +585,47 @@ export function splitWindow(
   if (opts?.shellCommand !== undefined) {
     parts.push(quoteArg(opts.shellCommand));
   }
+  return parts.join(" ");
+}
+
+// ---------------------------------------------------------------------------
+// break-pane
+// ---------------------------------------------------------------------------
+
+/** Options for breakPane. */
+export interface BreakPaneOptions {
+  /**
+   * Print the created window/pane ids into the command-reply body via
+   * `-P -F EFFECT_IDS_FORMAT` (tc-ozk.1).  See NewWindowOptions.printIds.
+   */
+  printIds?: boolean;
+}
+
+/**
+ * Serialize a `break-pane` command.
+ *
+ * Emits `break-pane -d -t %<paneId>`.  The `-d` flag keeps the new window in
+ * the background so a host tab strip doesn't jump focus.  With `printIds` the
+ * created pane/window ids are printed into the reply body (`-P -F`), which is
+ * how the daemon returns them in the VerbResult (tc-ozk.1).
+ *
+ * Note on field ordering: tmux's `#{pane_id}` for a broken-out pane is the
+ * SAME pane id that previously lived in the source window (break-pane moves the
+ * pane, it does not create a new pane); `#{window_id}` is the NEW window the
+ * pane now lives in.  So for break-pane the returned `newWindowId` is the
+ * structurally-new entity and `newPaneId` is the (re-homed) existing pane.
+ *
+ * @param paneId  Numeric pane id (the N in `%N`) to break out.
+ * @param opts    Optional break options.
+ * @returns       e.g. `break-pane -d -t %3`
+ *                or   `break-pane -d -P -F '#{pane_id} #{window_id}' -t %3`
+ */
+export function breakPane(paneId: number, opts?: BreakPaneOptions): string {
+  const parts: string[] = ["break-pane -d"];
+  if (opts?.printIds === true) {
+    parts.push(`-P -F ${quoteArg(EFFECT_IDS_FORMAT)}`);
+  }
+  parts.push(`-t %${paneId}`);
   return parts.join(" ");
 }
 

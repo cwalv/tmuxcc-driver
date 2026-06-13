@@ -56,6 +56,7 @@
 import type {
   SnapshotMessage,
   SessionProxyMessage,
+  SessionProxyCommandResponseMessage,
   ClientMessage,
   ResyncRequestMessage,
   PaneId,
@@ -526,6 +527,15 @@ export type ModelChangeHandler = (model: ClientModel) => void;
 export type ResyncNeededHandler = (gap: SeqGapInfo) => void;
 
 /**
+ * Handler for `command.response` messages observed on the control stream
+ * (tc-ozk.1).  The mirror itself is not state-bearing for these, but it owns
+ * the single-slot `onControl` handler, so it forwards each response here.
+ * connectClient routes this to the InputApi so awaited `sendVerb` promises
+ * resolve with the returned effect ids.
+ */
+export type CommandResponseHandler = (msg: SessionProxyCommandResponseMessage) => void;
+
+/**
  * Stateful client-side mirror of the session-proxy session model.
  *
  * Usage (pure manual drive):
@@ -596,6 +606,9 @@ export class Mirror {
 
   readonly #changeHandlers: ModelChangeHandler[] = [];
   readonly #resyncHandlers: ResyncNeededHandler[] = [];
+  // tc-ozk.1: forwarders for command.response messages (not state-bearing for
+  // the mirror, but the mirror owns the single-slot onControl handler).
+  readonly #commandResponseHandlers: CommandResponseHandler[] = [];
 
   // ── Public model access ───────────────────────────────────────────────────
 
@@ -658,6 +671,23 @@ export class Mirror {
     };
   }
 
+  /**
+   * Register a handler that fires for every `command.response` seen on the
+   * control stream (tc-ozk.1).
+   *
+   * The mirror forwards these unchanged — it does not interpret them.
+   * connectClient wires this to `InputApi.handleCommandResponse` so awaited
+   * `sendVerb` promises resolve with the returned effect ids.  Handlers are
+   * APPENDED; returns an unsubscribe function.
+   */
+  onCommandResponse(handler: CommandResponseHandler): () => void {
+    this.#commandResponseHandlers.push(handler);
+    return () => {
+      const idx = this.#commandResponseHandlers.indexOf(handler);
+      if (idx !== -1) this.#commandResponseHandlers.splice(idx, 1);
+    };
+  }
+
   // ── Receive methods ───────────────────────────────────────────────────────
 
   /**
@@ -702,6 +732,17 @@ export class Mirror {
    * Fires `onModelChange` handlers on successful apply.
    */
   receiveDelta(msg: SessionProxyMessage): void {
+    // command.response is non-state-bearing and order-independent — forward it
+    // to registered handlers regardless of init/seq state so awaited sendVerb
+    // promises can resolve (tc-ozk.1). The verb reply may legitimately arrive
+    // before OR after the pane's delta; the seq machinery below must not gate it.
+    if (msg.type === "command.response") {
+      for (const handler of this.#commandResponseHandlers) {
+        handler(msg);
+      }
+      return;
+    }
+
     // Not yet initialized — ignore.
     if (!this.#initialized || this.#lastSeq === null) return;
 
@@ -711,7 +752,6 @@ export class Mirror {
     // Non-state-bearing messages — skip seq check and silently ignore.
     if (
       msg.type === "session-proxy.capabilities" ||
-      msg.type === "command.response" ||
       msg.type === "error"
     ) {
       return;

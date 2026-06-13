@@ -411,7 +411,7 @@
 
     "SessionProxyCommandOkPayload": {
       "type": "object",
-      "description": "Successful command result payload. Fields are optional because not every command produces a new entity.",
+      "description": "Successful command result payload. Fields are optional because not every command produces a new entity. tc-ozk.1: for the pane/window-CREATING verbs (split-pane, open-window, break-pane) the session-proxy RETURNS the created entity's ids here — `paneId` is the created pane and `windowId` the window it lives in (recovered from tmux's `split-window`/`new-window`/`break-pane -P -F '#{pane_id} #{window_id}'` reply). The host binds by these returned ids when the pane materialises; no observer/claim correlation is needed.",
       "properties": {
         "windowId": { "$ref": "tmuxcc:shared/primitives#/$defs/WindowId" },
         "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" },

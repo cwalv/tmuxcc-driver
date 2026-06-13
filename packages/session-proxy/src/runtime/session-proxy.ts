@@ -728,7 +728,25 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
           return;
         }
 
-        inputPath.handleClientMessage(msg as import("../wire/session-proxy-control.js").ClientMessage);
+        // tc-ozk.1: pane/window-creating verbs RETURN their effect ids. Bind a
+        // per-transport responder that delivers the VerbResult as a
+        // command.response (ok=true with the created ids, or ok=false on a
+        // tmux %error / unparseable -P body). The success-path ids land in the
+        // payload's paneId/windowId; the host binds by those ids when the pane
+        // materialises — no observer/claim correlation needed.
+        inputPath.handleClientMessage(
+          msg as import("../wire/session-proxy-control.js").ClientMessage,
+          (correlationId, result) => {
+            if (result.ok) {
+              server.sendCommandResponse(transport, correlationId, {
+                paneId: result.newPaneId,
+                windowId: result.newWindowId,
+              });
+            } else {
+              server.sendCommandError(transport, correlationId, result.code, result.message);
+            }
+          },
+        );
       });
 
       // 4. Clean up data plane when the transport closes.

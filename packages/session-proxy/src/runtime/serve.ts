@@ -252,6 +252,30 @@ export interface ControlServer {
     correlationId: string,
     payload: import("../wire/session-proxy-control.js").SessionProxyCommandOkPayload,
   ): void;
+
+  /**
+   * Send a FAILED `command.response` (`result.ok = false`) to a specific client
+   * using the per-connection seq counter (tc-ozk.1 + B5b).
+   *
+   * This is the command-attributable error path: when a verb's tmux command
+   * comes back as `%error`, the failure belongs to THIS command request, so it
+   * is delivered here as `result.ok = false` rather than as an unsolicited
+   * ErrorMessage.  See SessionProxyCommandResponseMessage docs for the
+   * command.response vs error split.
+   *
+   * No-op if the transport is not in the active client set.
+   *
+   * @param transport     - The session-proxy-side transport of the target client.
+   * @param correlationId - The correlationId from the matching command.request.
+   * @param code          - Machine-readable error code (e.g. "verb.failed").
+   * @param message       - Human-readable error description (for logging).
+   */
+  sendCommandError(
+    transport: Transport,
+    correlationId: string,
+    code: string,
+    message: string,
+  ): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -606,6 +630,29 @@ class ControlServerImpl implements ControlServer {
       seq: state.nextSeq,
       correlationId,
       result: { ok: true, payload },
+    };
+    state.nextSeq++;
+    try {
+      transport.sendControl(msg);
+    } catch {
+      // Transport may have closed concurrently — clean up.
+      this._cleanupClient(transport);
+    }
+  }
+
+  sendCommandError(
+    transport: Transport,
+    correlationId: string,
+    code: string,
+    message: string,
+  ): void {
+    const state = this._clients.get(transport);
+    if (!state) return; // not in active client set
+    const msg: import("../wire/session-proxy-control.js").SessionProxyCommandResponseMessage = {
+      type: "command.response",
+      seq: state.nextSeq,
+      correlationId,
+      result: { ok: false, code, message },
     };
     state.nextSeq++;
     try {

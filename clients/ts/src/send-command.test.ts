@@ -28,7 +28,9 @@ import type {
   WireCommand,
   ClientMessage,
   SnapshotMessage,
+  SessionProxyCommandResponseMessage,
 } from "@tmuxcc/session-proxy";
+import { windowId } from "@tmuxcc/session-proxy";
 
 import { createInputApi } from "./input.js";
 import type { InputSender } from "./input.js";
@@ -96,6 +98,87 @@ describe("InputApi.sendCommand — unit", () => {
     const req = messages[0]! as CommandRequestMessage;
     assert.equal(req.type, "command.request");
     assert.deepEqual(req.command, cmd);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 1b. InputApi.sendVerb — returns effect ids (tc-ozk.1)
+// ---------------------------------------------------------------------------
+
+describe("InputApi.sendVerb — returns effect ids (tc-ozk.1)", () => {
+  it("resolves with newPaneId/newWindowId when the matching command.response carries the payload", async () => {
+    const messages: CommandRequestMessage[] = [];
+    const sender: InputSender = {
+      send(msg) { messages.push(msg as CommandRequestMessage); },
+    };
+
+    const api = createInputApi(sender);
+    const promise = api.sendVerb({ kind: "split-pane", paneId: paneId("p1"), direction: "horizontal" });
+
+    assert.equal(messages.length, 1);
+    const correlationId = messages[0]!.correlationId;
+
+    // SessionProxy returns the created ids in the command.response payload.
+    const response: SessionProxyCommandResponseMessage = {
+      type: "command.response",
+      seq: 5,
+      correlationId,
+      result: { ok: true, payload: { paneId: paneId("p7"), windowId: windowId("w2") } },
+    };
+    api.handleCommandResponse(response);
+
+    const result = await promise;
+    assert.deepEqual(result, { ok: true, newPaneId: paneId("p7"), newWindowId: windowId("w2") });
+  });
+
+  it("resolves ok=false on a failed command.response (%error mapping)", async () => {
+    const sender: InputSender = { send() { /* drop */ } };
+    const api = createInputApi(sender);
+
+    const promise = api.sendVerb({ kind: "split-pane", paneId: paneId("p1"), direction: "vertical" });
+    // We don't know the correlationId from outside; capture it from the message.
+    const messages: CommandRequestMessage[] = [];
+    const sender2: InputSender = { send(m) { messages.push(m as CommandRequestMessage); } };
+    const api2 = createInputApi(sender2);
+    const promise2 = api2.sendVerb({ kind: "split-pane", paneId: paneId("p1"), direction: "vertical" });
+    const correlationId = messages[0]!.correlationId;
+    api2.handleCommandResponse({
+      type: "command.response",
+      seq: 6,
+      correlationId,
+      result: { ok: false, code: "verb.failed", message: "tmux rejected split-pane" },
+    });
+    const result2 = await promise2;
+    assert.equal(result2.ok, false);
+    if (result2.ok === false) {
+      assert.equal(result2.code, "verb.failed");
+      assert.match(result2.message, /split-pane/);
+    }
+    // The first api's promise stays pending; reject it so the test doesn't leak.
+    api.rejectAllPending("test cleanup");
+    await assert.rejects(promise);
+  });
+
+  it("rejectAllPending rejects every in-flight verb", async () => {
+    const sender: InputSender = { send() { /* drop */ } };
+    const api = createInputApi(sender);
+    const p1 = api.sendVerb({ kind: "open-window" });
+    const p2 = api.sendVerb({ kind: "split-pane", paneId: paneId("p1"), direction: "horizontal" });
+    api.rejectAllPending("disconnected");
+    await assert.rejects(p1, /disconnected/);
+    await assert.rejects(p2, /disconnected/);
+  });
+
+  it("handleCommandResponse for an unknown correlationId is a no-op", () => {
+    const sender: InputSender = { send() { /* drop */ } };
+    const api = createInputApi(sender);
+    // Should not throw.
+    api.handleCommandResponse({
+      type: "command.response",
+      seq: 7,
+      correlationId: "no-such-id",
+      result: { ok: true, payload: { paneId: paneId("p9"), windowId: windowId("w9") } },
+    });
   });
 });
 
