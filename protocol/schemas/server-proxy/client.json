@@ -27,6 +27,17 @@
       "additionalProperties": false
     },
 
+    "SessionCreateUniqueCommand": {
+      "type": "object",
+      "description": "Create a session with a broker-minted unique name derived from baseName (tc-295a.5 / W1.4). The broker uniquifies against its live session table (never a client-side registry) and never silently attaches to an existing session — the response always has created=true and carries the minted name.",
+      "required": ["kind", "baseName"],
+      "properties": {
+        "kind": { "const": "session.createUnique" },
+        "baseName": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+
     "SessionDestroyCommand": {
       "type": "object",
       "description": "Destroy an existing session and reap its session-proxy.",
@@ -64,6 +75,7 @@
       "oneOf": [
         { "$ref": "#/$defs/SessionClaimCommand" },
         { "$ref": "#/$defs/SessionCreateCommand" },
+        { "$ref": "#/$defs/SessionCreateUniqueCommand" },
         { "$ref": "#/$defs/SessionDestroyCommand" },
         { "$ref": "#/$defs/PaneAttachCommand" },
         { "$ref": "#/$defs/ServerProxyInfoCommand" }
