@@ -22,8 +22,8 @@
 
     "ServerProxySessionInfo": {
       "type": "object",
-      "description": "A session as known to the server-proxy. Counts are static at snapshot/delta time.",
-      "required": ["sessionId", "name", "windowCount", "attachedClientCount"],
+      "description": "A session as known to the server-proxy. Counts are static at snapshot/delta time. tc-295a.4 (W1.3): enriched with tmuxccMarked, paneCount, lastActivity.",
+      "required": ["sessionId", "name", "windowCount", "attachedClientCount", "tmuxccMarked", "paneCount", "lastActivity"],
       "properties": {
         "sessionId": { "$ref": "tmuxcc:shared/primitives#/$defs/SessionId" },
         "name": { "type": "string" },
@@ -36,6 +36,20 @@
           "type": "integer",
           "minimum": 0,
           "description": "Number of tmuxcc clients currently attached at snapshot/delta time."
+        },
+        "tmuxccMarked": {
+          "type": "boolean",
+          "description": "True iff the session carries the @tmuxcc 1 user option (created or claimed by tmuxcc); false for foreign sessions."
+        },
+        "paneCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total panes across all windows in this session at snapshot/delta time (tmux list-panes -a)."
+        },
+        "lastActivity": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Unix epoch (seconds) of the most-recent activity in this session (#{session_activity}); 0 when unknown."
         }
       },
       "additionalProperties": false
@@ -65,15 +79,18 @@
         { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
       ],
       "type": "object",
-      "description": "A new session has become visible to the server-proxy. Only pushed when the \"sessions-watch\" feature is negotiated. direction: server-proxy→client.",
-      "required": ["type", "seq", "sessionId", "name", "windowCount", "attachedClientCount"],
+      "description": "A new session has become visible to the server-proxy. Only pushed when the \"sessions-watch\" feature is negotiated. direction: server-proxy→client. tc-295a.4 (W1.3): carries the enriched session fields.",
+      "required": ["type", "seq", "sessionId", "name", "windowCount", "attachedClientCount", "tmuxccMarked", "paneCount", "lastActivity"],
       "properties": {
         "type": { "const": "sessions.added" },
         "seq": { "type": "integer", "minimum": 1 },
         "sessionId": { "$ref": "tmuxcc:shared/primitives#/$defs/SessionId" },
         "name": { "type": "string" },
         "windowCount": { "type": "integer", "minimum": 0 },
-        "attachedClientCount": { "type": "integer", "minimum": 0 }
+        "attachedClientCount": { "type": "integer", "minimum": 0 },
+        "tmuxccMarked": { "type": "boolean" },
+        "paneCount": { "type": "integer", "minimum": 0 },
+        "lastActivity": { "type": "integer", "minimum": 0 }
       },
       "additionalProperties": false
     },

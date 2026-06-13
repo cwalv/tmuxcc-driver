@@ -52,7 +52,10 @@
             "sessionId": "s0",
             "name": "main",
             "windowCount": 2,
-            "attachedClientCount": 1
+            "attachedClientCount": 1,
+            "tmuxccMarked": true,
+            "paneCount": 3,
+            "lastActivity": 1765584000
           }
         ]
       }
