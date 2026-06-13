@@ -58,6 +58,10 @@ import type {
   ResyncRequestMessage,
   ErrorMessage,
   WindowLayout,
+  PaneAttachMessage,
+  PaneAttachFailedMessage,
+  PaneHydrationBeginMessage,
+  PaneHydrationEndMessage,
 } from "./index.js";
 
 // ---------------------------------------------------------------------------
@@ -625,6 +629,44 @@ describe("protocol schema conformance", () => {
       const msg: ResyncRequestMessage = {
         type: "resync.request",
         seq: 3,
+      };
+      assert.ok(validateClientMsg(msg as ClientMessage), JSON.stringify(validateClientMsg.errors));
+    });
+
+    it("PaneAttachFailedMessage (pane.not-found)", () => {
+      const msg: PaneAttachFailedMessage = {
+        type: "pane.attach.failed",
+        seq: 13,
+        paneId: P0,
+        code: "pane.not-found",
+        message: "Pane p0 is not present in the session model.",
+      };
+      assert.ok(validateSessionProxyMsg(msg as SessionProxyMessage), JSON.stringify(validateSessionProxyMsg.errors));
+    });
+
+    it("PaneHydrationBeginMessage", () => {
+      const msg: PaneHydrationBeginMessage = {
+        type: "pane.hydration.begin",
+        seq: 14,
+        paneId: P0,
+      };
+      assert.ok(validateSessionProxyMsg(msg as SessionProxyMessage), JSON.stringify(validateSessionProxyMsg.errors));
+    });
+
+    it("PaneHydrationEndMessage", () => {
+      const msg: PaneHydrationEndMessage = {
+        type: "pane.hydration.end",
+        seq: 15,
+        paneId: P0,
+      };
+      assert.ok(validateSessionProxyMsg(msg as SessionProxyMessage), JSON.stringify(validateSessionProxyMsg.errors));
+    });
+
+    it("PaneAttachMessage (client→session-proxy)", () => {
+      const msg: PaneAttachMessage = {
+        type: "pane.attach",
+        seq: 13,
+        paneId: P0,
       };
       assert.ok(validateClientMsg(msg as ClientMessage), JSON.stringify(validateClientMsg.errors));
     });

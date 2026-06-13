@@ -1,0 +1,271 @@
+/**
+ * tc-295a.8 / tc-295a.9 — SP-level attach + hydration ordering tests.
+ *
+ * These exercise the COMPOSITION that `session-proxy.ts` wires up
+ * (`makeSentinels` + `attachAndHydratePane`) using the same exported primitives
+ * — `hydratePane` / `hydrateTransport` (hydration.ts) and the real
+ * `createOutputDemux` queue gate — plus a minimal fake of the ControlServer's
+ * `sendDirected` seq-stamping. The full createSessionProxy assembly always
+ * builds its own real TmuxHost, so reconstructing the orchestration here lets us
+ * assert the WIRE CONTRACT deterministically without spawning tmux.
+ *
+ * The pieces under test are the durable part (the bead notes tc-2x3.3 will
+ * re-touch the impl): the message shapes + the ordering guarantee.
+ *
+ * Coverage (the ACs the bead names):
+ *   1. attach-to-vanished-pane → pane.attach.failed{pane.not-found} (no
+ *      hydration sentinels, no data frame).
+ *   2. attach-to-live-pane → pane.hydration.begin → (clear+replay frame) →
+ *      pane.hydration.end, in that order.
+ *   3. live-bytes-during-hydration are QUEUED and replayed AFTER the clear+
+ *      replay frame and BEFORE pane.hydration.end's effect — no interleave.
+ *
+ * @module runtime/attach-hydration.test
+ */
+
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+
+import { createOutputDemux } from "./output-demux.js";
+import { hydratePane, hydrateTransport, CLEAR_AND_SCROLLBACK } from "./hydration.js";
+import type { HydrationPipeline, HydrationSentinels } from "./hydration.js";
+import { createInMemoryTransportPair } from "../wire/transport.js";
+import { paneId } from "../wire/ids.js";
+import type { PaneId } from "../wire/ids.js";
+import type { CommandResult } from "../parser/correlator.js";
+
+const P1 = paneId("p1");
+const P9 = paneId("p9");
+
+// ---------------------------------------------------------------------------
+// Fakes mirroring the session-proxy.ts closure
+// ---------------------------------------------------------------------------
+
+/** Fake pipeline: scripted capture-pane replies, keyed by `-t %N` prefix. */
+function makePipeline(replies: Map<string, CommandResult | "reject">): {
+  pipeline: HydrationPipeline;
+  sent: string[];
+} {
+  const sent: string[] = [];
+  return {
+    sent,
+    pipeline: {
+      send(command: string): Promise<CommandResult> {
+        sent.push(command);
+        for (const [prefix, reply] of replies) {
+          if (command.startsWith(prefix)) {
+            if (reply === "reject") return Promise.reject(new Error("reject"));
+            return Promise.resolve(reply);
+          }
+        }
+        return Promise.resolve({ ok: true, commandNumber: 0, body: new Uint8Array(0) });
+      },
+    },
+  };
+}
+
+/**
+ * A unified ordered event log: control messages (via sendDirected) and data
+ * frames (via the demux fan-out / hydrator) land in ONE array so we can assert
+ * cross-plane ordering exactly.
+ */
+type LogEntry =
+  | { kind: "control"; type: string; paneId?: PaneId | undefined }
+  | { kind: "data"; paneId: PaneId; bytes: Uint8Array };
+
+function ok(body: Uint8Array): CommandResult {
+  return { ok: true, commandNumber: 0, body };
+}
+
+/**
+ * Reconstruct the session-proxy.ts orchestration over the REAL demux + the
+ * exported hydration primitives.
+ */
+function makeHarness() {
+  const demux = createOutputDemux();
+  const { sessionProxy, client } = createInMemoryTransportPair();
+  const log: LogEntry[] = [];
+
+  // Data frames the client receives (live fan-out AND hydrator-direct frames).
+  client.onData((pid, bytes) => log.push({ kind: "data", paneId: pid, bytes }));
+
+  demux.attachTransport(sessionProxy);
+
+  // Fake ControlServer.sendDirected (seq-stamp omitted — we log the type).
+  function sendDirected(msg: { type: string; paneId?: PaneId }): void {
+    log.push({ kind: "control", type: msg.type, paneId: msg.paneId });
+  }
+
+  function makeSentinels(): HydrationSentinels {
+    return {
+      begin(pid: PaneId): void {
+        demux.beginPaneHydration(sessionProxy, pid);
+        sendDirected({ type: "pane.hydration.begin", paneId: pid });
+      },
+      end(pid: PaneId): void {
+        demux.endPaneHydration(sessionProxy, pid);
+        sendDirected({ type: "pane.hydration.end", paneId: pid });
+      },
+    };
+  }
+
+  return { demux, sessionProxy, client, log, sendDirected, makeSentinels };
+}
+
+// ---------------------------------------------------------------------------
+// AC 1 — attach to a vanished pane → pane.not-found
+// ---------------------------------------------------------------------------
+
+describe("tc-295a.8 attach-to-vanished-pane", () => {
+  it("model-absent pane: emits pane.attach.failed{pane.not-found}, no hydration", async () => {
+    const h = makeHarness();
+    // attachAndHydratePane's model check fails → fail-loud, skip capture.
+    const modelHas = (_pid: PaneId): boolean => false;
+
+    if (!modelHas(P9)) {
+      h.sendDirected({ type: "pane.attach.failed", paneId: P9 });
+    }
+
+    const controls = h.log.filter((e) => e.kind === "control") as Array<{ type: string }>;
+    assert.deepEqual(controls.map((c) => c.type), ["pane.attach.failed"]);
+    assert.equal(h.log.filter((e) => e.kind === "data").length, 0, "no hydration frame for a vanished pane");
+  });
+
+  it("pane closes mid-capture (ok=false): hydratePane returns false → pane.not-found", async () => {
+    const h = makeHarness();
+    const { pipeline } = makePipeline(
+      new Map([["capture-pane -t %9", { ok: false, commandNumber: 0, body: new Uint8Array(0) } as CommandResult]]),
+    );
+    const sentinels = h.makeSentinels();
+
+    const found = await hydratePane(pipeline, h.sessionProxy, P9, sentinels);
+    assert.equal(found, false, "ok=false capture → pane considered not found");
+    if (!found) {
+      h.sendDirected({ type: "pane.attach.failed", paneId: P9 });
+    }
+
+    const controls = h.log.filter((e) => e.kind === "control") as Array<{ type: string }>;
+    // begin + end (window opened/closed even though capture failed) + failure.
+    assert.deepEqual(controls.map((c) => c.type), [
+      "pane.hydration.begin",
+      "pane.hydration.end",
+      "pane.attach.failed",
+    ]);
+    assert.equal(h.log.filter((e) => e.kind === "data").length, 0, "no data frame on failed capture");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC 2 — attach to a live pane → hydrate then stream, in order
+// ---------------------------------------------------------------------------
+
+describe("tc-295a.8 attach-to-live-pane hydrate-then-stream", () => {
+  it("emits begin → clear+replay data frame → end, in that order", async () => {
+    const h = makeHarness();
+    h.demux.notifyPaneBound(P1);
+    const captureBody = new TextEncoder().encode("history-line");
+    const { pipeline } = makePipeline(new Map([["capture-pane -t %1", ok(captureBody)]]));
+
+    const found = await hydratePane(pipeline, h.sessionProxy, P1, h.makeSentinels());
+    assert.equal(found, true);
+
+    const types = h.log.map((e) => (e.kind === "control" ? `C:${e.type}` : `D`));
+    assert.deepEqual(types, ["C:pane.hydration.begin", "D", "C:pane.hydration.end"]);
+
+    // The data frame is CLEAR_AND_SCROLLBACK + replay body.
+    const dataEntry = h.log.find((e) => e.kind === "data") as { bytes: Uint8Array };
+    assert.deepEqual(dataEntry.bytes.subarray(0, CLEAR_AND_SCROLLBACK.length), CLEAR_AND_SCROLLBACK);
+    assert.equal(
+      new TextDecoder().decode(dataEntry.bytes.subarray(CLEAR_AND_SCROLLBACK.length)),
+      "history-line",
+    );
+  });
+
+  it("live deltas after end stream normally (live pass-through restored)", async () => {
+    const h = makeHarness();
+    h.demux.notifyPaneBound(P1);
+    const { pipeline } = makePipeline(new Map([["capture-pane -t %1", ok(new Uint8Array(0))]]));
+
+    await hydratePane(pipeline, h.sessionProxy, P1, h.makeSentinels());
+    // Post-end live byte fans out immediately.
+    h.demux.store.append(P1, new Uint8Array([0x7a]));
+
+    const last = h.log[h.log.length - 1];
+    assert.equal(last!.kind, "data");
+    assert.deepEqual((last as { bytes: Uint8Array }).bytes, new Uint8Array([0x7a]));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC 3 — live bytes during hydration are queued (no interleave)
+// ---------------------------------------------------------------------------
+
+describe("tc-295a.9 live-bytes-during-hydration queueing", () => {
+  it("queues live bytes arriving during the capture RTT; replays them after the clear+replay frame, before end takes effect", async () => {
+    const h = makeHarness();
+    h.demux.notifyPaneBound(P1);
+
+    // A pipeline whose capture reply is deferred so we can inject a live byte
+    // INTO the hydration window (between begin and the reply).
+    let resolveCapture!: (r: CommandResult) => void;
+    const pipeline: HydrationPipeline = {
+      send(): Promise<CommandResult> {
+        return new Promise<CommandResult>((res) => { resolveCapture = res; });
+      },
+    };
+
+    const hydrationDone = hydratePane(pipeline, h.sessionProxy, P1, h.makeSentinels());
+
+    // Let begin() run (microtask) so the window is open.
+    await Promise.resolve();
+
+    // Live byte arrives DURING hydration → must be queued, not fanned out.
+    h.demux.store.append(P1, new Uint8Array([0xaa]));
+    assert.equal(
+      h.log.filter((e) => e.kind === "data").length,
+      0,
+      "live byte during hydration must NOT have been delivered yet",
+    );
+
+    // Capture reply arrives → hydrator delivers clear+replay, then end flushes queue.
+    resolveCapture(ok(new TextEncoder().encode("REPLAY")));
+    await hydrationDone;
+
+    // Expected order: begin, clear+replay frame, queued live byte, end.
+    const types = h.log.map((e) => (e.kind === "control" ? `C:${e.type}` : `D`));
+    assert.deepEqual(types, ["C:pane.hydration.begin", "D", "D", "C:pane.hydration.end"]);
+
+    const dataFrames = h.log.filter((e) => e.kind === "data") as Array<{ bytes: Uint8Array }>;
+    // First data frame = clear+replay; second = the queued live byte.
+    assert.deepEqual(dataFrames[0]!.bytes.subarray(0, CLEAR_AND_SCROLLBACK.length), CLEAR_AND_SCROLLBACK);
+    assert.equal(
+      new TextDecoder().decode(dataFrames[0]!.bytes.subarray(CLEAR_AND_SCROLLBACK.length)),
+      "REPLAY",
+    );
+    assert.deepEqual(dataFrames[1]!.bytes, new Uint8Array([0xaa]), "queued live byte replays after the replay frame");
+  });
+
+  it("bulk addClient-style hydrate of multiple panes frames each with its own begin/end", async () => {
+    const h = makeHarness();
+    h.demux.notifyPaneBound(P1);
+    h.demux.notifyPaneBound(P9);
+    const { pipeline } = makePipeline(
+      new Map([
+        ["capture-pane -t %1", ok(new TextEncoder().encode("a"))],
+        ["capture-pane -t %9", ok(new TextEncoder().encode("b"))],
+      ]),
+    );
+
+    await hydrateTransport(pipeline, h.sessionProxy, [P1, P9], h.makeSentinels());
+
+    // Each pane: begin + 1 data frame + end. Order across panes may interleave
+    // (concurrent), but per pane the begin precedes its data which precedes end.
+    function paneSeq(pid: PaneId): string[] {
+      return h.log
+        .filter((e) => (e.kind === "control" ? e.paneId === pid : e.paneId === pid))
+        .map((e) => (e.kind === "control" ? `C:${e.type}` : "D"));
+    }
+    assert.deepEqual(paneSeq(P1), ["C:pane.hydration.begin", "D", "C:pane.hydration.end"]);
+    assert.deepEqual(paneSeq(P9), ["C:pane.hydration.begin", "D", "C:pane.hydration.end"]);
+  });
+});

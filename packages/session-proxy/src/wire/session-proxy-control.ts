@@ -454,6 +454,97 @@ export interface PaneModeChangedMessage extends MessageBase {
 }
 
 // ---------------------------------------------------------------------------
+// Per-pane attach + hydration protocol (tc-295a.8 / tc-295a.9)
+// ---------------------------------------------------------------------------
+
+/**
+ * A pane attach targeted a pane the session-proxy does not know about.
+ * direction: session-proxy→client
+ *
+ * tc-295a.8 (W2.2): fail-loud, named error for the attach path. Distinct from
+ * the generic `command.response` failure shape because `pane.attach` is NOT a
+ * correlated `command.request` — it is a fire-and-forget client→session-proxy
+ * intent message (and the session-proxy itself issues the attach internally for
+ * the broker-forwarded primary pane). Surfacing this on the session-proxy wire
+ * (per-pane vocabulary) rather than as a `command.response` keeps the broker's
+ * own `pane.attach` response (sessions vocabulary) untouched.
+ *
+ * Operator policy (FAIL-LOUD): this is the visible signal an attach hit a
+ * vanished pane. The session-proxy does NOT silently absorb the request.
+ */
+export interface PaneAttachFailedMessage extends MessageBase {
+  readonly type: "pane.attach.failed";
+  readonly paneId: PaneId;
+  /** Always "pane.not-found" today; open-ended for forward compatibility. */
+  readonly code: "pane.not-found" | (string & Record<never, never>);
+  /** Human-readable error description (English, for logging/debugging). */
+  readonly message: string;
+}
+
+/**
+ * Sentinel: per-pane hydration is starting.
+ * direction: session-proxy→client
+ *
+ * tc-295a.9 (W2.3): the session-proxy is about to deliver the clear-then-replay
+ * hydration frame for `paneId` on the data plane. Between this message and the
+ * matching `pane.hydration.end`, live `%output` bytes for `paneId` are QUEUED
+ * by the driver (NOT interleaved with the hydration frame). After `end` the
+ * queued bytes are replayed in arrival order and the pane returns to live
+ * pass-through.
+ *
+ * The no-interleave guarantee is a DRIVER guarantee, not a client convention:
+ * a client that ignores these sentinels still receives bytes in the correct
+ * order (clear+replay, then queued live, then live). The sentinels exist so a
+ * renderer MAY (e.g.) suppress a spinner or reset emulator state precisely at
+ * the hydration boundary; correctness does not depend on the client acting.
+ */
+export interface PaneHydrationBeginMessage extends MessageBase {
+  readonly type: "pane.hydration.begin";
+  readonly paneId: PaneId;
+}
+
+/**
+ * Sentinel: per-pane hydration is complete.
+ * direction: session-proxy→client
+ *
+ * tc-295a.9 (W2.3): the clear-then-replay frame for `paneId` has been delivered
+ * and any live bytes queued during the hydration window have been flushed. All
+ * subsequent data-plane bytes for `paneId` are live output.
+ */
+export interface PaneHydrationEndMessage extends MessageBase {
+  readonly type: "pane.hydration.end";
+  readonly paneId: PaneId;
+}
+
+/**
+ * Client requests that the session-proxy attach (validate + hydrate) a pane on
+ * THIS connection.
+ * direction: client→session-proxy
+ *
+ * tc-295a.8 (W2.2): two callers issue this —
+ *   1. The broker-mediated first attach: the server-proxy forwards the target
+ *      paneId, and the session-proxy issues the attach internally for the
+ *      transport's primary pane immediately after the snapshot.
+ *   2. Mid-connection re-hydration (the §1.4 bindNew flow): the client binds a
+ *      new VS Code tab to an existing pane on an already-connected session and
+ *      sends `pane.attach` to trigger hydration begin/bytes/end for THAT pane
+ *      on the existing transport.
+ *
+ * On success the session-proxy emits `pane.hydration.begin` → (clear+replay on
+ * the data plane) → `pane.hydration.end`. If the pane is not in the model the
+ * session-proxy emits `pane.attach.failed{code:"pane.not-found"}` (fail-loud).
+ *
+ * Not correlated: there is no correlationId. The hydration sentinels (or the
+ * failure message) ARE the response. This keeps the attach intent symmetric
+ * whether it originates from the client or from the session-proxy's own
+ * addClient path.
+ */
+export interface PaneAttachMessage extends MessageBase {
+  readonly type: "pane.attach";
+  readonly paneId: PaneId;
+}
+
+// ---------------------------------------------------------------------------
 // Command request / response (client↔sessionProxy, correlated)
 // ---------------------------------------------------------------------------
 
@@ -1105,6 +1196,10 @@ export type SessionProxyMessage =
   | SessionProxySessionRenamedMessage
   // Client-count delta (tc-44wu0)
   | ClientCountChangedMessage
+  // Per-pane attach + hydration protocol (tc-295a.8 / tc-295a.9)
+  | PaneAttachFailedMessage
+  | PaneHydrationBeginMessage
+  | PaneHydrationEndMessage
   // Command responses
   | SessionProxyCommandResponseMessage
   // Unsolicited errors
@@ -1119,7 +1214,9 @@ export type ClientMessage =
   | ResizeRequestMessage
   | ClientCapabilitiesMessage
   | SessionProxyCommandRequestMessage
-  | ResyncRequestMessage;
+  | ResyncRequestMessage
+  // Per-pane attach (tc-295a.8)
+  | PaneAttachMessage;
 
 /**
  * Any control-plane message (either direction) on the session-proxy wire.
@@ -1161,6 +1258,10 @@ export function isSessionProxyMessage(msg: ControlMessage): msg is SessionProxyM
     t === "session.renamed" ||
     // Client-count delta (tc-44wu0)
     t === "client-count.changed" ||
+    // Per-pane attach + hydration protocol (tc-295a.8 / tc-295a.9)
+    t === "pane.attach.failed" ||
+    t === "pane.hydration.begin" ||
+    t === "pane.hydration.end" ||
     // Command responses
     t === "command.response" ||
     // Unsolicited errors
@@ -1176,7 +1277,9 @@ export function isClientMessage(msg: ControlMessage): msg is ClientMessage {
     t === "resize.request" ||
     t === "client.capabilities" ||
     t === "command.request" ||
-    t === "resync.request"
+    t === "resync.request" ||
+    // Per-pane attach (tc-295a.8)
+    t === "pane.attach"
   );
 }
 

@@ -1133,3 +1133,61 @@ describe("Mirror.onModelChange", () => {
     assert.deepEqual(order, [1, 2, 3]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Per-pane attach + hydration protocol (tc-295a.8 / tc-295a.9)
+// ---------------------------------------------------------------------------
+
+describe("hydration / attach protocol events", () => {
+  it("pane.hydration.begin/end surface on onHydrationEvent and advance seq (no false gap)", () => {
+    const mirror = new Mirror();
+    const events: Array<{ kind: string; paneId: string }> = [];
+    mirror.onHydrationEvent((e) => events.push({ kind: e.kind, paneId: e.paneId as string }));
+    let resyncFired = false;
+    mirror.onResyncNeeded(() => { resyncFired = true; });
+
+    mirror.receiveSnapshot(makeSnapshot(5)); // lastSeq = 5
+
+    mirror.receiveDelta({ type: "pane.hydration.begin", seq: 6, paneId: P1 });
+    mirror.receiveDelta({ type: "pane.hydration.end", seq: 7, paneId: P1 });
+    // A real topology delta at seq 8 must NOT be seen as a gap — the sentinels
+    // advanced the seq counter.
+    mirror.receiveDelta({ type: "pane.resized", seq: 8, paneId: P1, cols: 99, rows: 30 });
+
+    assert.equal(resyncFired, false, "sentinels must advance seq so no false gap");
+    assert.deepEqual(events, [
+      { kind: "begin", paneId: P1 },
+      { kind: "end", paneId: P1 },
+    ]);
+    assert.equal(mirror.getModel().panes.get(P1)!.cols, 99, "the post-hydration delta applied");
+  });
+
+  it("pane.attach.failed surfaces a not-found event with code + message", () => {
+    const mirror = new Mirror();
+    const events: Array<{ kind: string; paneId: string; code?: string | undefined }> = [];
+    mirror.onHydrationEvent((e) => events.push({ kind: e.kind, paneId: e.paneId as string, code: e.code }));
+
+    mirror.receiveSnapshot(makeSnapshot(5));
+    mirror.receiveDelta({
+      type: "pane.attach.failed",
+      seq: 6,
+      paneId: P2,
+      code: "pane.not-found",
+      message: "Pane p2 is not present in the session model.",
+    });
+
+    assert.deepEqual(events, [{ kind: "not-found", paneId: P2, code: "pane.not-found" }]);
+  });
+
+  it("sentinels do not fire onModelChange (not state-bearing)", () => {
+    const mirror = new Mirror();
+    let changes = 0;
+    mirror.receiveSnapshot(makeSnapshot(5));
+    mirror.onModelChange(() => { changes++; });
+
+    mirror.receiveDelta({ type: "pane.hydration.begin", seq: 6, paneId: P1 });
+    mirror.receiveDelta({ type: "pane.hydration.end", seq: 7, paneId: P1 });
+
+    assert.equal(changes, 0, "hydration sentinels must not trigger a model-change render");
+  });
+});

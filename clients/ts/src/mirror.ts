@@ -506,6 +506,17 @@ export function applyDelta(model: ClientModel, msg: SessionProxyMessage): Client
       // Not state-bearing for the mirror.
       return model;
 
+    // ── Per-pane attach + hydration protocol (tc-295a.8 / tc-295a.9) ──────────
+    //
+    // These do not change the topology model — hydration is a data-plane event
+    // and pane.attach.failed is an error surface. They are seq-tracked (see
+    // receiveDelta) so they do not create false gaps, and surfaced to renderers
+    // via Mirror.onHydrationEvent. The model is returned unchanged.
+    case "pane.attach.failed":
+    case "pane.hydration.begin":
+    case "pane.hydration.end":
+      return model;
+
     // ── Exhaustiveness check ─────────────────────────────────────────────────
     default: {
       // TypeScript will error here if a new SessionProxyMessage variant is added but
@@ -534,6 +545,34 @@ export type ResyncNeededHandler = (gap: SeqGapInfo) => void;
  * resolve with the returned effect ids.
  */
 export type CommandResponseHandler = (msg: SessionProxyCommandResponseMessage) => void;
+
+/**
+ * A per-pane attach / hydration protocol event surfaced by the mirror
+ * (tc-295a.8 / tc-295a.9).
+ *
+ *   "begin"      — pane.hydration.begin: the session-proxy is about to deliver
+ *                  the clear-then-replay frame for `paneId`. Live bytes for the
+ *                  pane during the window are queued by the DRIVER, so a renderer
+ *                  need not act — but MAY (e.g. show a "loading scrollback" hint).
+ *   "end"        — pane.hydration.end: hydration done; live output resumes.
+ *   "not-found"  — pane.attach.failed{pane.not-found}: the attach targeted a pane
+ *                  the session-proxy does not know about. Fail-loud: renderers
+ *                  should surface this (the user's bindNew hit a vanished pane).
+ *
+ * Ordering is a driver guarantee; the data-plane bytes are correct regardless of
+ * whether the renderer consumes these. The hook exists for UI affordances and to
+ * close the §1.4 bindNew flow's loud-failure path.
+ */
+export interface HydrationEvent {
+  readonly kind: "begin" | "end" | "not-found";
+  readonly paneId: PaneId;
+  /** Present only for "not-found": the named error code and message. */
+  readonly code?: string;
+  readonly message?: string;
+}
+
+/** Handler for hydration / attach protocol events from the mirror. */
+export type HydrationEventHandler = (event: HydrationEvent) => void;
 
 /**
  * Stateful client-side mirror of the session-proxy session model.
@@ -609,6 +648,7 @@ export class Mirror {
   // tc-ozk.1: forwarders for command.response messages (not state-bearing for
   // the mirror, but the mirror owns the single-slot onControl handler).
   readonly #commandResponseHandlers: CommandResponseHandler[] = [];
+  readonly #hydrationHandlers: HydrationEventHandler[] = [];
 
   // ── Public model access ───────────────────────────────────────────────────
 
@@ -685,6 +725,23 @@ export class Mirror {
     return () => {
       const idx = this.#commandResponseHandlers.indexOf(handler);
       if (idx !== -1) this.#commandResponseHandlers.splice(idx, 1);
+    };
+  }
+
+  /**
+   * Register a handler for per-pane attach / hydration protocol events
+   * (tc-295a.8 / tc-295a.9): pane.hydration.begin/end and pane.attach.failed.
+   *
+   * Handlers are APPENDED. Returns an unsubscribe function.
+   *
+   * The render hook (E6) registers here to surface the §1.4 bindNew loud
+   * failure (pane.not-found) and any hydration-boundary UI affordances.
+   */
+  onHydrationEvent(handler: HydrationEventHandler): () => void {
+    this.#hydrationHandlers.push(handler);
+    return () => {
+      const idx = this.#hydrationHandlers.indexOf(handler);
+      if (idx !== -1) this.#hydrationHandlers.splice(idx, 1);
     };
   }
 
@@ -783,6 +840,31 @@ export class Mirror {
           seq: ++this.#clientSeq,
         };
         this.#sendFn(msg);
+      }
+      return;
+    }
+
+    // tc-295a.8 / tc-295a.9: per-pane attach + hydration protocol messages are
+    // seq-tracked (advance #lastSeq so they don't create false gaps) but do not
+    // change the topology model. Surface them on the hydration-event hook
+    // instead of firing onModelChange.
+    if (
+      msg.type === "pane.attach.failed" ||
+      msg.type === "pane.hydration.begin" ||
+      msg.type === "pane.hydration.end"
+    ) {
+      this.#lastSeq = msg.seq;
+      if (msg.type === "pane.hydration.begin") {
+        this.#emitHydration({ kind: "begin", paneId: msg.paneId });
+      } else if (msg.type === "pane.hydration.end") {
+        this.#emitHydration({ kind: "end", paneId: msg.paneId });
+      } else {
+        this.#emitHydration({
+          kind: "not-found",
+          paneId: msg.paneId,
+          code: msg.code,
+          message: msg.message,
+        });
       }
       return;
     }
@@ -1102,6 +1184,12 @@ export class Mirror {
   #emitResync(gap: SeqGapInfo): void {
     for (const handler of this.#resyncHandlers) {
       handler(gap);
+    }
+  }
+
+  #emitHydration(event: HydrationEvent): void {
+    for (const handler of this.#hydrationHandlers) {
+      handler(event);
     }
   }
 }

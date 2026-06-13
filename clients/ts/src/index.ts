@@ -36,6 +36,8 @@ export type {
   ModelChangeHandler,
   ResyncNeededHandler,
   CommandResponseHandler,
+  HydrationEvent,
+  HydrationEventHandler,
 } from "./mirror.js";
 
 // ---------------------------------------------------------------------------

@@ -227,6 +227,35 @@ export interface OutputDemux {
    * Exposed for testing and diagnostics only.
    */
   isPaneKnown(paneId: PaneId): boolean;
+
+  /**
+   * tc-295a.9: begin per-pane hydration for ONE transport.
+   *
+   * While a (transport, pane) pair is hydrating, live `%output` bytes for that
+   * pane are QUEUED for that transport instead of being fanned out, so they
+   * cannot interleave with the clear-then-replay hydration frame the hydrator
+   * delivers directly via `transport.sendData`. Other transports are
+   * unaffected (a warm client keeps receiving live bytes for the pane).
+   *
+   * The no-interleave property is a DRIVER guarantee: the queue is held here,
+   * not by client convention. Call `endPaneHydration` to flush + resume.
+   *
+   * Idempotent per (transport, pane): a second begin without an intervening end
+   * keeps the existing queue.
+   */
+  beginPaneHydration(transport: Transport, paneId: PaneId): void;
+
+  /**
+   * tc-295a.9: end per-pane hydration for ONE transport.
+   *
+   * Flushes any bytes queued during the hydration window to `transport` in
+   * arrival order, then resumes live pass-through for that (transport, pane).
+   * No-op if the pair was not hydrating.
+   *
+   * MUST be called AFTER the clear-then-replay frame has been delivered to the
+   * transport so the queued live bytes land after the replayed history.
+   */
+  endPaneHydration(transport: Transport, paneId: PaneId): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +286,20 @@ export function createOutputDemux(opts: OutputDemuxOptions = {}): OutputDemux {
   const _transports = new Set<Transport>();
   const _pausedPanes = new Set<PaneId>();
   const _onPretopologyDropped = opts.onPretopologyDropped;
+
+  // ---------------------------------------------------------------------------
+  // Per-(transport, pane) hydration queues (tc-295a.9).
+  //
+  // While a transport is hydrating a pane, live %output bytes for that pane are
+  // appended to the transport's per-pane queue instead of being fanned out, so
+  // they cannot interleave with the clear-then-replay hydration frame the
+  // hydrator delivers directly. On endPaneHydration the queue is flushed to the
+  // transport in arrival order and removed, resuming live pass-through.
+  //
+  // Keyed by Transport → (PaneId → ordered chunk list). A transport with no
+  // entry (the common case) takes the fast path in _fanOut.
+  // ---------------------------------------------------------------------------
+  const _hydrating = new Map<Transport, Map<PaneId, Uint8Array[]>>();
 
   /**
    * Per-pane accumulator of bytes dropped from the pre-topology buffer
@@ -307,6 +350,17 @@ export function createOutputDemux(opts: OutputDemuxOptions = {}): OutputDemux {
     // swallow it. The PaneBufferStore.append contract is synchronous, so
     // we drop the Promise reference here.
     for (const transport of _transports) {
+      // tc-295a.9: if this transport is mid-hydration for this pane, queue the
+      // bytes instead of fanning out — they must not interleave with the
+      // clear-then-replay frame. They are flushed on endPaneHydration.
+      const paneQueues = _hydrating.get(transport);
+      if (paneQueues !== undefined) {
+        const queue = paneQueues.get(paneId);
+        if (queue !== undefined) {
+          queue.push(bytes);
+          continue;
+        }
+      }
       void transport.sendData(paneId, bytes);
     }
   }
@@ -383,6 +437,9 @@ export function createOutputDemux(opts: OutputDemuxOptions = {}): OutputDemux {
 
     detachTransport(transport: Transport): void {
       _transports.delete(transport);
+      // tc-295a.9: drop any in-flight hydration queues for this transport —
+      // the bytes are gone with the transport (the new spawn rehydrates).
+      _hydrating.delete(transport);
     },
 
     pausePane(paneId: PaneId): void {
@@ -439,6 +496,14 @@ export function createOutputDemux(opts: OutputDemuxOptions = {}): OutputDemux {
       _pendingFanout.delete(paneId);
       _pendingFanoutBytes.delete(paneId);
       _pendingFanoutOverflowed.delete(paneId);
+
+      // tc-295a.9: the pane is gone — discard any per-transport hydration
+      // queues for it (the queued live bytes have nowhere to render).
+      for (const [transport, paneQueues] of _hydrating) {
+        if (paneQueues.delete(paneId) && paneQueues.size === 0) {
+          _hydrating.delete(transport);
+        }
+      }
     },
 
     pendingBytes(paneId: PaneId): number {
@@ -447,6 +512,36 @@ export function createOutputDemux(opts: OutputDemuxOptions = {}): OutputDemux {
 
     isPaneKnown(paneId: PaneId): boolean {
       return _knownPanes.has(paneId);
+    },
+
+    beginPaneHydration(transport: Transport, paneId: PaneId): void {
+      let paneQueues = _hydrating.get(transport);
+      if (paneQueues === undefined) {
+        paneQueues = new Map();
+        _hydrating.set(transport, paneQueues);
+      }
+      // Idempotent per (transport, pane): keep the existing queue on a repeat
+      // begin so already-queued live bytes are not lost.
+      if (!paneQueues.has(paneId)) {
+        paneQueues.set(paneId, []);
+      }
+    },
+
+    endPaneHydration(transport: Transport, paneId: PaneId): void {
+      const paneQueues = _hydrating.get(transport);
+      if (paneQueues === undefined) return;
+      const queue = paneQueues.get(paneId);
+      if (queue === undefined) return;
+      // Stop queueing FIRST so the flush sends straight through (and any
+      // re-entrant append during the flush takes the live path).
+      paneQueues.delete(paneId);
+      if (paneQueues.size === 0) _hydrating.delete(transport);
+      // Flush queued live bytes to this transport in arrival order. They land
+      // AFTER the clear-then-replay frame (the caller delivers that before
+      // calling endPaneHydration), so there is no interleave.
+      for (const chunk of queue) {
+        void transport.sendData(paneId, chunk);
+      }
     },
   };
 }

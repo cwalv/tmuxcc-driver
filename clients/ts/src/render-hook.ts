@@ -353,6 +353,23 @@ export interface ClientController {
    * commands in extension.ts to drive tmux from the editor.
    */
   sendCommand(cmd: WireCommand): void;
+
+  /**
+   * Request on-demand per-pane hydration on THIS connection (tc-295a.8).
+   *
+   * Sends `pane.attach{paneId}` to the session-proxy, which validates the pane
+   * exists and emits `pane.hydration.begin` → (clear+replay on the data plane)
+   * → `pane.hydration.end`. A vanished pane surfaces `pane.attach.failed`
+   * (observable via `Mirror.onHydrationEvent`).
+   *
+   * Used by the §1.4 bindNew flow: when the renderer binds a NEW VS Code tab to
+   * a pane that already exists on an already-connected session, the new tab's
+   * terminal buffer is empty — this triggers a fresh clear+replay for that pane
+   * on the existing transport so the new tab shows the pane's scrollback.
+   *
+   * Fire-and-forget: the hydration sentinels (or the failure) are the response.
+   */
+  attachPane(paneId: PaneId): void;
 }
 
 // ---------------------------------------------------------------------------

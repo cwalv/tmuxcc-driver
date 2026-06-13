@@ -409,6 +409,60 @@
       "additionalProperties": false
     },
 
+    "PaneAttachFailedMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "A pane attach targeted a pane the session-proxy does not know about. Fail-loud, named error for the attach path (tc-295a.8). Distinct from command.response failures because pane.attach is not a correlated request. direction: session-proxy→client.",
+      "required": ["type", "seq", "paneId", "code", "message"],
+      "properties": {
+        "type": { "const": "pane.attach.failed" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" },
+        "code": {
+          "type": "string",
+          "description": "Error code. Known value: \"pane.not-found\". Open-ended for forward compatibility.",
+          "examples": ["pane.not-found"]
+        },
+        "message": {
+          "type": "string",
+          "description": "Human-readable error description (English, for logging/debugging)."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "PaneHydrationBeginMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "Sentinel: per-pane hydration is starting (tc-295a.9). The session-proxy is about to deliver the clear-then-replay hydration frame for paneId on the data plane. Live %output bytes for paneId arriving between begin and end are QUEUED by the driver (no interleave) and replayed after end. direction: session-proxy→client.",
+      "required": ["type", "seq", "paneId"],
+      "properties": {
+        "type": { "const": "pane.hydration.begin" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" }
+      },
+      "additionalProperties": false
+    },
+
+    "PaneHydrationEndMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "Sentinel: per-pane hydration is complete (tc-295a.9). The clear-then-replay frame for paneId has been delivered and any live bytes queued during the hydration window have been flushed. All subsequent data-plane bytes for paneId are live output. direction: session-proxy→client.",
+      "required": ["type", "seq", "paneId"],
+      "properties": {
+        "type": { "const": "pane.hydration.end" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" }
+      },
+      "additionalProperties": false
+    },
+
     "SessionProxyCommandOkPayload": {
       "type": "object",
       "description": "Successful command result payload. Fields are optional because not every command produces a new entity. tc-ozk.1: for the pane/window-CREATING verbs (split-pane, open-window, break-pane) the session-proxy RETURNS the created entity's ids here — `paneId` is the created pane and `windowId` the window it lives in (recovered from tmux's `split-window`/`new-window`/`break-pane -P -F '#{pane_id} #{window_id}'` reply). The host binds by these returned ids when the pane materialises; no observer/claim correlation is needed.",
@@ -544,6 +598,9 @@
         { "$ref": "#/$defs/WindowMonitorSilenceChangedMessage" },
         { "$ref": "#/$defs/SessionProxySessionRenamedMessage" },
         { "$ref": "#/$defs/ClientCountChangedMessage" },
+        { "$ref": "#/$defs/PaneAttachFailedMessage" },
+        { "$ref": "#/$defs/PaneHydrationBeginMessage" },
+        { "$ref": "#/$defs/PaneHydrationEndMessage" },
         { "$ref": "#/$defs/SessionProxyCommandResponseMessage" },
         { "$ref": "#/$defs/ErrorMessage" }
       ],

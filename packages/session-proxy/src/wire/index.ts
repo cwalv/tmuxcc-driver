@@ -96,6 +96,10 @@ export type {
   SessionProxySessionRenamedMessage,
   // SessionProxy → Client (client-count delta — tc-44wu0)
   ClientCountChangedMessage,
+  // SessionProxy → Client (per-pane attach + hydration protocol — tc-295a.8 / tc-295a.9)
+  PaneAttachFailedMessage,
+  PaneHydrationBeginMessage,
+  PaneHydrationEndMessage,
   // SessionProxy → Client (capabilities)
   SessionProxyCapabilitiesMessage,
   // SessionProxy → Client (command response + error)
@@ -126,6 +130,8 @@ export type {
   SessionProxyCommandRequestMessage,
   // Client → SessionProxy (resync)
   ResyncRequestMessage,
+  // Client → SessionProxy (per-pane attach — tc-295a.8)
+  PaneAttachMessage,
   // Client union
   ClientMessage,
   // Either direction (session-proxy wire)

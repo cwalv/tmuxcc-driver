@@ -58,7 +58,8 @@ import type { SwitchClientOutcome } from "../state/switch-client.js";
 import { createSessionProxyRegistry, createStormAlarm } from "../metrics/index.js";
 import type { SessionProxyRegistry, StormAlarmOptions } from "../metrics/index.js";
 import type { CommandResult } from "../parser/correlator.js";
-import { hydrateTransport } from "./hydration.js";
+import { hydrateTransport, hydratePane } from "./hydration.js";
+import type { HydrationSentinels } from "./hydration.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -176,8 +177,19 @@ export interface SessionProxy {
    * Runs the handshake + snapshot on the control plane, then attaches
    * the demux to the transport's data plane and wires the input path.
    * Returns the NegotiatedSession from the handshake.
+   *
+   * tc-295a.8 (W2.2): `primaryPaneId` is the broker-forwarded target pane this
+   * transport attached for (the pane the user is binding). When supplied, the
+   * session-proxy validates it exists in the model and, after the snapshot,
+   * guarantees its hydration (pane.hydration.begin → clear+replay → end) is
+   * delivered before any live delta for it. A vanished primary pane surfaces
+   * `pane.attach.failed{code:"pane.not-found"}` on this transport (fail-loud).
+   * When omitted, every known pane is hydrated (the legacy bulk contract).
    */
-  addClient(transport: Transport): Promise<import("../wire/handshake.js").NegotiatedSession>;
+  addClient(
+    transport: Transport,
+    primaryPaneId?: PaneId,
+  ): Promise<import("../wire/handshake.js").NegotiatedSession>;
 
   /**
    * tc-5quo — clear-then-replay hydration for the given transport.
@@ -543,6 +555,85 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
     get exited() { return host.exited; },
   };
 
+  // ---------------------------------------------------------------------------
+  // tc-295a.8 / tc-295a.9 — per-pane attach + hydration helpers.
+  //
+  // Both close over `demux`, `server`, and `pipeline`. `makeSentinels` binds
+  // the begin/end window to a specific (control transport, draining transport)
+  // pair so the data-plane queue gate and the control-plane sentinels target
+  // the same client. `attachAndHydratePane` validates pane existence and
+  // surfaces pane.attach.failed{pane.not-found} when the pane is gone.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Build the HydrationSentinels for one client.
+   *
+   * `controlTransport` is the raw transport the ControlServer knows (for seq-
+   * stamped sendDirected); `dataTransport` is the demux-attached draining
+   * wrapper the live %output fan-out targets (for the no-interleave queue gate).
+   * They wrap the same socket — the queue must gate the SAME object the demux
+   * fans out to, while the sentinels ride the control plane.
+   */
+  function makeSentinels(
+    controlTransport: Transport,
+    dataTransport: Transport,
+  ): HydrationSentinels {
+    return {
+      begin(pid: PaneId): void {
+        // Start queueing live bytes for this (transport, pane) BEFORE emitting
+        // begin, so no live byte slips out between the sentinel and the gate.
+        demux.beginPaneHydration(dataTransport, pid);
+        server.sendDirected(controlTransport, {
+          type: "pane.hydration.begin",
+          paneId: pid,
+        });
+      },
+      end(pid: PaneId): void {
+        // Flush the queued live bytes (they land after the clear+replay frame
+        // the hydrator just delivered), THEN emit end.
+        demux.endPaneHydration(dataTransport, pid);
+        server.sendDirected(controlTransport, {
+          type: "pane.hydration.end",
+          paneId: pid,
+        });
+      },
+    };
+  }
+
+  /**
+   * Validate `pid` exists in the model and hydrate it on `dataTransport`.
+   *
+   * On a vanished pane, emits pane.attach.failed{pane.not-found} (fail-loud)
+   * and skips the capture round-trip. The capture itself can ALSO reveal the
+   * pane is gone (closed between the model check and the capture reply); that
+   * path likewise surfaces pane.not-found.
+   */
+  async function attachAndHydratePane(
+    controlTransport: Transport,
+    dataTransport: Transport,
+    sentinels: HydrationSentinels,
+    pid: PaneId,
+  ): Promise<void> {
+    if (!pipeline.getModel().panes.has(pid)) {
+      server.sendDirected(controlTransport, {
+        type: "pane.attach.failed",
+        paneId: pid,
+        code: "pane.not-found",
+        message: `Pane ${pid as string} is not present in the session model.`,
+      });
+      return;
+    }
+    const found = await hydratePane(pipeline, dataTransport, pid, sentinels);
+    if (!found) {
+      server.sendDirected(controlTransport, {
+        type: "pane.attach.failed",
+        paneId: pid,
+        code: "pane.not-found",
+        message: `Pane ${pid as string} could not be captured (it may have closed mid-attach).`,
+      });
+    }
+  }
+
   return {
     host: hostView,
     demux,
@@ -610,7 +701,7 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
       });
     },
 
-    async addClient(transport: Transport) {
+    async addClient(transport: Transport, primaryPaneId?: PaneId) {
       // 1. Run control-plane handshake + send snapshot + subscribe deltas.
       const session = await server.addClient(transport);
 
@@ -683,7 +774,31 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
       //     hydration is in flight (any pre-hydration deltas land on the
       //     replayed history, then the clear+replay arrives and the live
       //     stream resumes from there).
-      void hydrateTransport(pipeline, drainingTransport, pipeline.getModel().panes.keys());
+      //
+      //     tc-295a.9: wrap each pane's clear+replay with hydration sentinels
+      //     and the demux no-interleave queue gate (see makeSentinels).
+      const sentinels = makeSentinels(transport, drainingTransport);
+
+      if (primaryPaneId !== undefined) {
+        // tc-295a.8: broker-forwarded targeted attach. Validate the primary
+        // pane exists; hydrate it FIRST (guaranteed before any live delta for
+        // it), then hydrate the remaining known panes. A vanished primary pane
+        // surfaces pane.attach.failed{pane.not-found} — fail-loud.
+        void attachAndHydratePane(transport, drainingTransport, sentinels, primaryPaneId).then(() => {
+          const others: PaneId[] = [];
+          for (const pid of pipeline.getModel().panes.keys()) {
+            if (pid !== primaryPaneId) others.push(pid);
+          }
+          void hydrateTransport(pipeline, drainingTransport, others, sentinels);
+        });
+      } else {
+        void hydrateTransport(
+          pipeline,
+          drainingTransport,
+          pipeline.getModel().panes.keys(),
+          sentinels,
+        );
+      }
 
       // 3. Wire input path: forward client control messages to tmux.
       //
@@ -695,6 +810,21 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
       transport.onControl((msg) => {
         if (msg.type === "resync.request") {
           server.handleResyncRequest(transport);
+          return;
+        }
+
+        // tc-295a.8: mid-connection per-pane attach. The client binds a new tab
+        // to an existing pane on this already-connected session (§1.4 bindNew)
+        // and asks for on-demand hydration of THAT pane on this transport.
+        // Validate + hydrate; a vanished pane surfaces pane.attach.failed.
+        if (msg.type === "pane.attach") {
+          const attach = msg as import("../wire/session-proxy-control.js").PaneAttachMessage;
+          void attachAndHydratePane(
+            transport,
+            drainingTransport,
+            makeSentinels(transport, drainingTransport),
+            attach.paneId,
+          );
           return;
         }
 
@@ -767,7 +897,14 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
       // by addClient.  Tests use this to drive the hydration round-trip
       // directly against a recording transport without re-running the
       // handshake.
-      return hydrateTransport(pipeline, transport, pipeline.getModel().panes.keys());
+      //
+      // tc-295a.9: frame each pane with sentinels too. The transport passed
+      // here is the bare client transport (not the demux-attached draining
+      // wrapper), so the queue gate is a no-op unless the same object was
+      // attached via demux.attachTransport — fine for the test driver, which
+      // exercises the sentinel emissions, not the live-byte queue.
+      const sentinels = makeSentinels(transport, transport);
+      return hydrateTransport(pipeline, transport, pipeline.getModel().panes.keys(), sentinels);
     },
 
     stop(): Promise<void> {

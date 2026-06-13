@@ -376,4 +376,114 @@ describe("createOutputDemux", () => {
       }
     });
   });
+
+  // -------------------------------------------------------------------------
+  // tc-295a.9 — per-(transport, pane) hydration queue (no-interleave gate)
+  // -------------------------------------------------------------------------
+
+  describe("per-pane hydration queue (tc-295a.9)", () => {
+    it("queues live bytes for a pane during its hydration window, then flushes in order on end", () => {
+      const { demux, sessionProxy, frames } = setup([P1]);
+
+      // Open the window — live bytes for P1 are now queued, not fanned out.
+      demux.beginPaneHydration(sessionProxy, P1);
+
+      demux.store.append(P1, bytes(0x01));
+      demux.store.append(P1, bytes(0x02, 0x03));
+      assert.equal(frames.length, 0, "live bytes must NOT fan out during hydration");
+
+      // The hydrator would deliver clear+replay directly here (transport.sendData).
+      // End the window — queued live bytes flush in arrival order, after the replay.
+      demux.endPaneHydration(sessionProxy, P1);
+
+      assert.equal(frames.length, 2, "both queued chunks flush on end");
+      assert.deepEqual(frames[0]!.bytes, bytes(0x01));
+      assert.deepEqual(frames[1]!.bytes, bytes(0x02, 0x03));
+    });
+
+    it("does not interleave: a directly-delivered replay frame precedes the queued live bytes", () => {
+      const { demux, sessionProxy, frames } = setup([P1]);
+
+      demux.beginPaneHydration(sessionProxy, P1);
+      demux.store.append(P1, bytes(0xaa)); // live byte during hydration → queued
+
+      // Simulate the hydrator delivering the clear+replay frame DIRECTLY.
+      sessionProxy.sendData(P1, bytes(0xde, 0xad));
+
+      // At this instant the replay is the only delivered frame.
+      assert.equal(frames.length, 1);
+      assert.deepEqual(frames[0]!.bytes, bytes(0xde, 0xad));
+
+      demux.endPaneHydration(sessionProxy, P1);
+
+      // Now the queued live byte follows the replay.
+      assert.equal(frames.length, 2);
+      assert.deepEqual(frames[1]!.bytes, bytes(0xaa));
+    });
+
+    it("only the hydrating transport queues; sibling transports keep streaming live", () => {
+      const demux = createOutputDemux();
+      const a = createInMemoryTransportPair();
+      const b = createInMemoryTransportPair();
+      const framesA = captureFrames(a.client);
+      const framesB = captureFrames(b.client);
+      demux.attachTransport(a.sessionProxy);
+      demux.attachTransport(b.sessionProxy);
+      demux.notifyPaneBound(P1);
+
+      demux.beginPaneHydration(a.sessionProxy, P1);
+      demux.store.append(P1, bytes(0x55));
+
+      assert.equal(framesA.length, 0, "hydrating transport A queues");
+      assert.equal(framesB.length, 1, "warm sibling B keeps receiving live bytes");
+      assert.deepEqual(framesB[0]!.bytes, bytes(0x55));
+
+      demux.endPaneHydration(a.sessionProxy, P1);
+      assert.equal(framesA.length, 1, "A receives the queued byte on end");
+      assert.deepEqual(framesA[0]!.bytes, bytes(0x55));
+    });
+
+    it("queue is per-pane: bytes for a non-hydrating pane fan out normally", () => {
+      const { demux, sessionProxy, frames } = setup([P1, P2]);
+
+      demux.beginPaneHydration(sessionProxy, P1);
+      demux.store.append(P1, bytes(0x01)); // queued
+      demux.store.append(P2, bytes(0x02)); // not hydrating → live
+
+      assert.equal(frames.length, 1, "P2 fans out while P1 is gated");
+      assert.deepEqual(frames[0]!.bytes, bytes(0x02));
+      assert.equal(frames[0]!.paneId, P2);
+
+      demux.endPaneHydration(sessionProxy, P1);
+      assert.equal(frames.length, 2);
+      assert.deepEqual(frames[1]!.bytes, bytes(0x01));
+      assert.equal(frames[1]!.paneId, P1);
+    });
+
+    it("endPaneHydration on a pane that was not hydrating is a no-op", () => {
+      const { demux, sessionProxy, frames } = setup([P1]);
+      demux.endPaneHydration(sessionProxy, P1); // never began
+      demux.store.append(P1, bytes(0x09));
+      assert.equal(frames.length, 1, "no spurious frames; live path intact");
+    });
+
+    it("detachTransport drops in-flight hydration queues (no leak, no late flush)", () => {
+      const { demux, sessionProxy, frames } = setup([P1]);
+      demux.beginPaneHydration(sessionProxy, P1);
+      demux.store.append(P1, bytes(0x01)); // queued
+      demux.detachTransport(sessionProxy);
+      // A late end must not throw and must not deliver to the detached transport.
+      demux.endPaneHydration(sessionProxy, P1);
+      assert.equal(frames.length, 0, "detached transport receives nothing");
+    });
+
+    it("notifyPaneClosed discards a hydrating pane's queue", () => {
+      const { demux, sessionProxy, frames } = setup([P1]);
+      demux.beginPaneHydration(sessionProxy, P1);
+      demux.store.append(P1, bytes(0x01)); // queued
+      demux.notifyPaneClosed(P1);
+      demux.endPaneHydration(sessionProxy, P1); // queue already gone
+      assert.equal(frames.length, 0, "closed pane's queued bytes are dropped");
+    });
+  });
 });

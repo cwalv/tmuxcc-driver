@@ -276,7 +276,40 @@ export interface ControlServer {
     code: string,
     message: string,
   ): void;
+
+  /**
+   * Send an unsolicited session-proxy→client message to ONE client using its
+   * per-connection seq counter (tc-295a.8 / tc-295a.9).
+   *
+   * The caller supplies the message WITHOUT `seq`; this stamps the next
+   * per-connection value before delivery. Used by the session-proxy's attach +
+   * hydration path to emit `pane.hydration.begin` / `pane.hydration.end` and
+   * `pane.attach.failed` directed at the attaching transport only (these are
+   * per-transport, not broadcast — a warm sibling client must not see another
+   * client's hydration sentinels).
+   *
+   * No-op if the transport is not in the active client set.
+   *
+   * @param transport - The session-proxy-side transport of the target client.
+   * @param msg       - The message to send, minus `seq`.
+   */
+  sendDirected(
+    transport: Transport,
+    msg: UnstampedSessionProxyMessage,
+  ): void;
 }
+
+/**
+ * A `SessionProxyMessage` without its `seq` field, distributed over the union so
+ * each variant's own fields are preserved (a plain `Omit<Union, "seq">` would
+ * collapse to only the common keys). The ControlServer stamps `seq` from the
+ * per-connection counter before delivery.
+ */
+export type UnstampedSessionProxyMessage = SessionProxyMessage extends infer M
+  ? M extends SessionProxyMessage
+    ? Omit<M, "seq">
+    : never
+  : never;
 
 // ---------------------------------------------------------------------------
 // Default capabilities
@@ -657,6 +690,22 @@ class ControlServerImpl implements ControlServer {
     state.nextSeq++;
     try {
       transport.sendControl(msg);
+    } catch {
+      // Transport may have closed concurrently — clean up.
+      this._cleanupClient(transport);
+    }
+  }
+
+  sendDirected(
+    transport: Transport,
+    msg: UnstampedSessionProxyMessage,
+  ): void {
+    const state = this._clients.get(transport);
+    if (!state) return; // not in active client set
+    const stamped = { ...msg, seq: state.nextSeq } as SessionProxyMessage;
+    state.nextSeq++;
+    try {
+      transport.sendControl(stamped);
     } catch {
       // Transport may have closed concurrently — clean up.
       this._cleanupClient(transport);

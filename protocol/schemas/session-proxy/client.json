@@ -70,6 +70,21 @@
       "additionalProperties": false
     },
 
+    "PaneAttachMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "Client requests the session-proxy attach (validate + hydrate) a pane on this connection (tc-295a.8). Issued by the broker-mediated first attach (for the transport's primary pane) and by mid-connection bindNew re-hydration. Not correlated — the session-proxy responds with pane.hydration.begin/end on success, or pane.attach.failed{code:\"pane.not-found\"} on a vanished pane. direction: client→session-proxy.",
+      "required": ["type", "seq", "paneId"],
+      "properties": {
+        "type": { "const": "pane.attach" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" }
+      },
+      "additionalProperties": false
+    },
+
     "OpenWindowCommand": {
       "type": "object",
       "description": "Open a new window in the bound session. The session-proxy chooses the pane id(s); created window/pane ids arrive in the command response.",
@@ -378,7 +393,8 @@
         { "$ref": "#/$defs/InputMessage" },
         { "$ref": "#/$defs/ResizeRequestMessage" },
         { "$ref": "#/$defs/ResyncRequestMessage" },
-        { "$ref": "#/$defs/SessionProxyCommandRequestMessage" }
+        { "$ref": "#/$defs/SessionProxyCommandRequestMessage" },
+        { "$ref": "#/$defs/PaneAttachMessage" }
       ],
       "description": "Discriminated union of all messages the client sends to the session-proxy. Narrow on `type`."
     }

@@ -24,7 +24,7 @@ import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
 import { paneId } from "@tmuxcc/session-proxy";
-import type { InputMessage, ResizeRequestMessage, PaneId } from "@tmuxcc/session-proxy";
+import type { InputMessage, ResizeRequestMessage, PaneAttachMessage, PaneId } from "@tmuxcc/session-proxy";
 
 import { createInputApi } from "./input.js";
 import type { InputApi, InputSender } from "./input.js";
@@ -33,7 +33,7 @@ import type { InputApi, InputSender } from "./input.js";
 // Test helpers
 // ---------------------------------------------------------------------------
 
-type SentMessage = InputMessage | ResizeRequestMessage;
+type SentMessage = InputMessage | ResizeRequestMessage | PaneAttachMessage;
 
 /** Capture-sender: records every sent message in order. */
 function makeSender(): { sender: InputSender; messages: SentMessage[] } {
@@ -346,5 +346,50 @@ describe("flush — no-op when nothing pending", () => {
 
     api.flush();
     assert.equal(messages.length, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 10. attachPane — pane.attach request (tc-295a.8)
+// ---------------------------------------------------------------------------
+
+describe("attachPane — pane.attach request shape", () => {
+  it("emits a pane.attach message with the target paneId and a seq", () => {
+    const { sender, messages } = makeSender();
+    const api = createInputApi(sender);
+
+    api.attachPane(P0);
+
+    assert.equal(messages.length, 1);
+    const msg = messages[0] as PaneAttachMessage;
+    assert.equal(msg.type, "pane.attach");
+    assert.equal(msg.paneId, P0);
+    assert.equal(msg.seq, 1);
+  });
+
+  it("is not coalesced — each call produces exactly one message", () => {
+    const { sender, messages } = makeSender();
+    const api = createInputApi(sender);
+
+    api.attachPane(P0);
+    api.attachPane(P1);
+    api.attachPane(P0);
+
+    assert.equal(messages.length, 3);
+    assert.deepEqual(
+      messages.map((m) => (m as PaneAttachMessage).paneId),
+      [P0, P1, P0],
+    );
+  });
+
+  it("shares the monotonic seq counter with input/resize/command", () => {
+    const { sender, messages } = makeSender();
+    const api = createInputApi(sender, { coalesceResizes: false });
+
+    api.sendInput(P0, "x");   // seq 1
+    api.attachPane(P0);       // seq 2
+    api.resizePane(P0, 80, 24); // seq 3
+
+    assert.deepEqual(messages.map((m) => m.seq), [1, 2, 3]);
   });
 });

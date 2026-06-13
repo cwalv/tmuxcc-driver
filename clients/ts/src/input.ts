@@ -69,6 +69,7 @@ import type {
   CommandRequestMessage,
   WireCommand,
   SessionProxyCommandResponseMessage,
+  PaneAttachMessage,
 } from "@tmuxcc/session-proxy";
 
 // ---------------------------------------------------------------------------
@@ -230,6 +231,18 @@ export interface InputApi {
    * reason is an Error carrying `reason`.
    */
   rejectAllPending(reason: string): void;
+
+  /**
+   * Send a `pane.attach` request to the session-proxy (tc-295a.8).
+   *
+   * Produces a single `pane.attach` wire message immediately (not coalesced).
+   * Triggers on-demand per-pane hydration of `paneId` on this connection — the
+   * session-proxy responds with pane.hydration.begin/end (or pane.attach.failed
+   * for a vanished pane). Used by the §1.4 bindNew flow.
+   *
+   * @param paneId - The pane to attach + hydrate.
+   */
+  attachPane(paneId: PaneId): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -242,7 +255,7 @@ export interface InputApi {
  * testable without a full handshake — a mock `{ send }` suffices.
  */
 export interface InputSender {
-  send(msg: InputMessage | ResizeRequestMessage | CommandRequestMessage): void;
+  send(msg: InputMessage | ResizeRequestMessage | CommandRequestMessage | PaneAttachMessage): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -413,6 +426,17 @@ export function createInputApi(
         deferred.reject(new Error(reason));
       }
       pendingVerbs.clear();
+    },
+
+    attachPane(paneId: PaneId): void {
+      // tc-295a.8: not coalesced — one wire message per call. Carries a seq from
+      // the same per-connection counter as input/resize/command.
+      const msg: PaneAttachMessage = {
+        type: "pane.attach",
+        seq: nextSeq(),
+        paneId,
+      };
+      sender.send(msg);
     },
   };
 }

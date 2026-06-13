@@ -85,6 +85,33 @@ export interface HydrationPipeline {
 }
 
 /**
+ * tc-295a.9: per-pane hydration sentinels + the no-interleave queue gate.
+ *
+ * Supplied by `session-proxy.ts` so the hydrator can frame each pane's
+ * clear-then-replay data frame with `pane.hydration.begin` / `.end` control
+ * messages AND tell the demux to queue live `%output` for that pane during the
+ * window (the no-interleave DRIVER guarantee).
+ *
+ * Ordering per pane (the contract the bead pins):
+ *   1. `begin(paneId)`            — emit pane.hydration.begin; start queueing
+ *                                   live bytes for this (transport, pane).
+ *   2. capture-pane round-trip    — live bytes arriving here are queued.
+ *   3. deliver clear+replay frame — via transport.sendData (bypasses the queue).
+ *   4. `end(paneId)`              — flush queued live bytes, then emit
+ *                                   pane.hydration.end; resume live pass-through.
+ *
+ * `begin` and `end` are always paired: if the capture fails (pane vanished
+ * mid-hydration), `end` still fires to drain the queue and close the window so
+ * a transient queue does not strand live bytes.
+ */
+export interface HydrationSentinels {
+  /** Open the hydration window for `paneId` (emit begin + start queueing). */
+  begin(paneId: PaneId): void;
+  /** Close the window for `paneId` (flush queue + emit end). */
+  end(paneId: PaneId): void;
+}
+
+/**
  * Hydrate `transport` with clear-then-replay for each pane in `paneIds`.
  *
  * Concurrent across panes; resolves when every pane's round-trip has
@@ -101,45 +128,87 @@ export function hydrateTransport(
   pipeline: HydrationPipeline,
   transport: Transport,
   paneIds: Iterable<PaneId>,
+  sentinels?: HydrationSentinels,
 ): Promise<void> {
-  const tasks: Promise<void>[] = [];
+  const tasks: Promise<boolean>[] = [];
   for (const pid of paneIds) {
-    tasks.push(_hydrateOnePane(pipeline, transport, pid));
+    tasks.push(_hydrateOnePane(pipeline, transport, pid, sentinels));
   }
   return Promise.all(tasks).then(() => undefined);
+}
+
+/**
+ * tc-295a.8: hydrate a SINGLE pane on `transport`, returning whether the pane
+ * was found (capture-pane succeeded). Used by the `pane.attach` request path so
+ * the caller can emit `pane.attach.failed{pane.not-found}` when the pane is gone
+ * — the fail-loud, named-error contract the bead requires.
+ *
+ * Wraps the same `_hydrateOnePane` body the bulk path uses, so the sentinel +
+ * no-interleave queueing behaviour is identical.
+ *
+ * @returns `true` if the pane hydrated (clear+replay delivered); `false` if the
+ *          pane was not found / capture refused (caller surfaces pane.not-found).
+ */
+export function hydratePane(
+  pipeline: HydrationPipeline,
+  transport: Transport,
+  pid: PaneId,
+  sentinels?: HydrationSentinels,
+): Promise<boolean> {
+  return _hydrateOnePane(pipeline, transport, pid, sentinels);
 }
 
 async function _hydrateOnePane(
   pipeline: HydrationPipeline,
   transport: Transport,
   pid: PaneId,
-): Promise<void> {
+  sentinels?: HydrationSentinels,
+): Promise<boolean> {
   // PaneId convention (ids.ts): "p" + tmux pane number.  Inverse for the
   // capture-pane target.  Defensive: skip any pane whose id does not
   // match — a misformed id is a bug elsewhere, but it must not break
   // hydration of well-formed siblings.
   const s = pid as unknown as string;
-  if (s.length < 2 || s.charCodeAt(0) !== 0x70 /* 'p' */) return;
+  if (s.length < 2 || s.charCodeAt(0) !== 0x70 /* 'p' */) return false;
   const tmuxN = parseInt(s.slice(1), 10);
-  if (!Number.isFinite(tmuxN)) return;
+  if (!Number.isFinite(tmuxN)) return false;
 
-  const cmd = capturePane(tmuxN, { escapes: true, startLine: "-", endLine: "-" });
-  let result: CommandResult;
+  // tc-295a.9: open the hydration window BEFORE the capture round-trip so live
+  // bytes arriving during the ~1 RTT are queued, not interleaved. Paired with
+  // the `end` in the finally below so a vanished pane never strands the queue.
+  sentinels?.begin(pid);
   try {
-    result = await pipeline.send(cmd);
-  } catch {
-    // Host dead or pipeline torn down — nothing we can do.  Hydration is
-    // best-effort.
-    return;
-  }
-  if (!result.ok) {
-    // Pane gone or capture-pane refused for some reason (e.g. closed mid-
-    // hydration).  Skip silently — the live stream will catch up if/when
-    // a new pane.opened reaches the client.
-    return;
-  }
+    const cmd = capturePane(tmuxN, { escapes: true, startLine: "-", endLine: "-" });
+    let result: CommandResult;
+    try {
+      result = await pipeline.send(cmd);
+    } catch {
+      // Host dead or pipeline torn down — nothing we can do.  Hydration is
+      // best-effort.
+      return false;
+    }
+    if (!result.ok) {
+      // Pane gone or capture-pane refused for some reason (e.g. closed mid-
+      // hydration).  Skip silently — the live stream will catch up if/when
+      // a new pane.opened reaches the client.
+      return false;
+    }
 
-  const replay = lfToCrlf(result.body);
+    return await _deliverReplay(transport, pid, result.body);
+  } finally {
+    // Always close the window: flush whatever live bytes were queued and emit
+    // pane.hydration.end. On a found pane this lands after the clear+replay
+    // frame; on a vanished pane it just drains the (usually empty) queue.
+    sentinels?.end(pid);
+  }
+}
+
+async function _deliverReplay(
+  transport: Transport,
+  pid: PaneId,
+  body: Uint8Array,
+): Promise<boolean> {
+  const replay = lfToCrlf(body);
   const combined = new Uint8Array(CLEAR_AND_SCROLLBACK.length + replay.length);
   combined.set(CLEAR_AND_SCROLLBACK, 0);
   combined.set(replay, CLEAR_AND_SCROLLBACK.length);
@@ -152,6 +221,10 @@ async function _hydrateOnePane(
     // Transport closed during hydration — caller will tear down via
     // onClose; nothing to do here.
   }
+  // The clear+replay frame was delivered (or the transport closed under us);
+  // either way the pane existed and was captured — report success so the
+  // attach path does NOT emit pane.not-found.
+  return true;
 }
 
 /**

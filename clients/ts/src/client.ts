@@ -192,6 +192,9 @@ export async function connectClient(
     sendCommand(cmd: WireCommand): void {
       inputApi.sendCommand(cmd);
     },
+    attachPane(paneId: PaneId): void {
+      inputApi.attachPane(paneId);
+    },
   };
 
   // ── disconnect() ────────────────────────────────────────────────────────────
