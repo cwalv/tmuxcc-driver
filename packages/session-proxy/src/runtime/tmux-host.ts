@@ -328,6 +328,21 @@ class TmuxHostImpl implements TmuxHost {
         LINES: String(rows),
       } as Record<string, string>;
 
+      // tc-4bv2: a control-mode client MUST NOT inherit an outer $TMUX /
+      // $TMUX_PANE. tmuxcc always drives its own server on a private `-L`
+      // socket, so an inherited $TMUX (e.g. the extension host itself running
+      // inside a tmux session — common in CI/e2e and for tmux-native users)
+      // makes `attach-session -CC` refuse with `%error … sessions should be
+      // nested with care, unset $TMUX to force` followed immediately by
+      // `%exit`. During bootstrap that `%exit` leaves the requery's in-flight
+      // `list-*` slots unresolved, so `start()` never resolves and the
+      // supervisor's READY wait times out (the "did not signal READY within
+      // 30s" symptom for any pre-existing session — all-dead-pane sessions
+      // are simply the case where the operator most often hits it). Stripping
+      // these two vars makes the nested attach behave like a top-level one.
+      delete mergedEnv["TMUX"];
+      delete mergedEnv["TMUX_PANE"];
+
       const proc = spawn(pythonPath, bridgeArgs, {
         cwd,
         env: mergedEnv,

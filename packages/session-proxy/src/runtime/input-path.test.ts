@@ -1341,6 +1341,8 @@ function makeReversalModel(opts: {
     cols: 80,
     rows: 24,
     mode: "normal",
+    dead: false,
+    exitCode: undefined,
     scrollbackHandle: undefined,
   };
 

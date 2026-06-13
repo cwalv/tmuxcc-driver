@@ -53,6 +53,16 @@
  * the contract: a pane that appears in `list-panes` survives, one that
  * doesn't is closed.
  *
+ * tc-4bv2 / tc-295a.10 (shared pane-state shape): a surviving corpse is not
+ * silent. The bootstrap requery reads `#{pane_dead}` / `#{pane_dead_status}`
+ * (bootstrap.ts), so the model's `Pane.dead` / `Pane.exitCode` carry the
+ * corpse state. The diff (projection.ts) therefore emits `pane.dead-changed`
+ * when a live pane becomes a corpse in place, includes the dead flag on
+ * `pane.opened` for a corpse seen for the first time, and carries the corpse's
+ * `exitCode` through to `pane.closed` when the slot is finally reaped. This is
+ * what lets an all-dead-pane session enter the snapshot and signal READY
+ * (tc-4bv2) without weakening the "in list-panes ⇒ in model" rule above.
+ *
  * # Reparenting (break-pane)
  *
  * `break-pane` keeps the pane id (`%N` unchanged) but moves it to a new

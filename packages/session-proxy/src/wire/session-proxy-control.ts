@@ -79,6 +79,54 @@ export interface PaneOpenedMessage extends MessageBase {
    * Clients MAY use this to avoid a separate focus event on startup.
    */
   readonly active: boolean;
+  /**
+   * True when this pane is already dead at the moment it enters the model
+   * (tc-4bv2 / tc-295a.10 shared pane-state shape). This happens when a
+   * requery (cold attach to a pre-existing session, or reconnect) observes a
+   * `remain-on-exit` corpse for the first time — the pane is born into the
+   * client's model already exited.
+   *
+   * Additive optional field — absent means false. Non-breaking per the
+   * versioning policy above.
+   */
+  readonly dead?: boolean;
+  /**
+   * Exit code of the pane's process when `dead` is true and the code is known
+   * (tmux `pane_dead_status`). Absent when the pane is alive or the code is
+   * unknowable. Additive optional field — non-breaking.
+   */
+  readonly exitCode?: number;
+}
+
+/**
+ * A pane's dead state changed without the pane leaving the session
+ * (tc-4bv2 / tc-295a.10 shared pane-state shape).
+ * direction: session-proxy→client
+ *
+ * Emitted when a LIVE pane transitions to dead (its process exited but the
+ * pane slot survives because `remain-on-exit on`), or — defensively — back to
+ * live (a dead pane respawned in place, `respawn-pane`). The pane stays in the
+ * model and the snapshot the whole time; this delta only flips the `dead`
+ * flag.
+ *
+ * This is DISTINCT from `pane.closed`: closed means the pane slot left
+ * `list-panes` entirely (the strong contract, tc-295a.10). A dead pane is a
+ * reapable corpse the user can still inspect and kill.
+ *
+ * Non-breaking additive delta — older clients that do not recognise this type
+ * fall through to the `default` branch in `applyDelta` and ignore it (the
+ * pane simply continues to render as live until the next snapshot).
+ */
+export interface PaneDeadChangedMessage extends MessageBase {
+  readonly type: "pane.dead-changed";
+  readonly paneId: PaneId;
+  /** True when the pane is now dead; false when it returned to live. */
+  readonly dead: boolean;
+  /**
+   * Exit code when `dead` is true and known (tmux `pane_dead_status`); absent
+   * otherwise (alive, or code unknowable).
+   */
+  readonly exitCode?: number;
 }
 
 /**
@@ -92,6 +140,13 @@ export interface PaneOpenedMessage extends MessageBase {
  * display a generic "[process exited]" message rather than "[process exited —
  * code N]". This field is additive/optional and does not require a protocol
  * version bump (non-breaking per the versioning policy above).
+ *
+ * tc-295a.10 (strong contract): pane.closed means the pane SLOT left
+ * `list-panes` entirely — it is emitted EXACTLY ONCE when a pane id present in
+ * the previous requery model is absent from the next. It is DISTINCT from
+ * PaneDeadChangedMessage (a `remain-on-exit` corpse that stays in the model).
+ * When the closed pane was previously observed as a dead corpse with a known
+ * `pane_dead_status`, that code is carried through here as `exitCode`.
  */
 export interface PaneClosedMessage extends MessageBase {
   readonly type: "pane.closed";
@@ -210,6 +265,21 @@ export interface SnapshotPane {
   readonly cols: number;
   /** Height in rows. */
   readonly rows: number;
+  /**
+   * True when the pane is dead at snapshot time (tc-4bv2 / tc-295a.10 shared
+   * pane-state shape): its process has exited but the pane slot survives
+   * (`remain-on-exit` corpse). A dead pane is part of the snapshot so the
+   * client can render it, inspect its scrollback, and kill/reap it.
+   *
+   * Additive optional field — absent means false. This is what lets an
+   * all-dead-pane session appear in the panel (the bead's core fix).
+   */
+  readonly dead?: boolean;
+  /**
+   * Exit code when `dead` is true and known (tmux `pane_dead_status`); absent
+   * when alive or the code is unknowable. Additive optional field.
+   */
+  readonly exitCode?: number;
 }
 
 /**
@@ -1179,6 +1249,8 @@ export type SessionProxyMessage =
   | PaneClosedMessage
   | PaneResizedMessage
   | PaneModeChangedMessage
+  // Dead-pane state delta (tc-4bv2 / tc-295a.10)
+  | PaneDeadChangedMessage
   // Window deltas
   | WindowAddedMessage
   | WindowClosedMessage
@@ -1241,6 +1313,7 @@ export function isSessionProxyMessage(msg: ControlMessage): msg is SessionProxyM
     t === "pane.closed" ||
     t === "pane.resized" ||
     t === "pane.mode-changed" ||
+    t === "pane.dead-changed" ||
     // Window deltas
     t === "window.added" ||
     t === "window.closed" ||

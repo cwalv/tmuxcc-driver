@@ -180,7 +180,7 @@ const P1 = paneId("p1");
 const P2 = paneId("p2");
 
 function makePane(id: PaneId, winId: WindowId, sessId: SessionId, cols = 80, rows = 24): Pane {
-  return { paneId: id, windowId: winId, sessionId: sessId, cols, rows, mode: "normal", scrollbackHandle: undefined };
+  return { paneId: id, windowId: winId, sessionId: sessId, cols, rows, mode: "normal", dead: false, exitCode: undefined, scrollbackHandle: undefined };
 }
 
 function makeModel1(): SessionModel {

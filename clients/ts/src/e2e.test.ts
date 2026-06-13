@@ -142,6 +142,8 @@ function buildBaseModel() {
     cols: 100,
     rows: 50,
     mode: "normal",
+    dead: false,
+    exitCode: undefined,
     scrollbackHandle: undefined,
   });
   m = addPane(m, {
@@ -151,6 +153,8 @@ function buildBaseModel() {
     cols: 100,
     rows: 50,
     mode: "normal",
+    dead: false,
+    exitCode: undefined,
     scrollbackHandle: undefined,
   });
   m = setFocus(m, { paneId: P0, windowId: W0, sessionId: S0 });

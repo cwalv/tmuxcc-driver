@@ -57,9 +57,15 @@
  *
  *   `#{pane_id}\t#{window_id}\t#{session_id}\t#{pane_index}\t` +
  *   `#{pane_width}\t#{pane_height}\t#{pane_top}\t#{pane_left}\t` +
- *   `#{?pane_active,1,0}\t#{pane_pid}\t#{pane_current_command}`
+ *   `#{?pane_active,1,0}\t#{pane_pid}\t#{pane_current_command}\t` +
+ *   `#{?pane_dead,1,0}\t#{pane_dead_status}`
  *
- * Fields (tab-separated, 11 per line).
+ * Fields (tab-separated, 13 per line). The last two are the dead-pane state
+ * (tc-4bv2 / tc-295a.10 shared shape):
+ *   [11] pane_dead        — "1" if the pane's process has exited but the slot
+ *                           survives (remain-on-exit corpse), "0" otherwise.
+ *   [12] pane_dead_status — the exited process's status code; empty string when
+ *                           the pane is alive or tmux has no status to report.
  *
  * # Id mapping convention
  *
@@ -106,7 +112,8 @@ export const BOOTSTRAP_WINDOWS_FORMAT =
 export const BOOTSTRAP_PANES_FORMAT =
   "#{pane_id}\t#{window_id}\t#{session_id}\t#{pane_index}\t" +
   "#{pane_width}\t#{pane_height}\t#{pane_top}\t#{pane_left}\t" +
-  "#{?pane_active,1,0}\t#{pane_pid}\t#{pane_current_command}";
+  "#{?pane_active,1,0}\t#{pane_pid}\t#{pane_current_command}\t" +
+  "#{?pane_dead,1,0}\t#{pane_dead_status}";
 
 // ---------------------------------------------------------------------------
 // Bootstrap command set
@@ -188,6 +195,11 @@ export interface PanesReplyRow {
   readonly paneTop: number;
   readonly paneLeft: number;
   readonly active: boolean;
+  /** True when `pane_dead=1` (remain-on-exit corpse). Defaults false on legacy
+   *  replies that don't carry the field. */
+  readonly dead: boolean;
+  /** Exit status from `pane_dead_status` when dead and known, else undefined. */
+  readonly exitCode: number | undefined;
 }
 
 /**
@@ -263,6 +275,21 @@ export function parsePanesReply(body: Uint8Array): PanesReplyRow[] {
     const paneLeft = parseInt(parts[7]!, 10);
     const active = parts[8]!.trim() === "1";
 
+    // Dead-pane fields (tc-4bv2 / tc-295a.10). Read defensively: legacy replies
+    // (or tmux builds that drop the trailing empty field) may have fewer parts.
+    // pane_dead is at index 11; pane_dead_status at index 12. A dead pane's
+    // status may be an empty string (tmux reports no code), which yields an
+    // undefined exitCode while dead stays true.
+    const dead = (parts[11] ?? "").trim() === "1";
+    let exitCode: number | undefined;
+    if (dead) {
+      const statusStr = (parts[12] ?? "").trim();
+      if (statusStr !== "") {
+        const parsed = parseInt(statusStr, 10);
+        if (!isNaN(parsed)) exitCode = parsed;
+      }
+    }
+
     const tmuxPaneId = parseSigilId(paneIdStr, "%");
     const tmuxWindowId = parseSigilId(winIdStr, "@");
     const tmuxSessionId = parseSigilId(sessIdStr, "$");
@@ -279,6 +306,8 @@ export function parsePanesReply(body: Uint8Array): PanesReplyRow[] {
       paneTop,
       paneLeft,
       active,
+      dead,
+      exitCode,
     });
   }
 
@@ -393,6 +422,9 @@ export function buildInitialModel(
       cols: row.width,
       rows: row.height,
       mode: "normal",
+      // Dead-pane state from the requery (tc-4bv2 / tc-295a.10 shared shape).
+      dead: row.dead,
+      exitCode: row.exitCode,
       scrollbackHandle: undefined,
     };
     model = addPane(model, p);

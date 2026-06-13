@@ -53,8 +53,8 @@ import type { SessionProxyMessage } from "../wire/session-proxy-control.js";
 //
 // BOOTSTRAP_WINDOWS_FORMAT fields (tab-separated, 9):
 //   $sess  name  @win  name  w   h   layout                  flags  active
-// BOOTSTRAP_PANES_FORMAT fields (tab-separated, 11):
-//   %pane  @win  $sess  idx  w   h   top  left  active  pid   cmd
+// BOOTSTRAP_PANES_FORMAT fields (tab-separated, 13):
+//   %pane  @win  $sess  idx  w   h   top  left  active  pid   cmd  dead  deadStatus
 // ---------------------------------------------------------------------------
 
 const ENC = new TextEncoder();
@@ -105,6 +105,10 @@ function paneLine(args: {
   active?: boolean;
   pid?: number;
   cmd?: string;
+  /** tc-4bv2 / tc-295a.10: pane_dead=1 (remain-on-exit corpse). */
+  dead?: boolean;
+  /** tc-4bv2 / tc-295a.10: pane_dead_status. Empty string when absent. */
+  deadStatus?: number;
 }): string {
   return [
     `%${args.paneNum}`,
@@ -118,6 +122,8 @@ function paneLine(args: {
     args.active ? "1" : "0",
     String(args.pid ?? 9000),
     args.cmd ?? "bash",
+    args.dead ? "1" : "0",
+    args.deadStatus !== undefined ? String(args.deadStatus) : "",
   ].join("\t") + "\n";
 }
 
@@ -263,6 +269,111 @@ describe("requeryDiff: dead-pane semantics", () => {
     const { next, deltas } = requeryDiff(prev, okResult(win), okResult(pane));
     assert.ok(next.panes.has(paneId("p1")), "p1 still in model");
     assert.deepEqual(deltas, []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Dead-pane wire shape (tc-4bv2 W2.5 + tc-295a.10 W2.4 — shared shape)
+// ---------------------------------------------------------------------------
+
+describe("requeryDiff: dead-pane wire shape (tc-4bv2 / tc-295a.10)", () => {
+  const winSingle = winLine({
+    sessNum: 0,
+    sessName: "main",
+    winNum: 1,
+    winName: "shell",
+    layout: SINGLE_PANE_LAYOUT(1),
+    active: true,
+  });
+
+  it("W2.5: an all-dead-pane session bootstraps into a NON-EMPTY snapshot (READY-independent-of-live-panes)", () => {
+    // The bead's core symptom: a pre-existing session whose only pane is a
+    // remain-on-exit corpse must still appear in the snapshot. The requery
+    // does not depend on a live pane — the corpse is in list-panes, so it is
+    // in the model, flagged dead.
+    const deadPane = paneLine({
+      paneNum: 1,
+      winNum: 1,
+      sessNum: 0,
+      active: true,
+      dead: true,
+      deadStatus: 0,
+    });
+    const { next, deltas } = requeryDiff(emptyModel(), okResult(winSingle), okResult(deadPane));
+
+    assert.equal(next.sessions.size, 1, "session present despite all panes dead");
+    assert.equal(next.windows.size, 1, "window present");
+    assert.equal(next.panes.size, 1, "dead pane is in the model");
+    const p1 = next.panes.get(paneId("p1"))!;
+    assert.equal(p1.dead, true, "pane flagged dead");
+    assert.equal(p1.exitCode, 0, "exit code from pane_dead_status");
+
+    // The bootstrap diff (against empty) carries pane.opened with dead:true —
+    // the client renders the corpse on first sight.
+    const opened = deltas.filter((d) => d.type === "pane.opened");
+    assert.equal(opened.length, 1);
+    assert.equal((opened[0] as { dead?: boolean }).dead, true, "pane.opened carries dead");
+    assert.equal((opened[0] as { exitCode?: number }).exitCode, 0);
+    // No pane.closed during a bootstrap of a dead pane (it is NOT an absence).
+    assert.equal(deltas.filter((d) => d.type === "pane.closed").length, 0);
+  });
+
+  it("live pane → dead corpse in place emits pane.dead-changed (NOT pane.closed)", () => {
+    const live = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true });
+    const prev = requeryDiff(emptyModel(), okResult(winSingle), okResult(live)).next;
+
+    const dead = paneLine({
+      paneNum: 1,
+      winNum: 1,
+      sessNum: 0,
+      active: true,
+      dead: true,
+      deadStatus: 137,
+    });
+    const { next, deltas } = requeryDiff(prev, okResult(winSingle), okResult(dead));
+
+    assert.ok(next.panes.has(paneId("p1")), "pane survives as corpse");
+    assert.equal(next.panes.get(paneId("p1"))!.dead, true);
+    const deadChanged = deltas.filter((d) => d.type === "pane.dead-changed");
+    assert.equal(deadChanged.length, 1, "exactly one pane.dead-changed");
+    assert.equal((deadChanged[0] as { dead: boolean }).dead, true);
+    assert.equal((deadChanged[0] as { exitCode?: number }).exitCode, 137);
+    assert.equal(deltas.filter((d) => d.type === "pane.closed").length, 0, "no close while corpse survives");
+  });
+
+  it("dead corpse → reaped (gone from list-panes) emits exactly one pane.closed carrying the exit code", () => {
+    const dead = paneLine({
+      paneNum: 1,
+      winNum: 1,
+      sessNum: 0,
+      active: true,
+      dead: true,
+      deadStatus: 42,
+    });
+    const prev = requeryDiff(emptyModel(), okResult(winSingle), okResult(dead)).next;
+    assert.equal(prev.panes.get(paneId("p1"))!.exitCode, 42);
+
+    // Corpse reaped: window is now empty in tmux → window also gone.
+    const { next, deltas } = requeryDiff(prev, okResult(""), okResult(""));
+    assert.ok(!next.panes.has(paneId("p1")), "pane removed");
+    const closed = deltas.filter((d) => d.type === "pane.closed");
+    assert.equal(closed.length, 1, "exactly one pane.closed");
+    assert.equal((closed[0] as { exitCode?: number }).exitCode, 42, "exit code carried through from corpse");
+  });
+
+  it("respawn-in-place (dead → live) emits pane.dead-changed dead:false with no exitCode", () => {
+    const dead = paneLine({
+      paneNum: 1, winNum: 1, sessNum: 0, active: true, dead: true, deadStatus: 1,
+    });
+    const prev = requeryDiff(emptyModel(), okResult(winSingle), okResult(dead)).next;
+
+    const live = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true });
+    const { next, deltas } = requeryDiff(prev, okResult(winSingle), okResult(live));
+    assert.equal(next.panes.get(paneId("p1"))!.dead, false);
+    const dc = deltas.filter((d) => d.type === "pane.dead-changed");
+    assert.equal(dc.length, 1);
+    assert.equal((dc[0] as { dead: boolean }).dead, false);
+    assert.ok(!("exitCode" in (dc[0] as object)), "no exitCode when alive");
   });
 });
 
@@ -1000,6 +1111,8 @@ function applyDeltaToModel(m: MutableModel, delta: SessionProxyMessage): void {
         cols: delta.cols,
         rows: delta.rows,
         mode: "normal",
+        dead: delta.dead ?? false,
+        exitCode: delta.dead ? delta.exitCode : undefined,
         scrollbackHandle: undefined,
       };
       m.panes.set(delta.paneId, pane);
@@ -1199,6 +1312,8 @@ function randomModel(rng: () => number, opts: { minWindows?: number } = {}): Ses
         cols: 40 + randInt(rng, 0, 40),
         rows: 12 + randInt(rng, 0, 12),
         mode: "normal",
+        dead: false,
+        exitCode: undefined,
         scrollbackHandle: undefined,
       };
       model = addPane(model, pane);

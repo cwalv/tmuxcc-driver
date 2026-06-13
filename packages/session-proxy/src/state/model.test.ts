@@ -80,6 +80,8 @@ function makePane(
   sessId: SessionId,
   cols = 80,
   rows = 24,
+  dead = false,
+  exitCode: number | undefined = undefined,
 ): Pane {
   return {
     paneId: id,
@@ -88,6 +90,8 @@ function makePane(
     cols,
     rows,
     mode: "normal",
+    dead,
+    exitCode,
     scrollbackHandle: undefined,
   };
 }

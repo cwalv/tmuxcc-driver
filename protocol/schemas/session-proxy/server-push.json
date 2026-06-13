@@ -82,6 +82,14 @@
           "type": "integer",
           "minimum": 1,
           "description": "Height in rows."
+        },
+        "dead": {
+          "type": "boolean",
+          "description": "True when the pane is dead at snapshot time — a remain-on-exit corpse whose process exited but whose slot survives (tc-4bv2 / tc-295a.10). Additive optional field; absent means false. A dead pane is part of the snapshot so it can be rendered, inspected, and reaped."
+        },
+        "exitCode": {
+          "type": "integer",
+          "description": "Exit code when dead is true and known (tmux pane_dead_status); absent when alive or unknowable. Additive optional field."
         }
       },
       "additionalProperties": false
@@ -162,6 +170,37 @@
         "active": {
           "type": "boolean",
           "description": "True if this pane is the active (focused) pane at the moment of opening."
+        },
+        "dead": {
+          "type": "boolean",
+          "description": "True when this pane is already dead when it enters the model — a remain-on-exit corpse observed on cold attach / reconnect (tc-4bv2 / tc-295a.10). Additive optional field; absent means false."
+        },
+        "exitCode": {
+          "type": "integer",
+          "description": "Exit code when dead is true and known (tmux pane_dead_status); absent otherwise. Additive optional field."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "PaneDeadChangedMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "A pane's dead state changed without the pane leaving the session (tc-4bv2 / tc-295a.10 shared pane-state shape). A live pane became a remain-on-exit corpse in place (dead=true), or a dead pane respawned back to live (dead=false). DISTINCT from pane.closed (which means the pane slot left list-panes entirely). direction: session-proxy→client.",
+      "required": ["type", "seq", "paneId", "dead"],
+      "properties": {
+        "type": { "const": "pane.dead-changed" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" },
+        "dead": {
+          "type": "boolean",
+          "description": "True when the pane is now dead; false when it returned to live."
+        },
+        "exitCode": {
+          "type": "integer",
+          "description": "Exit code when dead is true and known (tmux pane_dead_status); absent otherwise."
         }
       },
       "additionalProperties": false
@@ -172,7 +211,7 @@
         { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
       ],
       "type": "object",
-      "description": "A pane has been closed (exited or killed). direction: session-proxy→client.",
+      "description": "A pane slot left list-panes entirely (exited fully or was killed). tc-295a.10 strong contract: emitted exactly once per removed slot. DISTINCT from pane.dead-changed (a remain-on-exit corpse that stays in the model). direction: session-proxy→client.",
       "required": ["type", "seq", "paneId", "windowId"],
       "properties": {
         "type": { "const": "pane.closed" },
@@ -181,7 +220,7 @@
         "windowId": { "$ref": "tmuxcc:shared/primitives#/$defs/WindowId" },
         "exitCode": {
           "type": "integer",
-          "description": "Exit code of the pane's process, if known. Absent when the session-proxy could not determine the exit code (non-breaking optional field)."
+          "description": "Exit code of the pane's process, if known. Carried through from a dead corpse's pane_dead_status when the closed pane was previously observed dead; absent when unknowable (non-breaking optional field)."
         }
       },
       "additionalProperties": false
@@ -588,6 +627,7 @@
         { "$ref": "#/$defs/PaneClosedMessage" },
         { "$ref": "#/$defs/PaneResizedMessage" },
         { "$ref": "#/$defs/PaneModeChangedMessage" },
+        { "$ref": "#/$defs/PaneDeadChangedMessage" },
         { "$ref": "#/$defs/LayoutUpdatedMessage" },
         { "$ref": "#/$defs/FocusChangedMessage" },
         { "$ref": "#/$defs/WindowAddedMessage" },

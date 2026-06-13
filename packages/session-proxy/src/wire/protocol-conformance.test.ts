@@ -479,6 +479,67 @@ describe("protocol schema conformance", () => {
       assert.ok(validateSessionProxyMsg(msg as SessionProxyMessage), JSON.stringify(validateSessionProxyMsg.errors));
     });
 
+    it("PaneOpenedMessage (born dead with exitCode) — tc-4bv2 / tc-295a.10", () => {
+      const msg: PaneOpenedMessage = {
+        type: "pane.opened",
+        seq: 3,
+        paneId: P0,
+        windowId: W0,
+        cols: 80,
+        rows: 24,
+        active: true,
+        dead: true,
+        exitCode: 0,
+      };
+      assert.ok(validateSessionProxyMsg(msg as SessionProxyMessage), JSON.stringify(validateSessionProxyMsg.errors));
+    });
+
+    it("PaneDeadChangedMessage (dead with exitCode) — tc-4bv2 / tc-295a.10", () => {
+      const msg: SessionProxyMessage = {
+        type: "pane.dead-changed",
+        seq: 4,
+        paneId: P0,
+        dead: true,
+        exitCode: 137,
+      };
+      assert.ok(validateSessionProxyMsg(msg), JSON.stringify(validateSessionProxyMsg.errors));
+    });
+
+    it("PaneDeadChangedMessage (respawn, dead:false, no exitCode) — tc-4bv2 / tc-295a.10", () => {
+      const msg: SessionProxyMessage = {
+        type: "pane.dead-changed",
+        seq: 4,
+        paneId: P0,
+        dead: false,
+      };
+      assert.ok(validateSessionProxyMsg(msg), JSON.stringify(validateSessionProxyMsg.errors));
+    });
+
+    it("SnapshotMessage (with a dead pane) — tc-4bv2 / tc-295a.10", () => {
+      const msg: SnapshotMessage = {
+        type: "snapshot",
+        seq: 2,
+        session: { sessionId: S0, name: "main" },
+        windows: [
+          {
+            windowId: W0,
+            name: "shell",
+            active: true,
+            synchronizePanes: false,
+            monitorActivity: true,
+            monitorSilence: 0,
+            layout: sampleLayout,
+          },
+        ],
+        panes: [
+          { paneId: P0, windowId: W0, cols: 80, rows: 24, dead: true, exitCode: 0 },
+          { paneId: P1, windowId: W0, cols: 80, rows: 24, dead: true },
+        ],
+        focus: { paneId: P0, windowId: W0 },
+      };
+      assert.ok(validateSessionProxyMsg(msg as SessionProxyMessage), JSON.stringify(validateSessionProxyMsg.errors));
+    });
+
     it("PaneClosedMessage (with optional exitCode)", () => {
       const msg: PaneClosedMessage = {
         type: "pane.closed",

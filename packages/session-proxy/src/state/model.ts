@@ -136,6 +136,32 @@ export interface Pane {
    */
   readonly mode: PaneMode;
   /**
+   * Dead-pane state (tc-4bv2 / tc-295a.10, co-decided shared pane-state shape).
+   *
+   * True when tmux reports `pane_dead=1` — the pane's process has exited but
+   * the pane slot survives because `remain-on-exit on` keeps the corpse in
+   * `list-panes`. A dead pane is a FIRST-CLASS member of the model and the
+   * snapshot (NOT an absence): the user can inspect its scrollback and
+   * kill/reap it. A pane that leaves `list-panes` entirely is removed by the
+   * diff and emits `pane.closed` (the strong contract, tc-295a.10) — that is a
+   * distinct event from this dead flag.
+   *
+   * Defaults to false. Authoritative source: the bootstrap requery's
+   * `#{pane_dead}` field.
+   */
+  readonly dead: boolean;
+  /**
+   * Exit code of the pane's process when known and dead (tmux
+   * `#{pane_dead_status}`), else undefined.
+   *
+   * Only meaningful when `dead === true`. tmux only exposes a dead status for
+   * a corpse it is still listing (remain-on-exit); when a pane vanishes from
+   * `list-panes` without a corpse phase the code is unknowable and this stays
+   * undefined. Carried through to `pane.closed.exitCode` when a dead corpse is
+   * later reaped.
+   */
+  readonly exitCode: number | undefined;
+  /**
    * Handle into tc-fx2's scrollback buffer store, or undefined if no buffer
    * has been allocated yet. The reducer mints a handle on pane creation;
    * tc-fx2 registers the buffer under it. This field is session-proxy-internal and
@@ -755,7 +781,7 @@ export function removePane(model: SessionModel, paneId: PaneId): SessionModel {
 export function updatePane(
   model: SessionModel,
   paneId: PaneId,
-  patch: Partial<Pick<Pane, "cols" | "rows" | "mode" | "scrollbackHandle">>,
+  patch: Partial<Pick<Pane, "cols" | "rows" | "mode" | "dead" | "exitCode" | "scrollbackHandle">>,
 ): SessionModel {
   const pane = model.panes.get(paneId);
   if (!pane) return model;

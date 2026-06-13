@@ -89,6 +89,20 @@ export interface ClientPane {
   readonly rows: number;
   /** Current pane mode. Defaults to "normal" after a snapshot. */
   readonly mode: PaneMode;
+  /**
+   * True when the pane is dead — a `remain-on-exit` corpse whose process has
+   * exited but whose slot survives in tmux (tc-4bv2 / tc-295a.10 shared
+   * pane-state shape). A dead pane stays in `panes` (it is reapable, not
+   * gone); a pane whose slot left tmux is removed from `panes` and surfaces a
+   * `pane.closed`. Defaults false. Driven by SnapshotPane.dead /
+   * PaneOpenedMessage.dead / PaneDeadChangedMessage.
+   */
+  readonly dead: boolean;
+  /**
+   * Exit code when `dead` is true and known (tmux `pane_dead_status`); else
+   * undefined.
+   */
+  readonly exitCode: number | undefined;
 }
 
 /**
@@ -279,6 +293,10 @@ export function applySnapshot(snapshot: SnapshotMessage): {
       cols: p.cols,
       rows: p.rows,
       mode: "normal", // SnapshotPane has no mode field; default per spec
+      // tc-4bv2 / tc-295a.10: a dead pane is part of the snapshot (reapable
+      // corpse). Additive optional fields; absent means alive / unknown.
+      dead: p.dead ?? false,
+      exitCode: p.dead ? p.exitCode : undefined,
     });
   }
 
@@ -330,6 +348,27 @@ export function applyDelta(model: ClientModel, msg: SessionProxyMessage): Client
         cols: msg.cols,
         rows: msg.rows,
         mode: "normal",
+        // tc-4bv2 / tc-295a.10: a pane can be born already-dead (corpse seen
+        // for the first time on requery / reconnect).
+        dead: msg.dead ?? false,
+        exitCode: msg.dead ? msg.exitCode : undefined,
+      });
+      return { ...model, panes };
+    }
+
+    // tc-4bv2 / tc-295a.10: live ↔ dead transition in place (remain-on-exit
+    // corpse). The pane stays in the model; only its dead flag flips.
+    case "pane.dead-changed": {
+      const pane = model.panes.get(msg.paneId);
+      if (!pane) return model;
+      if (pane.dead === msg.dead && pane.exitCode === (msg.dead ? msg.exitCode : undefined)) {
+        return model; // no observable change
+      }
+      const panes = new Map(model.panes);
+      panes.set(msg.paneId, {
+        ...pane,
+        dead: msg.dead,
+        exitCode: msg.dead ? msg.exitCode : undefined,
       });
       return { ...model, panes };
     }
@@ -973,7 +1012,7 @@ export class Mirror {
 
     // Track previously-seen model to diff against.
     let prevModel: {
-      panes: ReadonlyMap<PaneId, { cols: number; rows: number }>;
+      panes: ReadonlyMap<PaneId, { cols: number; rows: number; dead: boolean; exitCode: number | undefined }>;
       windows: ReadonlyMap<WindowId, { name: string; layout: WindowLayout }>;
       focus: { paneId: PaneId | null; windowId: WindowId | null };
       exitCodes: ReadonlyMap<PaneId, number>;
@@ -1035,7 +1074,7 @@ export class Mirror {
         }
       }
 
-      // Panes: added / removed / resized
+      // Panes: added / removed / resized / dead-state changed
       for (const [pid, pane] of curr.panes) {
         const prevPane = prev.panes.get(pid);
         if (prevPane === undefined) {
@@ -1047,10 +1086,20 @@ export class Mirror {
             active: pane.paneId === curr.focus.paneId,
             // tc-zna.12: post-attach delta — this is a freshly-arriving pane.
             created: true,
+            // tc-4bv2 / tc-295a.10: carry born-dead state so the renderer can
+            // mark the corpse without waiting for a separate event.
+            ...(pane.dead ? { dead: true } : {}),
+            ...(pane.dead && pane.exitCode !== undefined ? { exitCode: pane.exitCode } : {}),
           });
           subscribeBytes(pid);
-        } else if (prevPane.cols !== pane.cols || prevPane.rows !== pane.rows) {
-          hook.onPaneResized(pid, pane.cols, pane.rows);
+        } else {
+          if (prevPane.cols !== pane.cols || prevPane.rows !== pane.rows) {
+            hook.onPaneResized(pid, pane.cols, pane.rows);
+          }
+          // tc-4bv2 / tc-295a.10: dead-state flip on an existing pane.
+          if (prevPane.dead !== pane.dead || prevPane.exitCode !== pane.exitCode) {
+            hook.onPaneDeadChanged(pid, pane.dead, pane.dead ? pane.exitCode : undefined);
+          }
         }
       }
       for (const [pid] of prev.panes) {
@@ -1070,9 +1119,9 @@ export class Mirror {
       }
 
       // Update prevModel to reflect current state.
-      const newPanes = new Map<PaneId, { cols: number; rows: number }>();
+      const newPanes = new Map<PaneId, { cols: number; rows: number; dead: boolean; exitCode: number | undefined }>();
       for (const [pid, p] of curr.panes) {
-        newPanes.set(pid, { cols: p.cols, rows: p.rows });
+        newPanes.set(pid, { cols: p.cols, rows: p.rows, dead: p.dead, exitCode: p.exitCode });
       }
       const newWindows = new Map<WindowId, { name: string; layout: WindowLayout }>();
       for (const [wid, w] of curr.windows) {
@@ -1114,6 +1163,11 @@ export class Mirror {
         // pane creation.  The factory's bind-on-provenance gate uses this to
         // refuse to consume an own-verb claim for a replay-race pane.
         created: false,
+        // tc-4bv2 / tc-295a.10: a pre-existing dead corpse replays into the
+        // renderer already-dead. This is the all-dead-pane-session path: the
+        // session is in the snapshot and its panes are dead on first render.
+        ...(pane.dead ? { dead: true } : {}),
+        ...(pane.dead && pane.exitCode !== undefined ? { exitCode: pane.exitCode } : {}),
       });
       subscribeBytes(pid);
     }
@@ -1125,9 +1179,9 @@ export class Mirror {
     hook.onConnected();
 
     // Seed prevModel from initial state.
-    const seedPanes = new Map<PaneId, { cols: number; rows: number }>();
+    const seedPanes = new Map<PaneId, { cols: number; rows: number; dead: boolean; exitCode: number | undefined }>();
     for (const [pid, p] of initial.panes) {
-      seedPanes.set(pid, { cols: p.cols, rows: p.rows });
+      seedPanes.set(pid, { cols: p.cols, rows: p.rows, dead: p.dead, exitCode: p.exitCode });
     }
     const seedWindows = new Map<WindowId, { name: string; layout: WindowLayout }>();
     for (const [wid, w] of initial.windows) {

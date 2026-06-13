@@ -79,6 +79,20 @@ export interface PaneInfo {
    * before the verb's real pane arrives.  Other renderers MAY ignore it.
    */
   readonly created: boolean;
+  /**
+   * tc-4bv2 / tc-295a.10: True when this pane is already dead at the moment it
+   * enters the model — a `remain-on-exit` corpse observed on cold attach /
+   * reconnect / snapshot replay. Renderers should render the pane in its dead
+   * state immediately (exit banner, dead icon) without waiting for a separate
+   * close event (a dead corpse never "closes" until reaped). Absent / false
+   * means the pane is live.
+   */
+  readonly dead?: boolean;
+  /**
+   * tc-4bv2 / tc-295a.10: exit code when `dead` is true and known (tmux
+   * `pane_dead_status`); absent when alive or unknowable.
+   */
+  readonly exitCode?: number;
 }
 
 /**
@@ -197,6 +211,25 @@ export interface RenderHook {
    * This is the authoritative size; renderers should update their viewport.
    */
   onPaneResized(paneId: PaneId, cols: number, rows: number): void;
+
+  /**
+   * A pane's dead state changed WITHOUT the pane leaving the session
+   * (tc-4bv2 / tc-295a.10 shared pane-state shape).
+   *
+   * Called when a `pane.dead-changed` delta arrives: a live pane became a
+   * `remain-on-exit` corpse in place (`dead === true`), or — defensively — a
+   * dead pane respawned back to live (`dead === false`). The pane is NOT
+   * removed; `onPaneClosed` is the separate event for a pane whose slot left
+   * tmux entirely.
+   *
+   * Renderers should reflect the dead state (exit banner, dead icon,
+   * reap/rebind affordances) but keep the pane's terminal/tab in place.
+   * `exitCode` is the process exit code when `dead` is true and known.
+   *
+   * Default-implementable as a no-op for renderers that do not distinguish a
+   * dead corpse from a live pane.
+   */
+  onPaneDeadChanged(paneId: PaneId, dead: boolean, exitCode?: number): void;
 
   /**
    * A pane entered or left a mode (normal ↔ copy ↔ view, or future modes).
@@ -405,6 +438,7 @@ export const NoOpRenderHook: RenderHook = {
   onPaneOpened(_pane: PaneInfo): void {},
   onPaneClosed(_paneId: PaneId, _exitCode?: number): void {},
   onPaneResized(_paneId: PaneId, _cols: number, _rows: number): void {},
+  onPaneDeadChanged(_paneId: PaneId, _dead: boolean, _exitCode?: number): void {},
   onPaneModeChanged(_paneId: PaneId, _mode: PaneMode): void {},
   onPaneOutput(_paneId: PaneId, _bytes: Uint8Array): void {},
   onWindowAdded(_window: WindowInfo): void {},
@@ -431,6 +465,7 @@ export type RenderHookCall =
   | { type: "paneOpened"; pane: PaneInfo }
   | { type: "paneClosed"; paneId: PaneId; exitCode?: number }
   | { type: "paneResized"; paneId: PaneId; cols: number; rows: number }
+  | { type: "paneDeadChanged"; paneId: PaneId; dead: boolean; exitCode?: number }
   | { type: "paneModeChanged"; paneId: PaneId; mode: PaneMode }
   | { type: "paneOutput"; paneId: PaneId; bytes: Uint8Array }
   | { type: "windowAdded"; window: WindowInfo }
@@ -475,6 +510,14 @@ export class EchoRenderHook implements RenderHook {
 
   onPaneResized(paneId: PaneId, cols: number, rows: number): void {
     this.calls.push({ type: "paneResized", paneId, cols, rows });
+  }
+
+  onPaneDeadChanged(paneId: PaneId, dead: boolean, exitCode?: number): void {
+    if (exitCode !== undefined) {
+      this.calls.push({ type: "paneDeadChanged", paneId, dead, exitCode });
+    } else {
+      this.calls.push({ type: "paneDeadChanged", paneId, dead });
+    }
   }
 
   onPaneModeChanged(paneId: PaneId, mode: PaneMode): void {

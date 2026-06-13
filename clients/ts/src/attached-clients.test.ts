@@ -84,6 +84,8 @@ function buildBaseModel() {
     cols: 80,
     rows: 24,
     mode: "normal",
+    dead: false,
+    exitCode: undefined,
     scrollbackHandle: undefined,
   });
   m = setFocus(m, { paneId: P0, windowId: W0, sessionId: S0 });

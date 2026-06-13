@@ -522,4 +522,67 @@ describe("TmuxHost — real tmux 3.4", { skip: !tmuxAvailable ? "tmux not found 
     });
     assert.notEqual(r.status, 0, "tmux server should be gone after kill-server");
   });
+
+  // tc-4bv2: regression — attaching with an inherited $TMUX must NOT fail with
+  // "%error … sessions should be nested with care, unset $TMUX to force" + an
+  // immediate %exit. Before the fix the host inherited process.env wholesale,
+  // so an extension host running inside a tmux session (CI / e2e / tmux-native
+  // users) made `attach-session -CC` refuse and exit during bootstrap — the
+  // requery's list-* slots never resolved and READY timed out. The host now
+  // strips $TMUX / $TMUX_PANE from the spawned tmux's env.
+  it("attaches under an inherited $TMUX (no nested-session %error) — tc-4bv2", async () => {
+    const sock = sockName("nested");
+    const sess = "tc-4bv2-nested";
+    after(() => killServer(sock));
+
+    // Pre-create an all-dead-pane session (the operator's reproducer): a pane
+    // with remain-on-exit whose shell has exited.
+    spawnSync("tmux", ["-L", sock, "new-session", "-d", "-s", sess], { timeout: 4000 });
+    spawnSync("tmux", ["-L", sock, "set-option", "-t", sess, "remain-on-exit", "on"], { timeout: 4000 });
+    spawnSync("tmux", ["-L", sock, "send-keys", "-t", sess, "exit", "Enter"], { timeout: 4000 });
+    // Spin-wait for the corpse so the attach genuinely targets a dead pane.
+    const deadline = Date.now() + 3000;
+    let dead = false;
+    while (Date.now() < deadline) {
+      const r = spawnSync("tmux", ["-L", sock, "list-panes", "-t", sess, "-F", "#{pane_dead}"], {
+        encoding: "utf8", timeout: 2000,
+      });
+      if (r.status === 0 && (r.stdout ?? "").trim() === "1") { dead = true; break; }
+    }
+    assert.equal(dead, true, "test setup: pane should be dead before attach");
+
+    const host = createTmuxHost({
+      socketName: sock,
+      sessionName: sess,
+      attach: true,
+      // Simulate the EDH inheriting an outer tmux's environment.
+      env: { TMUX: "/tmp/fake-tmux-socket,99999,0", TMUX_PANE: "%9" },
+    });
+    const chunks: Uint8Array[] = [];
+    host.onData((c) => chunks.push(c));
+    host.onError(() => {});
+
+    await host.start();
+    await waitFor(chunks, (all) => all.indexOf(DCS_INTRO) >= 0, 5000, "DCS intro timeout (attach failed?)");
+
+    // Issue the bootstrap-style query and require a clean %end reply.
+    host.write("list-panes -s -t =" + sess + " -F '#{pane_id} #{pane_dead}'\n");
+    await waitFor(
+      chunks,
+      (all) => (all.toString("utf8").match(/%end/g) ?? []).length >= 2,
+      5000,
+      "no %end reply to list-panes (nested-attach %error?)",
+    );
+
+    const text = Buffer.concat(chunks.map((c) => Buffer.from(c))).toString("utf8");
+    assert.ok(
+      !text.includes("sessions should be nested"),
+      `attach must not emit the nested-session %error; got:\n${text}`,
+    );
+    assert.ok(text.includes("%0 1") || /%\d+ 1/.test(text), "list-panes should report the dead corpse");
+    assert.equal(host.exited, false, "host must not have exited on attach");
+
+    host.kill();
+    await new Promise<void>((r) => { host.onExit(() => r()); });
+  });
 });

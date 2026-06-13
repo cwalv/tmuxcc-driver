@@ -97,6 +97,8 @@ function makePane(
   sessId: SessionId,
   cols = 80,
   rows = 24,
+  dead = false,
+  exitCode: number | undefined = undefined,
 ): Pane {
   return {
     paneId: id,
@@ -105,6 +107,8 @@ function makePane(
     cols,
     rows,
     mode: "normal",
+    dead,
+    exitCode,
     scrollbackHandle: undefined,
   };
 }
@@ -206,6 +210,10 @@ function applyDeltas(snap: SnapshotMessage, deltas: SessionProxyMessage[]): Snap
             windowId: delta.windowId,
             cols: delta.cols,
             rows: delta.rows,
+            // tc-4bv2 / tc-295a.10: carry born-dead state into the snapshot so
+            // the round-trip reconstructs SnapshotPane.dead/exitCode exactly.
+            ...(delta.dead ? { dead: true } : {}),
+            ...(delta.dead && delta.exitCode !== undefined ? { exitCode: delta.exitCode } : {}),
           },
         ];
         break;
@@ -220,6 +228,24 @@ function applyDeltas(snap: SnapshotMessage, deltas: SessionProxyMessage[]): Snap
             ? { ...p, cols: delta.cols, rows: delta.rows }
             : p,
         );
+        break;
+
+      // tc-4bv2 / tc-295a.10: dead-state flip on an existing pane. Mirror the
+      // projection: present dead/exitCode only when dead, absent when alive.
+      case "pane.dead-changed":
+        panes = panes.map((p) => {
+          if (p.paneId !== delta.paneId) return p;
+          const { dead: _d, exitCode: _e, ...rest } = p as typeof p & {
+            dead?: boolean;
+            exitCode?: number;
+          };
+          if (delta.dead) {
+            return delta.exitCode !== undefined
+              ? { ...rest, dead: true, exitCode: delta.exitCode }
+              : { ...rest, dead: true };
+          }
+          return { ...rest };
+        });
         break;
 
       case "pane.mode-changed":
@@ -271,11 +297,17 @@ function normalizeSnapshot(snap: SnapshotMessage) {
       })),
     panes: [...snap.panes]
       .sort((a, b) => String(a.paneId).localeCompare(String(b.paneId)))
-      .map(({ paneId, windowId, cols, rows }) => ({
+      .map(({ paneId, windowId, cols, rows, dead, exitCode }) => ({
         paneId,
         windowId,
         cols,
         rows,
+        // tc-4bv2 / tc-295a.10: include dead-pane state in the round-trip
+        // comparison so diff↔snapshot agreement is verified for corpses.
+        // Normalize absent → false/undefined so an alive pane on one side
+        // compares equal to a pane with the fields omitted on the other.
+        dead: dead ?? false,
+        exitCode: dead ? exitCode : undefined,
       })),
     focus: snap.focus,
   };
@@ -635,6 +667,99 @@ describe("round-trip: applyDeltas(snapshot(prev), diff(prev,next)) == snapshot(n
     const prev = baseModel();
     const next = updateSession(prev, S1, { name: "new-session-name" });
     roundTrip(prev, next);
+  });
+
+  // tc-4bv2 / tc-295a.10: dead-pane state round-trips through diff↔snapshot.
+  it("add a dead pane (born-dead with exit code)", () => {
+    const prev = baseModel();
+    const next = addPane(prev, makePane(P3, W1, S1, 30, 24, true, 0));
+    roundTrip(prev, next);
+  });
+
+  it("live pane → dead corpse in place", () => {
+    const prev = baseModel();
+    const next = updatePane(prev, P1, { dead: true, exitCode: 137 });
+    roundTrip(prev, next);
+  });
+
+  it("dead corpse exitCode becomes known on a later cycle", () => {
+    const prev = updatePane(baseModel(), P1, { dead: true, exitCode: undefined });
+    const next = updatePane(prev, P1, { dead: true, exitCode: 2 });
+    roundTrip(prev, next);
+  });
+
+  it("dead corpse respawns back to live", () => {
+    const prev = updatePane(baseModel(), P1, { dead: true, exitCode: 1 });
+    const next = updatePane(prev, P1, { dead: false, exitCode: undefined });
+    roundTrip(prev, next);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3b. Dead-pane wire shape (tc-4bv2 W2.5 + tc-295a.10 W2.4)
+// ---------------------------------------------------------------------------
+
+describe("dead-pane projection (tc-4bv2 / tc-295a.10)", () => {
+  it("projectSnapshot omits dead/exitCode for a live pane", () => {
+    const snap = projectSnapshot(baseModel(), { seq: 1 });
+    const p = snap.panes.find((x) => x.paneId === P1)!;
+    assert.ok(!("dead" in p), "no dead field for a live pane");
+    assert.ok(!("exitCode" in p), "no exitCode field for a live pane");
+  });
+
+  it("projectSnapshot surfaces a dead pane with exit code", () => {
+    const model = updatePane(baseModel(), P1, { dead: true, exitCode: 0 });
+    const snap = projectSnapshot(model, { seq: 1 });
+    const p = snap.panes.find((x) => x.paneId === P1)!;
+    assert.equal(p.dead, true);
+    assert.equal(p.exitCode, 0);
+  });
+
+  it("projectSnapshot surfaces a dead pane with no exit code (unknown status)", () => {
+    const model = updatePane(baseModel(), P1, { dead: true, exitCode: undefined });
+    const snap = projectSnapshot(model, { seq: 1 });
+    const p = snap.panes.find((x) => x.paneId === P1)!;
+    assert.equal(p.dead, true);
+    assert.ok(!("exitCode" in p), "exitCode omitted when unknown");
+  });
+
+  it("diffModel emits exactly one pane.dead-changed on a live→dead flip", () => {
+    const prev = baseModel();
+    const next = updatePane(prev, P1, { dead: true, exitCode: 5 });
+    const deltas = diffModel(prev, next);
+    const dc = deltas.filter((d) => d.type === "pane.dead-changed");
+    assert.equal(dc.length, 1);
+    const dc0 = dc[0]!;
+    if (dc0.type === "pane.dead-changed") {
+      assert.equal(dc0.paneId, P1);
+      assert.equal(dc0.dead, true);
+      assert.equal(dc0.exitCode, 5);
+    }
+    // No spurious pane.closed/pane.opened for an in-place transition.
+    assert.equal(deltas.filter((d) => d.type === "pane.closed").length, 0);
+    assert.equal(deltas.filter((d) => d.type === "pane.opened").length, 0);
+  });
+
+  it("diffModel carries exitCode through to pane.closed when a dead corpse is reaped", () => {
+    const prev = updatePane(baseModel(), P2, { dead: true, exitCode: 3 });
+    const next = removePane(prev, P2);
+    const deltas = diffModel(prev, next);
+    const closed = deltas.filter((d) => d.type === "pane.closed");
+    assert.equal(closed.length, 1);
+    const c0 = closed[0]!;
+    if (c0.type === "pane.closed") {
+      assert.equal(c0.paneId, P2);
+      assert.equal(c0.exitCode, 3);
+    }
+  });
+
+  it("diffModel omits exitCode on pane.closed for a live pane that vanished", () => {
+    const prev = baseModel(); // P2 live
+    const next = removePane(prev, P2);
+    const deltas = diffModel(prev, next);
+    const closed = deltas.filter((d) => d.type === "pane.closed");
+    assert.equal(closed.length, 1);
+    assert.ok(!("exitCode" in (closed[0] as object)), "no exitCode for a live pane removal");
   });
 });
 

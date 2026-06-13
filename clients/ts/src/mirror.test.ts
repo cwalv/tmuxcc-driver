@@ -141,6 +141,8 @@ function makePane(
     cols,
     rows,
     mode: "normal",
+    dead: false,
+    exitCode: undefined,
     scrollbackHandle: undefined,
   };
 }
@@ -361,6 +363,76 @@ describe("applyDelta — pane deltas", () => {
     const model = applyDelta(init, msg);
     assert.equal(model.panes.get(P1)!.mode, "copy");
     assert.equal(model.panes.get(P2)!.mode, "normal"); // unchanged
+  });
+});
+
+// ── Dead-pane shape (tc-4bv2 / tc-295a.10) ──────────────────────────────────
+
+describe("dead-pane mirror shape (tc-4bv2 / tc-295a.10)", () => {
+  it("applySnapshot reads dead/exitCode from a dead SnapshotPane", () => {
+    const snap: SnapshotMessage = {
+      type: "snapshot",
+      seq: 2,
+      session: { sessionId: S1, name: "main" },
+      windows: [
+        { windowId: W1, name: "shell", active: true, layout: makeSnapshot(2).windows[0]!.layout,
+          synchronizePanes: false, monitorActivity: true, monitorSilence: 0 },
+      ],
+      panes: [
+        { paneId: P1, windowId: W1, cols: 80, rows: 24, dead: true, exitCode: 0 },
+        { paneId: P2, windowId: W1, cols: 40, rows: 24 },
+      ],
+      focus: { paneId: P1, windowId: W1 },
+    };
+    const { model } = applySnapshot(snap);
+    assert.equal(model.panes.get(P1)!.dead, true);
+    assert.equal(model.panes.get(P1)!.exitCode, 0);
+    assert.equal(model.panes.get(P2)!.dead, false, "live pane defaults dead:false");
+    assert.equal(model.panes.get(P2)!.exitCode, undefined);
+  });
+
+  it("pane.opened born-dead carries dead/exitCode into the model", () => {
+    const { model: init } = applySnapshot(makeSnapshot(2));
+    const msg: SessionProxyMessage = {
+      type: "pane.opened",
+      seq: 3,
+      paneId: P3,
+      windowId: W1,
+      cols: 30,
+      rows: 24,
+      active: false,
+      dead: true,
+      exitCode: 7,
+    };
+    const model = applyDelta(init, msg);
+    assert.equal(model.panes.get(P3)!.dead, true);
+    assert.equal(model.panes.get(P3)!.exitCode, 7);
+  });
+
+  it("pane.dead-changed flips dead in place (pane stays in the model)", () => {
+    const { model: init } = applySnapshot(makeSnapshot(2));
+    assert.equal(init.panes.get(P1)!.dead, false);
+    const dead = applyDelta(init, {
+      type: "pane.dead-changed", seq: 3, paneId: P1, dead: true, exitCode: 137,
+    } as SessionProxyMessage);
+    assert.ok(dead.panes.has(P1), "pane still present");
+    assert.equal(dead.panes.get(P1)!.dead, true);
+    assert.equal(dead.panes.get(P1)!.exitCode, 137);
+
+    // Respawn back to live clears the exit code.
+    const live = applyDelta(dead, {
+      type: "pane.dead-changed", seq: 4, paneId: P1, dead: false,
+    } as SessionProxyMessage);
+    assert.equal(live.panes.get(P1)!.dead, false);
+    assert.equal(live.panes.get(P1)!.exitCode, undefined);
+  });
+
+  it("pane.dead-changed for an unknown pane is a no-op", () => {
+    const { model: init } = applySnapshot(makeSnapshot(2));
+    const model = applyDelta(init, {
+      type: "pane.dead-changed", seq: 3, paneId: P3, dead: true,
+    } as SessionProxyMessage);
+    assert.equal(model, init, "same reference — no change");
   });
 });
 

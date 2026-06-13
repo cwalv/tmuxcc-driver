@@ -41,6 +41,7 @@
  *   3. layout.updated      — window layout changes (may ref existing panes)
  *   4. pane.resized        — size changes on existing panes
  *   5. pane.mode-changed   — mode changes on existing panes
+ *   5b. pane.dead-changed  — dead-state flip on existing panes (tc-4bv2/tc-295a.10)
  *   6. window.renamed      — renames (entity already exists)
  *   7. session.renamed     — session rename
  *   8. focus.changed       — focus (all referenced entities now exist)
@@ -68,6 +69,7 @@ import type {
   PaneClosedMessage,
   PaneResizedMessage,
   PaneModeChangedMessage,
+  PaneDeadChangedMessage,
   WindowAddedMessage,
   WindowClosedMessage,
   WindowRenamedMessage,
@@ -152,12 +154,25 @@ export function projectSnapshot(
 
   const panes: SnapshotPane[] = [];
   for (const pane of model.panes.values()) {
-    panes.push({
+    // tc-4bv2 / tc-295a.10: surface dead-pane state in the snapshot so an
+    // all-dead-pane session renders (and is reapable). Keep `dead`/`exitCode`
+    // off the wire when the pane is alive — additive optional fields, absent
+    // means false/unknown (matches the conformance default).
+    const base: SnapshotPane = {
       paneId: pane.paneId,
       windowId: pane.windowId,
       cols: pane.cols,
       rows: pane.rows,
-    });
+    };
+    if (pane.dead) {
+      panes.push(
+        pane.exitCode !== undefined
+          ? { ...base, dead: true, exitCode: pane.exitCode }
+          : { ...base, dead: true },
+      );
+    } else {
+      panes.push(base);
+    }
   }
 
   const msg: SnapshotMessage = {
@@ -218,6 +233,10 @@ export function diffModel(prev: SessionModel, next: SessionModel): SessionProxyM
   for (const [id, pane] of next.panes) {
     if (!prev.panes.has(id)) {
       const win = next.windows.get(pane.windowId);
+      // tc-4bv2 / tc-295a.10: a pane can be observed already-dead on first
+      // sight (cold attach / reconnect to a remain-on-exit corpse). Carry the
+      // dead flag + exitCode so the client renders it dead without waiting for
+      // a follow-up delta. Keep the fields off when alive (additive optional).
       const msg: PaneOpenedMessage = {
         type: "pane.opened",
         seq: SEQ,
@@ -226,6 +245,8 @@ export function diffModel(prev: SessionModel, next: SessionModel): SessionProxyM
         cols: pane.cols,
         rows: pane.rows,
         active: win?.activePaneId === pane.paneId,
+        ...(pane.dead ? { dead: true } : {}),
+        ...(pane.dead && pane.exitCode !== undefined ? { exitCode: pane.exitCode } : {}),
       };
       out.push(msg);
     }
@@ -278,6 +299,34 @@ export function diffModel(prev: SessionModel, next: SessionModel): SessionProxyM
         seq: SEQ,
         paneId: pane.paneId,
         mode: pane.mode,
+      };
+      out.push(msg);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 5b. pane.dead-changed — dead-state flip on existing panes (tc-4bv2 / tc-295a.10)
+  //
+  // A pane present in BOTH prev and next whose `dead` flag changed: it became a
+  // remain-on-exit corpse (or, defensively, respawned back to live) WITHOUT
+  // leaving list-panes. This is the live transition signal; a pane that LEFT
+  // list-panes is handled by pane.closed below (the strong contract). We also
+  // emit when only the exitCode became known while dead stays true (a corpse
+  // whose status tmux reported on a later requery).
+  // -------------------------------------------------------------------------
+  for (const [id, pane] of next.panes) {
+    const prevPane = prev.panes.get(id);
+    if (!prevPane) continue; // new panes handled in pane.opened (carry dead there)
+    const deadFlipped = prevPane.dead !== pane.dead;
+    const exitCodeAppeared =
+      pane.dead && prevPane.dead && prevPane.exitCode !== pane.exitCode;
+    if (deadFlipped || exitCodeAppeared) {
+      const msg: PaneDeadChangedMessage = {
+        type: "pane.dead-changed",
+        seq: SEQ,
+        paneId: pane.paneId,
+        dead: pane.dead,
+        ...(pane.dead && pane.exitCode !== undefined ? { exitCode: pane.exitCode } : {}),
       };
       out.push(msg);
     }
@@ -386,11 +435,17 @@ export function diffModel(prev: SessionModel, next: SessionModel): SessionProxyM
   // -------------------------------------------------------------------------
   for (const [id, pane] of prev.panes) {
     if (!next.panes.has(id)) {
+      // tc-295a.10 strong contract: exactly one pane.closed per removed slot.
+      // Carry the exit code through when the pane we are closing was a dead
+      // corpse with a known pane_dead_status (the shell-exit + remain-on-exit
+      // path reaps a corpse whose code we already read). Otherwise the code is
+      // unknowable (slot vanished without a corpse phase) and stays absent.
       const msg: PaneClosedMessage = {
         type: "pane.closed",
         seq: SEQ,
         paneId: pane.paneId,
         windowId: pane.windowId,
+        ...(pane.dead && pane.exitCode !== undefined ? { exitCode: pane.exitCode } : {}),
       };
       out.push(msg);
     }
