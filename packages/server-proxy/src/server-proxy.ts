@@ -118,6 +118,22 @@ export interface ServerProxyOptions {
    * (`server-proxy.info` then reports `logPath: null`).
    */
   logPath?: string;
+
+  /**
+   * tc-295a.41 (test-harness affordance): when true, the broker does NOT
+   * self-exit with reason "tmux-gone".  By default (`false`/undefined — the
+   * production behavior, unchanged) a watcher EOF + a `tmux ls` probe that finds
+   * no tmux server triggers `_selfExit("tmux-gone")` and removes the socket.
+   * A long-lived embedded broker shared across a whole integration-test run
+   * (Layer A `runTest.ts`) instead wants to STAY UP through transient
+   * empty-server windows — session-churning specs momentarily empty the tmux
+   * server, and a self-exit there would wedge every later spec with a dropped
+   * server-proxy socket.  With this flag set, a tmux-gone watcher EOF re-enters
+   * watcher poll mode (waiting for a session to reappear) rather than exiting;
+   * the idle self-exit and all other lifecycle behavior are unchanged.  The
+   * production entry point never sets this.
+   */
+  persistThroughTmuxGone?: boolean;
 }
 
 /**
@@ -357,6 +373,8 @@ class ServerProxyImpl implements ServerProxyHandle {
   // ── tc-3iv self-exit state ──────────────────────────────────────────────────
   /** Idle hysteresis window (ms) before self-exit at zero IPC clients. */
   private readonly _idleExitMs: number;
+  /** tc-295a.41: suppress the "tmux-gone" self-exit (test-harness affordance). */
+  private readonly _persistThroughTmuxGone: boolean;
   /** Raw IPC connection count, maintained by the socket server (§6.2 "client"). */
   private _ipcClientCount = 0;
   /** Pending idle self-exit timer; armed whenever the client count is zero. */
@@ -392,6 +410,7 @@ class ServerProxyImpl implements ServerProxyHandle {
     this._socketDirName = opts.socketName;
     this._runtimeDirOpts = opts.runtimeDir !== undefined ? { runtimeDir: opts.runtimeDir } : {};
     this._idleExitMs = opts.idleExitMs ?? DEFAULT_IDLE_EXIT_MS;
+    this._persistThroughTmuxGone = opts.persistThroughTmuxGone ?? false;
   }
 
   endpoint(): string {
@@ -604,6 +623,13 @@ class ServerProxyImpl implements ServerProxyHandle {
           );
         }
         this._scheduleWatcherRespawn(this._watcherRespawnDelayMs);
+      } else if (this._persistThroughTmuxGone) {
+        // tc-295a.41 (test-harness affordance): the tmux server is gone, but a
+        // long-lived embedded broker must NOT exit — re-enter watcher poll mode
+        // so it adopts the next session/server that appears.  The watcher's own
+        // pre-attach poll handles "no server yet" (listSessions → null/empty →
+        // schedulePoll), and each poll tick re-drives a full refresh.
+        this._scheduleWatcherRespawn(WATCHER_RESPAWN_BACKOFF_INIT_MS);
       } else {
         void this._selfExit("tmux-gone");
       }
