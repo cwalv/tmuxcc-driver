@@ -41,6 +41,21 @@ function makeSubDir(baseDir: string, socketName: string): string {
 }
 
 /**
+ * Back-date a directory's atime/mtime to `Date.now() - offsetMs` (default 5 s).
+ *
+ * WHY: `stat.mtimeMs` has sub-millisecond precision whereas `Date.now()` returns
+ * an integer millisecond.  On a fast machine, a freshly-created dir can have a
+ * fractional mtime that is numerically larger than `Date.now()`, making
+ * `Date.now() - stat.mtimeMs < 0`, which triggers the age guard even when the
+ * caller passes `minAgeMs: 0`.  Back-dating ensures the fixture is unambiguously
+ * older than the cutoff so the GC sweep always reaches it.
+ */
+function backdateDir(dir: string, offsetMs = 5_000): void {
+  const t = new Date(Date.now() - offsetMs);
+  fs.utimesSync(dir, t, t);
+}
+
+/**
  * Start a real unix-domain server listening on `sockPath`.
  * Returns a stop function that closes the server.
  */
@@ -118,6 +133,9 @@ describe("gcStaleRuntimeDirs (tc-s1sm)", () => {
       const stop = await startListeningServer(sockPath);
       await stop();
       // Now sockPath may or may not exist, but no process listens on it.
+      // Back-date: the async server start/stop adds real delay but can still be
+      // sub-millisecond-precise relative to Date.now() on a loaded machine.
+      backdateDir(staleDir);
 
       const currentName = nextSocketName();
       // currentName dir does not need to exist — we just pass it as the guard.
@@ -140,6 +158,11 @@ describe("gcStaleRuntimeDirs (tc-s1sm)", () => {
       const orphanName = nextSocketName();
       const orphanDir = makeSubDir(baseDir, orphanName);
       // No server-proxy.sock — just an empty dir.
+      // Back-date so the age guard (Date.now() - stat.mtimeMs < minAgeMs) never
+      // fires: stat.mtimeMs has sub-millisecond precision; on a fast machine the
+      // fractional part can exceed the integer Date.now(), yielding a negative
+      // diff even when minAgeMs=0.
+      backdateDir(orphanDir);
 
       const currentName = nextSocketName();
       await gcStaleRuntimeDirs(baseDir, currentName, { probeTimeoutMs: 200, minAgeMs: 0 });
@@ -210,7 +233,9 @@ describe("gcStaleRuntimeDirs (tc-s1sm)", () => {
       const stale2 = nextSocketName();
       const stale1Dir = makeSubDir(baseDir, stale1);
       const stale2Dir = makeSubDir(baseDir, stale2);
-      void stale2Dir; // stale2 dir stays; stale1 is pre-removed.
+      // Back-date both dirs so the age guard never fires on a fast machine.
+      backdateDir(stale1Dir);
+      backdateDir(stale2Dir);
 
       // Remove stale1 before GC runs so the sweep encounters a vanished dir.
       fs.rmSync(stale1Dir, { recursive: true, force: true });
@@ -279,6 +304,9 @@ describe("gcStaleRuntimeDirs (tc-s1sm)", () => {
       );
 
       // With the guard disabled the same dir is treated as an orphan.
+      // Back-date before the second sweep so the sub-millisecond mtime precision
+      // of a just-created dir can never make Date.now() - stat.mtimeMs negative.
+      backdateDir(youngDir);
       await gcStaleRuntimeDirs(baseDir, currentName, { probeTimeoutMs: 200, minAgeMs: 0 });
       assert.equal(
         fs.existsSync(youngDir),
