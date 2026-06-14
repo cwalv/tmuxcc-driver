@@ -390,6 +390,15 @@ class TmuxHostImpl implements TmuxHost {
         this._emitError(err);
       });
 
+      // tc-295a.38: proc.stdin can receive EPIPE when the bridge process dies
+      // (e.g. after an external kill-server) while the pipeline is still active
+      // and trying to send commands. Without an error handler on proc.stdin the
+      // EPIPE becomes an uncaughtException → crash. Route it through _emitError
+      // so it is handled identically to proc.stdout errors and proc errors.
+      proc.stdin!.on("error", (err) => {
+        this._emitError(err);
+      });
+
       proc.stderr!.on("data", (chunk: Buffer) => {
         if (this._stderrHandlers.size > 0) {
           const bytes = new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);

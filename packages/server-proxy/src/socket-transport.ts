@@ -112,7 +112,13 @@ class SocketTransport implements Transport {
   // ── Control plane ──────────────────────────────────────────────────────────
 
   sendControl(msg: Parameters<Transport["sendControl"]>[0]): void | Promise<void> {
-    if (this._closed) return;
+    // tc-295a.38: guard on BOTH _closed and socket.destroyed.  _closed is set
+    // by our own close() / _onClose() calls; socket.destroyed can become true
+    // first when the OS socket is torn down externally (e.g. a remote RST that
+    // arrives before our 'close' event handler runs).  Checking socket.destroyed
+    // prevents a write-after-destroy call that would produce an unhandled async
+    // EPIPE on Node.js internal write-queue flush.
+    if (this._closed || this._socket.destroyed) return;
     const json = JSON.stringify(msg);
     const payload = Buffer.from(json + "\n", "utf8");
     // Length-prefix the control message (4-byte u32be)
@@ -132,7 +138,8 @@ class SocketTransport implements Transport {
   // ── Data plane ─────────────────────────────────────────────────────────────
 
   sendData(paneId: PaneId, bytes: Uint8Array): void | Promise<void> {
-    if (this._closed) return;
+    // tc-295a.38: see sendControl for the dual guard rationale.
+    if (this._closed || this._socket.destroyed) return;
     // Mint a per-pane seq and encode as a data frame
     const key = String(paneId);
     const seq = (this._dataSeqs.get(key) ?? 0);
@@ -155,7 +162,7 @@ class SocketTransport implements Transport {
    */
   private _ensureDrainPromise(): Promise<void> {
     if (this._drainPromise !== null) return this._drainPromise;
-    if (this._closed) return Promise.resolve();
+    if (this._closed || this._socket.destroyed) return Promise.resolve();
     this._drainPromise = new Promise<void>((resolve) => {
       this._drainResolve = resolve;
     });
