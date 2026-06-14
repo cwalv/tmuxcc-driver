@@ -100,7 +100,16 @@ async function main(): Promise<void> {
   // Create the unix socket server
   const server = net.createServer((socket) => {
     const transport = createSocketTransport(socket);
-    void sessionProxy.addClient(transport);
+    // tc-295a.21: catch per-connection rejections (e.g. raw/unhandshaked connections).
+    // Without this catch, a HandshakeError from a malformed connection becomes an
+    // unhandled promise rejection → Node ≥ 22 exits → ALL sessions on this proxy
+    // are lost. Per-connection catch: log fail-loud, close that socket, continue.
+    sessionProxy.addClient(transport).catch((err: unknown) => {
+      process.stderr.write(
+        `[session-proxy] client connection rejected (handshake failed): ${String(err)}\n`,
+      );
+      try { transport.close(); } catch { /* already closed by addClient's catch */ }
+    });
   });
 
   await new Promise<void>((resolve, reject) => {
