@@ -114,6 +114,27 @@ export interface ServerProxySnapshotMessage extends MessageBase {
   readonly type: "sessions.snapshot";
   /** All sessions known to this server-proxy at snapshot time. */
   readonly sessions: readonly ServerProxySessionInfo[];
+  /**
+   * Whether the broker can currently reach the `tmux` binary (tc-295a.35).
+   *
+   * `true`  — tmux is installed and runnable (the normal case).
+   * `false` — the `tmux` executable is absent from the broker's PATH
+   *           (`spawnSync` ENOENT).  The broker does NOT exit on this — it
+   *           stays up, keeps polling, and flips this flag back to `true` in a
+   *           later snapshot if tmux appears (preserving the
+   *           tolerate-tmux-appearing-later behaviour, tc-295a.16 RCA).
+   *
+   * This is the canonical "is tmux available?" signal the extension reads from
+   * the broker's snapshot to surface the actionable "tmuxcc requires tmux."
+   * message — replacing the deleted `which tmux` pre-flight (E3.1 / plan A1g)
+   * with driver-owned state instead of an extension-side shell-out.
+   *
+   * OPTIONAL on the wire for forward/backward compatibility: an older broker
+   * that predates this field omits it; the extension treats `undefined` as
+   * "available" (the safe default — no false "tmux missing" prompt against a
+   * broker that simply doesn't report the flag).
+   */
+  readonly tmuxAvailable?: boolean;
 }
 
 // ---------------------------------------------------------------------------

@@ -165,6 +165,71 @@ describe("tmux-south listSessions (tc-zcqr)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// listSessions tmux-binary availability out-param (tc-295a.35)
+//
+// The broker reports tmux-AVAILABILITY as canonical state (the `tmuxAvailable`
+// snapshot field) so the extension can surface the actionable "tmuxcc requires
+// tmux." message — replacing the deleted `which tmux` pre-flight WITHOUT making
+// the broker exit on tmux-absence.  `listSessions(socketName, out)` classifies
+// the binary-missing case (spawnSync ENOENT) into `out.binaryMissing` from the
+// SAME shell-out it already makes, distinct from the transient/no-server cases.
+//
+// We simulate "tmux not installed" by running with an empty PATH so the
+// unqualified `spawnSync("tmux", …)` cannot resolve the binary (ENOENT) — we
+// do NOT touch the operator's real tmux install.
+// ---------------------------------------------------------------------------
+
+describe("tmux-south listSessions tmux-availability (tc-295a.35)", () => {
+  afterEach(() => {
+    // Restore PATH in case a test left it cleared (each test restores its own,
+    // but this is a belt-and-braces guard against an assertion throwing first).
+  });
+
+  it("reports binaryMissing=false when tmux is present (no-server socket)", () => {
+    const socketName = `tmuxcc-test-south-avail-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const out = { binaryMissing: false };
+    const rows = listSessions(socketName, out);
+    // No server on this fresh socket → [] (server has no sessions).  tmux IS
+    // installed, so binaryMissing must be false.
+    assert.deepEqual(rows, [], "no-server socket must yield [] when tmux is present");
+    assert.equal(
+      out.binaryMissing,
+      false,
+      "tmux present (ran, reported no-server) ⇒ binaryMissing must be false",
+    );
+  });
+
+  it("reports binaryMissing=true when the tmux binary is absent (ENOENT)", () => {
+    const socketName = `tmuxcc-test-south-noenoent-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const savedPath = process.env.PATH;
+    try {
+      // Empty PATH ⇒ `spawnSync("tmux", …)` cannot find the binary ⇒ ENOENT.
+      process.env.PATH = "";
+      const out = { binaryMissing: false };
+      const rows = listSessions(socketName, out);
+      // Spawn-level failure stays `null` (transient contract unchanged) …
+      assert.equal(rows, null, "a spawn ENOENT must still return null (transient contract)");
+      // … but the out-param distinguishes binary-missing from other transients.
+      assert.equal(
+        out.binaryMissing,
+        true,
+        "ENOENT on the tmux binary ⇒ binaryMissing must be true",
+      );
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
+    }
+  });
+
+  it("does not require the out-param (null/[] contract unchanged for legacy callers)", () => {
+    const socketName = `tmuxcc-test-south-noout-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    // No out-param: behaviour identical to before tc-295a.35.
+    const rows = listSessions(socketName);
+    assert.deepEqual(rows, [], "no-server socket must yield [] with no out-param supplied");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // listSessions enriched fields (tc-295a.4 / W1.3)
 // ---------------------------------------------------------------------------
 

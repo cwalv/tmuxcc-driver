@@ -343,6 +343,61 @@ describe("server-proxy – unit (no tmux)", () => {
       await serverProxy.shutdown();
     }
   });
+
+  // ── tc-295a.35: broker reports tmux-availability as canonical state ────────
+  //
+  // De-hollows the missing-tmux oracle on the DRIVER side: this proves the
+  // broker comes up READY without tmux (preserving tolerance — it does NOT
+  // exit) AND reports `tmuxAvailable: false` in its snapshot, the canonical
+  // state the extension reads to surface "tmuxcc requires tmux.".  We simulate
+  // tmux-absence with an empty PATH during start()+snapshot (the unqualified
+  // `spawnSync("tmux", …)` then ENOENTs); PATH is restored in `finally` so the
+  // operator's real install is untouched.
+
+  it("U5 (tc-295a.35): snapshot reports tmuxAvailable=true when tmux is present", async () => {
+    const socketName = nextSocketName();
+    const serverProxy = createServerProxy({ socketName });
+    await serverProxy.start();
+    try {
+      const { snapshot } = await connectToServerProxy(serverProxy.endpoint());
+      assert.equal(snapshot.type, "sessions.snapshot");
+      // tmux installed on this host → broker reports available.
+      assert.equal(
+        snapshot.tmuxAvailable,
+        true,
+        `tmux present ⇒ snapshot.tmuxAvailable must be true; got ${String(snapshot.tmuxAvailable)}`,
+      );
+    } finally {
+      await serverProxy.shutdown();
+    }
+  });
+
+  it("U6 (tc-295a.35): broker stays up and snapshot reports tmuxAvailable=false when tmux is absent", async () => {
+    const socketName = nextSocketName();
+    const savedPath = process.env.PATH;
+    let serverProxy: ServerProxyHandle | undefined;
+    try {
+      // Empty PATH ⇒ the broker's `listSessions` spawn ENOENTs (tmux not found).
+      process.env.PATH = "";
+      serverProxy = createServerProxy({ socketName });
+      // The broker MUST come up READY without tmux — it tolerates absence.
+      await serverProxy.start();
+
+      const { snapshot } = await connectToServerProxy(serverProxy.endpoint());
+      assert.equal(snapshot.type, "sessions.snapshot");
+      assert.equal(snapshot.sessions.length, 0, "no tmux ⇒ no sessions");
+      assert.equal(
+        snapshot.tmuxAvailable,
+        false,
+        `tmux absent ⇒ snapshot.tmuxAvailable must be false; got ${String(snapshot.tmuxAvailable)}`,
+      );
+    } finally {
+      // Restore PATH BEFORE shutdown so cleanup tooling resolves normally.
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
+      if (serverProxy) await serverProxy.shutdown();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

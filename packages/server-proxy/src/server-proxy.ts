@@ -76,7 +76,7 @@ import { serverProxySocketPath, sessionProxySocketPath, removeSocket, restrictSo
 import { createServerProxyMetrics } from "./metrics.js";
 import type { ServerProxyMetrics } from "./metrics.js";
 import { listSessions, createSession, killSession, createTmuxWatcher, probeTmuxAlive, setWindowSynchronizePanes, setWindowMonitorActivity, setWindowMonitorSilence, setSessionMarker, getTmuxServerPid, countTmuxccClientsBySession } from "./tmux-south.js";
-import type { TmuxWatcher } from "./tmux-south.js";
+import type { TmuxWatcher, TmuxAvailabilityOut } from "./tmux-south.js";
 import { createSessionProxySupervisor } from "./session-proxy-supervisor.js";
 import type { SessionProxySupervisor, SessionProxyExitInfo } from "./session-proxy-supervisor.js";
 import type { RuntimeDirOptions } from "./runtime-dir.js";
@@ -336,6 +336,23 @@ class ServerProxyImpl implements ServerProxyHandle {
    * started (ext-a §6.2 "adopted server").  Reported in `server-proxy.info`.
    */
   private _adoptedExistingServer = false;
+
+  // ── tc-295a.35 tmux-availability state ─────────────────────────────────────
+  /**
+   * Whether the `tmux` binary is currently reachable (tc-295a.35).
+   *
+   * Canonical driver-owned state: `_refreshSessions` flips it false when
+   * `listSessions` reports a binary-missing ENOENT and true again when tmux
+   * runs.  Reported in every `sessions.snapshot` so the extension can surface
+   * the actionable "tmuxcc requires tmux." message — the replacement for the
+   * deleted `which tmux` pre-flight (E3.1 / plan A1g), WITHOUT the broker
+   * exiting on tmux-absence (it stays up and tolerates tmux appearing later;
+   * tc-295a.16 RCA).
+   *
+   * Starts `true` (optimistic): the first `_refreshSessions` in `start()`
+   * corrects it before the first client snapshot is built.
+   */
+  private _tmuxAvailable = true;
 
   // ── tc-3iv self-exit state ──────────────────────────────────────────────────
   /** Idle hysteresis window (ms) before self-exit at zero IPC clients. */
@@ -801,7 +818,25 @@ class ServerProxyImpl implements ServerProxyHandle {
     // (status 0 with empty stdout / "no server running" stderr).  On a
     // transient failure, leave _sessions/_byName intact; clearing on a flake
     // is exactly what produced the "Session not found after creation" race.
-    const rows = listSessions(this._opts.socketName);
+    // tc-295a.35: classify tmux-binary availability from the SAME shell-out
+    // (no extra spawn).  `listSessions` sets `availability.binaryMissing` true
+    // iff the spawn failed with ENOENT (tmux not on PATH).  We track it as
+    // canonical state and re-broadcast a fresh snapshot to connected clients
+    // when it flips, so the extension can surface / clear the actionable
+    // "tmuxcc requires tmux." message without the broker ever exiting on
+    // tmux-absence (tolerate-tmux-appearing-later, tc-295a.16 RCA).
+    const availability: TmuxAvailabilityOut = { binaryMissing: false };
+    const rows = listSessions(this._opts.socketName, availability);
+    const nowAvailable = !availability.binaryMissing;
+    if (nowAvailable !== this._tmuxAvailable) {
+      this._tmuxAvailable = nowAvailable;
+      // Only push if we already have live clients AND start() has finished:
+      // start()'s initial refresh runs BEFORE the socket server accepts
+      // connections, so the first client gets the corrected flag in its
+      // post-handshake snapshot anyway; a flip AFTER that is the case that
+      // needs an unsolicited re-broadcast.
+      if (this._started) this._broadcastSnapshot();
+    }
     if (rows === null) {
       // Transient failure — do not mutate the session table.  The watcher /
       // next claim will re-drive a refresh.
@@ -936,7 +971,31 @@ class ServerProxyImpl implements ServerProxyHandle {
         lastActivity: entry.lastActivity,
       });
     }
-    return { type: "sessions.snapshot", seq, sessions };
+    // tc-295a.35: canonical tmux-availability flag carried in every snapshot.
+    return { type: "sessions.snapshot", seq, sessions, tmuxAvailable: this._tmuxAvailable };
+  }
+
+  /**
+   * Re-broadcast a full `sessions.snapshot` to every connected client
+   * (tc-295a.35).
+   *
+   * Used when `_tmuxAvailable` flips AFTER clients have connected — the
+   * post-handshake snapshot they received is now stale on that one field, so
+   * we push a fresh full snapshot.  A snapshot (not a bespoke delta) keeps the
+   * extension's SocketStore consumer on its existing FULL-REPLACE path: the
+   * session table is re-asserted identically and `tmuxAvailable` updates
+   * atomically with it.
+   */
+  private _broadcastSnapshot(): void {
+    for (const [transport, state] of this._clients) {
+      const snapshot = this._buildSnapshot(state.nextSeq);
+      state.nextSeq++;
+      try {
+        transport.sendControl(snapshot as unknown as Parameters<typeof transport.sendControl>[0]);
+      } catch {
+        this._clients.delete(transport);
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------

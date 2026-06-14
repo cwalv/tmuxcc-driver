@@ -103,6 +103,30 @@ export interface TmuxSessionRow {
 }
 
 /**
+ * Optional out-parameter for {@link listSessions} reporting whether the tmux
+ * BINARY itself is present (tc-295a.35).
+ *
+ * `listSessions` collapses every spawn-level failure (timeout, ENOENT, …) to
+ * `null` so its session-table callers (`_refreshSessions`, the watcher) treat
+ * all of them identically as "transient — leave the cache alone".  But ONE of
+ * those spawn failures — `ENOENT` on the `tmux` binary — is NOT transient: it
+ * means tmux is not installed, which the broker reports as canonical state
+ * (`tmuxAvailable: false` in its snapshot) so the extension can surface the
+ * actionable "tmuxcc requires tmux." message.  This out-param lets a caller
+ * that cares (the broker's `_refreshSessions`) read that distinction WITHOUT a
+ * second shell-out and WITHOUT changing the `null`/`[]` contract every other
+ * caller depends on.
+ *
+ * `binaryMissing` is set on EVERY call:
+ *   - `true`  iff the spawn failed with ENOENT (tmux not on PATH).
+ *   - `false` for every other outcome (success, no-server, timeout, other
+ *     spawn errors) — i.e. tmux ran (or could have run), so it IS installed.
+ */
+export interface TmuxAvailabilityOut {
+  binaryMissing: boolean;
+}
+
+/**
  * Run `tmux -L <socketName> list-sessions -F '...'` synchronously and
  * return the parsed rows.
  *
@@ -120,8 +144,18 @@ export interface TmuxSessionRow {
  * (leave the cache alone).  The previous behaviour conflated both as `[]`,
  * which silently dropped the just-created session out of `_byName` and
  * surfaced as the "Session not found after creation" claim race.
+ *
+ * tc-295a.35: pass an optional {@link TmuxAvailabilityOut} to additionally
+ * learn whether the `null` (or any) return was caused by the tmux binary being
+ * absent (`out.binaryMissing`).  The broker uses this to report
+ * `tmuxAvailable` as canonical state in its snapshot — see
+ * {@link TmuxAvailabilityOut}.  Callers that don't pass `out` see no behaviour
+ * change (the `null`/`[]` contract is unchanged).
  */
-export function listSessions(socketName: string): TmuxSessionRow[] | null {
+export function listSessions(
+  socketName: string,
+  out?: TmuxAvailabilityOut,
+): TmuxSessionRow[] | null {
   // Fields: session_id  session_name  session_windows  session_attached
   //         @tmuxcc  session_activity
   // Delimiter: tab (\t) avoids accidental splits on spaces in session names.
@@ -131,6 +165,16 @@ export function listSessions(socketName: string): TmuxSessionRow[] | null {
     ["-L", socketName, "list-sessions", "-F", FORMAT],
     { encoding: "utf8", timeout: 5_000 },
   );
+
+  // tc-295a.35: classify the binary-missing case.  `spawnSync` sets
+  // `result.error.code === "ENOENT"` iff the `tmux` executable could not be
+  // found on PATH.  Every other outcome (it ran, or failed for a different
+  // reason) means the binary IS present.  Reported via the out-param only;
+  // the session-table return value is unchanged.
+  if (out) {
+    const code = (result.error as NodeJS.ErrnoException | undefined)?.code;
+    out.binaryMissing = code === "ENOENT";
+  }
 
   // Spawn-level failure (timeout, ENOENT on tmux binary, etc.) — transient,
   // do NOT degrade to "empty session list".
