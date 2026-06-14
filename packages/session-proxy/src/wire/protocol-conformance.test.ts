@@ -925,6 +925,27 @@ describe("protocol schema conformance", () => {
       assert.ok(validateClientMsg(msg as ClientMessage), JSON.stringify(validateClientMsg.errors));
     });
 
+    // tc-6gnc.9: rename-session
+    it("SessionProxyCommandRequestMessage (rename-session) — tc-6gnc.9", () => {
+      const msg: SessionProxyCommandRequestMessage = {
+        type: "command.request",
+        seq: 16,
+        correlationId: "req-020",
+        command: { kind: "rename-session", name: "new-session-name" },
+      };
+      assert.ok(validateClientMsg(msg as ClientMessage), JSON.stringify(validateClientMsg.errors));
+    });
+
+    it("SessionProxyCommandRequestMessage (rename-session with spaces) — tc-6gnc.9", () => {
+      const msg: SessionProxyCommandRequestMessage = {
+        type: "command.request",
+        seq: 17,
+        correlationId: "req-021",
+        command: { kind: "rename-session", name: "my project session" },
+      };
+      assert.ok(validateClientMsg(msg as ClientMessage), JSON.stringify(validateClientMsg.errors));
+    });
+
     it("SessionProxyCommandResponseMessage (pane.capture success with text) — tc-295a.11", () => {
       const msg: SessionProxyCommandResponseMessage = {
         type: "command.response",

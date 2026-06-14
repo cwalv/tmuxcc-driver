@@ -121,6 +121,8 @@ export type {
   SplitPaneCommand,
   ClosePaneCommand,
   RenameWindowCommand,
+  // tc-6gnc.9: rename the bound tmux session
+  RenameSessionCommand,
   SelectPaneCommand,
   ResizePaneCommand,
   // tc-zna.3: managed-window resize transaction

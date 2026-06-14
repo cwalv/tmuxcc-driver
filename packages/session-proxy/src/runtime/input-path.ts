@@ -695,6 +695,39 @@ export function createInputPath(
             break;
           }
 
+          case "rename-session": {
+            // rename-session -t =<currentName> <newName>  (tc-6gnc.9)
+            //
+            // Renames the bound tmux session.  The "=" prefix is the tmux
+            // exact-match target selector (same pattern as kill-session tc-91o)
+            // to avoid ambiguity when session names share a prefix.
+            //
+            // The session-proxy observes the resulting %session-renamed
+            // notification and emits a session.renamed delta to all connected
+            // clients — no optimistic model update is needed here; the mirror
+            // drives the UI update.
+            //
+            // Fail-loud on empty name: drop the command with a warning.
+            if (command.name.length === 0) {
+              console.warn("[input-path] rename-session received empty name — dropping");
+              break;
+            }
+            // Resolve the current session name from the live model.  In a
+            // session-proxy there is exactly one session; take the first one.
+            // Falls back to no target flag if the model is unavailable (pre-snapshot),
+            // which makes tmux rename the currently attached session — the
+            // correct behaviour in all real-world cases.
+            const currentModel = getModel?.();
+            const currentSessionName = currentModel?.sessions.values().next().value?.name;
+            const targetFlag = currentSessionName !== undefined
+              ? `-t =${currentSessionName} `
+              : "";
+            // Single-quote the new name to handle spaces / special chars.
+            const quotedNewSessionName = "'" + command.name.replace(/'/g, "'\\''") + "'";
+            sendCommand(`rename-session ${targetFlag}${quotedNewSessionName}`);
+            break;
+          }
+
           case "select-pane": {
             // select-pane -t %<N>
             const tmuxPaneNum = toTmuxPane(command.paneId);

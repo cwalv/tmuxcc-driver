@@ -752,6 +752,24 @@ export interface RenameWindowCommand {
 }
 
 /**
+ * Rename the bound tmux session.
+ *
+ * Issues `rename-session -t =<currentName> <newName>` in the session-proxy.
+ * The session-proxy emits a `session.renamed` delta on success, which propagates
+ * to all connected clients and updates all surfaces (tree, status bar, tab titles).
+ *
+ * The name must be non-empty; the session-proxy drops the command if empty
+ * (fail-loud in the handler).
+ *
+ * Additive addition — tc-6gnc.9: resolves the tc-asyq.10 stub.
+ */
+export interface RenameSessionCommand {
+  readonly kind: "rename-session";
+  /** The new session name. Must be non-empty. */
+  readonly name: string;
+}
+
+/**
  * Focus (select) a pane. The session-proxy emits a focus.changed delta on success.
  */
 export interface SelectPaneCommand {
@@ -1094,6 +1112,8 @@ export type WireCommand =
   | SplitPaneCommand
   | ClosePaneCommand
   | RenameWindowCommand
+  // tc-6gnc.9: rename the bound tmux session
+  | RenameSessionCommand
   | SelectPaneCommand
   | ResizePaneCommand
   | KillSessionCommand

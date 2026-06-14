@@ -157,6 +157,17 @@
       "additionalProperties": false
     },
 
+    "RenameSessionCommand": {
+      "type": "object",
+      "description": "Rename the bound tmux session. The session-proxy issues `rename-session -t =<currentName> <newName>` and the resulting session.renamed delta propagates to all clients. Added tc-6gnc.9.",
+      "required": ["kind", "name"],
+      "properties": {
+        "kind": { "const": "rename-session" },
+        "name": { "type": "string", "description": "The new session name. Must be non-empty." }
+      },
+      "additionalProperties": false
+    },
+
     "SelectPaneCommand": {
       "type": "object",
       "description": "Focus (select) a pane. The session-proxy emits a focus.changed delta on success.",
@@ -362,6 +373,7 @@
         { "$ref": "#/$defs/SplitPaneCommand" },
         { "$ref": "#/$defs/ClosePaneCommand" },
         { "$ref": "#/$defs/RenameWindowCommand" },
+        { "$ref": "#/$defs/RenameSessionCommand" },
         { "$ref": "#/$defs/SelectPaneCommand" },
         { "$ref": "#/$defs/ResizePaneCommand" },
         { "$ref": "#/$defs/KillSessionCommand" },
