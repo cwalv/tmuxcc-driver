@@ -61,6 +61,7 @@ import type { CommandResult } from "../parser/correlator.js";
 import { hydrateTransport, hydratePane, captureText } from "./hydration.js";
 import type { HydrationSentinels } from "./hydration.js";
 import { createVerbOriginRegistry } from "./verb-origin.js";
+import { createCloseCauseRegistry } from "./close-cause.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -280,6 +281,14 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
   // pane/window leaves the model (it can never be re-announced for that id).
   const verbOrigins = createVerbOriginRegistry();
 
+  // tc-u7cu.6: close-cause registry — records which panes were closed by a
+  // wire verb (close-pane / kill-window) so pane.closed deltas carry `cause`.
+  // Recorded by the per-transport verb responder in addClient (at %end time,
+  // which always arrives before %window-close / requery in tmux control mode);
+  // consumed (one-shot) by diffModel when emitting pane.closed; cleared
+  // defensively when a pane leaves the model (in case the consume path was missed).
+  const closeCauses = createCloseCauseRegistry();
+
   // 1. Host
   const host = createTmuxHost(opts.host);
 
@@ -444,6 +453,8 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
     metrics: metricsRegistry,
     // tc-ozk.2: per-client delta tagging consults the verb-origin registry.
     originLookup: (id) => verbOrigins.lookup(id),
+    // tc-u7cu.6: pane.closed tagging consults the close-cause registry (consume).
+    closeCauseLookup: (id) => closeCauses.consume(id),
   });
 
   // 6a. Patch the late-binding reference so the switch-client callback
@@ -552,6 +563,11 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
         // id, so drop any recorded verb-origin (bounds the registry alongside
         // its TTL/size cap).
         verbOrigins.clear(pid);
+        // tc-u7cu.6: defensive clear — the close-cause registry uses one-shot
+        // consume semantics (diffModel.closeCauseLookup already consumed it), but
+        // clear here in case the registry wasn't wired or the pane vanished
+        // through a path that bypassed diffModel (e.g. session shutdown).
+        closeCauses.clear(pid);
       }
     }
     for (const wid of prev.windows.keys()) {
@@ -921,6 +937,53 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
           return;
         }
 
+        // tc-u7cu.6: close-cause pre-capture for close-pane and kill-window.
+        //
+        // When a close-pane or kill-window verb ACKs (%end), we record the
+        // affected pane id(s) in closeCauses so the resulting pane.closed delta
+        // is stamped with the cause (killed-by-this-connection). We capture the
+        // id(s) HERE (from the command message, before handleClientMessage) so
+        // the VerbResponder closure can reference them without needing to inspect
+        // the model at ACK time.
+        //
+        // For kill-window we snapshot the current model's panes for that window
+        // synchronously (before the command is sent). The %end arrives before
+        // %window-close / requery, so the panes are still in the model at this
+        // point — this is the correct snapshot window.
+        //
+        // We capture the connectionId here too (synchronously), so the closure
+        // doesn't need to call server.connectionIdFor again at ACK time.
+        let closeCauseCapture: (() => void) | undefined;
+        if (msg.type === "command.request") {
+          const cmd = (msg as import("../wire/session-proxy-control.js").SessionProxyCommandRequestMessage).command;
+          const connId = server.connectionIdFor(transport);
+          if (connId !== undefined) {
+            if (cmd.kind === "close-pane") {
+              const pid = (cmd as import("../wire/session-proxy-control.js").ClosePaneCommand).paneId;
+              const reqId = (msg as import("../wire/session-proxy-control.js").SessionProxyCommandRequestMessage).correlationId;
+              closeCauseCapture = () => closeCauses.record(pid, connId, reqId);
+            } else if (cmd.kind === "kill-window") {
+              const wid = (cmd as import("../wire/session-proxy-control.js").KillWindowCommand).windowId;
+              const reqId = (msg as import("../wire/session-proxy-control.js").SessionProxyCommandRequestMessage).correlationId;
+              // Snapshot which panes belong to this window RIGHT NOW (synchronous,
+              // before the command is issued). This is safe because %end arrives
+              // before %window-close / requery (tmux sends %end for a command
+              // before emitting the corresponding topology notifications).
+              const affectedPanes: import("../wire/ids.js").PaneId[] = [];
+              for (const pane of pipeline.getModel().panes.values()) {
+                if (pane.windowId === wid) {
+                  affectedPanes.push(pane.paneId);
+                }
+              }
+              closeCauseCapture = () => {
+                for (const pid of affectedPanes) {
+                  closeCauses.record(pid, connId, reqId);
+                }
+              };
+            }
+          }
+        }
+
         // tc-ozk.1: pane/window-creating verbs RETURN their effect ids. Bind a
         // per-transport responder that delivers the VerbResult as a
         // command.response (ok=true with the created ids, or ok=false on a
@@ -952,6 +1015,12 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
                 // tc-u7cu.3: Non-creating verb ACK — no effect ids to record or
                 // send.  The client receives { ok: true, payload: {} } which it
                 // resolves as a simple success (VerbResult { ok: true }).
+                //
+                // tc-u7cu.6: if this was a close-pane or kill-window verb, record
+                // the close cause now that tmux has ACKed (%end). The %end always
+                // arrives before %window-close / requery in tmux control mode, so
+                // the pane.closed delta has not yet been emitted.
+                closeCauseCapture?.();
                 server.sendCommandResponse(transport, correlationId, {});
               }
             } else {

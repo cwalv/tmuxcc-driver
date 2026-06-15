@@ -184,6 +184,16 @@ export interface PaneDeadChangedMessage extends MessageBase {
  * PaneDeadChangedMessage (a `remain-on-exit` corpse that stays in the model).
  * When the closed pane was previously observed as a dead corpse with a known
  * `pane_dead_status`, that code is carried through here as `exitCode`.
+ *
+ * `cause` is the causality tag (tc-u7cu.6). PRESENT when this pane was closed
+ * by a wire verb (close-pane / kill-window) from a specific connection: names
+ * the connection + requestId that caused the close. ABSENT when the close was
+ * unsolicited (shell exit, external kill-pane from a native tmux client, or any
+ * non-wire cause). Mirrors the `origin` field on `pane.opened` / `window.added`
+ * (tc-ozk.2): the session-proxy is the only party that knows which closes it
+ * caused, so it stamps this rather than every host guessing. Additive optional
+ * field — older clients that do not read it are unaffected (non-breaking per
+ * the versioning policy above). See {@link Origin}.
  */
 export interface PaneClosedMessage extends MessageBase {
   readonly type: "pane.closed";
@@ -195,6 +205,13 @@ export interface PaneClosedMessage extends MessageBase {
    * tmux's %window-close notification does not include a per-pane exit status).
    */
   readonly exitCode?: number;
+  /**
+   * Causality tag (tc-u7cu.6). PRESENT when this pane was closed by a wire
+   * verb (close-pane / kill-window): names the connection + requestId that
+   * caused the close. ABSENT when the close was unsolicited (shell exit,
+   * external kill-pane). Additive optional field — see {@link Origin}.
+   */
+  readonly cause?: Origin;
 }
 
 /**

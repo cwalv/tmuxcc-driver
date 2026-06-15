@@ -204,10 +204,17 @@ export interface RenderHook {
    * absent when the underlying tmux notification did not carry exit status
    * (the most common case — see PaneClosedMessage in @tmuxcc/session-proxy).
    *
+   * `cause` (tc-u7cu.6) is the close-cause tag — PRESENT when a wire verb from
+   * a specific connection caused the close (close-pane / kill-window).  The
+   * `cause.connectionId` can be compared against the client's own `connectionId`
+   * (from `ClientModel.ownConnectionId`) to determine if THIS client issued the
+   * close.  ABSENT when the close was unsolicited (shell exit, external kill-pane).
+   * Additive optional parameter — older renderers that ignore it are unaffected.
+   *
    * Renderers should show an exit message and mark the terminal as exited here.
    * The tab MUST NOT auto-close; that is a user-driven action.
    */
-  onPaneClosed(paneId: PaneId, exitCode?: number): void;
+  onPaneClosed(paneId: PaneId, exitCode?: number, cause?: Origin): void;
 
   /**
    * A pane's dimensions changed.
@@ -441,7 +448,7 @@ export interface ByteSource {
  */
 export const NoOpRenderHook: RenderHook = {
   onPaneOpened(_pane: PaneInfo): void {},
-  onPaneClosed(_paneId: PaneId, _exitCode?: number): void {},
+  onPaneClosed(_paneId: PaneId, _exitCode?: number, _cause?: Origin): void {},
   onPaneResized(_paneId: PaneId, _cols: number, _rows: number): void {},
   onPaneDeadChanged(_paneId: PaneId, _dead: boolean, _exitCode?: number): void {},
   onPaneModeChanged(_paneId: PaneId, _mode: PaneMode): void {},
@@ -468,7 +475,7 @@ export const NoOpRenderHook: RenderHook = {
  */
 export type RenderHookCall =
   | { type: "paneOpened"; pane: PaneInfo }
-  | { type: "paneClosed"; paneId: PaneId; exitCode?: number }
+  | { type: "paneClosed"; paneId: PaneId; exitCode?: number; cause?: Origin }
   | { type: "paneResized"; paneId: PaneId; cols: number; rows: number }
   | { type: "paneDeadChanged"; paneId: PaneId; dead: boolean; exitCode?: number }
   | { type: "paneModeChanged"; paneId: PaneId; mode: PaneMode }
@@ -505,12 +512,13 @@ export class EchoRenderHook implements RenderHook {
     this.calls.push({ type: "paneOpened", pane });
   }
 
-  onPaneClosed(paneId: PaneId, exitCode?: number): void {
-    if (exitCode !== undefined) {
-      this.calls.push({ type: "paneClosed", paneId, exitCode });
-    } else {
-      this.calls.push({ type: "paneClosed", paneId });
-    }
+  onPaneClosed(paneId: PaneId, exitCode?: number, cause?: Origin): void {
+    this.calls.push({
+      type: "paneClosed",
+      paneId,
+      ...(exitCode !== undefined ? { exitCode } : {}),
+      ...(cause !== undefined ? { cause } : {}),
+    });
   }
 
   onPaneResized(paneId: PaneId, cols: number, rows: number): void {

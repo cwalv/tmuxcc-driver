@@ -209,6 +209,17 @@ export interface ClientModel {
    */
   readonly exitCodes: ReadonlyMap<PaneId, number>;
   /**
+   * Close causes for panes that have closed, keyed by paneId (tc-u7cu.6).
+   *
+   * Populated when a `pane.closed` delta arrives carrying a `cause` (stamped
+   * by the session-proxy when a wire verb — close-pane / kill-window — caused the
+   * close). Absent when the close was unsolicited (shell exit, external kill-pane).
+   * The entry persists after the pane is removed from `panes` so the mirror's
+   * diff path can pass the cause to `onPaneClosed`.
+   * Entries are removed when the next snapshot arrives or the mirror is detached.
+   */
+  readonly closeCauses: ReadonlyMap<PaneId, Origin>;
+  /**
    * Number of session-proxy-protocol clients currently connected to this session.
    *
    * tc-1elae (Phase 2 — §11.4): initially populated from
@@ -267,6 +278,7 @@ function emptyClientModel(): ClientModel {
     panes: new Map(),
     focus: { paneId: null, windowId: null },
     exitCodes: new Map(),
+    closeCauses: new Map(),
     attachedClientCount: undefined,
     ownConnectionId: undefined,
   };
@@ -335,9 +347,11 @@ export function applySnapshot(snapshot: SnapshotMessage): {
       paneId: snapshot.focus.paneId,
       windowId: snapshot.focus.windowId,
     },
-    // Snapshot resets all state including exit codes — panes that exited before
-    // this snapshot are gone and their exit codes are no longer relevant.
+    // Snapshot resets all state including exit codes and close causes — panes
+    // that exited before this snapshot are gone and their metadata is no longer relevant.
     exitCodes: new Map(),
+    // tc-u7cu.6: snapshot resets close causes alongside exit codes.
+    closeCauses: new Map(),
     // tc-1elae (§11.4): propagate the attached-client count from the snapshot
     // so TmuxccSessionHandle can surface it in the status-bar tooltip.
     attachedClientCount: snapshot.attachedClientCount,
@@ -411,12 +425,16 @@ export function applyDelta(model: ClientModel, msg: SessionProxyMessage): Client
       const panes = new Map(model.panes);
       panes.delete(msg.paneId);
       // Record the exit code if the session-proxy provided one.
-      if (msg.exitCode !== undefined) {
-        const exitCodes = new Map(model.exitCodes);
-        exitCodes.set(msg.paneId, msg.exitCode);
-        return { ...model, panes, exitCodes };
-      }
-      return { ...model, panes };
+      const exitCodes =
+        msg.exitCode !== undefined
+          ? (() => { const m = new Map(model.exitCodes); m.set(msg.paneId, msg.exitCode!); return m; })()
+          : model.exitCodes;
+      // tc-u7cu.6: record the close cause if the session-proxy provided one.
+      const closeCauses =
+        msg.cause !== undefined
+          ? (() => { const m = new Map(model.closeCauses); m.set(msg.paneId, msg.cause!); return m; })()
+          : model.closeCauses;
+      return { ...model, panes, exitCodes, closeCauses };
     }
 
     case "pane.resized": {
@@ -1070,11 +1088,13 @@ export class Mirror {
       windows: ReadonlyMap<WindowId, { name: string; layout: WindowLayout }>;
       focus: { paneId: PaneId | null; windowId: WindowId | null };
       exitCodes: ReadonlyMap<PaneId, number>;
+      closeCauses: ReadonlyMap<PaneId, Origin>;
     } = {
       panes: new Map(),
       windows: new Map(),
       focus: { paneId: null, windowId: null },
       exitCodes: new Map(),
+      closeCauses: new Map(),
     };
 
     // Byte-source unsubscribe functions keyed by PaneId string.
@@ -1161,7 +1181,9 @@ export class Mirror {
         if (!curr.panes.has(pid)) {
           // Pass the exit code if the session-proxy provided one (carried in exitCodes).
           const exitCode = curr.exitCodes.get(pid);
-          hook.onPaneClosed(pid, exitCode);
+          // tc-u7cu.6: pass the close cause if the session-proxy provided one.
+          const cause = curr.closeCauses.get(pid);
+          hook.onPaneClosed(pid, exitCode, cause);
           unsubscribeBytes(pid);
         }
       }
@@ -1187,6 +1209,7 @@ export class Mirror {
         windows: newWindows,
         focus: { paneId: nf.paneId, windowId: nf.windowId },
         exitCodes: curr.exitCodes,
+        closeCauses: curr.closeCauses,
       };
     }
 
@@ -1249,6 +1272,7 @@ export class Mirror {
       windows: seedWindows,
       focus: { paneId: initial.focus.paneId, windowId: initial.focus.windowId },
       exitCodes: initial.exitCodes,
+      closeCauses: initial.closeCauses,
     };
 
     // ── Subscribe to future model changes ────────────────────────────────────

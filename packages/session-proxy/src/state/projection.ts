@@ -106,6 +106,27 @@ import type {
 export type OriginLookup = (id: PaneId | WindowId) => Origin | undefined;
 
 // ---------------------------------------------------------------------------
+// Close-cause attribution (tc-u7cu.6)
+// ---------------------------------------------------------------------------
+
+/**
+ * Consume the close cause for a pane that is about to be closed (tc-u7cu.6).
+ *
+ * Threaded into {@link diffModel} so the SINGLE place that emits `pane.closed`
+ * can stamp the cause uniformly. Called once per disappearing pane id.
+ *
+ * Returns `{connectionId, requestId}` when the id was killed by a wire verb
+ * (close-pane / kill-window), or `undefined` when the close was unsolicited
+ * (shell exit, external kill-pane). ONE-SHOT: the registry removes the entry
+ * on consume (each pane id closes exactly once; diffModel is not called
+ * per-client for close deltas so idempotency is not needed here).
+ *
+ * Omitting `closeCauseLookup` leaves all close deltas untagged — the correct
+ * default for callers without close-verb-correlation state (tests).
+ */
+export type CloseCauseLookup = (id: PaneId) => Origin | undefined;
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -245,11 +266,17 @@ export function projectSnapshot(
  * path). This is the SINGLE choke point that both the event path (serve.ts) and
  * the diff/requery path (requery.ts) pass the lookup through, so attribution is
  * uniform across both.
+ *
+ * `closeCauseLookup` (tc-u7cu.6): optional close-cause resolver. When supplied,
+ * each disappearing pane has its id passed to the lookup (consume, one-shot);
+ * a non-undefined result is stamped as the `cause` field on the emitted
+ * `pane.closed` (verb-caused), and `undefined` leaves it untagged (unsolicited).
  */
 export function diffModel(
   prev: SessionModel,
   next: SessionModel,
   originLookup?: OriginLookup,
+  closeCauseLookup?: CloseCauseLookup,
 ): SessionProxyMessage[] {
   const out: SessionProxyMessage[] = [];
 
@@ -493,12 +520,19 @@ export function diffModel(
       // corpse with a known pane_dead_status (the shell-exit + remain-on-exit
       // path reaps a corpse whose code we already read). Otherwise the code is
       // unknowable (slot vanished without a corpse phase) and stays absent.
+      //
+      // tc-u7cu.6: stamp the cause when this close was caused by a wire verb
+      // (close-pane / kill-window). The lookup is ONE-SHOT (consume): each
+      // pane id closes exactly once, and diffModel is called once per model
+      // transition (not once per client), so the consume semantics are safe.
+      const cause = closeCauseLookup?.(pane.paneId);
       const msg: PaneClosedMessage = {
         type: "pane.closed",
         seq: SEQ,
         paneId: pane.paneId,
         windowId: pane.windowId,
         ...(pane.dead && pane.exitCode !== undefined ? { exitCode: pane.exitCode } : {}),
+        ...(cause !== undefined ? { cause } : {}),
       };
       out.push(msg);
     }

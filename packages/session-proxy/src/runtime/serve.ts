@@ -83,7 +83,7 @@ import type {
 } from "../wire/session-proxy-control.js";
 import { projectSnapshot } from "../state/projection.js";
 import { diffModel } from "../state/projection.js";
-import type { OriginLookup } from "../state/projection.js";
+import type { OriginLookup, CloseCauseLookup } from "../state/projection.js";
 import type { ConnectionId } from "../wire/ids.js";
 import { connectionId as mintConnectionId } from "../wire/ids.js";
 import type { SessionProxyRegistry } from "../metrics/registry.js";
@@ -125,6 +125,15 @@ export interface ControlServerOptions {
    * VerbOriginRegistry's `lookup`.
    */
   originLookup?: OriginLookup;
+
+  /**
+   * Close-cause lookup (tc-u7cu.6). When provided, the delta stream passes it
+   * to `diffModel`, so every `pane.closed` for a verb-caused close is stamped
+   * with its `cause`. Omit to leave all close deltas untagged (the default —
+   * tests / callers without close-verb-correlation state). The session-proxy
+   * factory wires this to the shared CloseCauseRegistry's `consume`.
+   */
+  closeCauseLookup?: CloseCauseLookup;
 }
 
 /**
@@ -408,6 +417,8 @@ class ControlServerImpl implements ControlServer {
   private readonly _metrics: SessionProxyRegistry | undefined;
   /** tc-ozk.2: origin attribution lookup passed to per-client diffModel. */
   private readonly _originLookup: OriginLookup | undefined;
+  /** tc-u7cu.6: close-cause lookup passed to per-client diffModel. */
+  private readonly _closeCauseLookup: CloseCauseLookup | undefined;
 
   /**
    * Active clients keyed by transport reference. Using the Transport object as
@@ -452,6 +463,7 @@ class ControlServerImpl implements ControlServer {
     this._capabilities = opts.capabilities ?? DEFAULT_CAPABILITIES;
     this._metrics = opts.metrics;
     this._originLookup = opts.originLookup;
+    this._closeCauseLookup = opts.closeCauseLookup;
   }
 
   async addClient(transport: Transport): Promise<NegotiatedSession> {
@@ -509,7 +521,8 @@ class ControlServerImpl implements ControlServer {
       // tc-ozk.2: pass the origin lookup so verb-caused creations this client
       // sees carry their origin (incl. another client's verb — the multi-client
       // case: client B sees origin.connectionId=A and treats it as not-its-own).
-      const deltas: SessionProxyMessage[] = diffModel(prevModel, newModel, this._originLookup);
+      // tc-u7cu.6: pass the close-cause lookup so verb-caused closes carry cause.
+      const deltas: SessionProxyMessage[] = diffModel(prevModel, newModel, this._originLookup, this._closeCauseLookup);
       for (const delta of deltas) {
         // Stamp seq on a new object (SessionProxyMessage fields are readonly; spread).
         const stamped = { ...delta, seq: state.nextSeq };

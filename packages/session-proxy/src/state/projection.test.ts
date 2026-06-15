@@ -761,6 +761,42 @@ describe("dead-pane projection (tc-4bv2 / tc-295a.10)", () => {
     assert.equal(closed.length, 1);
     assert.ok(!("exitCode" in (closed[0] as object)), "no exitCode for a live pane removal");
   });
+
+  // tc-u7cu.6: close-cause stamping tests.
+
+  it("diffModel stamps cause on pane.closed when closeCauseLookup returns an origin (client-kill)", () => {
+    const prev = baseModel();
+    const next = removePane(prev, P2);
+    // Use a simple inline CloseCauseLookup that returns a cause for P2.
+    const fakeOrigin = { connectionId: "conn1" as import("../wire/ids.js").ConnectionId, requestId: "req-42" };
+    const deltas = diffModel(prev, next, undefined, (id) =>
+      id === P2 ? fakeOrigin : undefined,
+    );
+    const closed = deltas.filter((d) => d.type === "pane.closed");
+    assert.equal(closed.length, 1);
+    const c0 = closed[0]!;
+    if (c0.type === "pane.closed") {
+      assert.deepEqual(c0.cause, fakeOrigin, "cause must be stamped from the lookup");
+    }
+  });
+
+  it("diffModel omits cause on pane.closed when closeCauseLookup returns undefined (unsolicited exit)", () => {
+    const prev = baseModel();
+    const next = removePane(prev, P2);
+    const deltas = diffModel(prev, next, undefined, (_id) => undefined);
+    const closed = deltas.filter((d) => d.type === "pane.closed");
+    assert.equal(closed.length, 1);
+    assert.ok(!("cause" in (closed[0] as object)), "no cause for an unsolicited close");
+  });
+
+  it("diffModel omits cause on pane.closed when no closeCauseLookup is provided", () => {
+    const prev = baseModel();
+    const next = removePane(prev, P2);
+    const deltas = diffModel(prev, next);
+    const closed = deltas.filter((d) => d.type === "pane.closed");
+    assert.equal(closed.length, 1);
+    assert.ok(!("cause" in (closed[0] as object)), "no cause when lookup is absent");
+  });
 });
 
 // ---------------------------------------------------------------------------

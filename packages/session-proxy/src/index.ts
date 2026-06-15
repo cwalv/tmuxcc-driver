@@ -46,7 +46,7 @@ export {
 } from "./state/index.js";
 // Projection functions for client round-trip tests:
 export { projectSnapshot, diffModel } from "./state/projection.js";
-export type { ProjectSnapshotOpts, OriginLookup } from "./state/projection.js";
+export type { ProjectSnapshotOpts, OriginLookup, CloseCauseLookup } from "./state/projection.js";
 
 // Verb-origin registry (tc-ozk.2) — re-exported so the SDK test harness
 // (clients/ts, tc-ozk.4) can seed origin attribution when replaying conformance
@@ -58,6 +58,14 @@ export type {
   VerbOriginRegistry,
   VerbOriginRegistryOptions,
 } from "./runtime/verb-origin.js";
+
+// Close-cause registry (tc-u7cu.6) — re-exported so tests can seed close-cause
+// attribution when testing pane.closed cause stamping.
+export { createCloseCauseRegistry } from "./runtime/close-cause.js";
+export type {
+  CloseCauseRegistry,
+  CloseCauseRegistryOptions,
+} from "./runtime/close-cause.js";
 
 // Runtime — createSessionProxy and supporting types (tc-93a).
 // Re-exported from src/index so consumers can import from "@tmuxcc/session-proxy"
