@@ -2054,3 +2054,173 @@ describe("createInputPath — tc-n4ct cross-message ordering", () => {
     d2.resolve({ ok: true });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Suite: tc-u7cu.8 — runAckVerb ACK path (non-creating verb %error / %end)
+//
+// Covers the driver-layer wiring for non-creating verbs routed through
+// runAckVerb: %error → sendCommandError (ok=false, verbatim tmux body);
+//            %end  → {ok:true} ACK with no effect ids.
+// ---------------------------------------------------------------------------
+
+describe("createInputPath — runAckVerb ACK path (tc-u7cu.8)", () => {
+  const enc = (s: string) => new TextEncoder().encode(s);
+
+  it("close-pane + %error → respond ok=false with verbatim tmux error body", async () => {
+    // A real tmux refusal for kill-pane puts the reason in the %begin…%error
+    // block body; the correlator accumulates it into CommandResult.body.  The
+    // driver must surface it VERBATIM — not a generic "tmux rejected" string.
+    const host = makeFakeDeps();
+    const path = createInputPath(host);
+    const results: Array<{ correlationId: string; result: VerbResult }> = [];
+
+    host.enqueueSendResult(
+      Promise.resolve({ ok: false, body: enc("can't find pane: %99") }),
+    );
+
+    path.handleClientMessage(
+      {
+        type: "command.request",
+        seq: nextSeq(),
+        correlationId: "ack-err-1",
+        command: { kind: "close-pane", paneId: paneId("p99") },
+      },
+      (correlationId, result) => results.push({ correlationId, result }),
+    );
+
+    // The tmux command was written synchronously before the promise settled.
+    assert.equal(host.lastWrite, "kill-pane -t %99\n");
+
+    // Let the awaited send result propagate.
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    assert.equal(results.length, 1, "exactly one respond() call");
+    assert.equal(results[0]!.correlationId, "ack-err-1");
+    assert.equal(results[0]!.result.ok, false);
+    if (results[0]!.result.ok === false) {
+      assert.equal(results[0]!.result.code, "verb.failed");
+      // Verbatim tmux text, not a synthesized generic message.
+      assert.equal(results[0]!.result.message, "can't find pane: %99");
+    }
+  });
+
+  it("close-pane + %error with no body → respond ok=false with generic message", async () => {
+    // When tmux emits an empty body for the %error block, the driver falls back
+    // to a generic "tmux rejected <verbKind>" message rather than an empty string.
+    const host = makeFakeDeps();
+    const path = createInputPath(host);
+    const results: Array<{ correlationId: string; result: VerbResult }> = [];
+
+    host.enqueueSendResult(Promise.resolve({ ok: false }));
+
+    path.handleClientMessage(
+      {
+        type: "command.request",
+        seq: nextSeq(),
+        correlationId: "ack-err-2",
+        command: { kind: "close-pane", paneId: paneId("p3") },
+      },
+      (correlationId, result) => results.push({ correlationId, result }),
+    );
+
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    assert.equal(results.length, 1);
+    assert.equal(results[0]!.result.ok, false);
+    if (results[0]!.result.ok === false) {
+      assert.equal(results[0]!.result.code, "verb.failed");
+      assert.ok(
+        results[0]!.result.message.includes("close-pane"),
+        `generic fallback message should mention the verb kind; got: ${results[0]!.result.message}`,
+      );
+    }
+  });
+
+  it("close-pane + %end → respond ok=true with no effect ids", async () => {
+    // %end on a non-creating verb: the ACK carries {ok:true} with no pane/window
+    // ids (distinct from runCreatingVerb which always returns ids on %end).
+    const host = makeFakeDeps();
+    const path = createInputPath(host);
+    const results: Array<{ correlationId: string; result: VerbResult }> = [];
+
+    host.enqueueSendResult(Promise.resolve({ ok: true }));
+
+    path.handleClientMessage(
+      {
+        type: "command.request",
+        seq: nextSeq(),
+        correlationId: "ack-ok-1",
+        command: { kind: "close-pane", paneId: paneId("p2") },
+      },
+      (correlationId, result) => results.push({ correlationId, result }),
+    );
+
+    assert.equal(host.lastWrite, "kill-pane -t %2\n");
+
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    assert.equal(results.length, 1, "exactly one respond() call");
+    assert.equal(results[0]!.correlationId, "ack-ok-1");
+    // {ok:true} with no newPaneId / newWindowId — non-creating verb ACK.
+    assert.deepEqual(results[0]!.result, { ok: true });
+  });
+
+  it("kill-session + %error → respond ok=false with verbatim body", async () => {
+    // Verify runAckVerb is wired for another non-creating verb (kill-session).
+    const host = makeFakeDeps();
+    const path = createInputPath(host);
+    const results: Array<{ correlationId: string; result: VerbResult }> = [];
+
+    host.enqueueSendResult(
+      Promise.resolve({ ok: false, body: enc("can't find session: =nosuchsession") }),
+    );
+
+    path.handleClientMessage(
+      {
+        type: "command.request",
+        seq: nextSeq(),
+        correlationId: "ack-ks-err",
+        command: { kind: "kill-session", sessionName: "nosuchsession" },
+      },
+      (correlationId, result) => results.push({ correlationId, result }),
+    );
+
+    assert.equal(host.lastWrite, "kill-session -t =nosuchsession\n");
+
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    assert.equal(results.length, 1);
+    assert.equal(results[0]!.result.ok, false);
+    if (results[0]!.result.ok === false) {
+      assert.equal(results[0]!.result.code, "verb.failed");
+      assert.equal(results[0]!.result.message, "can't find session: =nosuchsession");
+    }
+  });
+
+  it("rename-window + %end → respond ok=true ACK with no effect ids", async () => {
+    // %end for a rename-window (also routed through runAckVerb): confirms the
+    // same {ok:true, no ids} shape applies across all non-creating verbs.
+    const host = makeFakeDeps();
+    const path = createInputPath(host);
+    const results: Array<{ correlationId: string; result: VerbResult }> = [];
+
+    host.enqueueSendResult(Promise.resolve({ ok: true }));
+
+    path.handleClientMessage(
+      {
+        type: "command.request",
+        seq: nextSeq(),
+        correlationId: "ack-rw-ok",
+        command: { kind: "rename-window", windowId: windowId("w3"), name: "devserver" },
+      },
+      (correlationId, result) => results.push({ correlationId, result }),
+    );
+
+    assert.equal(host.lastWrite, "rename-window -t @3 'devserver'\n");
+
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    assert.equal(results.length, 1);
+    assert.deepEqual(results[0]!.result, { ok: true });
+  });
+});
