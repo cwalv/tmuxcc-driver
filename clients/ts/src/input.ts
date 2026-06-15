@@ -77,25 +77,36 @@ import type {
 // ---------------------------------------------------------------------------
 
 /**
- * The result of a pane/window-CREATING verb, as RETURNED by the session-proxy
- * in the `command.response` payload (tc-ozk.1).
+ * The result of a verb sent via `sendVerb`, as RETURNED by the session-proxy
+ * in the `command.response` payload (tc-ozk.1 / tc-u7cu.3).
  *
- * On success the verb carries the ids tmux actually created — the host binds by
- * these ids whenever the pane materialises (which may arrive before OR after
- * this result), with NO observer/claim correlation needed.  On failure it
- * carries a loud error mapped from the tmux `%error` (or an unparseable `-P`
- * reply on the session-proxy side).
+ * Two success variants:
  *
- *   { ok: true,  newPaneId, newWindowId }
- *   { ok: false, code, message }
+ *   Pane/window-CREATING verbs (split-pane, open-window, break-pane):
+ *     `{ ok: true, newPaneId, newWindowId }` — the ids tmux actually created.
+ *     The host binds by these ids whenever the pane materialises (which may
+ *     arrive before OR after this result), with NO observer/claim correlation.
+ *
+ *   State-MUTATING non-creating verbs (kill-pane, rename-session, etc.) —
+ *   tc-u7cu.3:
+ *     `{ ok: true }` — tmux accepted the command (no `%error`).  No new
+ *     pane/window was created; `newPaneId` and `newWindowId` are absent.
+ *
+ * On failure (tmux `%error` or protocol error):
+ *     `{ ok: false, code, message }`.
+ *
+ * Summary:
+ *   { ok: true, newPaneId, newWindowId }  — creating verb success
+ *   { ok: true }                          — non-creating verb ACK
+ *   { ok: false, code, message }          — failure (any verb kind)
  */
 export type VerbResult =
   | {
       readonly ok: true;
-      /** Wire id of the created pane (`p<N>`). */
-      readonly newPaneId: PaneId;
-      /** Wire id of the window the new pane lives in (`w<N>`). */
-      readonly newWindowId: WindowId;
+      /** Wire id of the created pane (`p<N>`). Present only for creating verbs. */
+      readonly newPaneId?: PaneId;
+      /** Wire id of the window the new pane lives in (`w<N>`). Present only for creating verbs. */
+      readonly newWindowId?: WindowId;
     }
   | {
       readonly ok: false;
@@ -446,20 +457,25 @@ export function createInputApi(
       if (msg.result.ok) {
         const payload = msg.result.payload;
         if (payload?.paneId !== undefined && payload?.windowId !== undefined) {
+          // Creating verb (split-pane / open-window / break-pane): ids present.
           deferred.resolve({
             ok: true,
             newPaneId: payload.paneId,
             newWindowId: payload.windowId,
           });
+        } else if (payload?.paneId === undefined && payload?.windowId === undefined) {
+          // tc-u7cu.3: Non-creating state-mutating verb ACK (kill-pane,
+          // rename-session, etc.): ok=true with no pane/window ids.
+          // Resolve as simple success — the caller distinguishes by checking
+          // whether newPaneId/newWindowId are present.
+          deferred.resolve({ ok: true });
         } else {
-          // ok=true but the creating-verb ids are missing — the session-proxy
-          // promises to return them for creating verbs (tc-ozk.1), so this is a
-          // contract violation.  Surface it as a failure rather than a
-          // half-populated success.
+          // ok=true but ONLY ONE id present — session-proxy contract violation.
+          // Surface as a failure rather than a half-populated success.
           deferred.resolve({
             ok: false,
             code: "verb.no-effect-ids",
-            message: `command.response ok=true but payload lacked paneId/windowId: ${JSON.stringify(payload)}`,
+            message: `command.response ok=true but payload had only one of paneId/windowId: ${JSON.stringify(payload)}`,
           });
         }
       } else {

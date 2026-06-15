@@ -183,10 +183,17 @@ export interface InputPathCommandResult {
 export type VerbResult =
   | {
       readonly ok: true;
-      /** Wire id of the created pane (`p<N>`). Always present for the creating verbs. */
-      readonly newPaneId: PaneId;
-      /** Wire id of the window the new pane lives in (`w<N>`). */
-      readonly newWindowId: WindowId;
+      /**
+       * Wire id of the created pane (`p<N>`).
+       * Present for pane/window-CREATING verbs; absent for non-creating ACKs
+       * (tc-u7cu.3: kill-pane, rename-session, etc.).
+       */
+      readonly newPaneId?: PaneId;
+      /**
+       * Wire id of the window the new pane lives in (`w<N>`).
+       * Present for creating verbs; absent for non-creating ACKs (tc-u7cu.3).
+       */
+      readonly newWindowId?: WindowId;
     }
   | {
       readonly ok: false;
@@ -462,6 +469,7 @@ export function createInputPath(
     cmd: string,
     optimistic: NotificationEvent,
     reverse: (before: SessionModel) => NotificationEvent | null,
+    ackOpts?: { respond: VerbResponder; correlationId: string; verbKind: string },
   ): void {
     // Capture before-model BEFORE write (sync) so we have the pre-update state
     // even if onModelChange handlers mutate downstream views inline.
@@ -476,19 +484,49 @@ export function createInputPath(
     // without waiting for tmux confirmation.
     dispatchSynthetic?.(optimistic);
 
-    // Error reversal: if any wiring is missing we skip rollback (the optimistic
-    // model is left in place; the next bootstrap or external event corrects it).
+    // tc-u7cu.3: if an ACK responder was provided, always observe the result to
+    // send a command.response back to the issuing client.
+    const { respond: ackRespond, correlationId: ackCorrelationId, verbKind: ackVerbKind } = ackOpts ?? {};
+
+    // Error reversal: if no wiring is present we still need to observe the
+    // result for the ACK (if any), so we cannot return early.
     if (dispatchSynthetic === undefined || before === undefined) {
+      if (ackRespond !== undefined && ackCorrelationId !== undefined && ackVerbKind !== undefined) {
+        // Only wired for ACK, not for reversal.
+        void resultPromise.then(
+          (result) => {
+            if (!result.ok) {
+              const errorBody = result.body !== undefined ? new TextDecoder().decode(result.body).trim() : "";
+              const message = errorBody !== "" ? errorBody : `tmux rejected ${ackVerbKind}`;
+              ackRespond(ackCorrelationId, { ok: false, code: "verb.failed", message });
+            } else {
+              ackRespond(ackCorrelationId, { ok: true });
+            }
+          },
+          (err) => {
+            ackRespond(ackCorrelationId, { ok: false, code: "verb.internal", message: String(err) });
+          },
+        );
+      }
       return;
     }
 
     void resultPromise.then(
       (result) => {
-        if (result.ok) return; // tmux accepted — optimistic update was correct.
+        if (result.ok) {
+          // tmux accepted — optimistic update was correct.
+          ackRespond?.(ackCorrelationId!, { ok: true });
+          return;
+        }
         // tmux rejected: restore the model to its captured before-state.
         const compensating = reverse(before);
         if (compensating !== null) {
           dispatchSynthetic(compensating);
+        }
+        if (ackRespond !== undefined && ackCorrelationId !== undefined && ackVerbKind !== undefined) {
+          const errorBody = result.body !== undefined ? new TextDecoder().decode(result.body).trim() : "";
+          const message = errorBody !== "" ? errorBody : `tmux rejected ${ackVerbKind}`;
+          ackRespond(ackCorrelationId, { ok: false, code: "verb.failed", message });
         }
       },
       (err) => {
@@ -496,6 +534,7 @@ export function createInputPath(
         // its optimistic state.  This is rare and not a tmux rejection; the
         // next bootstrap or external event will eventually correct the model.
         console.warn("[input-path] send rejected for optimistic update:", err);
+        ackRespond?.(ackCorrelationId!, { ok: false, code: "verb.internal", message: String(err) });
       },
     );
   }
@@ -570,6 +609,55 @@ export function createInputPath(
       (err) => {
         // Protocol-level rejection (e.g. correlator cmdnum mismatch). Rare;
         // surface loudly as a failed verb so the client's await doesn't hang.
+        const message = `${verbKind} command failed at the correlator: ${String(err)}`;
+        console.error(`[input-path] ${message} (correlationId=${correlationId})`);
+        respond(correlationId, { ok: false, code: "verb.internal", message });
+      },
+    );
+  }
+
+  /**
+   * tc-u7cu.3: Issue a state-MUTATING NON-CREATING verb and ACK its result.
+   *
+   * For verbs that do NOT produce new pane/window ids (kill-pane, rename-session,
+   * kill-window, swap-window, set-synchronize-panes, etc.) this replaces the old
+   * fire-and-forget `sendCommand` when the caller needs to know whether tmux
+   * accepted or rejected the command.
+   *
+   * Unlike `runCreatingVerb`, the command does NOT carry `-P -F`; the reply body
+   * is ignored.  On `%end` the result is `{ ok: true }` (no ids).  On `%error`
+   * the tmux error text is surfaced as `{ ok: false, code: "verb.failed", message }`.
+   *
+   * When no `respond` callback is wired the command is still issued as
+   * fire-and-forget (no `command.response` is sent) — same as the previous
+   * `sendCommand` path.
+   */
+  function runAckVerb(
+    respond: VerbResponder | undefined,
+    correlationId: string,
+    verbKind: string,
+    cmd: string,
+  ): void {
+    const resultPromise = sendCommand(cmd);
+    if (respond === undefined) return; // no return path wired — fire-and-forget.
+
+    void resultPromise.then(
+      (result) => {
+        if (!result.ok) {
+          const errorBody =
+            result.body !== undefined
+              ? new TextDecoder().decode(result.body).trim()
+              : "";
+          const message = errorBody !== "" ? errorBody : `tmux rejected ${verbKind}`;
+          console.warn(`[input-path] tmux rejected ${verbKind}: ${message} (correlationId=${correlationId})`);
+          respond(correlationId, { ok: false, code: "verb.failed", message });
+          return;
+        }
+        // %end: tmux accepted the command.  Respond with a simple ACK
+        // (no pane/window ids — this is a non-creating verb).
+        respond(correlationId, { ok: true });
+      },
+      (err) => {
         const message = `${verbKind} command failed at the correlator: ${String(err)}`;
         console.error(`[input-path] ${message} (correlationId=${correlationId})`);
         respond(correlationId, { ok: false, code: "verb.internal", message });
@@ -680,18 +768,18 @@ export function createInputPath(
           }
 
           case "close-pane": {
-            // kill-pane -t %<N>
+            // kill-pane -t %<N>  (tc-u7cu.3: ACK round-trip so %error surfaces)
             const tmuxPaneNum = toTmuxPane(command.paneId);
-            sendCommand(`kill-pane -t %${tmuxPaneNum}`);
+            runAckVerb(respond, correlationId, "close-pane", `kill-pane -t %${tmuxPaneNum}`);
             break;
           }
 
           case "rename-window": {
-            // rename-window -t @<N> <name>
+            // rename-window -t @<N> <name>  (tc-u7cu.3: ACK round-trip)
             const tmuxWinNum = toTmuxWindow(command.windowId);
             // Single-quote the name to handle spaces / special chars.
             const quotedName = "'" + command.name.replace(/'/g, "'\\''") + "'";
-            sendCommand(`rename-window -t @${tmuxWinNum} ${quotedName}`);
+            runAckVerb(respond, correlationId, "rename-window", `rename-window -t @${tmuxWinNum} ${quotedName}`);
             break;
           }
 
@@ -724,7 +812,8 @@ export function createInputPath(
               : "";
             // Single-quote the new name to handle spaces / special chars.
             const quotedNewSessionName = "'" + command.name.replace(/'/g, "'\\''") + "'";
-            sendCommand(`rename-session ${targetFlag}${quotedNewSessionName}`);
+            // tc-u7cu.3: ACK round-trip so %error (e.g. duplicate name) surfaces.
+            runAckVerb(respond, correlationId, "rename-session", `rename-session ${targetFlag}${quotedNewSessionName}`);
             break;
           }
 
@@ -784,7 +873,6 @@ export function createInputPath(
           case "kill-session": {
             // kill-session -t =<sessionName>
             // Terminates the tmux session and all its windows/panes.
-            // Used when tmuxcc.killSessionOnLastWindowClose=true (ux-design.md [deleted; map: ux-design-v2 §8] §13).
             // The session-proxy will receive a session exit notification from tmux;
             // callers should expect the connection to close shortly after.
             //
@@ -792,7 +880,13 @@ export function createInputPath(
             // id-mapping is required.  The "=" prefix is the tmux exact-match
             // target selector, which avoids ambiguity when session names share a
             // prefix.
-            sendCommand(`kill-session -t =${command.sessionName}`);
+            //
+            // tc-u7cu.3: ACK round-trip so %error surfaces.  In practice,
+            // kill-session will terminate the connection before the ACK arrives
+            // (the session-proxy receives a session exit from tmux), but we
+            // still register the responder so a genuine %error (e.g. unknown
+            // session) is surfaced.
+            runAckVerb(respond, correlationId, "kill-session", `kill-session -t =${command.sessionName}`);
             break;
           }
 
@@ -811,6 +905,8 @@ export function createInputPath(
             // command (e.g. no such window), `sendCommandWithReversal` observes
             // the %error via the correlator and dispatches a compensating
             // synthetic with the captured before-value, restoring the model.
+            //
+            // tc-u7cu.3: also ACK the round-trip so %error surfaces to the caller.
             const tmuxWinNum = toTmuxWindow(command.windowId);
             const wid = command.windowId;
             const on = command.on;
@@ -822,6 +918,7 @@ export function createInputPath(
                 if (prev === undefined) return null; // window gone — nothing to revert.
                 return { kind: "internal:set-window-sync", windowId: wid, on: prev.synchronizePanes };
               },
+              respond !== undefined ? { respond, correlationId, verbKind: "set-synchronize-panes" } : undefined,
             );
             break;
           }
@@ -837,6 +934,7 @@ export function createInputPath(
             //
             // Optimistic model update with error reversal (tc-7xv.37) — same
             // pattern as set-synchronize-panes above.
+            // tc-u7cu.3: also ACK the round-trip so %error surfaces.
             const tmuxWinNum = toTmuxWindow(command.windowId);
             const wid = command.windowId;
             const on = command.on;
@@ -848,6 +946,7 @@ export function createInputPath(
                 if (prev === undefined) return null;
                 return { kind: "internal:set-window-monitor-activity", windowId: wid, on: prev.monitorActivity };
               },
+              respond !== undefined ? { respond, correlationId, verbKind: "set-monitor-activity" } : undefined,
             );
             break;
           }
@@ -865,6 +964,7 @@ export function createInputPath(
             // Optimistic model update with error reversal (tc-7xv.37) — same
             // pattern as set-synchronize-panes above.  tmux 3.4 does NOT emit
             // %window-option-changed for monitor-silence.
+            // tc-u7cu.3: also ACK the round-trip so %error surfaces.
             const tmuxWinNum = toTmuxWindow(command.windowId);
             const wid = command.windowId;
             const secondsVal = command.seconds !== null && command.seconds > 0 ? command.seconds : 0;
@@ -876,6 +976,7 @@ export function createInputPath(
                 if (prev === undefined) return null;
                 return { kind: "internal:set-window-monitor-silence", windowId: wid, seconds: prev.monitorSilence };
               },
+              respond !== undefined ? { respond, correlationId, verbKind: "set-monitor-silence" } : undefined,
             );
             break;
           }
@@ -915,10 +1016,11 @@ export function createInputPath(
             // select-pane -T <title> -t %<N>
             // Sets the pane's display title (#{pane_title}).
             // An empty title resets to the default (process name).
+            // tc-u7cu.3: ACK round-trip so %error surfaces.
             const tmuxPaneNum = toTmuxPane(command.paneId);
             // Single-quote the title to handle spaces / special chars.
             const quotedTitle = "'" + command.title.replace(/'/g, "'\\''") + "'";
-            sendCommand(`select-pane -T ${quotedTitle} -t %${tmuxPaneNum}`);
+            runAckVerb(respond, correlationId, "rename-pane", `select-pane -T ${quotedTitle} -t %${tmuxPaneNum}`);
             break;
           }
           // ── tc-7xv.18: window verbs ──────────────────────────────────────────
@@ -929,8 +1031,9 @@ export function createInputPath(
             // Kills the tmux window and all its panes.  tmux emits pane-exited
             // and window-close notifications which flow back through the session-proxy
             // mirror as pane.closed + window.removed deltas.
+            // tc-u7cu.3: ACK round-trip so %error surfaces.
             const tmuxWinNum = toTmuxWindow(command.windowId);
-            sendCommand(`kill-window -t @${tmuxWinNum}`);
+            runAckVerb(respond, correlationId, "kill-window", `kill-window -t @${tmuxWinNum}`);
             break;
           }
 
@@ -939,9 +1042,10 @@ export function createInputPath(
             //
             // Exchanges the positions of two windows within the session.
             // No panes are created or destroyed; tmux reorders the window list.
+            // tc-u7cu.3: ACK round-trip so %error surfaces.
             const srcNum = toTmuxWindow(command.sourceWindowId);
             const tgtNum = toTmuxWindow(command.targetWindowId);
-            sendCommand(`swap-window -s @${srcNum} -t @${tgtNum}`);
+            runAckVerb(respond, correlationId, "swap-window", `swap-window -s @${srcNum} -t @${tgtNum}`);
             break;
           }
 

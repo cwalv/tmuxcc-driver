@@ -931,21 +931,29 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
           msg as import("../wire/session-proxy-control.js").ClientMessage,
           (correlationId, result) => {
             if (result.ok) {
-              // tc-ozk.2: record the verb→effect-ids correlation BEFORE sending
-              // the response, so the daemon can stamp `origin` on the
-              // pane.opened / window.added it emits for these ids. connectionId
-              // names THIS connection (the verb's issuer); requestId is the
-              // verb's correlationId. The pane's delta may arrive before or
-              // after this responder fires — the registry decouples them (a
-              // late delta is emitted untagged but still bound by id, tc-ozk.1).
-              const connId = server.connectionIdFor(transport);
-              if (connId !== undefined) {
-                verbOrigins.record(result.newPaneId, result.newWindowId, connId, correlationId);
+              if (result.newPaneId !== undefined && result.newWindowId !== undefined) {
+                // tc-ozk.2: record the verb→effect-ids correlation BEFORE sending
+                // the response, so the daemon can stamp `origin` on the
+                // pane.opened / window.added it emits for these ids. connectionId
+                // names THIS connection (the verb's issuer); requestId is the
+                // verb's correlationId. The pane's delta may arrive before or
+                // after this responder fires — the registry decouples them (a
+                // late delta is emitted untagged but still bound by id, tc-ozk.1).
+                const connId = server.connectionIdFor(transport);
+                if (connId !== undefined) {
+                  verbOrigins.record(result.newPaneId, result.newWindowId, connId, correlationId);
+                }
+                // Creating verb: include effect ids in the response payload.
+                server.sendCommandResponse(transport, correlationId, {
+                  paneId: result.newPaneId,
+                  windowId: result.newWindowId,
+                });
+              } else {
+                // tc-u7cu.3: Non-creating verb ACK — no effect ids to record or
+                // send.  The client receives { ok: true, payload: {} } which it
+                // resolves as a simple success (VerbResult { ok: true }).
+                server.sendCommandResponse(transport, correlationId, {});
               }
-              server.sendCommandResponse(transport, correlationId, {
-                paneId: result.newPaneId,
-                windowId: result.newWindowId,
-              });
             } else {
               server.sendCommandError(transport, correlationId, result.code, result.message);
             }
