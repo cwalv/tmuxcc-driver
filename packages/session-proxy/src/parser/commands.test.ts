@@ -252,6 +252,22 @@ describe("listPanes", () => {
     assert.ok(cmd.includes("-t @2"), `Expected -t @2, got: ${cmd}`);
   });
 
+  it("session-scoped form targets the immutable session id (tc-0v59)", () => {
+    const cmd = listPanes({ sessionId: 3 });
+    // `-s` scopes to all panes in the session; `-t $3` is the immutable id.
+    assert.ok(
+      cmd.startsWith("list-panes -s -t $3 -F "),
+      `Expected 'list-panes -s -t $3 -F ...', got: ${cmd}`,
+    );
+    assert.ok(!cmd.includes("="), `Session-scoped form must not use a name target: ${cmd}`);
+  });
+
+  it("session-scoped form honors a custom format", () => {
+    const fmt = "#{pane_id}\t#{session_id}";
+    const cmd = listPanes({ sessionId: 0, format: fmt });
+    assert.equal(cmd, `list-panes -s -t $0 -F '${fmt}'`);
+  });
+
   it("includes a custom format", () => {
     const fmt = "#{pane_id}\t#{pane_width}";
     const cmd = listPanes(undefined, fmt);

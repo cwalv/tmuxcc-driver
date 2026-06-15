@@ -120,23 +120,56 @@ export const BOOTSTRAP_PANES_FORMAT =
 // ---------------------------------------------------------------------------
 
 /**
+ * How the requery engine scopes its `list-windows` / `list-panes` cycle to a
+ * single session.
+ *
+ *   - `{ kind: "id", sessionId }` — target by the IMMUTABLE tmux session id
+ *     (`$N`). This is the steady-state target: it survives a `rename-session`
+ *     (the id never changes), so the requery keeps observing the right session
+ *     after a rename and can emit the `session.renamed` delta (tc-0v59).
+ *   - `{ kind: "name", sessionName }` — target by the (mutable) session name
+ *     (`=<name>`). Used ONLY for the very first cold cycle, before any reply
+ *     has revealed the immutable id. The name is correct at bootstrap; the
+ *     engine captures the id from the first successful reply and switches to
+ *     id-targeting forever after.
+ *   - `undefined` — no scope: fall back to `-a` (all sessions), the legacy
+ *     behaviour for bootstrap shapes that know neither the id nor the name.
+ */
+export type SessionTarget =
+  | { readonly kind: "id"; readonly sessionId: number }
+  | { readonly kind: "name"; readonly sessionName: string };
+
+/**
  * Return the two tmux commands the requery engine issues on every cycle.
  *
- * When `sessionName` is provided, commands are scoped to that session only
- * (avoiding cross-session contamination in multi-session environments).
- * When absent, falls back to `-a` (all sessions) for backward compatibility
- * with bootstrap shapes that don't yet know the session name.
+ * When `target` is provided the commands are scoped to that one session
+ * (avoiding cross-session contamination in multi-session environments). The
+ * `"id"` form targets by the immutable session id `$N` (rename-safe); the
+ * `"name"` form targets by `=<name>` (used only before the id is known).
+ * When `target` is absent, falls back to `-a` (all sessions).
  *
  * Returns: `[listWindowsCommand, listPanesCommand]`
  */
-export function bootstrapCommands(sessionName?: string): [string, string] {
-  if (sessionName !== undefined && sessionName.length > 0) {
-    // Scope bootstrap to this session only (tc-tfv.3: avoid cross-session
-    // pane/focus contamination when multiple sessions share a tmux server).
-    const target = `=${sessionName}`;
-    const winCmd = listWindows(BOOTSTRAP_WINDOWS_FORMAT) + ` -t ${target}`;
+export function bootstrapCommands(target?: SessionTarget): [string, string] {
+  if (target !== undefined && target.kind === "id") {
+    // Steady-state: scope by the IMMUTABLE session id ($N). listWindows emits
+    // `-t $<id>`; listPanes emits the session-scoped `-s -t $<id>` form. This
+    // survives a rename-session (tc-0v59) because the id never changes.
+    const winCmd = listWindows(BOOTSTRAP_WINDOWS_FORMAT, target.sessionId);
+    const paneCmd = listPanes({
+      sessionId: target.sessionId,
+      format: BOOTSTRAP_PANES_FORMAT,
+    });
+    return [winCmd, paneCmd];
+  }
+  if (target !== undefined && target.kind === "name" && target.sessionName.length > 0) {
+    // Cold-bootstrap only: scope by the mutable session name (tc-tfv.3: avoid
+    // cross-session pane/focus contamination when multiple sessions share a
+    // tmux server). Used until the first reply reveals the immutable id.
+    const nameTarget = `=${target.sessionName}`;
+    const winCmd = listWindows(BOOTSTRAP_WINDOWS_FORMAT) + ` -t ${nameTarget}`;
     // list-panes -s scopes to all panes in the session; -t targets the session.
-    const paneCmd = listPanes(undefined, BOOTSTRAP_PANES_FORMAT) + ` -s -t ${target}`;
+    const paneCmd = listPanes(undefined, BOOTSTRAP_PANES_FORMAT) + ` -s -t ${nameTarget}`;
     return [winCmd, paneCmd];
   }
   // Fallback: all sessions (legacy behaviour).

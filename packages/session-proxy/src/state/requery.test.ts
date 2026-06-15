@@ -2225,3 +2225,190 @@ describe("RequeryEngine: failure telemetry hooks (tc-3si.5)", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// tc-0v59: session rename propagation — id-based requery targeting + loud %error
+//
+// The requery engine must target the session by its IMMUTABLE tmux id ($N),
+// captured from the first successful reply, NOT by the mutable session name.
+// This is what lets a requery survive a `rename-session`: the id never changes,
+// so the next cycle observes the NEW name and emits the `session.renamed` delta.
+//
+// A queued submit that ALSO records the command strings, so we can assert the
+// exact `-t` target the engine emits per cycle. FIFO, like `queueSubmit`.
+// ---------------------------------------------------------------------------
+
+function recordingSubmit(results: CommandResult[]): {
+  submit: SubmitCommand;
+  commands: string[];
+} {
+  const queue = [...results];
+  const commands: string[] = [];
+  return {
+    submit: (cmd: string) => {
+      commands.push(cmd);
+      return Promise.resolve(queue.shift() ?? errResult(999));
+    },
+    commands,
+  };
+}
+
+describe("RequeryEngine: id-based session targeting (tc-0v59)", () => {
+  it("first cold cycle targets =<name>; every cycle AFTER capturing the id targets $<id>", async () => {
+    // Bootstrap: tmux session $7 named "main".
+    const win = winLine({
+      sessNum: 7,
+      sessName: "main",
+      winNum: 1,
+      winName: "shell",
+      layout: SINGLE_PANE_LAYOUT(1),
+      active: true,
+    });
+    const pane = paneLine({ paneNum: 1, winNum: 1, sessNum: 7, active: true });
+
+    // Two clean cycles' worth of replies.
+    const { submit, commands } = recordingSubmit([
+      okResult(win),
+      okResult(pane),
+      okResult(win),
+      okResult(pane),
+    ]);
+
+    const engine = createRequeryEngine({ submit, sessionName: "main" });
+
+    // Cycle 1 (cold): no id captured yet → must target by name.
+    await engine.requery();
+    const [winCmd1, paneCmd1] = [commands[0]!, commands[1]!];
+    assert.ok(
+      winCmd1.includes("-t =main"),
+      `cold cycle 1 list-windows should target =main, got: ${winCmd1}`,
+    );
+    assert.ok(
+      paneCmd1.includes("-t =main"),
+      `cold cycle 1 list-panes should target =main, got: ${paneCmd1}`,
+    );
+
+    // Cycle 2: id ($7) captured from cycle 1's reply → must target by id.
+    engine.markDirty();
+    await engine.requery();
+    const [winCmd2, paneCmd2] = [commands[2]!, commands[3]!];
+    assert.ok(
+      winCmd2.includes("-t $7"),
+      `cycle 2 list-windows should target $7, got: ${winCmd2}`,
+    );
+    assert.ok(
+      !winCmd2.includes("=main"),
+      `cycle 2 must NOT target the mutable name, got: ${winCmd2}`,
+    );
+    assert.ok(
+      paneCmd2.includes("-s -t $7"),
+      `cycle 2 list-panes should be session-scoped to $7, got: ${paneCmd2}`,
+    );
+  });
+
+  it("requery SURVIVES a rename: id-targeted reply with the NEW name emits session.renamed", async () => {
+    // Bootstrap with the OLD name "before", session $4.
+    const winBefore = winLine({
+      sessNum: 4,
+      sessName: "before",
+      winNum: 1,
+      winName: "shell",
+      layout: SINGLE_PANE_LAYOUT(1),
+      active: true,
+    });
+    const paneBefore = paneLine({ paneNum: 1, winNum: 1, sessNum: 4, active: true });
+
+    // After rename: SAME session id $4, NEW name "after". This is exactly what
+    // tmux returns for `list-windows -t $4` after `rename-session` — the id is
+    // stable, only the name changed. Under the OLD name-targeting code the
+    // engine would have issued `-t =before` and gotten %error here.
+    const winAfter = winLine({
+      sessNum: 4,
+      sessName: "after",
+      winNum: 1,
+      winName: "shell",
+      layout: SINGLE_PANE_LAYOUT(1),
+      active: true,
+    });
+    const paneAfter = paneLine({ paneNum: 1, winNum: 1, sessNum: 4, active: true });
+
+    const { submit, commands } = recordingSubmit([
+      okResult(winBefore),
+      okResult(paneBefore),
+      okResult(winAfter),
+      okResult(paneAfter),
+    ]);
+
+    const engine = createRequeryEngine({ submit, sessionName: "before" });
+
+    // Bootstrap cycle: model has the old name.
+    await engine.requery();
+    assert.equal(engine.getModel().sessions.get(sessionId("s4"))?.name, "before");
+
+    // Post-rename requery: targets $4 (the captured id), so the reply with the
+    // NEW name lands instead of a %error from the stale `=before` target.
+    engine.markDirty();
+    const { deltas } = await engine.requery();
+
+    // The post-rename cycle must have targeted by id, never the old name.
+    assert.ok(
+      commands[2]!.includes("-t $4") && !commands[2]!.includes("=before"),
+      `post-rename cycle must target $4 not =before, got: ${commands[2]}`,
+    );
+
+    // Model now carries the new name AND a session.renamed delta was emitted.
+    assert.equal(engine.getModel().sessions.get(sessionId("s4"))?.name, "after");
+    const renamed = deltas.find((d) => d.type === "session.renamed");
+    assert.ok(
+      renamed !== undefined,
+      `expected a session.renamed delta, got: ${deltas.map((d) => d.type).join(", ")}`,
+    );
+    assert.equal(
+      (renamed as { newName: string }).newName,
+      "after",
+      "session.renamed must carry the new name",
+    );
+  });
+
+  it("a requery %error emits a loud per-incident stderr line (no silent swallow)", async () => {
+    const failedReasons: ("error" | "budget")[] = [];
+    const d = deferredSubmit();
+    const engine = createRequeryEngine({
+      submit: d.submit,
+      sessionName: "main",
+      onCycleFailed: (r) => failedReasons.push(r),
+    });
+
+    // Capture stderr to verify the loud log.
+    const origWrite = process.stderr.write.bind(process.stderr);
+    const captured: string[] = [];
+    (process.stderr as { write: typeof process.stderr.write }).write = ((
+      chunk: string | Uint8Array,
+    ) => {
+      captured.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+
+    let result;
+    try {
+      const inflight = engine.requery();
+      d.resolveNext(errResult()); // %error from list-windows
+      d.resolveNext(okResult("")); // list-panes ok (one side failing is enough)
+      result = await inflight;
+    } finally {
+      process.stderr.write = origWrite;
+    }
+
+    assert.equal(result.failed, true);
+    assert.deepEqual(failedReasons, ["error"], "still bumps the error-reason counter");
+    const logText = captured.join("");
+    assert.ok(
+      logText.includes("REQUERY ERROR"),
+      `expected a loud REQUERY ERROR stderr line; got: ${JSON.stringify(logText)}`,
+    );
+    assert.ok(
+      logText.includes("list-windows"),
+      `loud line should name which reply failed; got: ${logText}`,
+    );
+  });
+});

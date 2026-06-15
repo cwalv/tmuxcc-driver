@@ -83,6 +83,7 @@ export {
 export type {
   WindowsReplyRow,
   PanesReplyRow,
+  SessionTarget,
 } from "./bootstrap.js";
 
 // tc-128.1: requery engine + diff-to-deltas

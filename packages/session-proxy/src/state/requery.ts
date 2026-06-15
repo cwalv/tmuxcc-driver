@@ -180,6 +180,7 @@ import {
   parsePanesReply,
   parseWindowsReply,
 } from "./bootstrap.js";
+import type { SessionTarget } from "./bootstrap.js";
 
 // ---------------------------------------------------------------------------
 // Pure core: parse two replies → fresh model → diff against prev
@@ -307,11 +308,15 @@ export interface RequeryEngineOptions {
   readonly initialModel?: SessionModel;
 
   /**
-   * The tmux session name this engine is bound to. Forwarded to
-   * `bootstrapCommands(sessionName)` so the queries are scoped to one session
-   * (avoiding cross-session contamination on a shared tmux server, mirroring
-   * the bootstrap coordinator's behavior). When absent the queries fall back
-   * to `-a` (all sessions).
+   * The tmux session name this engine is bound to. Used ONLY to scope the
+   * very first cold requery cycle (`list-* -t =<name>`), before any reply has
+   * revealed the session's immutable id. On the first successful reply the
+   * engine captures `#{session_id}` (already in the bootstrap format) and
+   * targets `$<id>` on every subsequent cycle — which survives a
+   * `rename-session` (tc-0v59). The name thereafter is a human display label
+   * only, never a query target. When absent the queries fall back to `-a`
+   * (all sessions) and the id is NOT captured (the engine deliberately tracks
+   * every session in that mode).
    */
   readonly sessionName?: string;
 
@@ -513,7 +518,25 @@ export function createRequeryEngine(opts: RequeryEngineOptions): RequeryEngine {
 
 class RequeryEngineImpl implements RequeryEngine {
   private _model: SessionModel;
+
+  /**
+   * The (mutable) session name supplied at construction. Used ONLY to scope
+   * the very first cold cycle by `=<name>`, before any reply has revealed the
+   * immutable session id. Once `_sessionId` is captured the name is never a
+   * query target again (tc-0v59) — it lives on only as the human display label
+   * inside the model.
+   */
   private readonly _sessionName: string | undefined;
+
+  /**
+   * The IMMUTABLE tmux session id (`$N` → N) this engine is bound to, captured
+   * from the first successful requery reply. `undefined` until that capture.
+   * Once set, EVERY cycle targets `$<id>` — which survives a rename-session,
+   * unlike the name. This is the fix for tc-0v59: a rename no longer makes the
+   * requery target a stale name and bail with `%error`.
+   */
+  private _sessionId: number | undefined;
+
   private readonly _submit: SubmitCommand;
   private readonly _teardownThreshold: number;
   private readonly _onTeardownConfirmation:
@@ -568,6 +591,51 @@ class RequeryEngineImpl implements RequeryEngine {
     return this._dirty;
   }
 
+  /**
+   * The session scope for the next cycle's `bootstrapCommands` (tc-0v59).
+   *
+   * Prefers the immutable id (`$<id>`) once captured — that's the steady-state
+   * target that survives a rename. Falls back to the construction-time name
+   * (`=<name>`) for the very first cold cycle, before any reply has revealed
+   * the id. Returns `undefined` (→ `-a` all-sessions) when neither is known.
+   */
+  private _sessionTarget(): SessionTarget | undefined {
+    if (this._sessionId !== undefined) {
+      return { kind: "id", sessionId: this._sessionId };
+    }
+    if (this._sessionName !== undefined && this._sessionName.length > 0) {
+      return { kind: "name", sessionName: this._sessionName };
+    }
+    return undefined;
+  }
+
+  /**
+   * Capture the immutable session id from a parsed reply, once (tc-0v59).
+   *
+   * The id is field [0] of every BOOTSTRAP_*_FORMAT row. We read it from the
+   * windows reply first (panes as a fallback when the session has no windows
+   * in the reply yet). Once set, the id is NEVER overwritten — it is immutable
+   * for the life of the session, and re-binding it could let a transient
+   * cross-session contamination hijack the requery target.
+   *
+   * No-op when the engine has no name/id scope at all (the `-a` fallback case):
+   * in that mode the engine deliberately tracks every session, so latching onto
+   * one id would silently narrow the scope.
+   */
+  private _captureSessionId(
+    windowRows: ReturnType<typeof parseWindowsReply>,
+    paneRows: ReturnType<typeof parsePanesReply>,
+  ): void {
+    if (this._sessionId !== undefined) return;
+    // Only bind when this engine is scoped to a single session. In the
+    // unscoped `-a` mode (no name supplied) we must NOT collapse onto one id.
+    if (this._sessionName === undefined || this._sessionName.length === 0) return;
+    const first = windowRows[0] ?? paneRows[0];
+    if (first !== undefined) {
+      this._sessionId = first.tmuxSessionId;
+    }
+  }
+
   requery(): Promise<RequeryResult> {
     if (this._inFlight !== null) return this._inFlight;
     const startModel = this._model;
@@ -589,11 +657,13 @@ class RequeryEngineImpl implements RequeryEngine {
    *   2. Issue both `list-*` commands and await both replies.
    *   3. If either reply is `%error` (regardless of mid-flight dirties):
    *      treat the entire call as failed. Do NOT swap `_model`; re-arm the
-   *      dirty bit; return `{ next: startModel, deltas: [], failed: true }`.
-   *      The pure-core `requeryDiff` retains the BOOTSTRAP "missing rows =
-   *      empty rows" semantic; the engine driver must never wipe the model
-   *      on a transient command failure (a teardown burst that the next
-   *      successful cycle would have to undo).
+   *      dirty bit; loud-log the incident (tc-0v59 — `_reportRequeryError`,
+   *      same alarm pattern as the budget/refuted siblings); return
+   *      `{ next: startModel, deltas: [], failed: true }`. The pure-core
+   *      `requeryDiff` retains the BOOTSTRAP "missing rows = empty rows"
+   *      semantic; the engine driver must never wipe the model on a transient
+   *      command failure (a teardown burst that the next successful cycle
+   *      would have to undo).
    *   4. Parse the replies into a CANDIDATE model held in a local. Do NOT
    *      write `_model` yet.
    *   5. If the dirty bit was set during this cycle: discard the candidate
@@ -644,7 +714,7 @@ class RequeryEngineImpl implements RequeryEngine {
 
     for (let attempt = 0; attempt < CYCLE_BUDGET; attempt++) {
       this._dirty = false;
-      const [winCmd, paneCmd] = bootstrapCommands(this._sessionName);
+      const [winCmd, paneCmd] = bootstrapCommands(this._sessionTarget());
 
       // Issue both commands before awaiting either, mirroring the bootstrap
       // coordinator's FIFO pairing. The correlator the caller wired up
@@ -661,8 +731,16 @@ class RequeryEngineImpl implements RequeryEngine {
       // discarded; _model is still startModel because we never wrote to it.
       // The pending teardown candidate (if any) is also discarded — we
       // can't confirm against a %error.
+      //
+      // tc-0v59: the failure is now VISIBLE per incident. The legitimate
+      // transient-retry behaviour is unchanged (a single blip during a
+      // notification storm still re-arms dirty and retries); the ONLY change
+      // is the loud per-incident stderr line below, in line with the
+      // budget-exhausted and refuted-teardown siblings. A persistent requery
+      // %error (e.g. a stale-target regression) can no longer spin invisibly.
       if (!winResult.ok || !paneResult.ok) {
         this._dirty = true;
+        this._reportRequeryError(winResult, paneResult);
         this._reportCycleFailed("error");
         return { next: startModel, deltas: [], failed: true };
       }
@@ -674,6 +752,16 @@ class RequeryEngineImpl implements RequeryEngine {
       const windowRows = parseWindowsReply(winResult.body);
       const paneRows = parsePanesReply(paneResult.body);
       const candidate = buildInitialModel(windowRows, paneRows);
+
+      // tc-0v59: capture the IMMUTABLE session id from the first successful
+      // reply, then target by `$<id>` on every subsequent cycle. The id is in
+      // the BOOTSTRAP_*_FORMAT replies (field [0] of each window/pane row).
+      // Capturing it here — after a clean parse, regardless of the dirty bit —
+      // means we lock onto the id the moment we first see the session, so a
+      // later rename never points the requery at a stale name. We never
+      // OVERWRITE a captured id (it is immutable), so a transient cross-session
+      // contamination cannot hijack the binding once it is set.
+      this._captureSessionId(windowRows, paneRows);
 
       if (this._dirty) {
         // Dirty mid-flight: discard candidate AND any pending teardown
@@ -771,6 +859,47 @@ class RequeryEngineImpl implements RequeryEngine {
     this._reportBudgetExhausted();
     this._reportCycleFailed("budget");
     return { next: startModel, deltas: [], failed: true };
+  }
+
+  /**
+   * Loud-log a requery `%error` cycle failure (tc-0v59).
+   *
+   * Mirrors `_reportBudgetExhausted` / `_reportTeardownOutcome`'s alert path:
+   * one stderr line per incident, unconditional (independent of any wired
+   * counter), not parsed by anything — a forensic trail. Names which reply
+   * failed and the session target so a stale-target regression (the exact bug
+   * this bead fixed) is instantly attributable instead of spinning silently
+   * behind the coalescer's retry + heartbeat.
+   *
+   * NOTE: a SINGLE blip is expected during a notification storm and is
+   * harmless (the cycle re-arms dirty and retries) — but per the pre-alpha
+   * fail-loud policy the failure must still be VISIBLE per incident, not
+   * swallowed into a silent counter.
+   */
+  private _reportRequeryError(
+    winResult: CommandResult,
+    paneResult: CommandResult,
+  ): void {
+    const which =
+      !winResult.ok && !paneResult.ok
+        ? "list-windows + list-panes"
+        : !winResult.ok
+          ? "list-windows"
+          : "list-panes";
+    const target = this._sessionTarget();
+    const scope =
+      target === undefined
+        ? "-a (all sessions)"
+        : target.kind === "id"
+          ? `$${target.sessionId}`
+          : `=${target.sessionName}`;
+    process.stderr.write(
+      `[requery-engine] REQUERY ERROR: tmux returned %error for ${which} ` +
+        `(target ${scope}). The model is intact (kept the pre-cycle snapshot) and ` +
+        `the cycle re-armed dirty for retry. A SINGLE blip during a notification ` +
+        `storm is benign; a PERSISTENT %error means the target is wrong (e.g. a ` +
+        `stale session name after a rename — tc-0v59) and the requery is stuck.\n`,
+    );
   }
 
   /**

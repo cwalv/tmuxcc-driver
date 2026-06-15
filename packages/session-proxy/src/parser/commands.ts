@@ -284,17 +284,46 @@ export function listWindows(format?: string, sessionId?: number): string {
 export const LIST_PANES_DEFAULT_FORMAT =
   "#{pane_id}\t#{window_id}\t#{pane_index}\t#{pane_width}\t#{pane_height}\t#{pane_top}\t#{pane_left}\t#{?pane_active,1,0}\t#{pane_pid}\t#{pane_current_command}";
 
+/** Options for the session-scoped form of {@link listPanes}. */
+export interface ListPanesSessionOptions {
+  /**
+   * Numeric session ID (the N in `$N`).  Emits the session-scoped form
+   * `list-panes -s -t $<id> -F '<format>'`, which lists every pane in the
+   * session across all its windows.  Targeting by the IMMUTABLE session id
+   * (rather than a mutable session name) keeps the requery engine pointed at
+   * the right session across a `rename-session` (tc-0v59).
+   */
+  readonly sessionId: number;
+  /** Format string (default: LIST_PANES_DEFAULT_FORMAT). */
+  readonly format?: string;
+}
+
 /**
  * Serialize a `list-panes` command.
  *
  * Emits `list-panes -F '<format>'`.  When `target` is provided it is passed
  * as `-t <target>` (e.g. `%5` for a pane, `@2` for a window).
  *
- * @param target  Optional target (window or pane ID string, e.g. `@2`).
- * @param format  Format string (default: LIST_PANES_DEFAULT_FORMAT).
+ * Pass a {@link ListPanesSessionOptions} object instead of a string target to
+ * get the session-scoped form `list-panes -s -t $<id> -F '<format>'` — every
+ * pane in the session, addressed by its immutable session id.
+ *
+ * @param target  Optional target: a window/pane id string (e.g. `@2`), or a
+ *                {@link ListPanesSessionOptions} for the session-scoped form.
+ * @param format  Format string (default: LIST_PANES_DEFAULT_FORMAT).  Ignored
+ *                when `target` is a {@link ListPanesSessionOptions} (use its
+ *                `format` field instead).
  * @returns       e.g. `list-panes -t @2 -F '<format>'`
+ *                or   `list-panes -s -t $0 -F '<format>'`
  */
-export function listPanes(target?: string, format?: string): string {
+export function listPanes(
+  target?: string | ListPanesSessionOptions,
+  format?: string,
+): string {
+  if (typeof target === "object") {
+    const fmt = quoteArg(target.format ?? LIST_PANES_DEFAULT_FORMAT);
+    return `list-panes -s -t $${target.sessionId} -F ${fmt}`;
+  }
   const fmt = quoteArg(format ?? LIST_PANES_DEFAULT_FORMAT);
   const t = target !== undefined ? ` -t ${target}` : "";
   return `list-panes${t} -F ${fmt}`;
