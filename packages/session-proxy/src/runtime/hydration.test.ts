@@ -42,6 +42,7 @@ import {
   CLEAR_AND_SCROLLBACK,
   hydrateTransport,
   lfToCrlf,
+  trimTrailingBlankLines,
 } from "./hydration.js";
 import type { HydrationPipeline } from "./hydration.js";
 import { paneId } from "../wire/ids.js";
@@ -164,6 +165,51 @@ describe("tc-5quo lfToCrlf", () => {
     const src = new Uint8Array([0xff, 0x0a, 0x80, 0x0d, 0x0a, 0xfe]);
     const out = lfToCrlf(src);
     assert.deepEqual(Array.from(out), [0xff, 0x0d, 0x0a, 0x80, 0x0d, 0x0a, 0xfe]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (A') tc-pizl.2 — trimTrailingBlankLines (fresh-pane viewport-tail strip)
+// ---------------------------------------------------------------------------
+
+describe("tc-pizl.2 trimTrailingBlankLines", () => {
+  const enc = (s: string): Uint8Array => new TextEncoder().encode(s);
+  const dec = (b: Uint8Array): string => new TextDecoder().decode(b);
+
+  it("strips a fresh pane's empty viewport tail down to the prompt row", () => {
+    // capture-pane -E - returns the prompt near the top then the empty viewport
+    // rows (one bare LF each).  Trimming the tail leaves the prompt as the last
+    // line with NO trailing LF, so the replayed cursor lands on the prompt row.
+    const body = enc("\ncwa at chost in ~\n$ \n\n\n\n\n");
+    assert.equal(dec(trimTrailingBlankLines(body)), "\ncwa at chost in ~\n$ ");
+  });
+
+  it("leaves a scrollback body that ends on real content byte-unchanged (p2)", () => {
+    // A pane WITH scrollback fills the viewport down to the cursor: its last
+    // captured line is real content, so there is no trailing blank to strip.
+    const body = enc("python file1.py\npython file2.py\n^C\nreset\n$ ls -la");
+    const out = trimTrailingBlankLines(body);
+    assert.equal(out, body, "no trailing blank → returned same reference (unchanged)");
+  });
+
+  it("drops the single trailing LF when real content ends with one (cursor on its row)", () => {
+    const body = enc("line1\nline2\n$ ls\n");
+    assert.equal(dec(trimTrailingBlankLines(body)), "line1\nline2\n$ ls");
+  });
+
+  it("preserves interior and leading blank lines — only the trailing run is stripped", () => {
+    const body = enc("\n\nabove\n\nbelow\n\n\n");
+    assert.equal(dec(trimTrailingBlankLines(body)), "\n\nabove\n\nbelow");
+  });
+
+  it("treats space-only trailing rows as blank (belt-and-braces)", () => {
+    const body = enc("text\n   \n  \n");
+    assert.equal(dec(trimTrailingBlankLines(body)), "text");
+  });
+
+  it("returns empty for an all-blank body and for an empty body", () => {
+    assert.equal(dec(trimTrailingBlankLines(enc("\n\n\n"))), "");
+    assert.equal(dec(trimTrailingBlankLines(new Uint8Array(0))), "");
   });
 });
 
@@ -486,6 +532,100 @@ describe("tc-5quo hydration — bind-path invariant", () => {
     assert.ok(
       replayStr.includes("LINE-DURING-DISCONNECT-2"),
       "second line produced during disconnect must appear in the hydrated replay",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (E) tc-pizl.2 — fresh-pane top-anchor invariant (FUTURE E2E ORACLE, unit form)
+//
+// The oracle: a fresh no-history pane must NOT produce a full-pane-height block
+// of trailing blank lines in the replay (those newlines bottom-anchor the prompt
+// in xterm).  A pane WITH scrollback must STILL replay its real content ending on
+// the last real line (bottom-anchored), unregressed.  We exercise the full
+// hydrateTransport frame here so the assertion covers the delivered byte stream,
+// not just the trim helper.
+// ---------------------------------------------------------------------------
+
+describe("tc-pizl.2 fresh-pane top-anchor invariant", () => {
+  /** The replay body (after CLEAR prefix) decoded as a string. */
+  function replayString(frameBytes: Uint8Array): string {
+    return new TextDecoder().decode(frameBytes.subarray(CLEAR_AND_SCROLLBACK.length));
+  }
+
+  it("fresh pane: replay carries NO trailing pane-height block of blank lines", async () => {
+    // tmux capture-pane -E - of a fresh 50-row pane: prompt near the top, then
+    // ~47 empty viewport rows (one bare LF each).
+    const ROWS = 50;
+    const captureBody =
+      "\ncwa at chost in ~\n$ " + "\n".repeat(ROWS - 3);
+
+    const { pipeline, setReply } = makeFakePipeline();
+    const { transport, frames } = makeRecordingTransport();
+    setReply("capture-pane", ok(new TextEncoder().encode(captureBody)));
+
+    await hydrateTransport(pipeline, transport, [P1]);
+
+    assert.equal(frames.length, 1);
+    const replay = replayString(frames[0]!.bytes);
+
+    // The replay must END on the prompt (no trailing newline / blank block).
+    assert.ok(replay.endsWith("$ "), `replay must end on the prompt, got: ${JSON.stringify(replay)}`);
+    assert.ok(
+      !/\n\s*\n\s*$/.test(replay),
+      "replay must not end with a run of blank lines (would bottom-anchor the prompt)",
+    );
+    // The FIRST non-empty line must be near the TOP — within the first few rows,
+    // NOT preceded by a pane-height block of blanks.
+    const lines = replay.split(/\r?\n/);
+    const firstNonEmpty = lines.findIndex((l) => l.trim().length > 0);
+    assert.ok(firstNonEmpty >= 0, "replay must contain a non-empty line");
+    assert.ok(
+      firstNonEmpty < 5,
+      `first non-empty line must be near the top (got index ${firstNonEmpty})`,
+    );
+    // And the total line count must be a handful (prompt rows), not pane-height.
+    assert.ok(
+      lines.length < 10,
+      `fresh-pane replay must not span a pane-height block of lines (got ${lines.length})`,
+    );
+  });
+
+  it("scrollback pane: replay still ends bottom-anchored on real content (p2 non-regression)", async () => {
+    // A pane with real scrollback filling the viewport down to the cursor: the
+    // last captured line is real content (the live prompt), with no empty tail.
+    const realLines = [
+      "$ ls -la",
+      "total 8",
+      "drwxr-xr-x  2 cwa cwa 4096 Jun 15 file1.py",
+      "drwxr-xr-x  2 cwa cwa 4096 Jun 15 file2.py",
+      "^C",
+      "$ reset",
+      "$ ", // live prompt — the cursor row, bottom of the viewport
+    ];
+    const captureBody = realLines.join("\n"); // NO trailing blank rows
+
+    const { pipeline, setReply } = makeFakePipeline();
+    const { transport, frames } = makeRecordingTransport();
+    setReply("capture-pane", ok(new TextEncoder().encode(captureBody)));
+
+    await hydrateTransport(pipeline, transport, [P1]);
+
+    assert.equal(frames.length, 1);
+    const replay = replayString(frames[0]!.bytes);
+
+    // Every real line survives and the last line is the live prompt (bottom-
+    // anchored) — the trim must NOT have eaten real content.
+    for (const ln of realLines) {
+      assert.ok(replay.includes(ln), `scrollback line must survive hydration: ${JSON.stringify(ln)}`);
+    }
+    assert.ok(replay.endsWith("$ "), "scrollback replay must end on the live prompt (bottom-anchored)");
+    // The trim is a no-op for a body with no trailing blanks: byte-identical to
+    // the plain LF→CRLF of the capture body.
+    assert.deepEqual(
+      frames[0]!.bytes.subarray(CLEAR_AND_SCROLLBACK.length),
+      lfToCrlf(new TextEncoder().encode(captureBody)),
+      "scrollback body must be byte-unchanged by the trailing-blank trim",
     );
   });
 });

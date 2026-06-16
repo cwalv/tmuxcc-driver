@@ -259,7 +259,17 @@ async function _deliverReplay(
   pid: PaneId,
   body: Uint8Array,
 ): Promise<boolean> {
-  const replay = lfToCrlf(body);
+  // tc-pizl.2: drop the empty viewport tail BEFORE the CRLF fixup. `-E -` makes
+  // tmux capture the whole pane-height grid down to the bottom visible row, so a
+  // FRESH pane (prompt near the top, the rest of the viewport blank) comes back
+  // with a pane-height block of trailing blank lines. Replayed verbatim those
+  // newlines drive xterm's cursor past the bottom of the viewport, scrolling the
+  // prompt up and leaving it bottom-anchored above a full-pane-height block of
+  // blanks (the bead's `bufferLines = 50 blanks + prompt-at-bottom`). Trimming
+  // the all-blank tail keeps a fresh pane top-anchored; a pane WITH scrollback
+  // has real content filling down to the cursor, so it has NO trailing blank
+  // lines and is byte-unchanged here (p2's 592-line hydration is untouched).
+  const replay = lfToCrlf(trimTrailingBlankLines(body));
   const combined = new Uint8Array(CLEAR_AND_SCROLLBACK.length + replay.length);
   combined.set(CLEAR_AND_SCROLLBACK, 0);
   combined.set(replay, CLEAR_AND_SCROLLBACK.length);
@@ -311,4 +321,71 @@ export function lfToCrlf(src: Uint8Array): Uint8Array {
     out[j++] = b;
   }
   return out;
+}
+
+/**
+ * tc-pizl.2: strip a trailing run of blank lines from a capture body.
+ *
+ * # Why
+ *
+ * `capture-pane -t %N -p -e -S - -E -` captures down to the bottom row of the
+ * VISIBLE viewport (`bottom = hsize + sy - 1`, cmd-capture-pane.c), so a fresh
+ * pane whose prompt sits near the top returns the prompt followed by a
+ * pane-height block of empty viewport rows — one `\n` per blank row.  Delivered
+ * verbatim to xterm those newlines push the cursor past the bottom of the
+ * viewport and scroll the prompt up, leaving it bottom-anchored under a
+ * full-pane-height block of blanks (the artefact this fixes).
+ *
+ * Stripping the all-blank TAIL keeps a fresh pane top-anchored.  A pane WITH
+ * scrollback has real content filling down to the cursor/prompt, so its last
+ * captured line is non-blank and the body is returned byte-for-byte unchanged.
+ *
+ * # Definition of "blank line"
+ *
+ * Lines are split on bare LF (`\n`, 0x0a) — the separator tmux emits.  A line
+ * is blank iff every byte is an ASCII space (0x20) or CR (0x0d), or it is
+ * empty.  tmux's `GRID_STRING_TRIM_SPACES` already strips trailing spaces
+ * within a row, so blank viewport rows arrive byte-empty; the space/CR
+ * tolerance is belt-and-braces.  Only the contiguous trailing run of blank
+ * lines is removed — interior and leading blanks (legitimate scrollback) are
+ * preserved.  The separator newline BEFORE each stripped blank line is removed
+ * with it, so the last surviving line carries NO trailing newline: the cursor
+ * lands on the prompt row (where live input echoes), matching tmux's cursor_y.
+ *
+ * Operates on the RAW capture body (bare LF), BEFORE `lfToCrlf`.  Only the
+ * data-plane hydration replay calls this — `captureText` (pane.capture) stays
+ * raw and untrimmed.
+ *
+ * Exported for direct unit testing.
+ */
+export function trimTrailingBlankLines(src: Uint8Array): Uint8Array {
+  // Walk back from the end, skipping over trailing blank lines.  `end` is the
+  // exclusive index of the last byte we keep.  We treat the body as a sequence
+  // of LF-separated lines; the segment after the final LF is the last line.
+  let end = src.length;
+  // Scan backwards line-by-line.  For each trailing line, if it is blank
+  // (only spaces / CRs, or empty), drop it along with its preceding LF.
+  while (end > 0) {
+    // Find the start of the current trailing line: the byte after the previous
+    // LF (or 0 if none).  lineStart..end is the line's content (no LF).
+    let lineStart = end;
+    while (lineStart > 0 && src[lineStart - 1] !== 0x0a) {
+      lineStart--;
+    }
+    // Is src[lineStart..end) blank?
+    let blank = true;
+    for (let k = lineStart; k < end; k++) {
+      const b = src[k]!;
+      if (b !== 0x20 /* space */ && b !== 0x0d /* CR */) {
+        blank = false;
+        break;
+      }
+    }
+    if (!blank) break;
+    // Blank trailing line: drop it AND the LF that separates it from the line
+    // above (if any), so the surviving body does not end with a dangling LF.
+    end = lineStart > 0 ? lineStart - 1 : 0;
+  }
+  if (end === src.length) return src;
+  return src.subarray(0, end);
 }
