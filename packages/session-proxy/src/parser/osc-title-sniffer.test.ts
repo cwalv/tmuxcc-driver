@@ -238,30 +238,31 @@ describe("OscTitleSniffer – cross-chunk buffering", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Non-title OSC numbers are ignored
+// Non-title OSC numbers are passed through (not stripped)
 // ---------------------------------------------------------------------------
 
-describe("OscTitleSniffer – non-title OSC numbers ignored", () => {
-  it("OSC-1 followed by OSC-2 in same chunk: only OSC-2 fires", () => {
+describe("OscTitleSniffer – non-title OSC numbers passed through", () => {
+  it("OSC-1 followed by OSC-2 in same chunk: only OSC-2 fires; OSC-1 passes through", () => {
     const sniffer = new OscTitleSniffer();
-    const input = bytes(osc(1, "icon-name"), osc(2, "real-title"));
+    const osc1 = osc(1, "icon-name");
+    const osc2 = osc(2, "real-title");
+    const input = bytes(osc1, osc2);
     const result = sniffer.feed(input);
     // The title from OSC-2 should win; OSC-1 should not emit a title.
     assert.equal(result.updatedTitle, "real-title");
-    // passthrough should be empty (both OSC sequences stripped).
-    assert.equal(result.passthrough.length, 0);
+    // OSC-1 passes through verbatim; OSC-2 (title) is stripped.
+    assert.deepEqual(result.passthrough, osc1);
   });
 
-  it("non-title OSC bytes do not appear in passthrough when paired with title OSC", () => {
+  it("non-title OSC bytes pass through unchanged alongside surrounding text", () => {
     const sniffer = new OscTitleSniffer();
-    // OSC-8 (hyperlink): should be stripped from passthrough (it's an OSC),
-    // but does NOT emit a title.
-    const input = bytes("pre", osc(8, ";;url"), "post");
+    // OSC-8 (hyperlink): must pass through byte-for-byte; must NOT update title.
+    const osc8 = osc(8, ";;url");
+    const input = bytes("pre", osc8, "post");
     const result = sniffer.feed(input);
     assert.equal(result.updatedTitle, null, "OSC-8 should not produce a title");
-    const passthroughStr = new TextDecoder().decode(result.passthrough);
-    // OSC-8 is stripped; surrounding text passes through.
-    assert.equal(passthroughStr, "prepost");
+    const expected = bytes("pre", osc8, "post");
+    assert.deepEqual(result.passthrough, expected);
   });
 });
 
@@ -364,6 +365,123 @@ describe("OscTitleSniffer – passthrough correctness", () => {
     const r3 = sniffer.feed(bytes("tle", [BEL], "# "));
     assert.equal(r3.updatedTitle, "new-title");
     assert.equal(new TextDecoder().decode(r3.passthrough), "# ");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Regression tests (tc-2mn8 review findings)
+// ---------------------------------------------------------------------------
+
+describe("OscTitleSniffer – regression: non-title OSC passthrough (Bug 1)", () => {
+  it("OSC-52 complete sequence: exact input bytes in passthrough, updatedTitle===null", () => {
+    const sniffer = new OscTitleSniffer();
+    const input = osc(52, "c;Y2xpcGJvYXJk"); // clipboard read/write
+    const result = sniffer.feed(input);
+    assert.equal(result.updatedTitle, null, "OSC-52 must not update title");
+    assert.deepEqual(result.passthrough, input, "OSC-52 must pass through byte-for-byte");
+  });
+
+  it("OSC-8 complete sequence: exact input bytes in passthrough, updatedTitle===null", () => {
+    const sniffer = new OscTitleSniffer();
+    const input = osc(8, ";;https://example.com"); // hyperlink
+    const result = sniffer.feed(input);
+    assert.equal(result.updatedTitle, null, "OSC-8 must not update title");
+    assert.deepEqual(result.passthrough, input, "OSC-8 must pass through byte-for-byte");
+  });
+
+  it("OSC-4 complete sequence: exact input bytes in passthrough, updatedTitle===null", () => {
+    const sniffer = new OscTitleSniffer();
+    const input = osc(4, "0;rgb:ff/00/00"); // color palette
+    const result = sniffer.feed(input);
+    assert.equal(result.updatedTitle, null, "OSC-4 must not update title");
+    assert.deepEqual(result.passthrough, input, "OSC-4 must pass through byte-for-byte");
+  });
+
+  it("non-title OSC with ST (ESC \\) terminator: exact input bytes in passthrough", () => {
+    const sniffer = new OscTitleSniffer();
+    const input = oscST(8, ";;https://st-example.com");
+    const result = sniffer.feed(input);
+    assert.equal(result.updatedTitle, null);
+    assert.deepEqual(result.passthrough, input, "OSC-8 with ST must pass through byte-for-byte");
+  });
+
+  it("non-title OSC split across two chunks: concatenated passthrough == concatenated input", () => {
+    const sniffer = new OscTitleSniffer();
+    const full = osc(52, "c;dGVzdA==");
+    // Split after the intro (after `ESC ] 5 2 ;`)
+    const splitAt = 5; // ESC ] 5 2 ;  = 5 bytes
+    const chunk1 = full.subarray(0, splitAt);
+    const chunk2 = full.subarray(splitAt);
+
+    const r1 = sniffer.feed(chunk1);
+    assert.equal(r1.updatedTitle, null);
+
+    const r2 = sniffer.feed(chunk2);
+    assert.equal(r2.updatedTitle, null);
+
+    // Concatenated passthrough must equal the full input.
+    const combined = bytes(r1.passthrough, r2.passthrough);
+    assert.deepEqual(combined, full, "split non-title OSC passthrough must equal original");
+  });
+});
+
+describe("OscTitleSniffer – regression: out buffer sizing (Bug 2)", () => {
+  it("split ESC then passthrough: no byte lost across chunk boundary", () => {
+    const sniffer = new OscTitleSniffer();
+    // chunk1 ends with a lone ESC (buffered, not yet emitted)
+    const chunk1 = bytes("x", [ESC]);
+    // chunk2 continues with CSI sequence — ESC was NOT an OSC opener
+    const chunk2 = bytes([0x5b, 0x30, 0x6d], " hi"); // [0m hi
+
+    const r1 = sniffer.feed(chunk1);
+    const r2 = sniffer.feed(chunk2);
+
+    // Concat passthrough must equal "x" + ESC + "[0m hi" — no bytes dropped
+    const combined = bytes(r1.passthrough, r2.passthrough);
+    const expected = bytes("x", [ESC, 0x5b, 0x30, 0x6d], " hi");
+    assert.deepEqual(combined, expected, "no bytes must be dropped across chunk boundary");
+  });
+
+  it("split ESC then large passthrough: all bytes survive when chunk2 > chunk1", () => {
+    const sniffer = new OscTitleSniffer();
+    // chunk1: lone ESC (1 byte buffered)
+    const chunk1 = bytes([ESC]);
+    // chunk2: non-OSC continuation + lots of text
+    const longText = "A".repeat(200);
+    const chunk2 = bytes([0x5b, 0x41], longText); // [A (cursor up) then text
+
+    const r1 = sniffer.feed(chunk1);
+    const r2 = sniffer.feed(chunk2);
+
+    const combined = bytes(r1.passthrough, r2.passthrough);
+    const expected = bytes([ESC, 0x5b, 0x41], longText);
+    assert.deepEqual(combined, expected);
+  });
+});
+
+describe("OscTitleSniffer – regression: existing title behavior preserved (Bug 1 & 2)", () => {
+  it("OSC-0 still stripped from passthrough and still updates title", () => {
+    const sniffer = new OscTitleSniffer();
+    const input = bytes("pre", osc(0, "shell title"), "post");
+    const result = sniffer.feed(input);
+    assert.equal(result.updatedTitle, "shell title");
+    assert.equal(new TextDecoder().decode(result.passthrough), "prepost");
+  });
+
+  it("OSC-2 still stripped from passthrough and still updates title", () => {
+    const sniffer = new OscTitleSniffer();
+    const input = bytes("A", osc(2, "win title"), "B");
+    const result = sniffer.feed(input);
+    assert.equal(result.updatedTitle, "win title");
+    assert.equal(new TextDecoder().decode(result.passthrough), "AB");
+  });
+
+  it("OSC-2 with ST still stripped and still updates title", () => {
+    const sniffer = new OscTitleSniffer();
+    const input = oscST(2, "st-title");
+    const result = sniffer.feed(input);
+    assert.equal(result.updatedTitle, "st-title");
+    assert.equal(result.passthrough.length, 0);
   });
 });
 

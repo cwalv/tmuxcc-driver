@@ -118,6 +118,7 @@ export class OscTitleSniffer {
   /**
    * Whether the current OSC is a title-OSC (Ps === "0" or Ps === "2").
    * Set to true when we finish parsing the decimal parameter and it is 0 or 2.
+   * Only meaningful after we have seen the `;` separator.
    */
   private _isTitleOsc = false;
 
@@ -142,8 +143,18 @@ export class OscTitleSniffer {
       return { passthrough: chunk, updatedTitle: null };
     }
 
+    // Capture the carried-over buffer length BEFORE processing this chunk.
+    // Bytes from the prior call's buffer may be flushed into `out` (e.g. when
+    // ESC_SEEN discovers the next byte is not `]`, it emits the buffered ESC).
+    // Sizing `out` to chunk.length alone is therefore insufficient; we must
+    // also account for those pre-buffered bytes to prevent silent out-of-bounds
+    // writes. (Bug 2 fix.)
+    const initialBufLen = this._bufLen;
+
     // Slow path: walk byte-by-byte.
-    const out = new Uint8Array(chunk.length); // worst-case same size as input
+    // `out` is sized to the maximum possible passthrough: every byte in the
+    // current chunk PLUS any bytes flushed from the carry-over buffer.
+    const out = new Uint8Array(chunk.length + initialBufLen);
     let outLen = 0;
     let updatedTitle: string | null = null;
 
@@ -202,7 +213,14 @@ export class OscTitleSniffer {
             this._isTitleOsc = ps === 0 || ps === 2;
             this._state = "OSC_TEXT";
           } else if (b === ST_BEL) {
-            // Degenerate OSC with no text: `ESC ] Ps BEL`.  Consume and move on.
+            // Degenerate OSC with no text: `ESC ] Ps BEL`.
+            // For non-title OSCs, pass the buffered bytes + BEL through.
+            // For title OSCs (Ps 0 or 2), strip (no title to extract anyway).
+            const ps = parseInt(this._paramDigits, 10);
+            if (ps !== 0 && ps !== 2) {
+              for (let j = 0; j < this._bufLen; j++) out[outLen++] = this._buf[j]!;
+              out[outLen++] = ST_BEL;
+            }
             this._resetOsc();
           } else if (b === ESC) {
             // ESC in param area — possible ST or corrupt sequence.
@@ -227,11 +245,12 @@ export class OscTitleSniffer {
         case "OSC_TEXT": {
           if (b === ST_BEL) {
             // BEL terminator: OSC complete.
-            const title = this._finishOsc();
-            if (title !== null) {
-              updatedTitle = title;
+            // Bug 1 fix: only strip title OSCs; pass non-title OSCs through.
+            const title = this._finishOscBEL(out, outLen);
+            outLen = title.newOutLen;
+            if (title.updatedTitle !== null) {
+              updatedTitle = title.updatedTitle;
             }
-            // OSC bytes are NOT emitted to passthrough (stripped).
           } else if (b === ESC) {
             // May be the start of ESC \ (ST).  Do NOT push the ESC to the
             // buffer yet — we only push it if the next byte is NOT ST_BS
@@ -251,11 +270,12 @@ export class OscTitleSniffer {
             // ESC \ — confirmed string terminator.
             // The ESC was intentionally NOT pushed to the buffer in OSC_TEXT,
             // so the buffer contains clean title text without a trailing ESC.
-            const title = this._finishOsc();
-            if (title !== null) {
-              updatedTitle = title;
+            // Bug 1 fix: only strip title OSCs; pass non-title OSCs through.
+            const title = this._finishOscST(out, outLen);
+            outLen = title.newOutLen;
+            if (title.updatedTitle !== null) {
+              updatedTitle = title.updatedTitle;
             }
-            // OSC bytes (ESC + \) are NOT emitted to passthrough (stripped).
           } else {
             // Not a ST: the pending ESC is a literal byte inside the title.
             // Push the ESC to the buffer now, then handle `b` as OSC_TEXT.
@@ -263,8 +283,9 @@ export class OscTitleSniffer {
             this._state = "OSC_TEXT";
             // Re-process `b` as if we had just entered OSC_TEXT.
             if (b === ST_BEL) {
-              const title = this._finishOsc();
-              if (title !== null) updatedTitle = title;
+              const title = this._finishOscBEL(out, outLen);
+              outLen = title.newOutLen;
+              if (title.updatedTitle !== null) updatedTitle = title.updatedTitle;
             } else if (b === ESC) {
               // Another ESC — stay in IN_OSC_ESC (don't push this one yet either).
               this._state = "IN_OSC_ESC";
@@ -296,19 +317,63 @@ export class OscTitleSniffer {
   }
 
   /**
-   * Called when we reach a terminator (BEL or ESC \).
-   * Returns the extracted title string if this was a title OSC, else null.
+   * Called when we reach a BEL terminator.
+   *
+   * For title OSCs (Ps 0 or 2): extracts and returns the title; strips the
+   * OSC sequence from passthrough (does NOT write to `out`).
+   *
+   * For non-title OSCs: passes the buffered bytes + BEL through to `out` and
+   * returns null title.
+   *
    * Resets state to IDLE in either case.
    */
-  private _finishOsc(): string | null {
-    let result: string | null = null;
+  private _finishOscBEL(
+    out: Uint8Array,
+    outLen: number,
+  ): { updatedTitle: string | null; newOutLen: number } {
     if (this._isTitleOsc) {
-      // The buffer holds: ESC ] Ps ; <text> (the terminator is NOT buffered).
-      // We need to extract the text after the first `;`.
-      result = extractTitleFromOscBuffer(this._buf.subarray(0, this._bufLen));
+      // Title OSC: extract title, strip OSC from passthrough.
+      const result = extractTitleFromOscBuffer(this._buf.subarray(0, this._bufLen));
+      this._resetOsc();
+      return { updatedTitle: result, newOutLen: outLen };
+    } else {
+      // Non-title OSC: emit buffered intro bytes + BEL terminator to passthrough.
+      for (let j = 0; j < this._bufLen; j++) out[outLen++] = this._buf[j]!;
+      out[outLen++] = ST_BEL;
+      this._resetOsc();
+      return { updatedTitle: null, newOutLen: outLen };
     }
-    this._resetOsc();
-    return result;
+  }
+
+  /**
+   * Called when we reach an ESC \ string terminator.
+   *
+   * For title OSCs (Ps 0 or 2): extracts and returns the title; strips the
+   * OSC sequence from passthrough.
+   *
+   * For non-title OSCs: passes the buffered bytes + ESC \ through to `out` and
+   * returns null title.
+   *
+   * Resets state to IDLE in either case.
+   */
+  private _finishOscST(
+    out: Uint8Array,
+    outLen: number,
+  ): { updatedTitle: string | null; newOutLen: number } {
+    if (this._isTitleOsc) {
+      // Title OSC: extract title, strip OSC from passthrough.
+      // The buffer holds: ESC ] Ps ; <text> (the ESC of ESC\ was NOT pushed).
+      const result = extractTitleFromOscBuffer(this._buf.subarray(0, this._bufLen));
+      this._resetOsc();
+      return { updatedTitle: result, newOutLen: outLen };
+    } else {
+      // Non-title OSC: emit buffered intro bytes + ESC \ terminator to passthrough.
+      for (let j = 0; j < this._bufLen; j++) out[outLen++] = this._buf[j]!;
+      out[outLen++] = ESC;
+      out[outLen++] = ST_BS;
+      this._resetOsc();
+      return { updatedTitle: null, newOutLen: outLen };
+    }
   }
 
   private _resetOsc(): void {
