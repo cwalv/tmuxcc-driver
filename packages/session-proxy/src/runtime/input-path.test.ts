@@ -1432,7 +1432,8 @@ function makeReversalModel(opts: {
     dead: false,
     exitCode: undefined,
     label: undefined,
-    scrollbackHandle: undefined,
+    // scrollbackHandle and paneTitle are optional — omit to avoid
+    // exactOptionalPropertyTypes TS2375 when passing undefined explicitly.
   };
 
   let m = emptyModel();

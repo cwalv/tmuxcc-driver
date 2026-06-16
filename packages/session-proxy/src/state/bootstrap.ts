@@ -500,7 +500,8 @@ export function buildInitialModel(
       // Durable pane name from the @tmuxcc_label user-option (tc-1a8z).
       // Re-read on every requery → survives a driver restart for free.
       label: row.label,
-      scrollbackHandle: undefined,
+      // scrollbackHandle and paneTitle are absent (optional) — tc-fx2 and
+      // tc-2mn8 populate them respectively via updatePane after creation.
     };
     model = addPane(model, p);
   }

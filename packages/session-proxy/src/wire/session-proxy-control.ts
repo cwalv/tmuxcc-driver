@@ -379,6 +379,15 @@ export interface SnapshotPane {
    * Additive optional field — absent/empty means no durable name is set.
    */
   readonly label?: string;
+  /**
+   * Live shell window title for this pane, as sniffed from OSC-0/2 sequences
+   * in the pane's `%output` stream (tc-2mn8). Absent when no OSC title has
+   * been observed yet (pane just opened, or shell has not set a title).
+   * Empty string means the shell explicitly cleared the title.
+   *
+   * Additive optional field — older clients that do not read it are unaffected.
+   */
+  readonly paneTitle?: string;
 }
 
 /**
@@ -567,6 +576,34 @@ export interface WindowMonitorSilenceChangedMessage extends MessageBase {
    * Clients may treat 0 as "off" and any positive value as "on for N seconds".
    */
   readonly seconds: number;
+}
+
+// ---------------------------------------------------------------------------
+// Additional Deltas — live pane title (session-proxy→client, tc-2mn8)
+// ---------------------------------------------------------------------------
+
+/**
+ * The live shell window title of a pane has changed.
+ * direction: session-proxy→client
+ *
+ * Emitted when an OSC-0 or OSC-2 title sequence is sniffed from the pane's
+ * `%output` byte stream (tc-2mn8). No tmux polling is required — the OSC
+ * bytes ALREADY arrive in the `%output` demux and are sniffed in-stream.
+ *
+ * `title` is the new title string (may be an empty string when the shell
+ * cleared the title).
+ *
+ * Consumer precedence for display:
+ *   @tmuxcc_label (durable name) > pane.title-changed (live) > paneId (fallback)
+ *
+ * Non-breaking additive delta — older clients that do not recognise this type
+ * fall through to the `default` branch in `applyDelta` and ignore it.
+ */
+export interface PaneTitleChangedMessage extends MessageBase {
+  readonly type: "pane.title-changed";
+  readonly paneId: PaneId;
+  /** The new live shell window title. Empty string means the shell cleared it. */
+  readonly title: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -1457,7 +1494,7 @@ export interface ResyncRequestMessage extends MessageBase {
  * Grouped by family:
  *   Capabilities:  SessionProxyCapabilitiesMessage
  *   Snapshot:      SnapshotMessage
- *   Pane deltas:   PaneOpenedMessage | PaneClosedMessage | PaneResizedMessage | PaneModeChangedMessage | PaneLabelChangedMessage
+ *   Pane deltas:   PaneOpenedMessage | PaneClosedMessage | PaneResizedMessage | PaneModeChangedMessage | PaneLabelChangedMessage | PaneTitleChangedMessage
  *   Window deltas: WindowAddedMessage | WindowClosedMessage | WindowRenamedMessage | WindowSyncChangedMessage | WindowMonitorActivityChangedMessage | WindowMonitorSilenceChangedMessage
  *   Layout deltas: LayoutUpdatedMessage
  *   Focus deltas:  FocusChangedMessage
@@ -1480,6 +1517,8 @@ export type SessionProxyMessage =
   | PaneLabelChangedMessage
   // Dead-pane state delta (tc-4bv2 / tc-295a.10)
   | PaneDeadChangedMessage
+  // Live shell title delta (tc-2mn8)
+  | PaneTitleChangedMessage
   // Window deltas
   | WindowAddedMessage
   | WindowClosedMessage
@@ -1543,6 +1582,10 @@ export function isSessionProxyMessage(msg: ControlMessage): msg is SessionProxyM
     t === "pane.resized" ||
     t === "pane.mode-changed" ||
     t === "pane.dead-changed" ||
+    // Durable pane name delta (tc-1a8z)
+    t === "pane.label-changed" ||
+    // Live shell title delta (tc-2mn8)
+    t === "pane.title-changed" ||
     // Window deltas
     t === "window.added" ||
     t === "window.closed" ||

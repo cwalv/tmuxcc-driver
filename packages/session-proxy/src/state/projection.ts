@@ -73,6 +73,7 @@ import type {
   PaneModeChangedMessage,
   PaneLabelChangedMessage,
   PaneDeadChangedMessage,
+  PaneTitleChangedMessage,
   WindowAddedMessage,
   WindowClosedMessage,
   WindowRenamedMessage,
@@ -215,12 +216,14 @@ export function projectSnapshot(
     // tc-1a8z: surface the durable, driver-owned pane name when set. Additive
     // optional field — kept off the wire when unset (undefined). Distinct from
     // the live pane_title (tc-2mn8).
+    // tc-2mn8: carry paneTitle when known (absent means no title seen yet).
     const base: SnapshotPane = {
       paneId: pane.paneId,
       windowId: pane.windowId,
       cols: pane.cols,
       rows: pane.rows,
       ...(pane.label !== undefined ? { label: pane.label } : {}),
+      ...(pane.paneTitle !== undefined ? { paneTitle: pane.paneTitle } : {}),
     };
     if (pane.dead) {
       panes.push(
@@ -439,6 +442,23 @@ export function diffModel(
         paneId: pane.paneId,
         dead: pane.dead,
         ...(pane.dead && pane.exitCode !== undefined ? { exitCode: pane.exitCode } : {}),
+      };
+      out.push(msg);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 5c. pane.title-changed — live shell title change on existing panes (tc-2mn8)
+  // -------------------------------------------------------------------------
+  for (const [id, pane] of next.panes) {
+    const prevPane = prev.panes.get(id);
+    if (!prevPane) continue; // new panes handled in pane.opened
+    if (prevPane.paneTitle !== pane.paneTitle && pane.paneTitle !== undefined) {
+      const msg: PaneTitleChangedMessage = {
+        type: "pane.title-changed",
+        seq: SEQ,
+        paneId: pane.paneId,
+        title: pane.paneTitle,
       };
       out.push(msg);
     }

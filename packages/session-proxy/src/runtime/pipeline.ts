@@ -89,6 +89,7 @@ import { createPaneBufferStore } from "../state/scrollback.js";
 import {
   checkInvariants,
   emptyModel,
+  updatePane,
   updateWindow,
   updatePane,
   windowId as mintWindowId,
@@ -109,6 +110,7 @@ import {
 import type { SessionProxyRegistry } from "../metrics/registry.js";
 import { classifyCommand } from "../metrics/registry.js";
 import { decodeOutputPayload } from "../parser/output-codec.js";
+import { OscTitleSniffer } from "../parser/osc-title-sniffer.js";
 import { paneId as mintPaneId } from "../wire/ids.js";
 import type { TmuxHost } from "./tmux-host.js";
 import { diffModel } from "../state/projection.js";
@@ -467,6 +469,17 @@ class RuntimePipelineImpl implements RuntimePipeline {
   private readonly _modelChangeHandlers = new Set<ModelChangeHandler>();
   private readonly _notificationHandlers = new Set<NotificationHandler>();
   private _unsubData: (() => void) | null = null;
+  /**
+   * Per-pane OSC title sniffers (tc-2mn8).
+   *
+   * Keyed by the wire PaneId string (e.g. "p3"). Each sniffer maintains its
+   * own streaming parser state across %output chunks so that a title sequence
+   * spanning two chunks is correctly reassembled.
+   *
+   * Entries are created lazily on first output for a pane and removed when the
+   * pane closes (via onModelChange — see the cleanup in start()).
+   */
+  private readonly _oscSniffers = new Map<string, OscTitleSniffer>();
   private _started = false;
   private _stopped = false;
   private _live = false;
@@ -849,6 +862,8 @@ class RuntimePipelineImpl implements RuntimePipeline {
     this._coalescer?.stop();
     this._unsubData?.();
     this._unsubData = null;
+    // tc-2mn8: drop all sniffer state on shutdown.
+    this._oscSniffers.clear();
   }
 
   getModel(): SessionModel {
@@ -988,8 +1003,35 @@ class RuntimePipelineImpl implements RuntimePipeline {
     // fans these out). No model change, no topology dirty.
     if (event.kind === "output" || event.kind === "extended-output") {
       const pid = mintPaneId("p" + event.paneId);
-      const bytes = decodeOutputPayload(event.rawPayload);
+      const decoded = decodeOutputPayload(event.rawPayload);
+
+      // tc-2mn8: sniff OSC-0/2 title sequences from the decoded byte stream.
+      // Each pane has its own streaming sniffer to handle sequences that span
+      // multiple %output chunks. The sniffer returns:
+      //   - passthrough: decoded bytes with title OSC sequences stripped
+      //   - updatedTitle: new title string if a complete OSC-0/2 was found
+      let sniffer = this._oscSniffers.get(pid);
+      if (sniffer === undefined) {
+        sniffer = new OscTitleSniffer();
+        this._oscSniffers.set(pid, sniffer);
+      }
+      const sniffResult = sniffer.feed(decoded);
+
+      // Pass the stripped bytes to the scrollback buffer + demux fan-out.
+      const bytes = sniffResult.passthrough;
       this.buffers.append(pid, bytes);
+
+      // If a new title was found, patch the model (paneTitle field).
+      if (sniffResult.updatedTitle !== null) {
+        const newTitle = sniffResult.updatedTitle;
+        this.patchModel((model) => {
+          const pane = model.panes.get(pid);
+          if (pane === undefined) return model;
+          if (pane.paneTitle === newTitle) return model;
+          return updatePane(model, pid, { paneTitle: newTitle });
+        });
+      }
+
       // tc-3si.6: aggregate output-throughput accounting. Two hot-path
       // calls per frame: one counter inc + one histogram observe, no
       // allocation, no per-byte work. Aggregate (no per-pane label —
@@ -1107,6 +1149,18 @@ class RuntimePipelineImpl implements RuntimePipeline {
         console.warn("[pipeline] invariant violations after model update:", violations);
       }
     }
+
+    // tc-2mn8: clean up OSC title sniffers for panes that have left the model.
+    // This keeps memory bounded: each closed pane's streaming parser state is
+    // dropped when the pane is no longer known to the model.
+    if (this._oscSniffers.size > 0) {
+      for (const [pid] of prev.panes) {
+        if (!model.panes.has(pid) && this._oscSniffers.has(pid)) {
+          this._oscSniffers.delete(pid);
+        }
+      }
+    }
+
     for (const handler of this._modelChangeHandlers) {
       try {
         handler(model, prev);

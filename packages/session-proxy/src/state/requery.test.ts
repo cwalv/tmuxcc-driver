@@ -1284,7 +1284,8 @@ function applyDeltaToModel(m: MutableModel, delta: SessionProxyMessage): void {
         dead: delta.dead ?? false,
         exitCode: delta.dead ? delta.exitCode : undefined,
         label: delta.label,
-        scrollbackHandle: undefined,
+        // scrollbackHandle and paneTitle are optional — omit to avoid
+        // exactOptionalPropertyTypes TS2375 when passing undefined explicitly.
       };
       m.panes.set(delta.paneId, pane);
       m.windows.set(delta.windowId, {
@@ -1486,7 +1487,8 @@ function randomModel(rng: () => number, opts: { minWindows?: number } = {}): Ses
         dead: false,
         exitCode: undefined,
         label: undefined,
-        scrollbackHandle: undefined,
+        // scrollbackHandle and paneTitle are optional — omit to avoid
+        // exactOptionalPropertyTypes TS2375 when passing undefined explicitly.
       };
       model = addPane(model, pane);
     }

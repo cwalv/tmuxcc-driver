@@ -188,7 +188,19 @@ export interface Pane {
    * tc-fx2 registers the buffer under it. This field is session-proxy-internal and
    * never sent on the wire.
    */
-  readonly scrollbackHandle: ScrollbackHandle | undefined;
+  readonly scrollbackHandle?: ScrollbackHandle;
+  /**
+   * Live shell window title for this pane, extracted by sniffing OSC-0 and
+   * OSC-2 sequences from the per-pane `%output` byte stream (tc-2mn8).
+   *
+   * Updated in real-time as OSC title sequences flow through the pipeline —
+   * no tmux round-trips or polling required.  Absent when no title has been
+   * seen yet.  An empty string is a valid title (the shell cleared it).
+   *
+   * Consumer precedence (for tab/tree display):
+   *   @tmuxcc_label (durable name) > paneTitle (live) > paneId (fallback)
+   */
+  readonly paneTitle?: string;
 }
 
 /**
@@ -798,11 +810,11 @@ export function removePane(model: SessionModel, paneId: PaneId): SessionModel {
   return { ...model, windows, panes, focus };
 }
 
-/** Replace a pane's fields (e.g. resize or mode change). */
+/** Replace a pane's fields (e.g. resize or mode change or title update). */
 export function updatePane(
   model: SessionModel,
   paneId: PaneId,
-  patch: Partial<Pick<Pane, "cols" | "rows" | "mode" | "dead" | "exitCode" | "label" | "scrollbackHandle">>,
+  patch: Partial<Pick<Pane, "cols" | "rows" | "mode" | "dead" | "exitCode" | "label" | "scrollbackHandle" | "paneTitle">>,
 ): SessionModel {
   const pane = model.panes.get(paneId);
   if (!pane) return model;
