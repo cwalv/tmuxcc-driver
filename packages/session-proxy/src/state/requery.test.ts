@@ -53,8 +53,8 @@ import type { SessionProxyMessage } from "../wire/session-proxy-control.js";
 //
 // BOOTSTRAP_WINDOWS_FORMAT fields (tab-separated, 9):
 //   $sess  name  @win  name  w   h   layout                  flags  active
-// BOOTSTRAP_PANES_FORMAT fields (tab-separated, 13):
-//   %pane  @win  $sess  idx  w   h   top  left  active  pid   cmd  dead  deadStatus
+// BOOTSTRAP_PANES_FORMAT fields (tab-separated, 14):
+//   %pane  @win  $sess  idx  w   h   top  left  active  pid   cmd  dead  deadStatus  @tmuxcc_label
 // ---------------------------------------------------------------------------
 
 const ENC = new TextEncoder();
@@ -109,6 +109,8 @@ function paneLine(args: {
   dead?: boolean;
   /** tc-4bv2 / tc-295a.10: pane_dead_status. Empty string when absent. */
   deadStatus?: number;
+  /** tc-1a8z: @tmuxcc_label durable pane name. Empty string when unset. */
+  label?: string;
 }): string {
   return [
     `%${args.paneNum}`,
@@ -124,6 +126,7 @@ function paneLine(args: {
     args.cmd ?? "bash",
     args.dead ? "1" : "0",
     args.deadStatus !== undefined ? String(args.deadStatus) : "",
+    args.label ?? "",
   ].join("\t") + "\n";
 }
 
@@ -374,6 +377,76 @@ describe("requeryDiff: dead-pane wire shape (tc-4bv2 / tc-295a.10)", () => {
     assert.equal(dc.length, 1);
     assert.equal((dc[0] as { dead: boolean }).dead, false);
     assert.ok(!("exitCode" in (dc[0] as object)), "no exitCode when alive");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Durable pane-name re-read from @tmuxcc_label (tc-1a8z)
+//
+// The durable name lives in the per-pane @tmuxcc_label user-option and is
+// re-read on every requery (BOOTSTRAP_PANES_FORMAT field [13]). This is what
+// makes it survive a driver restart for FREE: a cold bootstrap (prev=empty)
+// re-reads the option straight back into the model. A requery whose option
+// value changed emits a pane.label-changed delta.
+// ---------------------------------------------------------------------------
+
+describe("requeryDiff: durable pane-name (@tmuxcc_label, tc-1a8z)", () => {
+  const winSingle = winLine({
+    sessNum: 0,
+    sessName: "main",
+    winNum: 1,
+    winName: "shell",
+    layout: SINGLE_PANE_LAYOUT(1),
+    active: true,
+  });
+
+  it("bootstrap re-reads @tmuxcc_label into the model (survives a driver restart)", () => {
+    // Simulate a driver restart: a fresh bootstrap (prev=empty) against a pane
+    // that already carries @tmuxcc_label. The durable name re-materializes with
+    // ZERO extra round-trips — canonical state lived with the pane in tmux.
+    const named = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true, label: "deploy" });
+    const { next, deltas } = requeryDiff(emptyModel(), okResult(winSingle), okResult(named));
+
+    assert.equal(next.panes.get(paneId("p1"))!.label, "deploy", "durable name re-read on bootstrap");
+    // The bootstrap diff carries the name on pane.opened (born-with-label).
+    const opened = deltas.filter((d) => d.type === "pane.opened");
+    assert.equal(opened.length, 1);
+    assert.equal((opened[0] as { label?: string }).label, "deploy", "pane.opened carries the durable name");
+  });
+
+  it("an unset @tmuxcc_label leaves label undefined (empty option value)", () => {
+    const bare = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true }); // label defaults ""
+    const { next } = requeryDiff(emptyModel(), okResult(winSingle), okResult(bare));
+    assert.equal(next.panes.get(paneId("p1"))!.label, undefined, "empty option → no durable name");
+  });
+
+  it("a changed @tmuxcc_label on a later requery emits exactly one pane.label-changed", () => {
+    const bare = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true });
+    const prev = requeryDiff(emptyModel(), okResult(winSingle), okResult(bare)).next;
+
+    const named = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true, label: "build" });
+    const { next, deltas } = requeryDiff(prev, okResult(winSingle), okResult(named));
+
+    assert.equal(next.panes.get(paneId("p1"))!.label, "build");
+    const lc = deltas.filter((d) => d.type === "pane.label-changed");
+    assert.equal(lc.length, 1, "exactly one pane.label-changed");
+    assert.equal((lc[0] as { label?: string }).label, "build");
+    // A rename is NOT a structural change — no spurious open/close/resize.
+    assert.equal(deltas.filter((d) => d.type === "pane.closed").length, 0);
+    assert.equal(deltas.filter((d) => d.type === "pane.opened").length, 0);
+  });
+
+  it("clearing @tmuxcc_label on a later requery emits pane.label-changed with label ABSENT", () => {
+    const named = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true, label: "build" });
+    const prev = requeryDiff(emptyModel(), okResult(winSingle), okResult(named)).next;
+
+    const bare = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true }); // label cleared → ""
+    const { next, deltas } = requeryDiff(prev, okResult(winSingle), okResult(bare));
+
+    assert.equal(next.panes.get(paneId("p1"))!.label, undefined, "name cleared");
+    const lc = deltas.filter((d) => d.type === "pane.label-changed");
+    assert.equal(lc.length, 1);
+    assert.ok(!("label" in (lc[0] as object)), "label omitted when cleared");
   });
 });
 
@@ -1210,6 +1283,7 @@ function applyDeltaToModel(m: MutableModel, delta: SessionProxyMessage): void {
         mode: "normal",
         dead: delta.dead ?? false,
         exitCode: delta.dead ? delta.exitCode : undefined,
+        label: delta.label,
         scrollbackHandle: undefined,
       };
       m.panes.set(delta.paneId, pane);
@@ -1411,6 +1485,7 @@ function randomModel(rng: () => number, opts: { minWindows?: number } = {}): Ses
         mode: "normal",
         dead: false,
         exitCode: undefined,
+        label: undefined,
         scrollbackHandle: undefined,
       };
       model = addPane(model, pane);

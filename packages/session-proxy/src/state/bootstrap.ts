@@ -58,14 +58,18 @@
  *   `#{pane_id}\t#{window_id}\t#{session_id}\t#{pane_index}\t` +
  *   `#{pane_width}\t#{pane_height}\t#{pane_top}\t#{pane_left}\t` +
  *   `#{?pane_active,1,0}\t#{pane_pid}\t#{pane_current_command}\t` +
- *   `#{?pane_dead,1,0}\t#{pane_dead_status}`
+ *   `#{?pane_dead,1,0}\t#{pane_dead_status}\t#{@tmuxcc_label}`
  *
- * Fields (tab-separated, 13 per line). The last two are the dead-pane state
- * (tc-4bv2 / tc-295a.10 shared shape):
+ * Fields (tab-separated, 14 per line). Fields [11]/[12] are the dead-pane state
+ * (tc-4bv2 / tc-295a.10 shared shape); [13] is the durable pane name (tc-1a8z):
  *   [11] pane_dead        — "1" if the pane's process has exited but the slot
  *                           survives (remain-on-exit corpse), "0" otherwise.
  *   [12] pane_dead_status — the exited process's status code; empty string when
  *                           the pane is alive or tmux has no status to report.
+ *   [13] @tmuxcc_label    — the durable, driver-owned pane name (the per-pane
+ *                           user-option set by the `rename-pane` verb); empty
+ *                           string when no durable name is set.  Re-read on
+ *                           every requery so the name survives a driver restart.
  *
  * # Id mapping convention
  *
@@ -92,6 +96,26 @@ import {
 import type { PaneId, WindowId, SessionId } from "../wire/ids.js";
 
 // ---------------------------------------------------------------------------
+// Pane user-options
+// ---------------------------------------------------------------------------
+
+/**
+ * The per-pane tmux user-option that stores the durable, driver-owned pane
+ * name (tc-1a8z).
+ *
+ * Single source of truth for the option NAME, shared by the WRITE side
+ * (input-path's `rename-pane` verb → `set-option -pt %N @tmuxcc_label <name>`)
+ * and the READ side (BOOTSTRAP_PANES_FORMAT below → `#{@tmuxcc_label}`).  It
+ * mirrors the session-ownership marker `@tmuxcc` (tc-w61): canonical state
+ * lives WITH the pane in tmux, so it survives a driver restart for free and is
+ * natively introspectable.
+ *
+ * This is the DURABLE channel — never set via a title escape, so the shell
+ * cannot clobber it.  Distinct from the live pane_title (tc-2mn8).
+ */
+export const TMUXCC_LABEL_OPTION = "@tmuxcc_label";
+
+// ---------------------------------------------------------------------------
 // Format strings
 // ---------------------------------------------------------------------------
 
@@ -113,7 +137,7 @@ export const BOOTSTRAP_PANES_FORMAT =
   "#{pane_id}\t#{window_id}\t#{session_id}\t#{pane_index}\t" +
   "#{pane_width}\t#{pane_height}\t#{pane_top}\t#{pane_left}\t" +
   "#{?pane_active,1,0}\t#{pane_pid}\t#{pane_current_command}\t" +
-  "#{?pane_dead,1,0}\t#{pane_dead_status}";
+  "#{?pane_dead,1,0}\t#{pane_dead_status}\t#{@tmuxcc_label}";
 
 // ---------------------------------------------------------------------------
 // Bootstrap command set
@@ -233,6 +257,12 @@ export interface PanesReplyRow {
   readonly dead: boolean;
   /** Exit status from `pane_dead_status` when dead and known, else undefined. */
   readonly exitCode: number | undefined;
+  /**
+   * Durable, driver-owned pane name from the `@tmuxcc_label` pane user-option
+   * (tc-1a8z), or undefined when the option is unset/empty.  Re-read on every
+   * requery so the durable name survives a driver restart.
+   */
+  readonly label: string | undefined;
 }
 
 /**
@@ -323,6 +353,14 @@ export function parsePanesReply(body: Uint8Array): PanesReplyRow[] {
       }
     }
 
+    // Durable pane name (tc-1a8z): the `@tmuxcc_label` user-option at field
+    // [13]. Read defensively — legacy replies (or panes that never had the
+    // option set) carry an empty string here, which maps to "no durable name"
+    // (undefined). We trim to drop the trailing line whitespace but otherwise
+    // preserve the value the user set.
+    const labelRaw = (parts[13] ?? "").trim();
+    const label = labelRaw === "" ? undefined : labelRaw;
+
     const tmuxPaneId = parseSigilId(paneIdStr, "%");
     const tmuxWindowId = parseSigilId(winIdStr, "@");
     const tmuxSessionId = parseSigilId(sessIdStr, "$");
@@ -341,6 +379,7 @@ export function parsePanesReply(body: Uint8Array): PanesReplyRow[] {
       active,
       dead,
       exitCode,
+      label,
     });
   }
 
@@ -458,6 +497,9 @@ export function buildInitialModel(
       // Dead-pane state from the requery (tc-4bv2 / tc-295a.10 shared shape).
       dead: row.dead,
       exitCode: row.exitCode,
+      // Durable pane name from the @tmuxcc_label user-option (tc-1a8z).
+      // Re-read on every requery → survives a driver restart for free.
+      label: row.label,
       scrollbackHandle: undefined,
     };
     model = addPane(model, p);

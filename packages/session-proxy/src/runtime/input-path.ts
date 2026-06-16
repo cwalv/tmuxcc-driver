@@ -74,6 +74,7 @@ import {
   breakPane,
   parseEffectIds,
   setOptionForWindow,
+  setOptionForPane,
   setWindowSizeManual,
   setWindowSizeDefault,
   resizeWindow,
@@ -81,6 +82,7 @@ import {
 } from "../parser/commands.js";
 import type { NotificationEvent } from "../parser/notifications.js";
 import type { SessionModel } from "../state/model.js";
+import { TMUXCC_LABEL_OPTION } from "../state/bootstrap.js";
 
 // ---------------------------------------------------------------------------
 // Id-mapping helpers
@@ -1029,14 +1031,38 @@ export function createInputPath(
           }
 
           case "rename-pane": {
-            // select-pane -T <title> -t %<N>
-            // Sets the pane's display title (#{pane_title}).
-            // An empty title resets to the default (process name).
-            // tc-u7cu.3: ACK round-trip so %error surfaces.
+            // set-option -pt %<N> @tmuxcc_label <name>  (tc-1a8z)
+            //
+            // Sets the DURABLE, driver-owned pane name in the per-pane tmux
+            // user-option `@tmuxcc_label`.  This is the canonical user rename
+            // channel — a SEPARATE channel from the volatile shell title.  We
+            // do NOT issue `select-pane -T` (which fights the shell for the
+            // #{pane_title} slot); the durable name lives with the pane in tmux
+            // and is re-read on every requery (BOOTSTRAP_PANES_FORMAT), so it
+            // survives a driver restart for free.
+            //
+            // An empty title CLEARS the durable name: tmux stores `''` and the
+            // requery maps an empty option value back to "no name" (undefined).
+            //
+            // Optimistic model update with error reversal (tc-7xv.37) — same
+            // pattern as set-synchronize-panes.  We inject internal:set-pane-label
+            // so the model (and the pane.label-changed delta) updates immediately;
+            // on %error we restore the captured before-value.
+            // tc-u7cu.3: also ACK the round-trip so %error surfaces.
             const tmuxPaneNum = toTmuxPane(command.paneId);
-            // Single-quote the title to handle spaces / special chars.
-            const quotedTitle = "'" + command.title.replace(/'/g, "'\\''") + "'";
-            runAckVerb(respond, correlationId, "rename-pane", `select-pane -T ${quotedTitle} -t %${tmuxPaneNum}`);
+            const pid = command.paneId;
+            // Empty title → clear the durable name (model label: undefined).
+            const newLabel = command.title === "" ? undefined : command.title;
+            sendCommandWithReversal(
+              setOptionForPane(tmuxPaneNum, TMUXCC_LABEL_OPTION, command.title),
+              { kind: "internal:set-pane-label", paneId: pid, label: newLabel },
+              (before) => {
+                const prev = before.panes.get(pid);
+                if (prev === undefined) return null; // pane gone — nothing to revert.
+                return { kind: "internal:set-pane-label", paneId: pid, label: prev.label };
+              },
+              respond !== undefined ? { respond, correlationId, verbKind: "rename-pane" } : undefined,
+            );
             break;
           }
           // ── tc-7xv.18: window verbs ──────────────────────────────────────────

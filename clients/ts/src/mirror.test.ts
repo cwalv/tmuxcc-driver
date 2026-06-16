@@ -143,6 +143,7 @@ function makePane(
     mode: "normal",
     dead: false,
     exitCode: undefined,
+    label: undefined,
     scrollbackHandle: undefined,
   };
 }
@@ -363,6 +364,47 @@ describe("applyDelta — pane deltas", () => {
     const model = applyDelta(init, msg);
     assert.equal(model.panes.get(P1)!.mode, "copy");
     assert.equal(model.panes.get(P2)!.mode, "normal"); // unchanged
+  });
+
+  // tc-1a8z: durable pane-name channel.
+  it("pane.label-changed sets the durable name on the pane", () => {
+    const { model: init } = applySnapshot(makeSnapshot(1));
+    const model = applyDelta(init, {
+      type: "pane.label-changed",
+      seq: 2,
+      paneId: P1,
+      label: "deploy",
+    });
+    assert.equal(model.panes.get(P1)!.label, "deploy");
+    assert.equal(model.panes.get(P2)!.label, undefined); // unchanged
+  });
+
+  it("pane.label-changed with label absent clears the durable name", () => {
+    const { model: init } = applySnapshot(makeSnapshot(1));
+    const named = applyDelta(init, {
+      type: "pane.label-changed",
+      seq: 2,
+      paneId: P1,
+      label: "deploy",
+    });
+    assert.equal(named.panes.get(P1)!.label, "deploy");
+    const cleared = applyDelta(named, {
+      type: "pane.label-changed",
+      seq: 3,
+      paneId: P1,
+    });
+    assert.equal(cleared.panes.get(P1)!.label, undefined, "name cleared when label absent");
+  });
+
+  it("applySnapshot carries SnapshotPane.label into the model", () => {
+    const base = makeSnapshot(2);
+    const snap: SnapshotMessage = {
+      ...base,
+      panes: base.panes.map((p) => (p.paneId === P1 ? { ...p, label: "tests" } : p)),
+    };
+    const { model } = applySnapshot(snap);
+    assert.equal(model.panes.get(P1)!.label, "tests");
+    assert.equal(model.panes.get(P2)!.label, undefined);
   });
 });
 

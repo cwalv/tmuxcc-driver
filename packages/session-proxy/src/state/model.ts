@@ -162,6 +162,27 @@ export interface Pane {
    */
   readonly exitCode: number | undefined;
   /**
+   * Durable, out-of-band, DRIVER-owned pane name (tc-1a8z).
+   *
+   * This is the CANONICAL user rename channel — set explicitly via the
+   * `rename-pane` wire command, which issues `set-option -pt %N @tmuxcc_label
+   * <name>` (the per-pane tmux user-option `@tmuxcc_label`).  It is a SEPARATE
+   * channel from the live shell title: it is NEVER set via a title escape
+   * (`select-pane -T` / OSC-0/2), so the shell cannot clobber it.
+   *
+   * Distinct from the (future) `pane_title` field (tc-2mn8) which carries the
+   * volatile shell-owned title sniffed from the %output stream.  Render
+   * precedence (durable label > live title > paneId) is the downstream
+   * consumer's concern (tc-asyq.6), NOT this model's.
+   *
+   * Authoritative source: the per-pane user-option `@tmuxcc_label`, re-read on
+   * every bootstrap requery (BOOTSTRAP_PANES_FORMAT), so the durable name
+   * survives a driver restart for free — canonical state lives with the pane in
+   * tmux.  `undefined` means no durable name has been set (the option is unset
+   * or empty); clearing the name (empty rename) resets to `undefined`.
+   */
+  readonly label: string | undefined;
+  /**
    * Handle into tc-fx2's scrollback buffer store, or undefined if no buffer
    * has been allocated yet. The reducer mints a handle on pane creation;
    * tc-fx2 registers the buffer under it. This field is session-proxy-internal and
@@ -781,7 +802,7 @@ export function removePane(model: SessionModel, paneId: PaneId): SessionModel {
 export function updatePane(
   model: SessionModel,
   paneId: PaneId,
-  patch: Partial<Pick<Pane, "cols" | "rows" | "mode" | "dead" | "exitCode" | "scrollbackHandle">>,
+  patch: Partial<Pick<Pane, "cols" | "rows" | "mode" | "dead" | "exitCode" | "label" | "scrollbackHandle">>,
 ): SessionModel {
   const pane = model.panes.get(paneId);
   if (!pane) return model;

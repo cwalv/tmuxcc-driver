@@ -109,6 +109,7 @@ function makePane(
     mode: "normal",
     dead,
     exitCode,
+    label: undefined,
     scrollbackHandle: undefined,
   };
 }
@@ -214,6 +215,9 @@ function applyDeltas(snap: SnapshotMessage, deltas: SessionProxyMessage[]): Snap
             // the round-trip reconstructs SnapshotPane.dead/exitCode exactly.
             ...(delta.dead ? { dead: true } : {}),
             ...(delta.dead && delta.exitCode !== undefined ? { exitCode: delta.exitCode } : {}),
+            // tc-1a8z: carry a born durable name so the round-trip reconstructs
+            // SnapshotPane.label exactly.
+            ...(delta.label !== undefined ? { label: delta.label } : {}),
           },
         ];
         break;
@@ -250,6 +254,16 @@ function applyDeltas(snap: SnapshotMessage, deltas: SessionProxyMessage[]): Snap
 
       case "pane.mode-changed":
         // SnapshotPane has no mode field; ignore.
+        break;
+
+      // tc-1a8z: durable pane-name change. Mirror the projection: set label
+      // when present, drop it when absent (name cleared).
+      case "pane.label-changed":
+        panes = panes.map((p) => {
+          if (p.paneId !== delta.paneId) return p;
+          const { label: _l, ...rest } = p as typeof p & { label?: string };
+          return delta.label !== undefined ? { ...rest, label: delta.label } : { ...rest };
+        });
         break;
 
       // --- focus ---
@@ -796,6 +810,78 @@ describe("dead-pane projection (tc-4bv2 / tc-295a.10)", () => {
     const closed = deltas.filter((d) => d.type === "pane.closed");
     assert.equal(closed.length, 1);
     assert.ok(!("cause" in (closed[0] as object)), "no cause when lookup is absent");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3c. Durable pane-name projection (tc-1a8z)
+// ---------------------------------------------------------------------------
+
+describe("durable pane-name projection (tc-1a8z)", () => {
+  it("projectSnapshot omits label for a pane with no durable name", () => {
+    const snap = projectSnapshot(baseModel(), { seq: 1 });
+    const p = snap.panes.find((x) => x.paneId === P1)!;
+    assert.ok(!("label" in p), "no label field when unset");
+  });
+
+  it("projectSnapshot surfaces the durable name when set", () => {
+    const model = updatePane(baseModel(), P1, { label: "build" });
+    const snap = projectSnapshot(model, { seq: 1 });
+    const p = snap.panes.find((x) => x.paneId === P1)!;
+    assert.equal(p.label, "build");
+  });
+
+  it("diffModel emits exactly one pane.label-changed on a rename", () => {
+    const prev = baseModel();
+    const next = updatePane(prev, P1, { label: "deploy" });
+    const deltas = diffModel(prev, next);
+    const lc = deltas.filter((d) => d.type === "pane.label-changed");
+    assert.equal(lc.length, 1);
+    const lc0 = lc[0]!;
+    if (lc0.type === "pane.label-changed") {
+      assert.equal(lc0.paneId, P1);
+      assert.equal(lc0.label, "deploy");
+    }
+    // A rename is NOT a resize/close/open — none of those spurious deltas.
+    assert.equal(deltas.filter((d) => d.type === "pane.resized").length, 0);
+    assert.equal(deltas.filter((d) => d.type === "pane.closed").length, 0);
+    assert.equal(deltas.filter((d) => d.type === "pane.opened").length, 0);
+  });
+
+  it("diffModel emits pane.label-changed with label ABSENT when the name is cleared", () => {
+    const prev = updatePane(baseModel(), P1, { label: "deploy" });
+    const next = updatePane(prev, P1, { label: undefined });
+    const deltas = diffModel(prev, next);
+    const lc = deltas.filter((d) => d.type === "pane.label-changed");
+    assert.equal(lc.length, 1);
+    assert.ok(!("label" in (lc[0] as object)), "label omitted when cleared");
+  });
+
+  it("diffModel emits no pane.label-changed when the name is unchanged", () => {
+    const prev = updatePane(baseModel(), P1, { label: "build" });
+    const next = updatePane(prev, P1, { label: "build" });
+    const deltas = diffModel(prev, next);
+    assert.equal(deltas.filter((d) => d.type === "pane.label-changed").length, 0);
+  });
+
+  it("round-trip: applyDeltas(snapshot(prev), diff(prev,next)) === snapshot(next) for a rename", () => {
+    const prev = baseModel();
+    const next = updatePane(prev, P1, { label: "tests" });
+    const reconstructed = applyDeltas(projectSnapshot(prev, { seq: 1 }), diffModel(prev, next));
+    assert.deepEqual(reconstructed.panes, projectSnapshot(next, { seq: 2 }).panes);
+  });
+
+  it("a born-with-label pane carries label on pane.opened", () => {
+    const prev = baseModel();
+    let next = addPane(prev, { ...makePane(P3, W1, S1, 30, 24), label: "logs" });
+    next = updateWindow(next, W1, { activePaneId: P3 });
+    const deltas = diffModel(prev, next);
+    const opened = deltas.filter((d) => d.type === "pane.opened");
+    assert.equal(opened.length, 1);
+    const o0 = opened[0]!;
+    if (o0.type === "pane.opened") {
+      assert.equal(o0.label, "logs");
+    }
   });
 });
 

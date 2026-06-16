@@ -60,7 +60,7 @@
  */
 
 import type { NotificationToken } from "./tokenizer.js";
-import type { WindowId } from "../ids.js";
+import type { WindowId, PaneId } from "../ids.js";
 
 // ---------------------------------------------------------------------------
 // Event types
@@ -335,6 +335,26 @@ export interface InternalWindowMonitorSilenceSetNotification {
 
 // ── end tc-7xv.15 ─────────────────────────────────────────────────────────────
 
+/**
+ * Synthetic internal event: the session-proxy applied a `rename-pane` command
+ * (optimistic) and is now updating the durable pane name (tc-1a8z).
+ *
+ * This event is NEVER parsed from tmux control-mode output — it is injected by
+ * input-path.ts on two occasions:
+ *
+ *   1. After sending `set-option -pt %N @tmuxcc_label <name>` with the new
+ *      value (optimistic apply).  `label === undefined` means the durable name
+ *      was cleared (empty rename → `set-option -pt %N @tmuxcc_label ''`).
+ *   2. If tmux subsequently replies with %error, with the captured before-value
+ *      (compensating reversal — tc-7xv.37).
+ */
+export interface InternalPaneLabelSetNotification {
+  readonly kind: "internal:set-pane-label";
+  readonly paneId: PaneId;
+  /** The new durable name, or undefined when cleared. */
+  readonly label: string | undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Discriminated union
 // ---------------------------------------------------------------------------
@@ -360,7 +380,9 @@ export type NotificationEvent =
   | InternalWindowSyncSetNotification
   // tc-7xv.15: monitor-activity / monitor-silence
   | InternalWindowMonitorActivitySetNotification
-  | InternalWindowMonitorSilenceSetNotification;
+  | InternalWindowMonitorSilenceSetNotification
+  // tc-1a8z: durable pane name (@tmuxcc_label)
+  | InternalPaneLabelSetNotification;
 
 // ---------------------------------------------------------------------------
 // Internal parsing helpers (byte-level, zero-copy where possible)

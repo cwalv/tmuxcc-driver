@@ -310,14 +310,14 @@
 
     "RenamePaneCommand": {
       "type": "object",
-      "description": "Set a display title on a pane (select-pane -T). Empty string clears the tmux title. Added tc-7xv.9.",
+      "description": "Set the DURABLE, driver-owned pane name (tc-1a8z) — the canonical user rename channel. The session-proxy issues set-option -pt %N @tmuxcc_label <name> (the per-pane tmux user-option) and NEVER select-pane -T, so the durable name is a SEPARATE channel from the volatile shell title (pane_title, tc-2mn8) that the shell cannot clobber, and it survives a driver restart. Empty title CLEARS the durable name. The wire kind stays \"rename-pane\" and the field stays \"title\" for shape stability, but the SEMANTICS are the durable name, not a tmux pane title. Added tc-7xv.9; repurposed tc-1a8z.",
       "required": ["kind", "paneId", "title"],
       "properties": {
         "kind": { "const": "rename-pane" },
         "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" },
         "title": {
           "type": "string",
-          "description": "New display title. Empty string clears the tmux title (resets to process name)."
+          "description": "New durable pane name (stored in the @tmuxcc_label user-option). Empty string clears the durable name."
         }
       },
       "additionalProperties": false

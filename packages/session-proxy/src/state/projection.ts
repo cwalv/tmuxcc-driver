@@ -41,6 +41,7 @@
  *   3. layout.updated      — window layout changes (may ref existing panes)
  *   4. pane.resized        — size changes on existing panes
  *   5. pane.mode-changed   — mode changes on existing panes
+ *   5a2. pane.label-changed — durable pane-name changes on existing panes (tc-1a8z)
  *   5b. pane.dead-changed  — dead-state flip on existing panes (tc-4bv2/tc-295a.10)
  *   6. window.renamed      — renames (entity already exists)
  *   7. session.renamed     — session rename
@@ -70,6 +71,7 @@ import type {
   PaneClosedMessage,
   PaneResizedMessage,
   PaneModeChangedMessage,
+  PaneLabelChangedMessage,
   PaneDeadChangedMessage,
   WindowAddedMessage,
   WindowClosedMessage,
@@ -210,11 +212,15 @@ export function projectSnapshot(
     // all-dead-pane session renders (and is reapable). Keep `dead`/`exitCode`
     // off the wire when the pane is alive — additive optional fields, absent
     // means false/unknown (matches the conformance default).
+    // tc-1a8z: surface the durable, driver-owned pane name when set. Additive
+    // optional field — kept off the wire when unset (undefined). Distinct from
+    // the live pane_title (tc-2mn8).
     const base: SnapshotPane = {
       paneId: pane.paneId,
       windowId: pane.windowId,
       cols: pane.cols,
       rows: pane.rows,
+      ...(pane.label !== undefined ? { label: pane.label } : {}),
     };
     if (pane.dead) {
       panes.push(
@@ -326,6 +332,9 @@ export function diffModel(
         active: win?.activePaneId === pane.paneId,
         ...(pane.dead ? { dead: true } : {}),
         ...(pane.dead && pane.exitCode !== undefined ? { exitCode: pane.exitCode } : {}),
+        // tc-1a8z: born already carrying a durable name (e.g. cold attach to a
+        // previously-renamed pane). Off when unset (additive optional).
+        ...(pane.label !== undefined ? { label: pane.label } : {}),
         ...(origin !== undefined ? { origin } : {}),
       };
       out.push(msg);
@@ -379,6 +388,29 @@ export function diffModel(
         seq: SEQ,
         paneId: pane.paneId,
         mode: pane.mode,
+      };
+      out.push(msg);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 5a2. pane.label-changed — durable pane-name changes on existing panes (tc-1a8z)
+  //
+  // The durable name lives in the `@tmuxcc_label` pane user-option. It changes
+  // either optimistically (the input-path injects internal:set-pane-label right
+  // after a rename-pane command) or when a later requery re-reads the option's
+  // new value. A pane present in BOTH prev and next whose `label` differs gets
+  // a delta; `label` is omitted when the name was cleared (returned to unset).
+  // -------------------------------------------------------------------------
+  for (const [id, pane] of next.panes) {
+    const prevPane = prev.panes.get(id);
+    if (!prevPane) continue; // new panes carry their label in pane.opened
+    if (prevPane.label !== pane.label) {
+      const msg: PaneLabelChangedMessage = {
+        type: "pane.label-changed",
+        seq: SEQ,
+        paneId: pane.paneId,
+        ...(pane.label !== undefined ? { label: pane.label } : {}),
       };
       out.push(msg);
     }

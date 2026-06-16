@@ -1075,8 +1075,11 @@ describe("createInputPath — swap-pane command (tc-7xv.9)", () => {
   });
 });
 
-describe("createInputPath — rename-pane command (tc-7xv.9)", () => {
-  it("rename-pane → select-pane -T '<title>' -t %<N>", () => {
+// tc-1a8z: rename-pane is the DURABLE-name channel. It sets ONLY the per-pane
+// @tmuxcc_label user-option (set-option -pt %N), NEVER select-pane -T — so the
+// shell cannot clobber it. These tests pin that contract.
+describe("createInputPath — rename-pane command (tc-1a8z durable name)", () => {
+  it("rename-pane → set-option -pt %<N> @tmuxcc_label <name>", () => {
     const host = makeFakeDeps();
     const path = createInputPath(host);
 
@@ -1088,10 +1091,27 @@ describe("createInputPath — rename-pane command (tc-7xv.9)", () => {
     };
     path.handleClientMessage(msg);
 
-    assert.equal(host.lastWrite, "select-pane -T 'build' -t %5\n");
+    assert.equal(host.lastWrite, "set-option -pt %5 @tmuxcc_label build\n");
   });
 
-  it("rename-pane with empty title clears the tmux title", () => {
+  it("rename-pane NEVER issues select-pane -T (durable channel, not the title)", () => {
+    const host = makeFakeDeps();
+    const path = createInputPath(host);
+
+    path.handleClientMessage({
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "rp-no-title",
+      command: { kind: "rename-pane", paneId: paneId("p5"), title: "build" },
+    });
+
+    for (const w of host.writes) {
+      assert.ok(!w.includes("select-pane"), `must not push select-pane; got: ${w}`);
+      assert.ok(!w.includes("pane_title"), `must not touch pane_title; got: ${w}`);
+    }
+  });
+
+  it("rename-pane with empty title clears the durable name (set-option ... '')", () => {
     const host = makeFakeDeps();
     const path = createInputPath(host);
 
@@ -1103,10 +1123,10 @@ describe("createInputPath — rename-pane command (tc-7xv.9)", () => {
     };
     path.handleClientMessage(msg);
 
-    assert.equal(host.lastWrite, "select-pane -T '' -t %1\n");
+    assert.equal(host.lastWrite, "set-option -pt %1 @tmuxcc_label ''\n");
   });
 
-  it("rename-pane with title containing single quotes escapes them", () => {
+  it("rename-pane with a name containing single quotes escapes them", () => {
     const host = makeFakeDeps();
     const path = createInputPath(host);
 
@@ -1118,10 +1138,10 @@ describe("createInputPath — rename-pane command (tc-7xv.9)", () => {
     };
     path.handleClientMessage(msg);
 
-    assert.equal(host.lastWrite, "select-pane -T 'it'\\''s' -t %2\n");
+    assert.equal(host.lastWrite, "set-option -pt %2 @tmuxcc_label 'it'\\''s'\n");
   });
 
-  it("rename-pane with title containing spaces works correctly", () => {
+  it("rename-pane with a name containing spaces works correctly", () => {
     const host = makeFakeDeps();
     const path = createInputPath(host);
 
@@ -1133,7 +1153,7 @@ describe("createInputPath — rename-pane command (tc-7xv.9)", () => {
     };
     path.handleClientMessage(msg);
 
-    assert.equal(host.lastWrite, "select-pane -T 'my server' -t %3\n");
+    assert.equal(host.lastWrite, "set-option -pt %3 @tmuxcc_label 'my server'\n");
   });
 
   it("rename-pane with invalid pane id throws TypeError", () => {
@@ -1411,6 +1431,7 @@ function makeReversalModel(opts: {
     mode: "normal",
     dead: false,
     exitCode: undefined,
+    label: undefined,
     scrollbackHandle: undefined,
   };
 

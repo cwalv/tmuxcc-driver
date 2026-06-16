@@ -106,6 +106,18 @@ export interface ClientPane {
    */
   readonly exitCode: number | undefined;
   /**
+   * Durable, driver-owned pane name (tc-1a8z) — the canonical user rename
+   * channel, stored in the per-pane `@tmuxcc_label` tmux user-option. Set ONLY
+   * via the `rename-pane` command (never a title escape), so the shell cannot
+   * clobber it, and it survives a driver restart. `undefined` means no durable
+   * name is set.
+   *
+   * DISTINCT from the live shell title (tc-2mn8). Render precedence (durable
+   * label > live title > paneId) is the consumer's concern (tc-asyq.6). Driven
+   * by SnapshotPane.label / PaneOpenedMessage.label / PaneLabelChangedMessage.
+   */
+  readonly label: string | undefined;
+  /**
    * tc-ozk.2: causality tag, set from the `pane.opened` delta that introduced
    * this pane. PRESENT when a wire verb caused the creation (carries the
    * verb's `{connectionId, requestId}`); ABSENT for foreign panes and for
@@ -333,6 +345,8 @@ export function applySnapshot(snapshot: SnapshotMessage): {
       // corpse). Additive optional fields; absent means alive / unknown.
       dead: p.dead ?? false,
       exitCode: p.dead ? p.exitCode : undefined,
+      // tc-1a8z: durable, driver-owned pane name. Absent ⇒ no name set.
+      label: p.label,
       // tc-ozk.2: snapshot panes carry no per-pane origin — they are
       // pre-existing from this client's perspective, not freshly created.
       origin: undefined,
@@ -396,6 +410,9 @@ export function applyDelta(model: ClientModel, msg: SessionProxyMessage): Client
         // for the first time on requery / reconnect).
         dead: msg.dead ?? false,
         exitCode: msg.dead ? msg.exitCode : undefined,
+        // tc-1a8z: born already carrying a durable name (e.g. cold attach to a
+        // previously-renamed pane). Absent on the wire ⇒ no name set.
+        label: msg.label,
         // tc-ozk.2: carry the verb-origin tag through to the diff path so
         // onPaneOpened reports it. Absent on the wire ⇒ foreign creation.
         origin: msg.origin,
@@ -442,6 +459,17 @@ export function applyDelta(model: ClientModel, msg: SessionProxyMessage): Client
       if (!pane) return model;
       const panes = new Map(model.panes);
       panes.set(msg.paneId, { ...pane, cols: msg.cols, rows: msg.rows });
+      return { ...model, panes };
+    }
+
+    // tc-1a8z: the durable, driver-owned pane name changed. `label` absent on
+    // the wire ⇒ the name was cleared (back to undefined).
+    case "pane.label-changed": {
+      const pane = model.panes.get(msg.paneId);
+      if (!pane) return model;
+      if (pane.label === msg.label) return model; // no observable change
+      const panes = new Map(model.panes);
+      panes.set(msg.paneId, { ...pane, label: msg.label });
       return { ...model, panes };
     }
 
@@ -1084,7 +1112,7 @@ export class Mirror {
 
     // Track previously-seen model to diff against.
     let prevModel: {
-      panes: ReadonlyMap<PaneId, { cols: number; rows: number; dead: boolean; exitCode: number | undefined }>;
+      panes: ReadonlyMap<PaneId, { cols: number; rows: number; dead: boolean; exitCode: number | undefined; label: string | undefined }>;
       windows: ReadonlyMap<WindowId, { name: string; layout: WindowLayout }>;
       focus: { paneId: PaneId | null; windowId: WindowId | null };
       exitCodes: ReadonlyMap<PaneId, number>;
@@ -1165,6 +1193,8 @@ export class Mirror {
             // mark the corpse without waiting for a separate event.
             ...(pane.dead ? { dead: true } : {}),
             ...(pane.dead && pane.exitCode !== undefined ? { exitCode: pane.exitCode } : {}),
+            // tc-1a8z: carry a durable name so the renderer composes it on open.
+            ...(pane.label !== undefined ? { label: pane.label } : {}),
           });
           subscribeBytes(pid);
         } else {
@@ -1174,6 +1204,10 @@ export class Mirror {
           // tc-4bv2 / tc-295a.10: dead-state flip on an existing pane.
           if (prevPane.dead !== pane.dead || prevPane.exitCode !== pane.exitCode) {
             hook.onPaneDeadChanged(pid, pane.dead, pane.dead ? pane.exitCode : undefined);
+          }
+          // tc-1a8z: durable pane-name change on an existing pane.
+          if (prevPane.label !== pane.label) {
+            hook.onPaneLabelChanged(pid, pane.label);
           }
         }
       }
@@ -1196,9 +1230,9 @@ export class Mirror {
       }
 
       // Update prevModel to reflect current state.
-      const newPanes = new Map<PaneId, { cols: number; rows: number; dead: boolean; exitCode: number | undefined }>();
+      const newPanes = new Map<PaneId, { cols: number; rows: number; dead: boolean; exitCode: number | undefined; label: string | undefined }>();
       for (const [pid, p] of curr.panes) {
-        newPanes.set(pid, { cols: p.cols, rows: p.rows, dead: p.dead, exitCode: p.exitCode });
+        newPanes.set(pid, { cols: p.cols, rows: p.rows, dead: p.dead, exitCode: p.exitCode, label: p.label });
       }
       const newWindows = new Map<WindowId, { name: string; layout: WindowLayout }>();
       for (const [wid, w] of curr.windows) {
@@ -1248,6 +1282,9 @@ export class Mirror {
         // session is in the snapshot and its panes are dead on first render.
         ...(pane.dead ? { dead: true } : {}),
         ...(pane.dead && pane.exitCode !== undefined ? { exitCode: pane.exitCode } : {}),
+        // tc-1a8z: replay a pre-existing durable name so the renderer composes
+        // it on first paint.
+        ...(pane.label !== undefined ? { label: pane.label } : {}),
       });
       subscribeBytes(pid);
     }
@@ -1259,9 +1296,9 @@ export class Mirror {
     hook.onConnected();
 
     // Seed prevModel from initial state.
-    const seedPanes = new Map<PaneId, { cols: number; rows: number; dead: boolean; exitCode: number | undefined }>();
+    const seedPanes = new Map<PaneId, { cols: number; rows: number; dead: boolean; exitCode: number | undefined; label: string | undefined }>();
     for (const [pid, p] of initial.panes) {
-      seedPanes.set(pid, { cols: p.cols, rows: p.rows, dead: p.dead, exitCode: p.exitCode });
+      seedPanes.set(pid, { cols: p.cols, rows: p.rows, dead: p.dead, exitCode: p.exitCode, label: p.label });
     }
     const seedWindows = new Map<WindowId, { name: string; layout: WindowLayout }>();
     for (const [wid, w] of initial.windows) {

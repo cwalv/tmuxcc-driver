@@ -127,6 +127,13 @@ export interface PaneOpenedMessage extends MessageBase {
    */
   readonly exitCode?: number;
   /**
+   * Durable, driver-owned pane name (tc-1a8z) when this pane is born already
+   * carrying a `@tmuxcc_label` user-option — e.g. a cold attach / reconnect
+   * that observes a pane a previous session renamed.  Absent/empty means no
+   * durable name.  See {@link SnapshotPane.label}.  Additive optional field.
+   */
+  readonly label?: string;
+  /**
    * Causality tag (tc-ozk.2). PRESENT when this pane was created by a wire verb
    * (split-pane / open-window): names the connection + requestId that caused
    * it. ABSENT when foreign (native client, script). Additive optional field
@@ -226,6 +233,31 @@ export interface PaneResizedMessage extends MessageBase {
   readonly paneId: PaneId;
   readonly cols: number;
   readonly rows: number;
+}
+
+/**
+ * A pane's durable, driver-owned name changed (tc-1a8z).
+ * direction: session-proxy→client
+ *
+ * Emitted when the per-pane `@tmuxcc_label` user-option changes — either
+ * optimistically right after a `rename-pane` command, or when a later requery
+ * observes the user-option's new value.  This is the CANONICAL user rename
+ * channel, DISTINCT from the volatile shell title (tc-2mn8): it is set ONLY via
+ * `set-option -pt %N @tmuxcc_label`, never a title escape, so the shell cannot
+ * clobber it.
+ *
+ * `label` absent means the durable name was CLEARED (empty rename → the
+ * user-option is now unset); a non-empty `label` is the new durable name.
+ *
+ * Non-breaking additive delta — older clients that do not recognise this type
+ * ignore it (the pane continues to render with its prior name until the next
+ * snapshot).
+ */
+export interface PaneLabelChangedMessage extends MessageBase {
+  readonly type: "pane.label-changed";
+  readonly paneId: PaneId;
+  /** The new durable name, or absent when the name was cleared. */
+  readonly label?: string;
 }
 
 /**
@@ -334,6 +366,19 @@ export interface SnapshotPane {
    * when alive or the code is unknowable. Additive optional field.
    */
   readonly exitCode?: number;
+  /**
+   * Durable, driver-owned pane name (tc-1a8z) — the canonical user rename
+   * channel, stored in the per-pane `@tmuxcc_label` tmux user-option and set
+   * ONLY via the `rename-pane` command (never via a title escape).  Survives a
+   * driver restart (re-read from the user-option on every requery).
+   *
+   * DISTINCT from the live shell title `pane_title` (tc-2mn8): this is the
+   * out-of-band durable name the shell cannot clobber.  Render precedence
+   * (durable label > live title > paneId) is the consumer's concern (tc-asyq.6).
+   *
+   * Additive optional field — absent/empty means no durable name is set.
+   */
+  readonly label?: string;
 }
 
 /**
@@ -1036,22 +1081,35 @@ export interface SwapPaneCommand {
 }
 
 /**
- * Set a display title on a pane (`select-pane -T <title>`).
+ * Set the DURABLE, driver-owned pane name (tc-1a8z).
  * direction: client→session-proxy
  *
- * tmux does not persist pane titles across restarts; they are display-only
- * decorations.  The extension stores the user-visible label in the binding
- * registry (PersistedBinding.label) and also pushes the title to tmux so
- * `display-pane` and status-line formats that use #{pane_title} reflect it.
+ * This is the CANONICAL user rename channel.  The session-proxy issues
+ * `set-option -pt %N @tmuxcc_label <name>` — the per-pane tmux user-option — and
+ * NEVER `select-pane -T`.  Setting only `@tmuxcc_label` keeps the durable name
+ * in a SEPARATE channel from the volatile shell title (`pane_title`, tc-2mn8):
+ * the shell's OSC-0/2 stream cannot clobber it, and it survives a driver
+ * restart because canonical state lives with the pane in tmux (re-read from the
+ * user-option on every requery).
  *
- * An empty string clears the tmux title (resets to the process name).
+ * An empty `title` CLEARS the durable name (`set-option -pt %N @tmuxcc_label ''`
+ * → the model's `label` returns to unset).
+ *
+ * The session-proxy injects an optimistic `internal:set-pane-label` event
+ * (tc-7xv.37 reversal pattern) so the model updates immediately, then surfaces
+ * the change as a `pane.label-changed` delta.  Render precedence (durable label
+ * > live title > paneId) is the consumer's concern (tc-asyq.6).
+ *
+ * NOTE: the wire `kind` stays `"rename-pane"` and the field stays `title` for
+ * shape stability, but the SEMANTICS are now the durable name, not a tmux pane
+ * title.
  *
  * Additive addition — non-breaking per the versioning policy.
  */
 export interface RenamePaneCommand {
   readonly kind: "rename-pane";
   readonly paneId: PaneId;
-  /** New display title.  Empty string clears the tmux title. */
+  /** New durable pane name.  Empty string clears the durable name. */
   readonly title: string;
 }
 // ── tc-7xv.15: monitor-activity / monitor-silence commands ──────────────────
@@ -1399,7 +1457,7 @@ export interface ResyncRequestMessage extends MessageBase {
  * Grouped by family:
  *   Capabilities:  SessionProxyCapabilitiesMessage
  *   Snapshot:      SnapshotMessage
- *   Pane deltas:   PaneOpenedMessage | PaneClosedMessage | PaneResizedMessage | PaneModeChangedMessage
+ *   Pane deltas:   PaneOpenedMessage | PaneClosedMessage | PaneResizedMessage | PaneModeChangedMessage | PaneLabelChangedMessage
  *   Window deltas: WindowAddedMessage | WindowClosedMessage | WindowRenamedMessage | WindowSyncChangedMessage | WindowMonitorActivityChangedMessage | WindowMonitorSilenceChangedMessage
  *   Layout deltas: LayoutUpdatedMessage
  *   Focus deltas:  FocusChangedMessage
@@ -1418,6 +1476,8 @@ export type SessionProxyMessage =
   | PaneClosedMessage
   | PaneResizedMessage
   | PaneModeChangedMessage
+  // Durable pane-name delta (tc-1a8z)
+  | PaneLabelChangedMessage
   // Dead-pane state delta (tc-4bv2 / tc-295a.10)
   | PaneDeadChangedMessage
   // Window deltas

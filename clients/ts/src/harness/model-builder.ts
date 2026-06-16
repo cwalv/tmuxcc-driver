@@ -71,6 +71,7 @@ export function buildModel(init: TranscriptInitialModel): SessionModel {
       mode: "normal",
       dead: false,
       exitCode: undefined,
+      label: undefined,
       scrollbackHandle: undefined,
     });
   }
@@ -141,6 +142,7 @@ export function applyVerbCreate(
       mode: "normal",
       dead: false,
       exitCode: undefined,
+      label: undefined,
       scrollbackHandle: undefined,
     });
   }

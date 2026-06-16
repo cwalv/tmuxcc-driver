@@ -90,6 +90,10 @@
         "exitCode": {
           "type": "integer",
           "description": "Exit code when dead is true and known (tmux pane_dead_status); absent when alive or unknowable. Additive optional field."
+        },
+        "label": {
+          "type": "string",
+          "description": "Durable, driver-owned pane name (tc-1a8z) — the canonical user rename channel, stored in the per-pane @tmuxcc_label tmux user-option. Set ONLY via the rename-pane command (never a title escape), so the shell cannot clobber it; survives a driver restart (re-read from the option on every requery). DISTINCT from the live shell title pane_title (tc-2mn8). Additive optional field; absent/empty means no durable name. Render precedence (durable label > live title > paneId) is the consumer's concern (tc-asyq.6)."
         }
       },
       "additionalProperties": false
@@ -183,9 +187,32 @@
           "type": "integer",
           "description": "Exit code when dead is true and known (tmux pane_dead_status); absent otherwise. Additive optional field."
         },
+        "label": {
+          "type": "string",
+          "description": "Durable, driver-owned pane name (tc-1a8z) when this pane is born / replayed already carrying a @tmuxcc_label user-option (e.g. cold attach to a previously-renamed pane). Additive optional field; absent/empty means no durable name. Subsequent changes arrive via pane.label-changed. See SnapshotPane.label."
+        },
         "origin": {
           "$ref": "tmuxcc:shared/primitives#/$defs/Origin",
           "description": "Causality tag (tc-ozk.2). PRESENT when this pane was created by a wire verb (split-pane / open-window): names the connection + requestId that caused it. ABSENT when foreign (native client, script). Additive optional field; supersedes the bare `created` flag (tc-3y8.2). A client compares origin.connectionId against its own connectionId to decide whether this pane is its own."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "PaneLabelChangedMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "A pane's durable, driver-owned name changed (tc-1a8z) — the canonical user rename channel (the per-pane @tmuxcc_label tmux user-option). DISTINCT from the volatile shell title (tc-2mn8): set ONLY via set-option -pt %N @tmuxcc_label, never a title escape, so the shell cannot clobber it. `label` absent means the durable name was CLEARED (empty rename). direction: session-proxy→client.",
+      "required": ["type", "seq", "paneId"],
+      "properties": {
+        "type": { "const": "pane.label-changed" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" },
+        "label": {
+          "type": "string",
+          "description": "The new durable name; absent when the name was cleared (back to unset)."
         }
       },
       "additionalProperties": false
@@ -643,6 +670,7 @@
         { "$ref": "#/$defs/PaneClosedMessage" },
         { "$ref": "#/$defs/PaneResizedMessage" },
         { "$ref": "#/$defs/PaneModeChangedMessage" },
+        { "$ref": "#/$defs/PaneLabelChangedMessage" },
         { "$ref": "#/$defs/PaneDeadChangedMessage" },
         { "$ref": "#/$defs/LayoutUpdatedMessage" },
         { "$ref": "#/$defs/FocusChangedMessage" },

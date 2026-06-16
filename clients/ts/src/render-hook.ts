@@ -98,6 +98,14 @@ export interface PaneInfo {
    * `pane_dead_status`); absent when alive or unknowable.
    */
   readonly exitCode?: number;
+  /**
+   * tc-1a8z: the DURABLE, driver-owned pane name (the per-pane `@tmuxcc_label`
+   * user-option) when this pane is born / replayed already carrying one.
+   * Absent ⇒ no durable name.  Subsequent changes arrive via
+   * `onPaneLabelChanged`.  Renderers compose the user-visible name from this
+   * (render precedence is the renderer's concern; see tc-asyq.6).
+   */
+  readonly label?: string;
 }
 
 /**
@@ -250,6 +258,22 @@ export interface RenderHook {
    * Unknown mode strings must be tolerated (treated as opaque).
    */
   onPaneModeChanged(paneId: PaneId, mode: PaneMode): void;
+
+  /**
+   * A pane's DURABLE, driver-owned name changed (tc-1a8z).
+   *
+   * Called when a `pane.label-changed` delta arrives — the canonical user
+   * rename channel (the per-pane `@tmuxcc_label` tmux user-option).  This is a
+   * SEPARATE channel from the live shell title (tc-2mn8): it is set ONLY via the
+   * `rename-pane` command, never a title escape, and survives a driver restart.
+   *
+   * `label` is the new durable name, or `undefined` when the name was cleared.
+   * Renderers compose the user-visible name from this (render precedence —
+   * durable label > live title > paneId — is the renderer's concern; see
+   * tc-asyq.6).  Default-implementable as a no-op for renderers that do not
+   * surface a per-pane name.
+   */
+  onPaneLabelChanged(paneId: PaneId, label: string | undefined): void;
 
   // ── Output bytes ────────────────────────────────────────────────────────
 
@@ -452,6 +476,7 @@ export const NoOpRenderHook: RenderHook = {
   onPaneResized(_paneId: PaneId, _cols: number, _rows: number): void {},
   onPaneDeadChanged(_paneId: PaneId, _dead: boolean, _exitCode?: number): void {},
   onPaneModeChanged(_paneId: PaneId, _mode: PaneMode): void {},
+  onPaneLabelChanged(_paneId: PaneId, _label: string | undefined): void {},
   onPaneOutput(_paneId: PaneId, _bytes: Uint8Array): void {},
   onWindowAdded(_window: WindowInfo): void {},
   onWindowClosed(_windowId: WindowId): void {},
@@ -479,6 +504,7 @@ export type RenderHookCall =
   | { type: "paneResized"; paneId: PaneId; cols: number; rows: number }
   | { type: "paneDeadChanged"; paneId: PaneId; dead: boolean; exitCode?: number }
   | { type: "paneModeChanged"; paneId: PaneId; mode: PaneMode }
+  | { type: "paneLabelChanged"; paneId: PaneId; label?: string }
   | { type: "paneOutput"; paneId: PaneId; bytes: Uint8Array }
   | { type: "windowAdded"; window: WindowInfo }
   | { type: "windowClosed"; windowId: WindowId }
@@ -535,6 +561,14 @@ export class EchoRenderHook implements RenderHook {
 
   onPaneModeChanged(paneId: PaneId, mode: PaneMode): void {
     this.calls.push({ type: "paneModeChanged", paneId, mode });
+  }
+
+  onPaneLabelChanged(paneId: PaneId, label: string | undefined): void {
+    if (label !== undefined) {
+      this.calls.push({ type: "paneLabelChanged", paneId, label });
+    } else {
+      this.calls.push({ type: "paneLabelChanged", paneId });
+    }
   }
 
   onPaneOutput(paneId: PaneId, bytes: Uint8Array): void {

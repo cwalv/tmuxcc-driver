@@ -544,6 +544,50 @@ export function showOptionsForWindow(windowId: number, option: string): string {
   return `show-options -wvt @${windowId} ${quoteArg(option)}`;
 }
 
+/**
+ * Serialize a `set-option -pt %<paneId>` command targeting a specific pane.
+ *
+ * Emits `set-option -pt %<paneId> <option> <value>`.
+ *
+ * The `-p` flag scopes the option to the PANE (pane-local user option), the
+ * durable per-pane storage channel.  Primary consumer: the durable pane name
+ * `@tmuxcc_label` (tc-1a8z) — the rename verb sets ONLY this option and NEVER
+ * `select-pane -T` (which fights the shell for the volatile pane_title slot).
+ *
+ * The value is quoted when it contains special characters; an empty value
+ * (clear the durable name) serializes as `''`, which `set-option` accepts.
+ *
+ * @param paneId  Numeric pane ID (the N in `%N`).
+ * @param option  Pane user-option name (e.g. `@tmuxcc_label`).
+ * @param value   Option value (the durable label; `''` clears it).
+ * @returns       e.g. `set-option -pt %5 @tmuxcc_label build`
+ */
+export function setOptionForPane(
+  paneId: number,
+  option: string,
+  value: string,
+): string {
+  return `set-option -pt %${paneId} ${quoteArg(option)} ${quoteArg(value)}`;
+}
+
+/**
+ * Serialize a `show-options -pvt %<paneId> <option>` command.
+ *
+ * Emits `show-options -pvt %<paneId> <option>`.
+ *
+ * The `-p` flag selects PANE options; `-v` (value-only) makes the reply body
+ * contain just the option value with no name prefix.  Mirrors
+ * {@link showOptionsForWindow} for the per-pane scope.  An unset pane option
+ * yields an empty reply body.
+ *
+ * @param paneId  Numeric pane ID (the N in `%N`).
+ * @param option  Pane user-option name (e.g. `@tmuxcc_label`).
+ * @returns       e.g. `show-options -pvt %5 @tmuxcc_label`
+ */
+export function showOptionsForPane(paneId: number, option: string): string {
+  return `show-options -pvt %${paneId} ${quoteArg(option)}`;
+}
+
 // ---------------------------------------------------------------------------
 // split-window
 // ---------------------------------------------------------------------------

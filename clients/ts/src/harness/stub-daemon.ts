@@ -127,6 +127,7 @@ export function makeStubModel(opts: StubModelOptions = {}): SessionModel {
       mode: "normal",
       dead: false,
       exitCode: undefined,
+      label: undefined,
       scrollbackHandle: undefined,
     });
   }

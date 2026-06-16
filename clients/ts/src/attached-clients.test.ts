@@ -86,6 +86,7 @@ function buildBaseModel() {
     mode: "normal",
     dead: false,
     exitCode: undefined,
+    label: undefined,
     scrollbackHandle: undefined,
   });
   m = setFocus(m, { paneId: P0, windowId: W0, sessionId: S0 });

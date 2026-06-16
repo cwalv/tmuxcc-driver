@@ -90,6 +90,7 @@ import {
   checkInvariants,
   emptyModel,
   updateWindow,
+  updatePane,
   windowId as mintWindowId,
 } from "../state/model.js";
 import type { PaneBufferStore } from "../state/scrollback.js";
@@ -1043,6 +1044,18 @@ class RuntimePipelineImpl implements RuntimePipeline {
         if (win === undefined) return model;
         if (win.monitorSilence === event.seconds) return model;
         return updateWindow(model, event.windowId, { monitorSilence: event.seconds });
+      });
+      this._fireNotificationHandlers(event);
+      return;
+    }
+    // tc-1a8z: durable pane-name optimistic update (@tmuxcc_label). Patch the
+    // pane's `label` directly; a later requery re-confirms it from the option.
+    if (event.kind === "internal:set-pane-label") {
+      this.patchModel((model) => {
+        const pane = model.panes.get(event.paneId);
+        if (pane === undefined) return model;
+        if (pane.label === event.label) return model;
+        return updatePane(model, event.paneId, { label: event.label });
       });
       this._fireNotificationHandlers(event);
       return;

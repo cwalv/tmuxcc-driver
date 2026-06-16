@@ -32,6 +32,9 @@ import {
   setOption,
   setOptionForWindow,
   showOptionsForWindow,
+  // tc-1a8z: per-pane user-option builders (durable pane name).
+  setOptionForPane,
+  showOptionsForPane,
   // tc-zna.3: managed-window resize builders.
   setWindowSizeManual,
   resizeWindow,
@@ -631,6 +634,56 @@ describe("showOptionsForWindow", () => {
     assert.equal(
       showOptionsForWindow(0, "monitor-activity"),
       "show-options -wvt @0 monitor-activity",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// setOptionForPane / showOptionsForPane — tc-1a8z (durable pane name)
+// ---------------------------------------------------------------------------
+
+describe("setOptionForPane", () => {
+  it("sets @tmuxcc_label on pane %5", () => {
+    assert.equal(
+      setOptionForPane(5, "@tmuxcc_label", "build"),
+      "set-option -pt %5 @tmuxcc_label build",
+    );
+  });
+
+  it("quotes a name with spaces", () => {
+    assert.equal(
+      setOptionForPane(3, "@tmuxcc_label", "my server"),
+      "set-option -pt %3 @tmuxcc_label 'my server'",
+    );
+  });
+
+  it("escapes embedded single quotes", () => {
+    assert.equal(
+      setOptionForPane(2, "@tmuxcc_label", "it's"),
+      "set-option -pt %2 @tmuxcc_label 'it'\\''s'",
+    );
+  });
+
+  it("empty value serializes as '' (clears the durable name)", () => {
+    assert.equal(
+      setOptionForPane(1, "@tmuxcc_label", ""),
+      "set-option -pt %1 @tmuxcc_label ''",
+    );
+  });
+
+  it("pane %0 edge case", () => {
+    assert.equal(
+      setOptionForPane(0, "@tmuxcc_label", "x"),
+      "set-option -pt %0 @tmuxcc_label x",
+    );
+  });
+});
+
+describe("showOptionsForPane", () => {
+  it("emits show-options -pvt %5 @tmuxcc_label", () => {
+    assert.equal(
+      showOptionsForPane(5, "@tmuxcc_label"),
+      "show-options -pvt %5 @tmuxcc_label",
     );
   });
 });

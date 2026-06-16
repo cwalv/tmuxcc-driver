@@ -92,6 +92,7 @@ function makePane(
     mode: "normal",
     dead,
     exitCode,
+    label: undefined,
     scrollbackHandle: undefined,
   };
 }

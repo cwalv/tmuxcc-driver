@@ -75,6 +75,7 @@ export type { SwitchClientOutcome } from "./switch-client.js";
 export {
   BOOTSTRAP_WINDOWS_FORMAT,
   BOOTSTRAP_PANES_FORMAT,
+  TMUXCC_LABEL_OPTION,
   bootstrapCommands,
   parseWindowsReply,
   parsePanesReply,

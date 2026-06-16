@@ -601,12 +601,13 @@ interface SnapshotMessage extends MessageBase {
 
 #### `SnapshotPane`
 
-| Field      | Type       | Description           |
-|------------|------------|-----------------------|
-| `paneId`   | `PaneId`   | Pane identifier.      |
-| `windowId` | `WindowId` | Parent window.        |
-| `cols`     | `number`   | Width in columns.     |
-| `rows`     | `number`   | Height in rows.       |
+| Field      | Type       | Description                                                          |
+|------------|------------|----------------------------------------------------------------------|
+| `paneId`   | `PaneId`   | Pane identifier.                                                     |
+| `windowId` | `WindowId` | Parent window.                                                      |
+| `cols`     | `number`   | Width in columns.                                                   |
+| `rows`     | `number`   | Height in rows.                                                     |
+| `label?`   | `string`   | Durable, driver-owned pane name (tc-1a8z): the `@tmuxcc_label` user-option. Absent when no durable name is set. See `pane.label-changed`. |
 
 #### `focus`
 
@@ -647,6 +648,20 @@ focused. The session is always the bound session; no `sessionId` field.
 |----------|------------|------------------------------------------------------------------------------------------|
 | `paneId` | `PaneId`   | The pane whose mode changed.                                                             |
 | `mode`   | `PaneMode` | New mode: `"normal"`, `"copy"`, `"view"`, or future opaque string.                       |
+
+#### `pane.label-changed` — `PaneLabelChangedMessage`
+
+The DURABLE, driver-owned pane name changed (tc-1a8z) — the canonical user
+rename channel (the per-pane `@tmuxcc_label` tmux user-option). DISTINCT from
+the volatile shell title (`pane_title`, tc-2mn8): set ONLY via the `rename-pane`
+command (`set-option -pt %N @tmuxcc_label`), never a title escape, so the shell
+cannot clobber it; survives a driver restart (re-read from the option on every
+requery).
+
+| Field     | Type     | Description                                                          |
+|-----------|----------|----------------------------------------------------------------------|
+| `paneId`  | `PaneId` | The pane whose durable name changed.                                 |
+| `label?`  | `string` | The new durable name; absent when the name was cleared (empty rename). |
 
 ### Window deltas (session-proxy→client)
 

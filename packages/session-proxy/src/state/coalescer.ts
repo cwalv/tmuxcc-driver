@@ -175,6 +175,8 @@ export function isTopologyEvent(event: NotificationEvent): boolean {
     case "internal:set-window-sync":
     case "internal:set-window-monitor-activity":
     case "internal:set-window-monitor-silence":
+    // tc-1a8z: durable pane-name optimistic/compensating patch.
+    case "internal:set-pane-label":
       return false;
 
     // Everything else from tmux — every topology-affecting notification —
