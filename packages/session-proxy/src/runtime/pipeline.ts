@@ -91,7 +91,6 @@ import {
   emptyModel,
   updatePane,
   updateWindow,
-  updatePane,
   windowId as mintWindowId,
 } from "../state/model.js";
 import type { PaneBufferStore } from "../state/scrollback.js";
