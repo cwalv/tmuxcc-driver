@@ -144,7 +144,7 @@ function makePane(
     dead: false,
     exitCode: undefined,
     label: undefined,
-    scrollbackHandle: undefined,
+    // scrollbackHandle is optional — omit rather than passing undefined (exactOptionalPropertyTypes)
   };
 }
 

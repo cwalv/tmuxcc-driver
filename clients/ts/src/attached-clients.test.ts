@@ -87,7 +87,7 @@ function buildBaseModel() {
     dead: false,
     exitCode: undefined,
     label: undefined,
-    scrollbackHandle: undefined,
+    // scrollbackHandle is optional — omit rather than passing undefined (exactOptionalPropertyTypes)
   });
   m = setFocus(m, { paneId: P0, windowId: W0, sessionId: S0 });
   return m;

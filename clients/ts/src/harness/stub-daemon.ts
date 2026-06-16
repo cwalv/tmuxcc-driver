@@ -128,7 +128,7 @@ export function makeStubModel(opts: StubModelOptions = {}): SessionModel {
       dead: false,
       exitCode: undefined,
       label: undefined,
-      scrollbackHandle: undefined,
+      // scrollbackHandle is optional — omit rather than passing undefined (exactOptionalPropertyTypes)
     });
   }
 

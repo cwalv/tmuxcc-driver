@@ -72,7 +72,7 @@ export function buildModel(init: TranscriptInitialModel): SessionModel {
       dead: false,
       exitCode: undefined,
       label: undefined,
-      scrollbackHandle: undefined,
+      // scrollbackHandle is optional — omit rather than passing undefined (exactOptionalPropertyTypes)
     });
   }
 
@@ -143,7 +143,7 @@ export function applyVerbCreate(
       dead: false,
       exitCode: undefined,
       label: undefined,
-      scrollbackHandle: undefined,
+      // scrollbackHandle is optional — omit rather than passing undefined (exactOptionalPropertyTypes)
     });
   }
 

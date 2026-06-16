@@ -106,6 +106,14 @@ export interface PaneInfo {
    * (render precedence is the renderer's concern; see tc-asyq.6).
    */
   readonly label?: string;
+  /**
+   * tc-2mn8: the live shell window title sniffed from OSC-0/2 sequences, when
+   * this pane is replayed from the snapshot already carrying one.  Absent ⇒ no
+   * title has been observed yet.  Subsequent changes arrive via
+   * `onPaneTitleChanged`.  Renderers compose the user-visible name from this
+   * (render precedence is the renderer's concern; see tc-asyq.6).
+   */
+  readonly paneTitle?: string;
 }
 
 /**
@@ -274,6 +282,23 @@ export interface RenderHook {
    * surface a per-pane name.
    */
   onPaneLabelChanged(paneId: PaneId, label: string | undefined): void;
+
+  /**
+   * A pane's live shell window title changed (tc-2mn8).
+   *
+   * Called when a `pane.title-changed` delta arrives — the OSC-0/2 title
+   * sniffed from the pane's %output byte stream.  This is a SEPARATE channel
+   * from the durable label (tc-1a8z): it is set by the shell via title escape
+   * sequences and reflects the current shell activity.
+   *
+   * `title` is the new live title (empty string means the shell cleared it), or
+   * `undefined` when the title was cleared back to the unset state.
+   * Renderers compose the user-visible name from this (render precedence —
+   * durable label > live title > paneId — is the renderer's concern; see
+   * tc-asyq.6).  Default-implementable as a no-op for renderers that do not
+   * surface a per-pane name.
+   */
+  onPaneTitleChanged(paneId: PaneId, title: string | undefined): void;
 
   // ── Output bytes ────────────────────────────────────────────────────────
 
@@ -477,6 +502,7 @@ export const NoOpRenderHook: RenderHook = {
   onPaneDeadChanged(_paneId: PaneId, _dead: boolean, _exitCode?: number): void {},
   onPaneModeChanged(_paneId: PaneId, _mode: PaneMode): void {},
   onPaneLabelChanged(_paneId: PaneId, _label: string | undefined): void {},
+  onPaneTitleChanged(_paneId: PaneId, _title: string | undefined): void {},
   onPaneOutput(_paneId: PaneId, _bytes: Uint8Array): void {},
   onWindowAdded(_window: WindowInfo): void {},
   onWindowClosed(_windowId: WindowId): void {},
@@ -505,6 +531,7 @@ export type RenderHookCall =
   | { type: "paneDeadChanged"; paneId: PaneId; dead: boolean; exitCode?: number }
   | { type: "paneModeChanged"; paneId: PaneId; mode: PaneMode }
   | { type: "paneLabelChanged"; paneId: PaneId; label?: string }
+  | { type: "paneTitleChanged"; paneId: PaneId; title?: string }
   | { type: "paneOutput"; paneId: PaneId; bytes: Uint8Array }
   | { type: "windowAdded"; window: WindowInfo }
   | { type: "windowClosed"; windowId: WindowId }
@@ -568,6 +595,14 @@ export class EchoRenderHook implements RenderHook {
       this.calls.push({ type: "paneLabelChanged", paneId, label });
     } else {
       this.calls.push({ type: "paneLabelChanged", paneId });
+    }
+  }
+
+  onPaneTitleChanged(paneId: PaneId, title: string | undefined): void {
+    if (title !== undefined) {
+      this.calls.push({ type: "paneTitleChanged", paneId, title });
+    } else {
+      this.calls.push({ type: "paneTitleChanged", paneId });
     }
   }
 

@@ -118,6 +118,17 @@ export interface ClientPane {
    */
   readonly label: string | undefined;
   /**
+   * tc-2mn8: live shell window title, sniffed from OSC-0/2 sequences in the
+   * pane's %output stream. `undefined` means no OSC title has been observed yet
+   * (pane just opened, or shell has not set a title). Empty string means the
+   * shell explicitly cleared it.
+   *
+   * DISTINCT from the durable label (tc-1a8z). Render precedence (durable label
+   * > live title > paneId) is the consumer's concern (tc-asyq.6). Driven by
+   * SnapshotPane.paneTitle / PaneTitleChangedMessage.
+   */
+  readonly paneTitle: string | undefined;
+  /**
    * tc-ozk.2: causality tag, set from the `pane.opened` delta that introduced
    * this pane. PRESENT when a wire verb caused the creation (carries the
    * verb's `{connectionId, requestId}`); ABSENT for foreign panes and for
@@ -347,6 +358,8 @@ export function applySnapshot(snapshot: SnapshotMessage): {
       exitCode: p.dead ? p.exitCode : undefined,
       // tc-1a8z: durable, driver-owned pane name. Absent ⇒ no name set.
       label: p.label,
+      // tc-2mn8: live shell title from OSC-0/2 sniff. Absent ⇒ not yet observed.
+      paneTitle: p.paneTitle,
       // tc-ozk.2: snapshot panes carry no per-pane origin — they are
       // pre-existing from this client's perspective, not freshly created.
       origin: undefined,
@@ -413,6 +426,9 @@ export function applyDelta(model: ClientModel, msg: SessionProxyMessage): Client
         // tc-1a8z: born already carrying a durable name (e.g. cold attach to a
         // previously-renamed pane). Absent on the wire ⇒ no name set.
         label: msg.label,
+        // tc-2mn8: pane.opened does NOT carry paneTitle (only the snapshot and
+        // pane.title-changed delta do — matching the session-proxy projection).
+        paneTitle: undefined,
         // tc-ozk.2: carry the verb-origin tag through to the diff path so
         // onPaneOpened reports it. Absent on the wire ⇒ foreign creation.
         origin: msg.origin,
@@ -470,6 +486,17 @@ export function applyDelta(model: ClientModel, msg: SessionProxyMessage): Client
       if (pane.label === msg.label) return model; // no observable change
       const panes = new Map(model.panes);
       panes.set(msg.paneId, { ...pane, label: msg.label });
+      return { ...model, panes };
+    }
+
+    // tc-2mn8: the live shell window title changed (OSC-0/2 sniff). `title` is
+    // always a string on the wire (empty string = shell cleared it).
+    case "pane.title-changed": {
+      const pane = model.panes.get(msg.paneId);
+      if (!pane) return model;
+      if (pane.paneTitle === msg.title) return model; // no observable change
+      const panes = new Map(model.panes);
+      panes.set(msg.paneId, { ...pane, paneTitle: msg.title });
       return { ...model, panes };
     }
 
@@ -1112,7 +1139,7 @@ export class Mirror {
 
     // Track previously-seen model to diff against.
     let prevModel: {
-      panes: ReadonlyMap<PaneId, { cols: number; rows: number; dead: boolean; exitCode: number | undefined; label: string | undefined }>;
+      panes: ReadonlyMap<PaneId, { cols: number; rows: number; dead: boolean; exitCode: number | undefined; label: string | undefined; paneTitle: string | undefined }>;
       windows: ReadonlyMap<WindowId, { name: string; layout: WindowLayout }>;
       focus: { paneId: PaneId | null; windowId: WindowId | null };
       exitCodes: ReadonlyMap<PaneId, number>;
@@ -1209,6 +1236,10 @@ export class Mirror {
           if (prevPane.label !== pane.label) {
             hook.onPaneLabelChanged(pid, pane.label);
           }
+          // tc-2mn8: live shell title change on an existing pane.
+          if (prevPane.paneTitle !== pane.paneTitle) {
+            hook.onPaneTitleChanged(pid, pane.paneTitle);
+          }
         }
       }
       for (const [pid] of prev.panes) {
@@ -1230,9 +1261,9 @@ export class Mirror {
       }
 
       // Update prevModel to reflect current state.
-      const newPanes = new Map<PaneId, { cols: number; rows: number; dead: boolean; exitCode: number | undefined; label: string | undefined }>();
+      const newPanes = new Map<PaneId, { cols: number; rows: number; dead: boolean; exitCode: number | undefined; label: string | undefined; paneTitle: string | undefined }>();
       for (const [pid, p] of curr.panes) {
-        newPanes.set(pid, { cols: p.cols, rows: p.rows, dead: p.dead, exitCode: p.exitCode, label: p.label });
+        newPanes.set(pid, { cols: p.cols, rows: p.rows, dead: p.dead, exitCode: p.exitCode, label: p.label, paneTitle: p.paneTitle });
       }
       const newWindows = new Map<WindowId, { name: string; layout: WindowLayout }>();
       for (const [wid, w] of curr.windows) {
@@ -1296,9 +1327,9 @@ export class Mirror {
     hook.onConnected();
 
     // Seed prevModel from initial state.
-    const seedPanes = new Map<PaneId, { cols: number; rows: number; dead: boolean; exitCode: number | undefined; label: string | undefined }>();
+    const seedPanes = new Map<PaneId, { cols: number; rows: number; dead: boolean; exitCode: number | undefined; label: string | undefined; paneTitle: string | undefined }>();
     for (const [pid, p] of initial.panes) {
-      seedPanes.set(pid, { cols: p.cols, rows: p.rows, dead: p.dead, exitCode: p.exitCode, label: p.label });
+      seedPanes.set(pid, { cols: p.cols, rows: p.rows, dead: p.dead, exitCode: p.exitCode, label: p.label, paneTitle: p.paneTitle });
     }
     const seedWindows = new Map<WindowId, { name: string; layout: WindowLayout }>();
     for (const [wid, w] of initial.windows) {
