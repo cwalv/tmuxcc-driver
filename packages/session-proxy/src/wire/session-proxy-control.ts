@@ -849,6 +849,30 @@ export interface ResizeManagedWindowCommand {
 }
 
 /**
+ * tc-pizl.9: Release VS-Code-managed `window-size manual` for a window that
+ * has dropped from a managed strip to a single pane.
+ *
+ * When a bound 2-pane (or N-pane) strip loses a pane and only one pane
+ * survives, the `resize-managed-window` path left tmux's `window-size manual`
+ * set on the window.  With `manual` active the surviving pane is pinned to
+ * the stale doubled/combined geometry — TUIs (e.g. `top`) read the oversized
+ * `TIOCGWINSZ` and render at the wrong size.
+ *
+ * The session-proxy translates this command to:
+ *   `set-window-option -u -t @<wid> window-size`
+ * which resets the window's sizing policy to the global default (`latest` or
+ * `largest`), allowing the surviving pane to resume tracking its tmux client.
+ *
+ * Additive addition — non-breaking per the versioning policy.  Older
+ * session-proxies respond with `protocol.unknown-message`; the managed-strip
+ * case requires a paired session-proxy that handles this command.
+ */
+export interface ReleaseManagedWindowCommand {
+  readonly kind: "release-managed-window";
+  readonly windowId: WindowId;
+}
+
+/**
  * One-shot pane text snapshot (tc-295a.11 / W3.3 / gap A1d).
  *
  * Requests the current scrollback text for a live pane in a single correlated
@@ -1147,6 +1171,8 @@ export type WireCommand =
   | SwapWindowCommand
   // tc-zna.3: VS-Code-authoritative managed-window resize transaction
   | ResizeManagedWindowCommand
+  // tc-pizl.9: release manual window-size on strip→single-pane teardown
+  | ReleaseManagedWindowCommand
   // tc-x6l: read-only diagnostics + metrics
   | SessionProxyInfoCommand
   // tc-295a.11: one-shot pane text snapshot (kills C15 third authority)

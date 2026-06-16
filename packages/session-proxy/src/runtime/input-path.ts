@@ -75,6 +75,7 @@ import {
   parseEffectIds,
   setOptionForWindow,
   setWindowSizeManual,
+  setWindowSizeDefault,
   resizeWindow,
   resizePane as resizePaneCmd,
 } from "../parser/commands.js";
@@ -867,6 +868,21 @@ export function createInputPath(
               lines.push(resizePaneCmd(tmuxPaneNum, pane.cols, pane.rows));
             }
             sendBatch(lines);
+            break;
+          }
+
+          case "release-managed-window": {
+            // tc-pizl.9: Strip→single-pane teardown — release the manual window-size
+            // override left by the managed-strip path so the surviving pane resumes
+            // auto-tracking its tmux client dimensions.
+            //
+            // Translates to: set-window-option -u -t @<wid> window-size
+            //
+            // The `-u` flag unsets the window-local option and falls back to the
+            // global default (typically `latest`), restoring client-driven sizing.
+            // Idempotent — safe to send even when the window was not manual.
+            const tmuxWinNum = toTmuxWindow(command.windowId);
+            sendCommand(setWindowSizeDefault(tmuxWinNum));
             break;
           }
 

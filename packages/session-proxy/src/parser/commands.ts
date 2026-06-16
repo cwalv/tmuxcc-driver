@@ -701,6 +701,20 @@ export function setWindowSizeManual(windowId: number): string {
 }
 
 /**
+ * Serialize `set-window-option -u -t @<windowId> window-size`.
+ *
+ * Resets the window's sizing policy to the global default (typically `latest`
+ * or `largest`), releasing VS-Code-managed `manual` sizing so the surviving
+ * pane resumes tracking its tmux client's dimensions normally.
+ *
+ * Called after a managed strip tears down to a single pane (tc-pizl.9).
+ * Idempotent: unsetting an already-defaulted option is a no-op.
+ */
+export function setWindowSizeDefault(windowId: number): string {
+  return `set-window-option -u -t @${windowId} window-size`;
+}
+
+/**
  * Serialize `resize-window -t @<windowId> -x <cols> -y <rows>`.
  *
  * Sets the window's overall dimensions.  Pairs with `setWindowSizeManual`
