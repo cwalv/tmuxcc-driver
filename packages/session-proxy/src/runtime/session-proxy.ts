@@ -141,6 +141,21 @@ export interface SessionProxyOptions {
    * not exercise the supervisor path.
    */
   onFatalError?: (err: unknown) => void;
+
+  /**
+   * Called once per topology-classified notification, BEFORE the coalescer's
+   * policy runs.  Forwarded verbatim to `RuntimePipelineOptions.onTopologyNotify`.
+   *
+   * Production use: the server-proxy supervisor wires per-kind counters + the
+   * storm alarm here.  Tests wire a THROWING hook here to exercise the
+   * tc-2x3.4 error boundary: since this hook runs INSIDE `_dispatchEvent`,
+   * which runs INSIDE the `host.onData` try/catch, a throw propagates into the
+   * boundary rather than out of the event-loop callback.
+   *
+   * This is also the canonical fault-injection seam for tc-2x3.4's acceptance
+   * test (EB1): inject via this hook, assert the boundary fires.
+   */
+  onTopologyNotify?: (kind: string) => void;
 }
 
 /**
@@ -430,9 +445,21 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
     // classified notifications (output/pause/continue and the optimistic
     // internal:* events never count); the storm alarm and counters only
     // care about topology rate, so this is the right scope.
+    //
+    // tc-2x3.4: also forward opts.onTopologyNotify so callers (tests, the
+    // supervisor) can observe topology events from outside — and, critically,
+    // so tests can inject a throwing hook to exercise the error boundary.
+    // A throw from opts.onTopologyNotify propagates up through _dispatchEvent
+    // into the host.onData try/catch, triggering the boundary exactly as a
+    // real parser/reducer exception would.
     onTopologyNotify: (kind) => {
       metricsRegistry.incTopologyEvent(kind);
       stormAlarm.record(kind);
+      // Forward to the caller's hook AFTER the internal instrumentation.  If
+      // the caller's hook throws, the boundary catches it via the wrapping
+      // try/catch in host.onData — this is intentional (the throw is the
+      // fault-injection path).
+      opts.onTopologyNotify?.(kind);
     },
     onSwitchClientDetected: (outcome: SwitchClientOutcome) => {
       if (outcome === "reattach") {
