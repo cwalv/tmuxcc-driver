@@ -24,9 +24,10 @@
  * # Why a seam?
  *
  * The Transport interface is implemented independently for each concrete
- * transport (Unix socket, WebSocket, in-process pair for tests).  Wire-level
- * code (sessionProxy, client, codec) depends only on this interface so that the
- * concrete transport can be swapped without changing any wire logic.
+ * transport (the broker's production socket transport, and an in-process pair
+ * for tests).  Wire-level code (sessionProxy, client, codec) depends only on
+ * this interface so that the concrete transport can be swapped without changing
+ * any wire logic.
  *
  * # Imports
  *   - ControlMessage  — from tc-auj (control schema bead)
@@ -63,13 +64,16 @@ export type CloseHandler = (err?: Error) => void;
 /**
  * A bidirectional two-plane communication channel between session-proxy and client.
  *
- * Implementations include:
- *   - In-process paired transport (this file) — for unit tests.
- *   - Unix-socket transport — for the production sessionProxy (future bead).
- *   - WebSocket transport   — for browser/remote clients (future bead).
+ * Implementations:
+ *   - In-process paired transport (this file) — internal only, for unit tests.
+ *   - The production transport is the broker's socket transport (server-proxy /
+ *     broker layer), which implements this same interface.
  *
- * No concrete-transport details (socket fds, WebSocket opcodes, pipe handles)
- * may appear in this interface or in the wire types that use it.
+ * There is no WebSocket transport — that is speculative until a real
+ * browser/remote consumer exists; file a fresh bead if one materializes.
+ *
+ * No concrete-transport details (socket fds, pipe handles) may appear in this
+ * interface or in the wire types that use it.
  *
  * ## Method conventions
  *
