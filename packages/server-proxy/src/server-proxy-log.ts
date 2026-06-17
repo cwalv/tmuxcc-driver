@@ -86,10 +86,49 @@ export function openServerProxyLog(logPath: string): ServerProxyLog | null {
  * every write — launchers that capture stderr pre-READY keep working).
  *
  * Returns an uninstall function that restores the original `write`.
+ *
+ * # EPIPE resilience (tc-9xf1)
+ *
+ * The launcher (server-proxy-launcher.ts `spawnServerProxy`, tc-7xv.33) DESTROYS
+ * the broker's stdout/stderr pipes once it has read "READY\n", so the broker can
+ * outlive the extension host without EPIPE-ing on the next write.  The log file
+ * is the intended durable sink from that point on (see this module's header).
+ *
+ * After tc-2x3.3 collapsed the per-session session-proxy INTO the server-proxy
+ * process, the session-proxy's own routine diagnostics (e.g. the flow-control
+ * `[flow-control] DRAIN CLAMPED` warning, boundary-trip / crash notices) now run
+ * in THIS process and fire post-READY — i.e. AFTER the original stderr fd was
+ * destroyed.  Forwarding those writes to the detached fd raises EPIPE (or EBADF):
+ *   - SYNCHRONOUSLY (origWrite throws), and/or
+ *   - ASYNCHRONOUSLY (an 'error' event on process.stderr from the deferred
+ *     write-queue flush — `afterWriteDispatched`).
+ * With no handler, the async EPIPE becomes an uncaughtException that takes the
+ * collapsed broker — and every session it serves — down.  That is the tc-9xf1
+ * regression: the spawned broker self-destructed the moment tmux output flowed.
+ *
+ * Fix: the forward to the (possibly detached) original stderr must FAIL-SOFT —
+ * the log file already captured the line, so a dead pipe must never crash the
+ * broker.  We (1) swallow synchronous write errors and (2) install a benign,
+ * idempotent `process.stderr.on('error')` handler that drops EPIPE/EBADF (the
+ * expected detached-pipe codes) while re-throwing anything unexpected.
  */
 export function installStderrMirror(log: ServerProxyLog): () => void {
   const original = process.stderr.write;
   const origWrite = original.bind(process.stderr);
+
+  // (2) Swallow the ASYNC EPIPE/EBADF that the detached-pipe write-queue flush
+  // delivers as an 'error' event.  Idempotent: only install once per process so
+  // repeated installs (e.g. test churn) do not stack listeners.
+  if (!STDERR_DETACHED_GUARD_INSTALLED) {
+    STDERR_DETACHED_GUARD_INSTALLED = true;
+    process.stderr.on("error", (err: NodeJS.ErrnoException) => {
+      // The pipe is detached post-READY (tc-7xv.33); EPIPE/EBADF are expected
+      // and benign — the log file is the durable sink.  Anything else is a real
+      // stderr fault and must not be hidden.
+      if (err.code === "EPIPE" || err.code === "EBADF") return;
+      throw err;
+    });
+  }
 
   const teeWrite: typeof process.stderr.write = (
     chunk: Uint8Array | string,
@@ -97,14 +136,21 @@ export function installStderrMirror(log: ServerProxyLog): () => void {
     cb?: (err?: Error | null) => void,
   ): boolean => {
     log.append(chunk);
-    // Forward with the exact argument shape we received.
-    if (typeof encodingOrCb === "function") {
-      return origWrite(chunk, encodingOrCb);
+    // (1) Forward to the original stderr, fail-soft: once the launcher has
+    // detached the pipe the forward is best-effort (the log already has it).
+    try {
+      if (typeof encodingOrCb === "function") {
+        return origWrite(chunk, encodingOrCb);
+      }
+      if (encodingOrCb !== undefined) {
+        return origWrite(chunk, encodingOrCb, cb);
+      }
+      return origWrite(chunk, cb);
+    } catch {
+      // Detached pipe (EPIPE/EBADF) or any synchronous write fault: the log
+      // file already captured the line; never crash the broker over stderr.
+      return true;
     }
-    if (encodingOrCb !== undefined) {
-      return origWrite(chunk, encodingOrCb, cb);
-    }
-    return origWrite(chunk, cb);
   };
 
   process.stderr.write = teeWrite;
@@ -112,3 +158,11 @@ export function installStderrMirror(log: ServerProxyLog): () => void {
     process.stderr.write = original;
   };
 }
+
+/**
+ * Guard so the process-level `process.stderr.on('error')` listener (tc-9xf1) is
+ * installed at most once, regardless of how many times `installStderrMirror`
+ * runs in a process (test churn, re-init).  Avoids stacking listeners / the
+ * MaxListenersExceededWarning.
+ */
+let STDERR_DETACHED_GUARD_INSTALLED = false;

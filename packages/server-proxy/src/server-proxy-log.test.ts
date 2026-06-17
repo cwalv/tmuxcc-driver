@@ -7,6 +7,9 @@
  * L3. openServerProxyLog returns null when the path is unwritable.
  * L4. installStderrMirror tees stderr writes into the log and the uninstall
  *     function restores the original write.
+ * L5. installStderrMirror is EPIPE-resilient: once the launcher detaches the
+ *     stderr pipe post-READY (tc-7xv.33), forwarding to the dead fd must NOT
+ *     crash the broker — the log file is the durable sink (tc-9xf1 regression).
  *
  * @module server-proxy-log.test
  */
@@ -96,5 +99,48 @@ describe("server-proxy-log (tc-k6v)", () => {
     const line = content.split("\n").find((l) => l.includes("mirrored diagnostics line"));
     assert.ok(line, `log must contain the mirrored line, got: ${content}`);
     assert.match(line!, TS_PREFIX);
+  });
+
+  it("L5: tee survives a synchronously-throwing (detached) stderr — logs anyway, never throws (tc-9xf1)", () => {
+    // Regression for tc-9xf1: after the launcher destroys the broker's stderr
+    // pipe post-READY (tc-7xv.33), forwarding a write to the dead fd raises
+    // EPIPE.  Before the fix that EPIPE became an uncaughtException and, post the
+    // tc-2x3.3 collapse (session-proxy diagnostics now run IN this process), it
+    // crashed the whole broker the moment flow-control logged DRAIN CLAMPED —
+    // tearing down every per-session connection.  The forward must fail-soft.
+    const logPath = tempLogPath("l5");
+    const log = openServerProxyLog(logPath);
+    assert.ok(log);
+
+    const origWrite = process.stderr.write;
+    // Simulate a detached pipe: the underlying write throws EPIPE synchronously.
+    const epipe = Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+    let forwardAttempts = 0;
+    process.stderr.write = (() => {
+      forwardAttempts++;
+      throw epipe;
+    }) as typeof process.stderr.write;
+
+    let uninstall: (() => void) | undefined;
+    try {
+      uninstall = installStderrMirror(log);
+      // The tee forwards to our throwing stub — it MUST NOT propagate the EPIPE.
+      assert.doesNotThrow(
+        () => process.stderr.write("post-detach diagnostics\n"),
+        "tee must swallow the detached-pipe EPIPE",
+      );
+      assert.ok(forwardAttempts > 0, "tee must still attempt the forward");
+    } finally {
+      uninstall?.();
+      process.stderr.write = origWrite;
+      log.close();
+    }
+
+    // The line still reached the durable log sink despite the dead pipe.
+    const content = fs.readFileSync(logPath, "utf8");
+    assert.ok(
+      content.includes("post-detach diagnostics"),
+      `log must capture the line even when the stderr forward EPIPEs, got: ${content}`,
+    );
   });
 });
