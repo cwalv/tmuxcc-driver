@@ -458,10 +458,20 @@ describe("TmuxHost — real tmux 3.4", { skip: !tmuxAvailable ? "tmux not found 
     await host.start();
     await new Promise<void>((r) => setTimeout(r, 300));
 
+    const t0 = Date.now();
     await host.stop();
+    const elapsed = Date.now() - t0;
 
     assert.equal(host.exited, true, "exited must be true after stop()");
     assert.equal(exitFired, true, "onExit handler must fire");
+    // Regression guard: a clean detach-client completes in tens of ms.
+    // If stop() takes >= 1000ms it hit the SIGKILL fallback (3s), not the
+    // graceful detach path.  1000ms gives ample margin for slow CI while
+    // still catching the regression.
+    assert.ok(
+      elapsed < 1000,
+      `stop() must detach cleanly (< 1000ms), not fall through to SIGKILL; elapsed=${elapsed}ms`,
+    );
   });
 
   it("kill() terminates with SIGKILL and onExit fires", async () => {

@@ -178,8 +178,9 @@ export interface TmuxHost {
   onStderr(handler: DataHandler): () => void;
 
   /**
-   * Graceful stop: close stdin (sends EOF to tmux, triggering %exit),
-   * then wait for the process to exit.
+   * Graceful stop: sends `detach-client` as a -CC control command, which
+   * causes tmux to emit `%exit` and exit cleanly with code 0.
+   * Falls back to SIGKILL after 3 seconds if tmux does not respond.
    * Idempotent — safe to call multiple times.
    */
   stop(): Promise<void>;
@@ -465,21 +466,37 @@ class TmuxHostImpl implements TmuxHost {
         return;
       }
 
-      // Listen for exit
-      const cleanup = () => resolve();
-      this._exitHandlers.add(cleanup);
+      // Register exit listener before sending the command so we never miss the
+      // exit event if tmux responds faster than the JS event loop tick.
+      const onExited = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      this._exitHandlers.add(onExited);
 
-      // Send Ctrl-D (EOF) to the PTY master — tmux receives it on its stdin
-      // and exits cleanly (%exit). This mirrors the python bridge's stdin.end().
+      // Send `detach-client` as a proper -CC control command.  In control mode,
+      // tmux reads lines from the PTY as commands; `detach-client` tells the
+      // -CC client to detach gracefully, which produces `%exit` followed by a
+      // clean exit(0).
+      //
+      // Why NOT Ctrl-D (\x04): tmux opens the PTY in RAW mode (no ICRNL, no
+      // ISIG, no special-char processing), so \x04 is a literal data byte, not
+      // an EOF signal.  The PTY master can never half-close either (POSIX does
+      // not support half-close on PTY master fds), so there is no "stdin.end()"
+      // equivalent here.  Writing \x04 causes tmux to ignore it silently, the
+      // graceful path never completes, and EVERY stop() falls through the 3s
+      // SIGKILL fallback below.
       try {
-        this._pty?.write("\x04");
+        this._pty?.write("detach-client\n");
       } catch {
-        // already closed
+        // already closed — fall through to SIGKILL
       }
 
-      // Give it 3 seconds to exit gracefully, then SIGKILL
+      // 3 s SIGKILL is a genuine last-resort fallback (e.g. tmux is hung or
+      // crashed before it can process the command).  The happy path exits in
+      // tens of milliseconds and clears the timer via onExited above.
       const timer = setTimeout(() => {
-        this._exitHandlers.delete(cleanup);
+        this._exitHandlers.delete(onExited);
         this.kill("SIGKILL");
         // Wait for the kill to land
         const killWait = () => resolve();
@@ -489,14 +506,6 @@ class TmuxHostImpl implements TmuxHost {
           resolve();
         }, 1000);
       }, 3000);
-
-      // If it exits before the timer, cancel the timer
-      const origCleanup = cleanup;
-      this._exitHandlers.delete(cleanup);
-      this._exitHandlers.add(() => {
-        clearTimeout(timer);
-        origCleanup();
-      });
     });
 
     return this._stopPromise;

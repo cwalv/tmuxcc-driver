@@ -20,11 +20,11 @@
  *
  * Usage: node fake-tmux.js [--exit-code <n>]
  *
- * NOTE: This script is intentionally NOT wrapped with the pty bridge — it is
+ * NOTE: This script is intentionally NOT spawned via node-pty — it is
  * spawned directly via child_process.spawn with piped stdio so TmuxHost's pipe
- * plumbing is exercised hermetically. The PTY bridge is only needed for real
- * tmux. Pass the '--fake' flag to TmuxHostOptions... actually, the test spawns
- * fake-tmux directly as the 'pythonPath+bridgeArgs' (see test file).
+ * plumbing is exercised hermetically. The node-pty PTY bridge is only needed
+ * for real tmux (which requires tcgetattr on its stdio). The test spawns
+ * fake-tmux directly via spawnFake() (see test file).
  */
 import { createInterface } from "node:readline";
 

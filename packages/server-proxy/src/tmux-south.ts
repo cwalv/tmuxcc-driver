@@ -35,9 +35,9 @@
  * stdin on a plain pipe (or /dev/null) it exits immediately with "tcgetattr
  * failed: Inappropriate ioctl for device".  A direct `child_process.spawn`
  * watcher therefore dies instantly and silently degrades into a poller.
- * The watcher reuses the session-proxy's `createTmuxHost` (python PTY bridge) so the
- * `-CC` connection is genuinely live — required for EOF to be a meaningful
- * tmux-death signal.  It attaches with client flags `no-output,ignore-size`:
+ * The watcher reuses the session-proxy's `createTmuxHost` (node-pty bridge) so the
+ * `-CC` connection is genuinely live — required for process exit to be a
+ * meaningful tmux-death signal.  It attaches with client flags `no-output,ignore-size`:
  * the thin watcher must not receive pane output (§6.2 "do NOT process pane
  * events") and must not influence session sizing for real clients.
  *
