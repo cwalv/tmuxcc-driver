@@ -771,6 +771,76 @@ describe("server-proxy – integration (requires tmux)", { skip: !TMUX_AVAILABLE
     mux.transport.close();
   });
 
+  it("I12 (tc-i9aq.2): session.topology returns windows and panes for a known session", async () => {
+    const { mux } = await connectToServerProxy(serverProxy.endpoint());
+    const seq = { value: 1 };
+
+    // Claim a session so it exists in the registry and tmux has created it.
+    const claimResp = await sendServerProxyCommand(mux, { kind: "session.claim", name: "topology-target" }, seq);
+    assert.ok(claimResp.result.ok, `Claim failed: ${JSON.stringify(claimResp.result)}`);
+    const sessionId = (claimResp.result as {
+      ok: true;
+      payload: { sessionId: string };
+    }).payload.sessionId;
+
+    // Query topology — does NOT claim or spawn anything new.
+    const topResp = await sendServerProxyCommand(mux, { kind: "session.topology", sessionId }, seq);
+    assert.ok(topResp.result.ok, `session.topology failed: ${JSON.stringify(topResp.result)}`);
+    const topology = (topResp.result as {
+      ok: true;
+      payload: { topology: { windows: unknown[]; panes: unknown[] } };
+    }).payload.topology;
+
+    // A freshly-claimed session has at least one default window and pane.
+    assert.ok(Array.isArray(topology.windows), "topology.windows must be an array");
+    assert.ok(topology.windows.length >= 1, "topology must have at least one window");
+    const win = topology.windows[0] as { windowId: string; name: string; active: boolean };
+    assert.ok(win.windowId, "window must have windowId");
+    assert.ok(typeof win.name === "string", "window must have name");
+    assert.ok(typeof win.active === "boolean", "window must have active boolean");
+
+    assert.ok(Array.isArray(topology.panes), "topology.panes must be an array");
+    assert.ok(topology.panes.length >= 1, "topology must have at least one pane");
+    const pane = topology.panes[0] as {
+      paneId: string;
+      windowId: string;
+      bound: boolean;
+      detach: string | undefined;
+      icon: string | undefined;
+    };
+    assert.ok(pane.paneId, "pane must have paneId");
+    assert.ok(pane.windowId, "pane must have windowId");
+    assert.ok(typeof pane.bound === "boolean", "pane.bound must be boolean");
+    // bound defaults false (no @tmuxcc-bound set on a fresh session).
+    assert.equal(pane.bound, false, "fresh pane must have bound=false");
+    // detach and icon are undefined when not set.
+    assert.equal(pane.detach, undefined, "fresh pane must have detach=undefined");
+    assert.equal(pane.icon, undefined, "fresh pane must have icon=undefined");
+
+    mux.transport.close();
+  });
+
+  it("I13 (tc-i9aq.2): session.topology returns empty topology for unknown sessionId", async () => {
+    const { mux } = await connectToServerProxy(serverProxy.endpoint());
+    const seq = { value: 1 };
+
+    const resp = await sendServerProxyCommand(
+      mux,
+      { kind: "session.topology", sessionId: "s999-nonexistent" },
+      seq,
+    );
+    // Returns ok:true with empty topology (graceful fallback — no session.not-found).
+    assert.ok(resp.result.ok, `session.topology should succeed even for unknown session`);
+    const topology = (resp.result as {
+      ok: true;
+      payload: { topology: { windows: unknown[]; panes: unknown[] } };
+    }).payload.topology;
+    assert.deepEqual(topology.windows, [], "empty topology.windows for unknown session");
+    assert.deepEqual(topology.panes, [], "empty topology.panes for unknown session");
+
+    mux.transport.close();
+  });
+
   it("I7: connect to session-proxy endpoint and run snapshot round-trip", async () => {
     const { mux } = await connectToServerProxy(serverProxy.endpoint());
     const seq = { value: 1 };

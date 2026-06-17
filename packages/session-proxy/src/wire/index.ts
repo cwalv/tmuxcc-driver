@@ -61,6 +61,11 @@ export type {
   ServerProxyInfoCommand,
   ServerProxyInfoSession,
   ServerProxyInfoPayload,
+  // tc-i9aq.2: one-shot session topology query
+  SessionTopologyCommand,
+  SessionTopologyWindow,
+  SessionTopologyPane,
+  SessionTopologyPayload,
   ServerProxyCommandRequestMessage,
   ServerProxyCommandOkPayload,
   ServerProxyCommandResponseMessage,

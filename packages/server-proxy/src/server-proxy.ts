@@ -66,6 +66,7 @@ import type {
   ServerProxyCommandResponseMessage,
   ServerProxyInfoPayload,
   ServerProxyInfoSession,
+  SessionTopologyPayload,
   ErrorMessage,
   MessageBase,
   PaneId,
@@ -76,7 +77,7 @@ import { createSocketServer, createSocketTransport } from "./socket-transport.js
 import { serverProxySocketPath, sessionProxySocketPath, removeSocket, restrictSocket } from "./runtime-dir.js";
 import { createServerProxyMetrics } from "./metrics.js";
 import type { ServerProxyMetrics } from "./metrics.js";
-import { listSessions, createSession, killSession, createTmuxWatcher, probeTmuxAlive, setWindowSynchronizePanes, setWindowMonitorActivity, setWindowMonitorSilence, setSessionMarker, getTmuxServerPid, countTmuxccClientsBySession } from "./tmux-south.js";
+import { listSessions, createSession, killSession, createTmuxWatcher, probeTmuxAlive, setWindowSynchronizePanes, setWindowMonitorActivity, setWindowMonitorSilence, setSessionMarker, getTmuxServerPid, countTmuxccClientsBySession, listSessionTopology } from "./tmux-south.js";
 import type { TmuxWatcher, TmuxAvailabilityOut } from "./tmux-south.js";
 import { createSessionProxySupervisor } from "./session-proxy-supervisor.js";
 import type { SessionProxySupervisor, SessionProxyExitInfo } from "./session-proxy-supervisor.js";
@@ -1094,7 +1095,7 @@ class ServerProxyImpl implements ServerProxyHandle {
     this._metrics.incCommand(command.kind);
 
     try {
-      let payload: { sessionId?: SessionId; endpoint?: string; paneId?: PaneId; created?: boolean; ok?: true; info?: ServerProxyInfoPayload; name?: string };
+      let payload: { sessionId?: SessionId; endpoint?: string; paneId?: PaneId; created?: boolean; ok?: true; info?: ServerProxyInfoPayload; topology?: SessionTopologyPayload; name?: string };
 
       switch (command.kind) {
         case "session.claim":
@@ -1119,6 +1120,11 @@ class ServerProxyImpl implements ServerProxyHandle {
           // the named session and echoes the paneId back so the client has a
           // round-tripped acknowledgement of its targeted attach.
           payload = await this._attachPane(command.sessionId, command.paneId);
+          break;
+        case "session.topology":
+          // tc-i9aq.2: one-shot topology query for a discovered-but-unclaimed
+          // session.  Read-only — no claim, no session-proxy spawn.
+          payload = { topology: this._querySessionTopology(command.sessionId) };
           break;
         default: {
           const _exhaustive: never = command;
@@ -1164,6 +1170,48 @@ class ServerProxyImpl implements ServerProxyHandle {
     } catch {
       // Transport may have closed
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // tc-i9aq.2: one-shot topology query
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Resolve a `session.topology` command.
+   *
+   * Looks up the session name from the registry by `sessionId`, then runs a
+   * one-shot `list-windows` + `list-panes` via `listSessionTopology`.  Returns
+   * an empty topology `{ windows: [], panes: [] }` when the session is not
+   * found in the registry or the tmux calls fail — the caller renders the
+   * session as a leaf in that case (same as pre-tc-i9aq.2).
+   *
+   * Read-only: no claim, no session-proxy spawn, no mutation.
+   */
+  private _querySessionTopology(sessionId: SessionId): SessionTopologyPayload {
+    const entry = this._sessions.get(sessionId);
+    if (entry === undefined) {
+      // Session not in registry; caller falls back to leaf rendering.
+      return { windows: [], panes: [] };
+    }
+    const result = listSessionTopology(this._opts.socketName, entry.name);
+    if (result === null) {
+      // tmux call failed; fall back to leaf rendering.
+      return { windows: [], panes: [] };
+    }
+    return {
+      windows: result.windows.map((w) => ({
+        windowId: w.windowId,
+        name: w.name,
+        active: w.active,
+      })),
+      panes: result.panes.map((p) => ({
+        paneId: p.paneId,
+        windowId: p.windowId,
+        bound: p.bound,
+        detach: p.detach,
+        icon: p.icon,
+      })),
+    };
   }
 
   // ---------------------------------------------------------------------------

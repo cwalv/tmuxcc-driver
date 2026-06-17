@@ -304,6 +304,129 @@ export function countTmuxccClientsBySession(socketName: string): Map<string, num
   return counts;
 }
 
+// ---------------------------------------------------------------------------
+// Session topology query (tc-i9aq.2 — S1 lazy list for discovered sessions)
+// ---------------------------------------------------------------------------
+
+/**
+ * A single window row from `tmux list-windows`.
+ */
+export interface TmuxWindowRow {
+  /** tmux window id, e.g. "@1" */
+  windowId: string;
+  /** Window name */
+  name: string;
+  /** True when this is the active window in its session */
+  active: boolean;
+}
+
+/**
+ * A single pane row from `tmux list-panes` with `@tmuxcc-*` user-options.
+ */
+export interface TmuxPaneRow {
+  /** tmux pane id, e.g. "%1" */
+  paneId: string;
+  /** tmux window id this pane belongs to, e.g. "@1" */
+  windowId: string;
+  /**
+   * Durable binding intent (`@tmuxcc-bound`).  True when the pane has the
+   * option set to "1"; false otherwise.
+   */
+  bound: boolean;
+  /**
+   * RESOLVED detach-on-close policy (`@tmuxcc-detach`, format-walked so the
+   * first-wins pane→window→session value is returned directly).
+   * `undefined` when no scope has set the option.
+   */
+  detach: "detach" | "kill" | undefined;
+  /**
+   * Durable icon policy (`@tmuxcc-icon`).
+   * `undefined` when no option is set.
+   */
+  icon: string | undefined;
+}
+
+/**
+ * Full topology result for a single session: windows + panes with
+ * `@tmuxcc-*` fields.  Returned by {@link listSessionTopology}.
+ */
+export interface SessionTopologyResult {
+  readonly windows: TmuxWindowRow[];
+  readonly panes: TmuxPaneRow[];
+}
+
+/**
+ * Run `tmux list-windows` + `tmux list-panes` for a named session and return
+ * the full window/pane topology with `@tmuxcc-*` user-option fields.
+ *
+ * tc-i9aq.2 (A1 mechanism): called by the server-proxy's `session.topology`
+ * command handler for discovered-but-unclaimed sessions.  The query is
+ * read-only — no claim, no session-proxy spawn, no side effects.
+ *
+ * The `@tmuxcc-detach` pane format variable format-walks pane→window→session
+ * and yields the effective first-wins close policy directly (tc-i9aq.1 /
+ * cold-start.md §4 — same verified tmux 3.4 behaviour as the session-proxy's
+ * BOOTSTRAP_PANES_FORMAT).
+ *
+ * Returns `null` if the session cannot be found or the commands fail.
+ */
+export function listSessionTopology(
+  socketName: string,
+  sessionName: string,
+): SessionTopologyResult | null {
+  // list-windows: window_id, window_name, window_active
+  const WIN_FORMAT = "#{window_id}\t#{window_name}\t#{window_active}";
+  const winResult = spawnSync(
+    "tmux",
+    ["-L", socketName, "list-windows", "-t", sessionName, "-F", WIN_FORMAT],
+    { encoding: "utf8", timeout: 5_000 },
+  );
+  if (winResult.status !== 0 || winResult.error) return null;
+
+  const windows: TmuxWindowRow[] = [];
+  for (const line of (winResult.stdout ?? "").trim().split("\n")) {
+    if (!line) continue;
+    const [windowId, name, active] = line.split("\t");
+    if (!windowId || !name) continue;
+    windows.push({
+      windowId,
+      name,
+      active: (active ?? "").trim() === "1",
+    });
+  }
+
+  // list-panes: pane_id, window_id, @tmuxcc-bound, @tmuxcc-detach (resolved),
+  // @tmuxcc-icon.  The -a flag lists all panes across all windows; -t filters
+  // to the target session.
+  const PANE_FORMAT =
+    "#{pane_id}\t#{window_id}\t#{@tmuxcc-bound}\t#{@tmuxcc-detach}\t#{@tmuxcc-icon}";
+  const paneResult = spawnSync(
+    "tmux",
+    ["-L", socketName, "list-panes", "-t", sessionName, "-a", "-F", PANE_FORMAT],
+    { encoding: "utf8", timeout: 5_000 },
+  );
+  if (paneResult.status !== 0 || paneResult.error) return null;
+
+  const panes: TmuxPaneRow[] = [];
+  for (const line of (paneResult.stdout ?? "").trim().split("\n")) {
+    if (!line) continue;
+    const [paneId, windowId, boundRaw, detachRaw, iconRaw] = line.split("\t");
+    if (!paneId || !windowId) continue;
+    const detachTrimmed = (detachRaw ?? "").trim();
+    panes.push({
+      paneId,
+      windowId,
+      bound: (boundRaw ?? "").trim() === "1",
+      detach: detachTrimmed === "detach" || detachTrimmed === "kill"
+        ? (detachTrimmed as "detach" | "kill")
+        : undefined,
+      icon: (iconRaw ?? "").trim() || undefined,
+    });
+  }
+
+  return { windows, panes };
+}
+
 /**
  * Run `tmux -L <socketName> new-session -d -s <name> -P -F '#{session_id}'`
  * to create a detached session and authoritatively return its newly-minted

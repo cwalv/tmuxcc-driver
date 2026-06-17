@@ -407,6 +407,83 @@ export interface ServerProxyInfoCommand {
 }
 
 /**
+ * One window row in a `session.topology` response (tc-i9aq.2).
+ *
+ * Wire-contract note: carries only session-level window METADATA — no pane
+ * content, no south-side vocabulary — so the server-proxy-wire invariant is
+ * preserved.
+ */
+export interface SessionTopologyWindow {
+  /** tmux window id string, e.g. "@1". */
+  readonly windowId: string;
+  /** tmux window display name. */
+  readonly name: string;
+  /** True when this window is the active window in its session. */
+  readonly active: boolean;
+}
+
+/**
+ * One pane row in a `session.topology` response (tc-i9aq.2).
+ *
+ * `@tmuxcc-*` user-option fields are included so the extension can render
+ * unbound nodes with their durable intent/policy without a separate query.
+ * The `detach` field carries the RESOLVED (first-wins pane→window→session)
+ * value from tmux's own format-walk, matching the session-proxy requery.
+ */
+export interface SessionTopologyPane {
+  /** tmux pane id string, e.g. "%1". */
+  readonly paneId: string;
+  /** tmux window id this pane belongs to, e.g. "@1". */
+  readonly windowId: string;
+  /**
+   * Durable binding intent (`@tmuxcc-bound`): true when the pane carries the
+   * option set to "1" (tc-i9aq.1 / cold-start.md §4.A).
+   */
+  readonly bound: boolean;
+  /**
+   * RESOLVED detach-on-close policy (`@tmuxcc-detach`): the effective
+   * first-wins pane→window→session value.  `undefined` ⇒ no scope set it.
+   */
+  readonly detach: "detach" | "kill" | undefined;
+  /**
+   * Durable icon policy (`@tmuxcc-icon`).  `undefined` ⇒ no policy.
+   */
+  readonly icon: string | undefined;
+}
+
+/**
+ * Payload of a successful `session.topology` response (tc-i9aq.2).
+ */
+export interface SessionTopologyPayload {
+  /** All windows in the named session at query time. */
+  readonly windows: readonly SessionTopologyWindow[];
+  /** All panes across all windows in the named session at query time. */
+  readonly panes: readonly SessionTopologyPane[];
+}
+
+/**
+ * One-shot topology query for a discovered-but-unclaimed session (tc-i9aq.2).
+ *
+ * Runs `tmux list-windows` + `tmux list-panes` for the named session without
+ * claiming it or spawning a session-proxy.  The response carries the full
+ * window/pane topology including `@tmuxcc-*` fields so the extension can
+ * render unbound nodes with their durable intent.
+ *
+ * Wire-contract note: read-only; nothing is mutated.  The server-proxy-wire
+ * invariant (no pane CONTENT or south-side vocabulary) is preserved — only
+ * pane identity and durable metadata are carried.
+ *
+ * Additive addition — non-breaking per the versioning policy.  Older
+ * server-proxies respond with `protocol.unknown-message`; the extension
+ * falls back to the empty-leaf rendering (pre-tc-i9aq.2 behaviour).
+ */
+export interface SessionTopologyCommand {
+  readonly kind: "session.topology";
+  /** Session to query, identified by the server-proxy-minted SessionId. */
+  readonly sessionId: SessionId;
+}
+
+/**
  * One session row in a `server-proxy.info` response (tc-k6v).
  */
 export interface ServerProxyInfoSession {
@@ -497,7 +574,8 @@ export type ServerProxyCommand =
   | SessionCreateUniqueCommand
   | SessionDestroyCommand
   | PaneAttachCommand
-  | ServerProxyInfoCommand;
+  | ServerProxyInfoCommand
+  | SessionTopologyCommand;
 
 /**
  * Client issues a server-proxy-level command.
@@ -566,6 +644,11 @@ export interface ServerProxyCommandOkPayload {
    * Absent on all other command kinds.
    */
   readonly info?: ServerProxyInfoPayload;
+  /**
+   * Session topology for a `session.topology` response (tc-i9aq.2).
+   * Absent on all other command kinds.
+   */
+  readonly topology?: SessionTopologyPayload;
 }
 
 /**
