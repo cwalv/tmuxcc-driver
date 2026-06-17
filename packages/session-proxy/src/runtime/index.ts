@@ -46,7 +46,6 @@ export type { FlowController, FlowControllerOptions } from "./flow-control.js";
 export { createSessionProxy } from "./session-proxy.js";
 export type { SessionProxy, SessionProxyOptions, SessionProxyHostView } from "./session-proxy.js";
 
-// tc-2c5: die-with-parent watchdog — entry points install this at startup so a
-// SIGKILLed server-proxy never leaves orphan session-proxies (ext-a §6.3)
-export { installDieWithParent } from "./die-with-parent.js";
-export type { DieWithParentOptions } from "./die-with-parent.js";
+// tc-2x3.3: die-with-parent (tc-2c5) is gone — the session-proxy now runs
+// IN-PROCESS inside the server-proxy event loop (no child process to be
+// reparented), so there is nothing to enforce die-with-parent against.

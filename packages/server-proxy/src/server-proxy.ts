@@ -16,7 +16,8 @@
  *   1. A unix socket server at `endpoint()` for incoming server-proxy-wire connections
  *   2. A thin tmux -CC watcher (south side) for %sessions-changed notifications
  *   3. A session table mapping session names → { sessionId, tmuxId, ... }
- *   4. A session-proxy supervisor that spawns/reaps per-session session-proxy child processes
+ *   4. A session-proxy supervisor that instantiates/reaps per-session
+ *      session-proxies IN-PROCESS, one per claimed session (tc-2x3.3 collapse)
  *   5. A set of connected client transports (fan-out for delta messages)
  *   6. Its own exit policy (tc-3iv, tc-eqgp, ext-a-design-context.md §6.2):
  *      immediate self-exit when tmux is confirmed gone (watcher EOF + failed
@@ -1545,11 +1546,11 @@ function errorCode(err: unknown): string {
  * Register `onSelfExit` to observe; both paths complete shutdown() — which
  * unlinks the server-proxy socket file — before listeners run.  There is no
  * auto-restart layer: server-proxy crashes are bugs to fix, not UX to smooth over.
- * Nor are there orphaned session-proxies to reap after a server-proxy crash: session-proxies are
- * non-detached children that enforce die-with-parent themselves (tc-2c5 —
- * getppid watchdog installed in session-proxy-entry.ts).  Recovery is launcher →
- * fresh server-proxy → fresh session-proxies on next session.claim → fresh `-CC attach`
- * to the surviving tmux sessions.
+ * tc-2x3.3: session-proxies now run IN-PROCESS, so a server-proxy crash takes
+ * them with it by construction — there are no orphan processes to reap and no
+ * die-with-parent watchdog.  Recovery is launcher → fresh server-proxy → fresh
+ * in-process session-proxies on next session.claim → fresh `-CC attach` to the
+ * surviving tmux sessions.
  */
 export function createServerProxy(opts: ServerProxyOptions): ServerProxyHandle {
   return new ServerProxyImpl(opts);

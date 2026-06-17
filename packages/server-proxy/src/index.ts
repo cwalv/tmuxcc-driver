@@ -6,7 +6,7 @@
  *
  * The server-proxy is a per-tmux-socket discovery and lifecycle service:
  *   - Maintains the list of sessions on a tmux socket
- *   - Spawns per-session session-proxy processes on demand
+ *   - Instantiates per-session session-proxies IN-PROCESS on demand (tc-2x3.3)
  *   - Hands clients session-proxy socket paths via the server-proxy wire
  *
  * See SCHEMA.md "ServerProxy wire" for the full wire protocol spec.
@@ -15,10 +15,15 @@
  * launcher's job, but the server-proxy self-manages exit (tc-3iv) — immediate
  * self-exit when tmux is confirmed gone (watcher EOF + failed probe),
  * 5-minute hysteresis self-exit at zero IPC clients.  Both paths unlink the
- * server-proxy socket file before `onSelfExit` listeners run.  SessionProxys need no
- * external supervision either: they are non-detached children that enforce
- * die-with-parent themselves (tc-2c5), so a dead server-proxy leaves no orphans;
- * a fresh server-proxy simply spawns fresh session-proxies against the surviving tmux state.
+ * server-proxy socket file before `onSelfExit` listeners run.
+ *
+ * tc-2x3 Stage 2 (tc-2x3.3): the per-session session-proxies were collapsed
+ * from N child processes into the server-proxy's own event loop — one
+ * `createSessionProxy(...)` per claimed session, each on its own per-session
+ * unix socket, all in this single process.  There are therefore no child
+ * processes to orphan and no die-with-parent watchdog (tc-2c5 deleted);
+ * recovery from server-proxy death is unchanged: a fresh server-proxy
+ * re-attaches `-CC` to the surviving tmux sessions (tmux is the persistence layer).
  */
 
 export { createServerProxy } from "./server-proxy.js";

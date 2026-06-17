@@ -689,11 +689,19 @@ describe("server-proxy – integration (requires tmux)", { skip: !TMUX_AVAILABLE
     );
 
     // The claimed session appears with a live session-proxy pid and ≥1 window/pane.
+    // tc-2x3.3: the session-proxy now runs IN-PROCESS inside the server-proxy
+    // event loop, so sessionProxyPid is the server-proxy's own pid (the
+    // session-proxy IS this process) — still a live pid that `kill -0` can probe.
     const row = info.sessions.find((s) => s.name === "info-target");
     assert.ok(row, `server-proxy.info sessions must include 'info-target': ${JSON.stringify(info.sessions)}`);
     assert.ok(
       typeof row.sessionProxyPid === "number" && row.sessionProxyPid > 0,
       `sessionProxyPid must be a live pid, got ${String(row.sessionProxyPid)}`,
+    );
+    assert.equal(
+      row.sessionProxyPid,
+      process.pid,
+      "tc-2x3.3: in-process session-proxy reports the server-proxy's own pid",
     );
     // kill -0 probes liveness without sending a signal.
     assert.doesNotThrow(() => process.kill(row.sessionProxyPid as number, 0), "sessionProxyPid must be running");

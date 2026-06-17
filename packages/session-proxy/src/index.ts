@@ -81,11 +81,11 @@ export type { SessionProxy, SessionProxyOptions, SessionProxyHostView } from "./
 export { createTmuxHost } from "./runtime/tmux-host.js";
 export type { TmuxHost, TmuxHostOptions } from "./runtime/tmux-host.js";
 
-// Die-with-parent watchdog (tc-2c5) — session-proxy entry points (e.g. @tmuxcc/server-proxy's
-// session-proxy-entry.ts) install this at startup to enforce ext-a §6.3: session-proxies die
-// with the serverProxy; there is no orphan-and-reclaim path.
-export { installDieWithParent } from "./runtime/die-with-parent.js";
-export type { DieWithParentOptions } from "./runtime/die-with-parent.js";
+// tc-2x3.3: die-with-parent (tc-2c5) is gone — Stage 2 collapsed the per-session
+// session-proxy child processes into the server-proxy's own event loop, so there
+// is no child process to be reparented and nothing to enforce die-with-parent
+// against.  Recovery from server-proxy death is unchanged: a fresh server-proxy
+// re-attaches `-CC` to the surviving tmux sessions (tmux is the persistence layer).
 
 // Flow-control + output-demux primitives — exported so tc-7xv.6/tc-7xv.24
 // regression tests in @tmuxcc/server-proxy can drive a real SocketTransport through

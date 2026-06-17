@@ -1,133 +1,106 @@
 /**
- * SessionProxy supervisor — manages per-session session-proxy child processes.
+ * SessionProxy supervisor — manages per-session session-proxy runtimes IN-PROCESS.
  *
  * # Responsibility
  *
- * The supervisor owns the lifecycle of per-session session-proxy processes:
- *   - Spawning a session-proxy for a session (if one is not already running)
- *   - Waiting for the session-proxy to signal readiness
+ * The supervisor owns the lifecycle of per-session session-proxy runtimes:
+ *   - Instantiating a session-proxy for a session (if one is not already running)
+ *   - Waiting for the session-proxy to finish its bootstrap (start() resolves)
  *   - Reaping session-proxies on session removal or unexpected exit
  *   - Per-name atomicity: concurrent claim requests for the same session name
- *     are serialized so only one session-proxy process is ever spawned
+ *     are serialized so only one session-proxy is ever created
  *
- * # SessionProxy entry point
+ * # tc-2x3.3 collapse: in-process, single event loop
  *
- * The supervisor spawns Node.js running the session-proxy entry script
- * `src/session-proxy-entry.js` (compiled from session-proxy-entry.ts in this package).
- * The entry script accepts `--socket-name`, `--session-name`, and
- * `--socket-path` arguments and writes "READY\n" to stdout once the session-proxy
- * is listening.
+ * Before tc-2x3 Stage 2 each session-proxy ran in its OWN child process
+ * (`child_process.spawn(node, [session-proxy-entry.js, …])`).  The 1 + N + N
+ * topology (server-proxy + N session-proxy processes + N tmux clients) cost
+ * ~335-600 MB RSS at N=3.  Stage 2 collapses the N session-proxy processes into
+ * the server-proxy's own event loop: each session-proxy is now created
+ * IN-PROCESS via `createSessionProxy(...)` and serves clients over its own
+ * per-session unix socket.  The per-session sockets and the client wire protocol
+ * are BYTE-IDENTICAL — only WHERE the `createSessionProxy` + `net.createServer`
+ * code runs changed (in-proc vs child proc).
+ *
+ * Consequences of the collapse:
+ *   - No `--socket-name`/`--session-name`/`--socket-path` argv, no spawn, no
+ *     READY-handshake — the session-proxy is just an object we `await .start()`.
+ *   - No die-with-parent (tc-2c5): there is no child process to be reparented;
+ *     the session-proxy lives and dies with the server-proxy by construction.
+ *   - `sessionProxyPid()` reports the server-proxy's own pid — the session-proxy
+ *     IS this process now (tc-k6v `server-proxy.info`).
+ *   - The old SIGTERM graceful path (detach `-CC`, close + remove the unix
+ *     socket) is preserved as `_teardownEntry`: `sessionProxy.stop()` then close
+ *     the per-session server and unlink the socket file.
  *
  * # Data-plane endpoint convention
  *
- * Per SCHEMA.md: "SCHEMA.md mandates multiplexing control + data plane on the
- * same per-session-proxy socket via the 0xCC magic byte (already implemented in
- * tmuxcc-daemon's framing.ts). The endpoint string IS the multiplexed socket."
- *
- * The endpoint returned by the supervisor IS the unix socket path on which the
- * session-proxy listens for both control-plane (JSON) and data-plane (0xCC) traffic.
- * Clients do not need a separate data socket.
+ * Per SCHEMA.md: control + data plane are multiplexed on the same per-session
+ * unix socket via the 0xCC magic byte (socket-transport.ts).  The endpoint
+ * returned by the supervisor IS that multiplexed socket path; clients do not
+ * need a separate data socket.
  *
  * @module session-proxy-supervisor
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
-import { fileURLToPath } from "node:url";
-import { join, dirname } from "node:path";
+import * as net from "node:net";
+import { createSessionProxy } from "@tmuxcc/session-proxy";
+import type { SessionProxy } from "@tmuxcc/session-proxy";
+import { createSocketTransport } from "./socket-transport.js";
+import { removeSocket, restrictSocket } from "./runtime-dir.js";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-/** A running session-proxy entry. */
+/** A running in-process session-proxy entry. */
 interface SessionProxyEntry {
   /** The unix socket path the session-proxy is listening on. */
   socketPath: string;
   /** Stable server-proxy-assigned session id. */
   sessionId: string;
-  /** The session-proxy child process. */
-  proc: ChildProcess;
-  /** Promise that resolves once the session-proxy is ready. */
-  ready: Promise<string>;
+  /** The in-process session-proxy runtime. */
+  sessionProxy: SessionProxy;
+  /** The per-session unix socket server. */
+  server: net.Server;
+  /**
+   * Set once this entry has begun teardown (intentional reap OR host-exit).
+   * Guards the host.onExit crash handler against firing during an intentional
+   * reap, and guards double-teardown.
+   */
+  tornDown: boolean;
 }
 
 /**
- * Exit details passed to the crash handler. `code`/`signal` come from the
- * child's `exit` event — exactly one of them is non-null.
+ * Exit details passed to the crash handler.  `code`/`signal` are retained for
+ * wire/log compatibility with the pre-collapse shape; for an in-process
+ * session-proxy that exits because its bound tmux died, both are null (there is
+ * no child process exit code — the cause is a tmux host exit, surfaced via
+ * `host.onExit`).
  */
 export interface SessionProxyExitInfo {
   /** Session name the session-proxy was bound to (for logging). */
   sessionName: string;
-  /** Exit code, or null if the session-proxy was killed by a signal. */
+  /** Exit code — always null for an in-process session-proxy (no child process). */
   code: number | null;
-  /** Terminating signal (e.g. "SIGKILL"), or null if the session-proxy exited on its own. */
+  /** Terminating signal — always null for an in-process session-proxy. */
   signal: NodeJS.Signals | null;
 }
 
 /**
  * Called when a session-proxy exits UNEXPECTEDLY (ext-a §6.3 "Crash while the
- * server-proxy lives").  Intentional reaps (reapSessionProxy / reapAll) delete the
- * registry entry before killing and therefore never reach this handler.
- * By the time the handler runs, the supervisor has already reaped the
- * sessionId → session-proxy registry entry, so the next ensureSessionProxy() for the
- * session spawns a fresh session-proxy.
+ * server-proxy lives").  Intentional reaps (reapSessionProxy / reapAll) set the
+ * entry's `tornDown` flag before tearing down and therefore never reach this
+ * handler.  By the time the handler runs, the supervisor has already reaped the
+ * sessionId → session-proxy registry entry, so the next ensureSessionProxy() for
+ * the session creates a fresh session-proxy.
+ *
+ * tc-2x3.3: the canonical unexpected-exit trigger is now the bound tmux session
+ * dying (`host.onExit`) — there is no separate process to crash.  Per-session
+ * error boundaries (a session pipeline throwing should be survivable, with a
+ * trip counter / fault injection) are tc-2x3.4, NOT here.
  */
 export type SessionProxyCrashHandler = (sessionId: string, info: SessionProxyExitInfo) => void;
-
-// ---------------------------------------------------------------------------
-// Path to the session-proxy entry script
-// ---------------------------------------------------------------------------
-
-const __dir = dirname(fileURLToPath(import.meta.url));
-
-/**
- * Whether this module is being run from TypeScript source (via tsx) rather
- * than a compiled dist.
- *
- * True when the import.meta.url ends with ".ts" (tsx loader presents the
- * original source URL). False when running from a compiled .js dist bundle.
- *
- * Used by both `sessionProxyEntryScript()` and `sessionProxySpawnArgs()` to match the
- * entry-point extension and the `--import tsx` loader flag.
- */
-const _runningFromSource = import.meta.url.endsWith(".ts");
-
-/**
- * Path to the compiled session-proxy-entry script.
- * In dist/ layout the entry is dist/session-proxy-entry.js relative to this file.
- */
-function sessionProxyEntryScript(): string {
-  // When running from dist/ (compiled), session-proxy-entry.js is a sibling.
-  // When running from src/ via tsx, session-proxy-entry.ts is a sibling.
-  const ext = _runningFromSource ? ".ts" : ".js";
-  return join(__dir, `session-proxy-entry${ext}`);
-}
-
-/**
- * Build the Node.js argument array for spawning the session-proxy entry script.
- *
- * In development (TypeScript source, tsx loader): prepend `--import tsx` so
- * the `.ts` entry script can be executed directly.
- *
- * In production (compiled dist, `.js` entry): omit `--import tsx` entirely —
- * tsx is a devDependency and will not be present in a production install or
- * on a remote host.
- *
- * This mirrors the logic in `sessionProxyEntryScript()` so the two always agree on
- * whether TypeScript sources or compiled JS files are in use.
- */
-function sessionProxySpawnArgs(script: string, socketName: string, sessionName: string, socketPath: string): string[] {
-  const scriptArgs = [
-    script,
-    "--socket-name", socketName,
-    "--session-name", sessionName,
-    "--socket-path", socketPath,
-  ];
-  if (_runningFromSource) {
-    return ["--import", "tsx", ...scriptArgs];
-  }
-  return scriptArgs;
-}
 
 // ---------------------------------------------------------------------------
 // SessionProxySupervisor
@@ -138,10 +111,12 @@ export interface SessionProxySupervisor {
    * Ensure a session-proxy is running for the given session and return its socket path.
    *
    * If a session-proxy for `sessionId` is already running, returns its socket path
-   * immediately. If not, spawns one and waits for it to signal readiness.
+   * immediately. If not, creates one IN-PROCESS and waits for it to finish
+   * bootstrapping (the per-session socket is listening and `sessionProxy.start()`
+   * has resolved).
    *
    * Per-name atomicity: concurrent calls for the same `sessionId` share the
-   * same in-flight spawn promise — only one session-proxy process is ever spawned.
+   * same in-flight creation promise — only one session-proxy is ever created.
    */
   ensureSessionProxy(
     sessionId: string,
@@ -151,40 +126,44 @@ export interface SessionProxySupervisor {
   ): Promise<string>;
 
   /**
-   * PID of the running session-proxy for `sessionId`, or `null` when no session-proxy is
-   * running (never claimed, reaped, or crashed) or its spawn is still
-   * in-flight (tc-k6v `server-proxy.info`).  Read-only; never blocks on a spawn.
+   * PID of the process serving the session-proxy for `sessionId`, or `null`
+   * when no session-proxy is running (never claimed, reaped, or crashed) or its
+   * creation is still in-flight (tc-k6v `server-proxy.info`).  Read-only; never
+   * blocks on creation.
+   *
+   * tc-2x3.3: the session-proxy now runs IN-PROCESS, so a live entry reports
+   * the server-proxy's own pid (`process.pid`) — the session-proxy IS this
+   * process.
    */
   sessionProxyPid(sessionId: string): number | null;
 
   /**
-   * Number of live session-proxy children — both ready entries and in-flight
-   * spawns.  Used by the idle-exit policy (tc-eqgp): the server-proxy must
-   * never idle-exit while it has live session-proxy children, because those
-   * children represent active VS Code terminals whose data path
-   * (EDH ↔ session-proxy over per-session sockets) is invisible to the
-   * server-proxy's own IPC client count.  An in-flight spawn counts too —
-   * a claim is in progress and tearing the server-proxy out from under it
-   * would cascade-kill that nascent terminal too.
+   * Number of live session-proxies — both ready entries and in-flight
+   * creations.  Used by the idle-exit policy (tc-eqgp): the server-proxy must
+   * never idle-exit while it has live session-proxies, because those represent
+   * active VS Code terminals whose data path (EDH ↔ session-proxy over
+   * per-session sockets) is invisible to the server-proxy's own IPC client
+   * count.  An in-flight creation counts too — a claim is in progress and
+   * tearing the server-proxy down out from under it would cascade-kill that
+   * nascent terminal too.
    */
   aliveCount(): number;
 
   /**
-   * Register a callback fired whenever the alive-child count changes
-   * (spawn registered, ready entry recorded, entry reaped, or unexpected
-   * exit).  The handler receives the new count.  Used by the server-proxy
-   * to re-check the idle policy when the last child goes away
-   * (tc-eqgp).
+   * Register a callback fired whenever the alive count changes (creation
+   * registered, ready entry recorded, entry reaped, or unexpected exit).  The
+   * handler receives the new count.  Used by the server-proxy to re-check the
+   * idle policy when the last session-proxy goes away (tc-eqgp).
    */
   onAliveCountChange(handler: (count: number) => void): void;
 
   /**
-   * Kill the session-proxy for a session (if running). Called on session removal.
+   * Tear down the session-proxy for a session (if running). Called on session removal.
    */
   reapSessionProxy(sessionId: string): void;
 
   /**
-   * Kill all running session-proxies. Called on server-proxy shutdown.
+   * Tear down all running session-proxies. Called on server-proxy shutdown.
    */
   reapAll(): void;
 
@@ -200,9 +179,9 @@ export interface SessionProxySupervisor {
 
 class SessionProxySupervisorImpl implements SessionProxySupervisor {
   /**
-   * Map from sessionId to running session-proxy entry (or in-progress spawn promise).
-   * The value is the entry OR a Promise for the in-flight spawn, allowing
-   * per-name serialization.
+   * Map from sessionId to running session-proxy entry (or in-progress creation
+   * promise).  The value is the entry OR a Promise for the in-flight creation,
+   * allowing per-name serialization.
    */
   private _sessionProxies = new Map<string, SessionProxyEntry | Promise<SessionProxyEntry>>();
   private _crashHandler: SessionProxyCrashHandler | null = null;
@@ -213,10 +192,10 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
   }
 
   aliveCount(): number {
-    // Every map entry — ready entry or in-flight spawn promise — represents a
-    // live (or imminently-live) session-proxy child whose existence the idle
-    // policy must respect.  reapSessionProxy() / the crash handler delete the
-    // entry synchronously with the kill/exit, so the size is the alive count.
+    // Every map entry — ready entry or in-flight creation promise — represents
+    // a live (or imminently-live) session-proxy whose existence the idle policy
+    // must respect.  reapSessionProxy() / the crash handler delete the entry
+    // synchronously with the teardown/exit, so the size is the alive count.
     return this._sessionProxies.size;
   }
 
@@ -245,15 +224,15 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
     const existing = this._sessionProxies.get(sessionId);
     if (existing !== undefined) {
       if (existing instanceof Promise) {
-        // In-flight spawn — wait for it
+        // In-flight creation — wait for it
         const entry = await existing;
         return entry.socketPath;
       }
       return existing.socketPath;
     }
 
-    // Slow path: spawn a new session-proxy
-    const spawnPromise = this._spawnSessionProxy(
+    // Slow path: create a new session-proxy in-process
+    const createPromise = this._createSessionProxy(
       sessionId,
       sessionName,
       socketName,
@@ -261,32 +240,39 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
     );
 
     // Register the promise immediately so concurrent callers share it.
-    // tc-eqgp: count an in-flight spawn as a live child for idle-exit
-    // purposes — a claim is in progress and the server-proxy must stay up
-    // until that nascent terminal is wired.
-    this._sessionProxies.set(sessionId, spawnPromise);
+    // tc-eqgp: count an in-flight creation as a live session-proxy for
+    // idle-exit purposes — a claim is in progress and the server-proxy must
+    // stay up until that nascent terminal is wired.
+    this._sessionProxies.set(sessionId, createPromise);
     this._fireAliveCount();
 
     let entry: SessionProxyEntry;
     try {
-      entry = await spawnPromise;
+      entry = await createPromise;
     } catch (err) {
-      // Spawn failed — remove the stale promise
+      // Creation failed — remove the stale promise
       this._sessionProxies.delete(sessionId);
       this._fireAliveCount();
       throw err;
     }
 
     // Replace promise with resolved entry (no count change — promise → entry
-    // is still one alive child).
-    this._sessionProxies.set(sessionId, entry);
+    // is still one alive session-proxy).  But: an intentional reap may have run
+    // while the creation was in-flight (reapSessionProxy deletes the promise
+    // and chains teardown after it settles).  Only register the entry if THIS
+    // promise is still the registered value; otherwise the reap already owns
+    // teardown and we must not resurrect a reaped session.
+    if (this._sessionProxies.get(sessionId) === createPromise) {
+      this._sessionProxies.set(sessionId, entry);
+    }
     return entry.socketPath;
   }
 
   sessionProxyPid(sessionId: string): number | null {
     const entry = this._sessionProxies.get(sessionId);
     if (entry === undefined || entry instanceof Promise) return null;
-    return entry.proc.pid ?? null;
+    // tc-2x3.3: in-process — the session-proxy IS the server-proxy process.
+    return process.pid;
   }
 
   reapSessionProxy(sessionId: string): void {
@@ -297,15 +283,18 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
     this._fireAliveCount();
 
     if (entry instanceof Promise) {
-      // In-flight spawn — kill after it resolves
-      void entry.then((e) => this._killEntry(e)).catch(() => {});
+      // In-flight creation — tear down after it resolves.  ensureSessionProxy's
+      // registration is guarded on the promise still being the registered
+      // value, so deleting it here means the resolved entry will not be
+      // re-registered; we own its teardown.
+      void entry.then((e) => this._teardownEntry(e)).catch(() => {});
     } else {
-      this._killEntry(entry);
+      this._teardownEntry(entry);
     }
   }
 
   reapAll(): void {
-    for (const sessionId of this._sessionProxies.keys()) {
+    for (const sessionId of [...this._sessionProxies.keys()]) {
       this.reapSessionProxy(sessionId);
     }
   }
@@ -314,131 +303,144 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
   // Private helpers
   // ---------------------------------------------------------------------------
 
-  private async _spawnSessionProxy(
+  /**
+   * Create and start a session-proxy IN-PROCESS, listening on its per-session
+   * unix socket.  This is the in-process equivalent of the old
+   * session-proxy-entry.ts main(): remove the stale socket, create the
+   * SessionProxy, bind the unix socket server, restrict to 0600, start the
+   * SessionProxy (spawns `tmux -CC attach` via node-pty), and wire the
+   * host-exit teardown.
+   *
+   * Mirrors the pre-collapse readiness contract: the returned promise resolves
+   * ONLY after the socket is listening AND `sessionProxy.start()` has resolved,
+   * so `session.claim` does not return an endpoint until clients can actually
+   * connect and get a snapshot (the old "READY\n" handshake guaranteed the same).
+   */
+  private async _createSessionProxy(
     sessionId: string,
     sessionName: string,
     socketName: string,
     sessionProxySockPath: string,
   ): Promise<SessionProxyEntry> {
-    const script = sessionProxyEntryScript();
+    // Remove stale socket file if present.
+    removeSocket(sessionProxySockPath);
 
-    const proc = spawn(
-      process.execPath, // node — always the VS Code Remote Server's own Node binary
-      sessionProxySpawnArgs(script, socketName, sessionName, sessionProxySockPath),
-      {
-        stdio: ["ignore", "pipe", "pipe"],
-        // tc-2c5 / ext-a §6.3 invariant: session-proxies are REGULAR children — never
-        // `detached: true`, no PID file, no "find my old session-proxies" on startup.
-        // Die-with-parent is enforced inside the session-proxy itself (getppid
-        // watchdog in session-proxy-entry.ts); recovery from server-proxy death is a fresh
-        // server-proxy spawning fresh session-proxies, never reclaiming old ones.
-        detached: false,
-        env: { ...process.env },
+    // Create the session-proxy (not yet started).
+    const sessionProxy = createSessionProxy({
+      host: {
+        socketName,
+        sessionName,
+        attach: true, // server-proxy creates the session; session-proxy attaches
       },
-    );
-
-    // Capture stderr so failures aren't opaque. The session-proxy prints actionable
-    // diagnostics (e.g. "SessionProxy start failed: …") to stderr before exit;
-    // without surfacing it, the supervisor's error is unactionable.
-    let stderrBuf = "";
-    proc.stderr?.on("data", (chunk: Buffer) => {
-      stderrBuf += chunk.toString("utf8");
     });
 
-    // Wait for "READY\n" on stdout with a 30-second timeout
-    const readyPromise = new Promise<void>((resolve, reject) => {
-      let buf = "";
-      const timeout = setTimeout(() => {
-        const stderrTail = stderrBuf.trim();
-        reject(new Error(
-          `SessionProxy for session '${sessionName}' did not signal READY within 30s` +
-          (stderrTail ? `. stderr: ${stderrTail}` : ""),
-        ));
-      }, 30_000);
-
-      proc.stdout?.on("data", (chunk: Buffer) => {
-        buf += chunk.toString("utf8");
-        if (buf.includes("READY\n")) {
-          clearTimeout(timeout);
-          resolve();
-        }
-      });
-
-      proc.once("exit", (code) => {
-        clearTimeout(timeout);
-        const stderrTail = stderrBuf.trim();
-        reject(new Error(
-          `SessionProxy for session '${sessionName}' exited before READY (code=${code})` +
-          (stderrTail ? `. stderr: ${stderrTail}` : ""),
-        ));
-      });
-
-      proc.once("error", (err) => {
-        clearTimeout(timeout);
-        reject(err);
-      });
-    });
-
-    await readyPromise;
-
-    // Unref the child process so it doesn't keep the Node.js event loop alive.
-    // The process continues running; we can still kill/track it, but the parent
-    // won't be prevented from exiting due to this handle.
-    proc.unref();
-
-    // Wire up crash detection AFTER readiness so "exited before READY" is a
-    // spawn error, not a crash.
-    //
-    // tc-ukq (ext-a §6.3 "Crash while the server-proxy lives"): on unexpected
-    // exit the registry entry is reaped HERE, synchronously with the exit
-    // event, so the next ensureSessionProxy() spawns a fresh session-proxy.  Respawn is
-    // LAZY (§6.2): nothing is spawned until the next claim.
-    proc.once("exit", (code, signal) => {
-      const fire = () => {
-        const current = this._sessionProxies.get(sessionId);
-        // Only treat as a crash if THIS process is still the registered
-        // session-proxy.  The proc identity check guards the ABA case: an old
-        // session-proxy's late exit event (delivered after reapSessionProxy() + a fresh
-        // spawn under the same sessionId) must not reap the healthy
-        // replacement entry.
-        if (current !== undefined && !(current instanceof Promise) && current.proc === proc) {
-          this._sessionProxies.delete(sessionId);
-          this._fireAliveCount();
-          this._crashHandler?.(sessionId, { sessionName, code, signal });
-        }
-      };
-      const current = this._sessionProxies.get(sessionId);
-      if (current instanceof Promise) {
-        // The exit raced ensureSessionProxy()'s `await spawnPromise` continuation:
-        // the map still holds the in-flight promise this entry will be
-        // registered under.  Re-check after it settles (ensureSessionProxy's
-        // continuation — registered first — replaces the promise with the
-        // entry before our continuation runs).
-        void current.then(
-          () => queueMicrotask(fire),
-          () => { /* spawn failed; ensureSessionProxy already removed the entry */ },
+    // Create the per-session unix socket server.
+    const server = net.createServer((socket) => {
+      const transport = createSocketTransport(socket);
+      // tc-295a.21: catch per-connection rejections (e.g. raw/unhandshaked
+      // connections).  Without this catch, a HandshakeError from a malformed
+      // connection becomes an unhandled promise rejection → Node ≥ 22 exits.
+      // In the collapsed topology that would take the ENTIRE server-proxy and
+      // ALL its sessions down (previously it killed one session-proxy process).
+      // Per-connection catch: log fail-loud, close that socket, continue.
+      sessionProxy.addClient(transport).catch((err: unknown) => {
+        process.stderr.write(
+          `[session-proxy] client connection rejected (handshake failed): ${String(err)}\n`,
         );
-      } else {
-        fire();
-      }
+        try { transport.close(); } catch { /* already closed by addClient's catch */ }
+      });
     });
 
+    // Pre-build the entry so the host-exit handler (wired below, after start)
+    // can reference its `tornDown` flag and identity.
     const entry: SessionProxyEntry = {
       sessionId,
       socketPath: sessionProxySockPath,
-      proc,
-      ready: Promise.resolve(sessionProxySockPath),
+      sessionProxy,
+      server,
+      tornDown: false,
     };
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(sessionProxySockPath, () => {
+          server.off("error", reject);
+          resolve();
+        });
+      });
+
+      // Restrict socket permissions to 0600.
+      restrictSocket(sessionProxySockPath);
+
+      // Start the session-proxy (spawns tmux -CC attach via node-pty).
+      await sessionProxy.start();
+    } catch (err) {
+      // Creation failed before readiness — clean up the half-built entry so we
+      // leave no listening socket or running tmux behind, then rethrow so
+      // ensureSessionProxy removes the registry slot and the claim fails.
+      try { sessionProxy.kill(); } catch { /* not started */ }
+      await new Promise<void>((res) => { server.close(() => res()); });
+      removeSocket(sessionProxySockPath);
+      throw err;
+    }
+
+    // Wire host-exit teardown (tmux crashed or the bound session ended).
+    //
+    // tc-ukq (ext-a §6.3 "Crash while the server-proxy lives"): on an
+    // unexpected exit the registry entry is reaped HERE, and the crash handler
+    // fires so the server-proxy refreshes sessions (the tmux session may be
+    // gone → sessions.removed, or alive → fresh session-proxy on next claim).
+    // Respawn is LAZY (§6.2): nothing is created until the next claim.
+    //
+    // The host.onExit handler also drives the SessionProxy's own
+    // broadcastErrorAndClose (session.unavailable) before this runs — see
+    // createSessionProxy's start().  Here we just close the per-session socket
+    // server and unlink the socket file, then fire the crash handler.
+    sessionProxy.host.onExit(() => {
+      if (entry.tornDown) return; // intentional reap already owns teardown
+      entry.tornDown = true;
+
+      // Give connected clients a moment to receive session.unavailable (the
+      // SessionProxy's host.onExit broadcastErrorAndClose runs synchronously
+      // before our handler in registration order, but the close-and-unlink
+      // matches the pre-collapse 500ms grace from session-proxy-entry.ts).
+      setTimeout(() => {
+        server.close(() => {
+          removeSocket(sessionProxySockPath);
+        });
+      }, 500);
+
+      // Reap the registry entry + fire the crash handler, but only if THIS
+      // entry is still the registered one (ABA guard: a reap + fresh
+      // ensureSessionProxy under the same sessionId must not have its healthy
+      // replacement reaped by this late exit).
+      const current = this._sessionProxies.get(sessionId);
+      if (current === entry) {
+        this._sessionProxies.delete(sessionId);
+        this._fireAliveCount();
+        this._crashHandler?.(sessionId, { sessionName, code: null, signal: null });
+      }
+    });
 
     return entry;
   }
 
-  private _killEntry(entry: SessionProxyEntry): void {
-    try {
-      entry.proc.kill("SIGTERM");
-    } catch {
-      // already dead
-    }
+  /**
+   * Intentional teardown of an entry (reap): mirror the pre-collapse SIGTERM
+   * graceful path in-process — stop the session-proxy (detach the `-CC` client,
+   * up to 3 s then SIGKILL the tmux child), then close the per-session socket
+   * server and unlink the socket file.
+   */
+  private _teardownEntry(entry: SessionProxyEntry): void {
+    if (entry.tornDown) return;
+    entry.tornDown = true;
+    // Fire-and-forget: stop() resolves when tmux exits (≤3 s, then SIGKILL).
+    void entry.sessionProxy.stop().finally(() => {
+      entry.server.close(() => {
+        removeSocket(entry.socketPath);
+      });
+    });
   }
 }
 
