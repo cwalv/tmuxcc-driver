@@ -256,6 +256,28 @@ export interface RuntimePipelineOptions {
    * registry just to construct a pipeline.
    */
   metrics?: SessionProxyRegistry;
+
+  /**
+   * Called when the per-session notification-processing pipeline catches an
+   * unhandled exception (tc-2x3.4 per-session error boundary).
+   *
+   * The pipeline's `host.onData` handler wraps its tokenizer → correlator →
+   * _dispatchEvent call stack in a try/catch. If anything in that stack throws
+   * (a parser bug, a reducer throwing on a malformed notification, etc.) the
+   * error is CAUGHT — it does not propagate out of the event-loop callback and
+   * cannot crash the whole process — and this callback fires with the caught
+   * error.
+   *
+   * After calling this hook the pipeline STOPS itself (`stop()`) so no further
+   * processing happens on the now-broken pipeline. The caller is expected to
+   * tear down and reattach the session-proxy (the supervisor does this via
+   * `_teardownEntry` + lazy respawn).
+   *
+   * If this option is not supplied, a caught error is logged to stderr but the
+   * pipeline is NOT stopped — this preserves backward-compatibility for callers
+   * (tests, integration setups) that do not wire an error boundary.
+   */
+  onFatalError?: (err: unknown) => void;
 }
 
 /**
@@ -452,6 +474,7 @@ class RuntimePipelineImpl implements RuntimePipeline {
       | "onTopologyNotify"
       | "metrics"
       | "teardownThreshold"
+      | "onFatalError"
     >
   > & {
     sessionName: string | undefined;
@@ -460,6 +483,7 @@ class RuntimePipelineImpl implements RuntimePipeline {
     onTopologyNotify: TopologyNotifyHandler | undefined;
     metrics: SessionProxyRegistry | undefined;
     teardownThreshold: number | undefined;
+    onFatalError: ((err: unknown) => void) | undefined;
   };
   private readonly _tokenizer: ControlTokenizer;
   private readonly _correlator: CommandCorrelator;
@@ -509,6 +533,7 @@ class RuntimePipelineImpl implements RuntimePipeline {
       onTopologyNotify: opts.onTopologyNotify,
       metrics: opts.metrics,
       teardownThreshold: opts.teardownThreshold,
+      onFatalError: opts.onFatalError,
     };
 
     // The correlator routes notification tokens back to _onNotificationToken
@@ -563,10 +588,44 @@ class RuntimePipelineImpl implements RuntimePipeline {
 
     // Wire host.onData → tokenizer → correlator (which routes notifications
     // back to _onNotificationToken).
+    //
+    // tc-2x3.4: per-session error boundary — wrap the inner dispatch in a
+    // try/catch so a parser/reducer/pipeline exception in session A cannot
+    // propagate out of this event-loop callback and crash the whole
+    // server-proxy process (which now hosts ALL sessions in ONE event loop).
+    // On a caught error:
+    //   1. Log loudly to stderr with the session name (attribution).
+    //   2. Stop this pipeline (no further processing on the broken stack).
+    //   3. Call opts.onFatalError(err) — the supervisor wires this to its
+    //      per-session teardown + reattach path so only THIS session is
+    //      recycled; sibling sessions are unaffected.
+    //
+    // If onFatalError is not supplied (backward-compat for tests): log to
+    // stderr only.  The pipeline is stopped regardless so a broken pipeline
+    // doesn't silently continue producing garbage.
     this._unsubData = this._host.onData((chunk: Uint8Array) => {
-      const tokens: ControlToken[] = this._tokenizer.push(chunk);
-      for (const token of tokens) {
-        this._correlator.push(token);
+      try {
+        const tokens: ControlToken[] = this._tokenizer.push(chunk);
+        for (const token of tokens) {
+          this._correlator.push(token);
+        }
+      } catch (err) {
+        // Do NOT re-throw: that would unwind out of the PTY data event and
+        // into the shared event loop, crashing all sessions.
+        const sessionLabel = this._opts.sessionName ?? "<unknown-session>";
+        process.stderr.write(
+          `[pipeline] FATAL: session "${sessionLabel}" parser/reducer/pipeline threw an unhandled exception — ` +
+            `triggering per-session error boundary (tc-2x3.4).\n` +
+            `  Error: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`,
+        );
+        // Stop this pipeline immediately so we don't process further data on
+        // the now-broken parse state (tokenizer and correlator may be in an
+        // undefined mid-parse position).
+        this.stop();
+        // Delegate teardown + reattach to the supervisor (or whoever wired
+        // onFatalError). If no handler is wired, the log line above is the
+        // only signal — backward-compat for test setups.
+        this._opts.onFatalError?.(err);
       }
     });
 

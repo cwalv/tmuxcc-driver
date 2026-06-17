@@ -541,6 +541,24 @@ export interface SessionProxyRegistry {
   observeDeltasPerCycle(count: number): void;
 
   /**
+   * Increment `session_boundary_trips_total` (tc-2x3.4).
+   *
+   * Called by the session-proxy supervisor's per-session error boundary
+   * handler whenever the pipeline's `onFatalError` fires — i.e. the
+   * tokenizer / parser / reducer / _dispatchEvent stack threw an unhandled
+   * exception that the error boundary caught.
+   *
+   * This is an **expected-zero tripwire** in steady state: every increment
+   * means a parser/reducer bug surfaced at runtime and the session was
+   * recycled.  It is NOT counted on intentional teardowns (reapSessionProxy /
+   * SIGTERM graceful path) or on tmux-exit–triggered host.onExit paths.
+   *
+   * Surfaced via `session-proxy.info` in the same `metricsText` block as all
+   * other counters.
+   */
+  incBoundaryTrip(): void;
+
+  /**
    * Render the full registry as Prometheus text exposition format.
    * Returns a Promise<string> to match prom-client's async API.
    */
@@ -889,6 +907,25 @@ export function createSessionProxyRegistry(): SessionProxyRegistry {
     registers: [reg],
   });
 
+  // tc-2x3.4: per-session error boundary trip counter.
+  //
+  // Incremented by the supervisor's onFatalError handler whenever the
+  // pipeline's tokenizer / parser / reducer / _dispatchEvent stack threw an
+  // unhandled exception that the error boundary caught, was logged, and
+  // triggered a teardown + lazy reattach of this session.
+  //
+  // Expected-zero tripwire in steady state: any increment is a parser/reducer
+  // bug announcing itself.  Steady-state non-zero = a reproducible parse path
+  // is corrupted; sessions are recycling on every notification arrival.
+  const sessionBoundaryTripsTotal = new Counter({
+    name: "session_boundary_trips_total",
+    help:
+      "Per-session pipeline exception boundary trips (tc-2x3.4). " +
+      "Each increment = an unhandled parser/reducer/pipeline exception was caught; the session was recycled. " +
+      "Expected-zero tripwire — steady-state non-zero means a reproducible parse bug is recycling the session.",
+    registers: [reg],
+  });
+
   // tc-3si.5: per-cycle delta-count distribution. Complements
   // deltas_emitted_total (rate) by showing the SHAPE — small steady
   // (1–5) vs. bootstrap spikes vs. flapping diffs (alternating 0/N).
@@ -1035,6 +1072,10 @@ export function createSessionProxyRegistry(): SessionProxyRegistry {
 
     incResync(cause: ResyncCause): void {
       resyncsTotal.inc({ cause });
+    },
+
+    incBoundaryTrip(): void {
+      sessionBoundaryTripsTotal.inc();
     },
 
     observeDeltasPerCycle(count: number): void {

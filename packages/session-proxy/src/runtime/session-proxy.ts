@@ -125,6 +125,22 @@ export interface SessionProxyOptions {
    * Pass `{ threshold: Infinity }` to disable the alarm while keeping counters.
    */
   stormAlarm?: StormAlarmOptions;
+
+  /**
+   * Called when the per-session pipeline catches an unhandled exception
+   * (tc-2x3.4 per-session error boundary).
+   *
+   * Forwarded verbatim to `RuntimePipelineOptions.onFatalError`.  In the
+   * collapsed single-process topology (tc-2x3.3), a throwing pipeline can
+   * crash every session; this callback lets the caller (the server-proxy
+   * supervisor) tear down and reattach ONLY the affected session while
+   * leaving siblings running.
+   *
+   * When omitted, boundary trips are logged to stderr but the session is
+   * NOT automatically recycled — backward-compat for test setups that do
+   * not exercise the supervisor path.
+   */
+  onFatalError?: (err: unknown) => void;
 }
 
 /**
@@ -401,6 +417,13 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
     // output_bytes_total + output_frame_size_bytes — the latency / throughput
     // shapes documented in docs/observability.md.
     metrics: metricsRegistry,
+    // tc-2x3.4: per-session error boundary — forward the fatal-error hook so
+    // the supervisor can tear down + reattach only this session on a pipeline
+    // exception, without affecting siblings (tc-2x3.4).
+    // Use a conditional spread so exactOptionalPropertyTypes is satisfied:
+    // `undefined` is not assignable to `(err: unknown) => void` when the
+    // option is optional-but-not-undefined-typed.
+    ...(opts.onFatalError !== undefined ? { onFatalError: opts.onFatalError } : {}),
     // tc-x6l: per-kind counters + storm alarm attach to the topology
     // classification choke point — the coalescer's onNotify path, surfaced
     // through this pipeline option. The hook only fires for topology-

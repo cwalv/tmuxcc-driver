@@ -325,13 +325,95 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
     // Remove stale socket file if present.
     removeSocket(sessionProxySockPath);
 
+    // tc-2x3.4: per-session error boundary — late-binding entry reference.
+    //
+    // `entry` is declared below (after `server` is created), but `onFatalError`
+    // closes over it.  We use a nullable reference patched after the entry is
+    // built — same late-bind pattern as `pipelineRef`/`serverRef` in
+    // runtime/session-proxy.ts — so the closure never sees a TDZ violation.
+    // `onFatalError` only fires AFTER `sessionProxy.start()` resolves (the
+    // pipeline is live only then), which is always after `entryRef` is patched.
+    let entryRef: SessionProxyEntry | null = null;
+
     // Create the session-proxy (not yet started).
+    //
+    // tc-2x3.4: per-session error boundary.  The pipeline's `onFatalError`
+    // callback fires if the tokenizer / parser / reducer / _dispatchEvent
+    // stack throws an unhandled exception.  The pipeline stops itself before
+    // calling this hook; we tear down only THIS session's entry (unlink socket,
+    // reap registry), increment the boundary-trip counter on the session's own
+    // metrics registry, and fire `_fireAliveCount()` so the idle-exit policy
+    // re-evaluates.  Siblings are unaffected.
+    //
+    // This is NOT a crash (tmux is still alive) and NOT an intentional reap
+    // (the user didn't ask for shutdown) — so we do NOT fire `_crashHandler`.
+    // We set `tornDown = true` on the entry before teardown to prevent the
+    // host.onExit handler from double-tearing-down if tmux also exits right after.
+    //
+    // Lazy respawn (§6.2 ext-a): nothing is re-created until the extension
+    // calls `ensureSessionProxy` for this session again.
+    let boundaryTripInFlight = false;
+    const onFatalError = (err: unknown): void => {
+      const entry = entryRef;
+      if (entry === null) {
+        // Entry not yet patched — this would mean the pipeline fired before
+        // start() completed, which is structurally impossible. Defensive no-op.
+        return;
+      }
+
+      // Guard double-trip: the pipeline stops itself before calling this hook,
+      // but defensive against any re-entrant path.
+      if (boundaryTripInFlight) return;
+      boundaryTripInFlight = true;
+
+      // ABA guard: only tear down if THIS entry is still the registered one.
+      // A concurrent reap or fresh ensureSessionProxy may have already replaced it.
+      const current = this._sessionProxies.get(sessionId);
+      if (current !== entry) {
+        // Entry was already replaced — the boundary trip is stale; skip.
+        return;
+      }
+
+      // Increment the boundary-trip counter on THIS session's metrics registry
+      // so the trip is visible via session-proxy.info. Loud-log with session
+      // attribution so the bug stays visible even without a metrics reader.
+      entry.sessionProxy.metrics.incBoundaryTrip();
+      process.stderr.write(
+        `[session-proxy-supervisor] BOUNDARY TRIP: session "${sessionName}" (id: ${sessionId}) ` +
+          `pipeline threw an unhandled exception — tearing down this session's PTY client + per-session ` +
+          `socket; sibling sessions are unaffected (tc-2x3.4).\n` +
+          `  Error: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`,
+      );
+
+      // Mark tornDown so the host.onExit handler (wired below, after start)
+      // does not double-tear-down if tmux also exits right after the boundary trip.
+      entry.tornDown = true;
+
+      // Remove from registry so the next ensureSessionProxy creates a fresh
+      // session-proxy (lazy respawn — §6.2 ext-a).
+      if (this._sessionProxies.get(sessionId) === entry) {
+        this._sessionProxies.delete(sessionId);
+        this._fireAliveCount();
+      }
+
+      // Tear down: stop the session-proxy (detach `-CC` client, ≤3 s then
+      // SIGKILL the tmux child), close the per-session socket server, unlink
+      // the socket file.  We set tornDown above so `_teardownEntry` would
+      // short-circuit; do the equivalent teardown inline.
+      void entry.sessionProxy.stop().finally(() => {
+        entry.server.close(() => {
+          removeSocket(entry.socketPath);
+        });
+      });
+    };
+
     const sessionProxy = createSessionProxy({
       host: {
         socketName,
         sessionName,
         attach: true, // server-proxy creates the session; session-proxy attaches
       },
+      onFatalError,
     });
 
     // Create the per-session unix socket server.
@@ -360,6 +442,10 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
       server,
       tornDown: false,
     };
+
+    // tc-2x3.4: patch the late-binding boundary reference so `onFatalError`
+    // can find the entry if the pipeline throws.
+    entryRef = entry;
 
     try {
       await new Promise<void>((resolve, reject) => {
