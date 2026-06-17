@@ -49,12 +49,15 @@
  * fd open until the process exits — an fd leak bounded in normal use (one reattach
  * cycle) but unbounded under a persistent GAP-2 busy-loop.
  *
- * The fix: call `_closeServerFdOnly(server)` which closes the underlying libuv
- * Pipe handle (reclaiming the fd) WITHOUT triggering the post-close `fs.unlink`
- * callback that `server.close()` installs.  The socket FILE was already unlinked
- * by the fresh `_createSessionProxy`'s `removeSocket(path)` call, so there is
- * nothing on the filesystem to protect — the old fd is an orphaned inode with no
- * directory entry and can safely be closed.
+ * The fix: call `_closeServerFdOnly(server, path)`.  Note the fresh
+ * `_createSessionProxy` re-BINDS `path` (its `removeSocket` clears the stale
+ * file, then it listens again), so at teardown time `path` holds the FRESH
+ * socket — `server.close()`'s synchronous libuv unlink would clobber it.  So
+ * `_closeServerFdOnly` renames the fresh socket aside, calls `server.close()`
+ * (its unlink now hits the empty path → ENOENT no-op), then renames the fresh
+ * socket back — reclaiming the old fd without touching the live socket.  Full
+ * mechanism + the libuv-synchronous-unlink invariant it relies on are documented
+ * at `_closeServerFdOnly` below.
  *
  * # tc-2x3.6: GAP 2 — repeated-trip circuit breaker
  *
