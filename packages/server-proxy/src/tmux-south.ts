@@ -396,13 +396,14 @@ export function listSessionTopology(
   }
 
   // list-panes: pane_id, window_id, @tmuxcc-bound, @tmuxcc-detach (resolved),
-  // @tmuxcc-icon.  The -a flag lists all panes across all windows; -t filters
-  // to the target session.
+  // @tmuxcc-icon.  `-s -t <session>` lists every pane in the target session
+  // (across its windows).  NOT `-a`, which would list all panes on the server
+  // regardless of -t and leak other sessions' panes into this query.
   const PANE_FORMAT =
     "#{pane_id}\t#{window_id}\t#{@tmuxcc-bound}\t#{@tmuxcc-detach}\t#{@tmuxcc-icon}";
   const paneResult = spawnSync(
     "tmux",
-    ["-L", socketName, "list-panes", "-t", sessionName, "-a", "-F", PANE_FORMAT],
+    ["-L", socketName, "list-panes", "-s", "-t", sessionName, "-F", PANE_FORMAT],
     { encoding: "utf8", timeout: 5_000 },
   );
   if (paneResult.status !== 0 || paneResult.error) return null;
