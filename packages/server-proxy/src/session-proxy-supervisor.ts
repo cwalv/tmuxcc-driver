@@ -184,6 +184,29 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
    * allowing per-name serialization.
    */
   private _sessionProxies = new Map<string, SessionProxyEntry | Promise<SessionProxyEntry>>();
+  /**
+   * Reference count per socket path: how many live or in-flight entries currently
+   * claim ownership of that path.  Used by the ownership guard in
+   * `_doSocketTeardown` to decide whether to unlink the socket file.
+   *
+   * Why a reference count?
+   *
+   * `stop()` can take up to ~3 s.  During that window `ensureSessionProxy` may
+   * have already called `_createSessionProxy` for the same path, incrementing the
+   * count to 2.  When the old entry's `.finally` fires, it decrements back to 1;
+   * since the count is > 0, the unlink is skipped.  When the new entry eventually
+   * tears down, it decrements to 0 and the unlink runs safely.
+   *
+   * Lifecycle:
+   *   - Incremented at the START of `_createSessionProxy` (before server.listen),
+   *     even before `start()` resolves, so the guard sees the new claim during the
+   *     in-flight phase.
+   *   - Decremented inside `_doSocketTeardown`'s `.finally` callback at unlink
+   *     time.  If the count reaches 0, the path has no living owners → unlink.
+   *   - Also decremented (and the path removed) in the creation-failure path so
+   *     a failing creation does not leak a permanent claim.
+   */
+  private _socketPathRefCount = new Map<string, number>();
   private _crashHandler: SessionProxyCrashHandler | null = null;
   private _aliveCountHandlers: Array<(count: number) => void> = [];
 
@@ -325,6 +348,17 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
     // Remove stale socket file if present.
     removeSocket(sessionProxySockPath);
 
+    // Increment the socket-path reference count BEFORE binding the server.
+    // The ownership guard in _doSocketTeardown reads this count at unlink time;
+    // incrementing early ensures the guard sees the new claim even while this
+    // creation is still in-flight (awaiting start()).  The old entry's .finally
+    // will decrement its own claim; if the count is still > 0 afterward, the
+    // fresh entry owns the path and the unlink is skipped.
+    this._socketPathRefCount.set(
+      sessionProxySockPath,
+      (this._socketPathRefCount.get(sessionProxySockPath) ?? 0) + 1,
+    );
+
     // tc-2x3.4: per-session error boundary — late-binding entry reference.
     //
     // `entry` is declared below (after `server` is created), but `onFatalError`
@@ -398,13 +432,10 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
 
       // Tear down: stop the session-proxy (detach `-CC` client, ≤3 s then
       // SIGKILL the tmux child), close the per-session socket server, unlink
-      // the socket file.  We set tornDown above so `_teardownEntry` would
-      // short-circuit; do the equivalent teardown inline.
-      void entry.sessionProxy.stop().finally(() => {
-        entry.server.close(() => {
-          removeSocket(entry.socketPath);
-        });
-      });
+      // the socket file — with the ownership guard that prevents clobbering a
+      // fresh entry that may have taken over this socket path during stop()'s
+      // ≤3 s window (tc-2x3.4 DEFECT 1).
+      this._doSocketTeardown(entry);
     };
 
     const sessionProxy = createSessionProxy({
@@ -465,6 +496,9 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
       // Creation failed before readiness — clean up the half-built entry so we
       // leave no listening socket or running tmux behind, then rethrow so
       // ensureSessionProxy removes the registry slot and the claim fails.
+      // Release the socket-path ref-count claim added at the top of this method.
+      // The caller explicitly unlinks via removeSocket below; no auto-unlink here.
+      this._releaseSocketPath(sessionProxySockPath);
       try { sessionProxy.kill(); } catch { /* not started */ }
       await new Promise<void>((res) => { server.close(() => res()); });
       removeSocket(sessionProxySockPath);
@@ -491,10 +525,18 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
       // SessionProxy's host.onExit broadcastErrorAndClose runs synchronously
       // before our handler in registration order, but the close-and-unlink
       // matches the pre-collapse 500ms grace from session-proxy-entry.ts).
+      // Ownership guard (tc-2x3.4 DEFECT 1): same close-vs-unref logic as
+      // _doSocketTeardown — see that method's comment for the full explanation.
+      // ensureSessionProxy may have rebound the path during the 500ms grace window.
       setTimeout(() => {
-        server.close(() => {
-          removeSocket(sessionProxySockPath);
-        });
+        const refCount = this._socketPathRefCount.get(sessionProxySockPath) ?? 0;
+        if (refCount <= 1) {
+          this._socketPathRefCount.delete(sessionProxySockPath);
+          server.close();
+        } else {
+          this._socketPathRefCount.set(sessionProxySockPath, refCount - 1);
+          server.unref();
+        }
       }, 500);
 
       // Reap the registry entry + fire the crash handler, but only if THIS
@@ -521,12 +563,85 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
   private _teardownEntry(entry: SessionProxyEntry): void {
     if (entry.tornDown) return;
     entry.tornDown = true;
+    this._doSocketTeardown(entry);
+  }
+
+  /**
+   * Shared deferred socket teardown: stop the session-proxy, close the server,
+   * then unlink the socket file — BUT only if no currently-live or in-flight
+   * entry owns that socket path (ownership guard, tc-2x3.4 DEFECT 1).
+   *
+   * # Ownership guard
+   *
+   * `stop()` can take up to ~3 s (detach `-CC`, then SIGKILL fallback).  During
+   * that window the extension may call `ensureSessionProxy` again for the same
+   * session, which calls `_createSessionProxy` → `removeSocket(path)` → binds a
+   * NEW server on the same path.  Without the guard, the old entry's deferred
+   * `.finally` would fire `removeSocket(path)` AFTER the fresh server has
+   * already claimed it, unlinking the LIVE socket of the newly-reattached
+   * session and making it unreachable to any new client connections.
+   *
+   * Guard mechanism: `_socketPathRefCount` tracks how many entries (live OR
+   * in-flight) claim a given path.  `_createSessionProxy` increments the count
+   * immediately (even before `start()` resolves), and `_releaseSocketPath`
+   * decrements it at unlink time, performing the unlink only when the count
+   * reaches 0 (no remaining claimants).
+   *
+   * This is the SINGLE place both the boundary path (onFatalError) and the reap
+   * path (_teardownEntry) perform the deferred unlink, so the guard is applied
+   * consistently to both.
+   */
+  private _doSocketTeardown(entry: SessionProxyEntry): void {
     // Fire-and-forget: stop() resolves when tmux exits (≤3 s, then SIGKILL).
     void entry.sessionProxy.stop().finally(() => {
-      entry.server.close(() => {
-        removeSocket(entry.socketPath);
-      });
+      // Ownership guard (tc-2x3.4 DEFECT 1): check BEFORE calling server.close().
+      //
+      // Node.js net.Server.close() on a unix socket AUTOMATICALLY UNLINKS the
+      // socket file path that was passed to server.listen() — regardless of
+      // whether a fresh server has since bound to the same path.  If a fresh
+      // entry has claimed this path (ref count > 1), calling close() would
+      // clobber the live socket of the reattached session.
+      //
+      // When the path is still exclusively owned by THIS entry (ref count === 1),
+      // call server.close() normally — it closes the server AND unlinks the path
+      // as a side effect, which is exactly what we want.
+      //
+      // When a fresh entry has since claimed the path, call server.unref()
+      // instead: this prevents the old server from blocking process exit but
+      // does NOT unlink the socket file.  The old server's listening fd is
+      // orphaned (the socket path was already unlinked when the fresh
+      // _createSessionProxy called removeSocket), so it cannot accept new
+      // connections regardless.  The ref-count claim for this entry is
+      // released without triggering a file unlink.
+      const refCount = this._socketPathRefCount.get(entry.socketPath) ?? 0;
+      if (refCount <= 1) {
+        // No fresh claimant — close normally (auto-unlinks the path).
+        this._socketPathRefCount.delete(entry.socketPath);
+        entry.server.close();
+      } else {
+        // A fresh entry owns the path — abandon the old server without unlinking.
+        this._socketPathRefCount.set(entry.socketPath, refCount - 1);
+        entry.server.unref();
+      }
     });
+  }
+
+  /**
+   * Decrement the socket-path reference count for `socketPath` without
+   * performing any socket file operation.  Used only in the creation-failure
+   * path (the catch block in `_createSessionProxy`) where the caller handles
+   * the unlink explicitly via `removeSocket`.
+   *
+   * The teardown path uses the inline close-vs-unref logic in `_doSocketTeardown`
+   * and the host.onExit handler directly, so this method is NOT called there.
+   */
+  private _releaseSocketPath(socketPath: string): void {
+    const current = this._socketPathRefCount.get(socketPath) ?? 0;
+    if (current <= 1) {
+      this._socketPathRefCount.delete(socketPath);
+    } else {
+      this._socketPathRefCount.set(socketPath, current - 1);
+    }
   }
 }
 
