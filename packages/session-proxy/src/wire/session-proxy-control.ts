@@ -1230,9 +1230,10 @@ export interface RenamePaneCommand {
  * resolves the cascade host-side):
  *   - `"pane"`    → `set-option -pt %N <option> <value>` (target = `paneId`).
  *   - `"window"`  → `set-option -wt @N <option> <value>` (target = `windowId`).
- *   - `"session"` → `set-option -t = <option> <value>` (the bound session; no
- *                   target id — the session-proxy is bound to exactly one
- *                   session for its lifetime).
+ *   - `"session"` → `set-option -t <session-name> <option> <value>` (the bound
+ *                   session, resolved by name from the model — tmux 3.4 rejects
+ *                   the `-t =` current-session sigil here; the session-proxy is
+ *                   bound to exactly one session for its lifetime).
  *
  * Options (cold-start.md §4.A):
  *   - `"bound"`  (pane)                 — binding intent.
