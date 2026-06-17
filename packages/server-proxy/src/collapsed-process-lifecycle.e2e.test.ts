@@ -122,7 +122,7 @@ async function connectAndHandshake(endpoint: string): Promise<{
 }> {
   const transport = await connectSocketTransport(endpoint);
   await runClientHandshake(transport, CLIENT_CAPS, "server-proxy.capabilities");
-  const mux = new TransportMux(transport as Parameters<ConstructorParameters<typeof TransportMux>[0] extends infer P ? () => P : never>[0]);
+  const mux = new TransportMux(transport);
 
   const snapshotP = new Promise<ServerProxySnapshotMessage>((resolve) => {
     const unsub = mux.subscribe((msg) => {
