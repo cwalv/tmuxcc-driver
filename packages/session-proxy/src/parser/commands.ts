@@ -588,6 +588,73 @@ export function showOptionsForPane(paneId: number, option: string): string {
   return `show-options -pvt %${paneId} ${quoteArg(option)}`;
 }
 
+/**
+ * Serialize a `set-option -ut %<paneId> <option>` command targeting a specific
+ * pane — UNSET (clear) the pane-local user-option (tc-i9aq.1).
+ *
+ * Distinct from `setOptionForPane(…, "")`: an empty value stores `''` (the
+ * option is set-but-empty), whereas `-u` removes the option entirely so the
+ * requery's `#{@…}` format expands to empty AND the option no longer
+ * participates in the cascade walk.  Used by the `set-object-policy` verb when
+ * the value is null (cold-start.md §4.A: absent = no policy).
+ *
+ * @param paneId  Numeric pane ID (the N in `%N`).
+ * @param option  Pane user-option name (e.g. `@tmuxcc-bound`).
+ * @returns       e.g. `set-option -ut %5 @tmuxcc-bound`
+ */
+export function unsetOptionForPane(paneId: number, option: string): string {
+  return `set-option -upt %${paneId} ${quoteArg(option)}`;
+}
+
+/**
+ * Serialize a `set-option -uwt @<windowId> <option>` command — UNSET (clear) a
+ * window-local user-option (tc-i9aq.1).  See {@link unsetOptionForPane}.
+ *
+ * @param windowId  Numeric window ID (the N in `@N`).
+ * @param option    Window user-option name (e.g. `@tmuxcc-detach`).
+ * @returns         e.g. `set-option -uwt @3 @tmuxcc-detach`
+ */
+export function unsetOptionForWindow(windowId: number, option: string): string {
+  return `set-option -uwt @${windowId} ${quoteArg(option)}`;
+}
+
+/**
+ * Serialize a `set-option -t <sessionName> <option> <value>` command targeting
+ * a specific SESSION by name (tc-i9aq.1).
+ *
+ * The session-proxy is bound to exactly one session for its lifetime, so the
+ * plain `-t <name>` target pins it (cold-start.md §4.A session-scope
+ * `@tmuxcc-detach`).  The value is quoted; an empty value stores `''`.
+ *
+ * NOTE: verified tmux 3.4 — `set-option -t =<name>` is REJECTED ("no such
+ * session: =<name>"); the `=` exact-match sigil is a `list-*`/`-t` target
+ * filter, not accepted by `set-option`.  Use the plain name.
+ *
+ * @param sessionName  The bound session's name.
+ * @param option       Session user-option name (e.g. `@tmuxcc-detach`).
+ * @param value        Option value.
+ * @returns            e.g. `set-option -t work @tmuxcc-detach kill`
+ */
+export function setOptionForSession(
+  sessionName: string,
+  option: string,
+  value: string,
+): string {
+  return `set-option -t ${quoteArg(sessionName)} ${quoteArg(option)} ${quoteArg(value)}`;
+}
+
+/**
+ * Serialize a `set-option -ut <sessionName> <option>` command — UNSET (clear)
+ * a session-local user-option (tc-i9aq.1).  See {@link setOptionForSession}.
+ *
+ * @param sessionName  The bound session's name.
+ * @param option       Session user-option name (e.g. `@tmuxcc-detach`).
+ * @returns            e.g. `set-option -ut work @tmuxcc-detach`
+ */
+export function unsetOptionForSession(sessionName: string, option: string): string {
+  return `set-option -ut ${quoteArg(sessionName)} ${quoteArg(option)}`;
+}
+
 // ---------------------------------------------------------------------------
 // split-window
 // ---------------------------------------------------------------------------

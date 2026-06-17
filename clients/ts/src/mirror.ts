@@ -118,6 +118,29 @@ export interface ClientPane {
    */
   readonly label: string | undefined;
   /**
+   * tc-i9aq.1 (cold-start.md §4.A): durable binding intent from the per-pane
+   * `@tmuxcc-bound` user-option.  True when the user wants a VS Code terminal
+   * recreated for this pane on attach.  Defaults false.  Driven by
+   * SnapshotPane.bound / PaneOpenedMessage.bound / PanePolicyChangedMessage.
+   */
+  readonly bound: boolean;
+  /**
+   * tc-i9aq.1 (cold-start.md §4.A): RESOLVED detach-on-close policy — the
+   * effective first-wins value of `@tmuxcc-detach` walked pane→window→session.
+   * "detach" keeps the tmux pane alive when the tab closes; "kill" exits it.
+   * `undefined` means no scope set a policy (the extension applies its own
+   * default).  Driven by SnapshotPane.detach / PaneOpenedMessage.detach /
+   * PanePolicyChangedMessage.
+   */
+  readonly detach: "detach" | "kill" | undefined;
+  /**
+   * tc-i9aq.1 (cold-start.md §4.A): durable icon policy from the per-pane
+   * `@tmuxcc-icon` user-option, or `undefined` when unset.  Opaque string the
+   * extension interprets.  Driven by SnapshotPane.icon / PaneOpenedMessage.icon
+   * / PanePolicyChangedMessage.
+   */
+  readonly icon: string | undefined;
+  /**
    * tc-2mn8: live shell window title, sniffed from OSC-0/2 sequences in the
    * pane's %output stream. `undefined` means no OSC title has been observed yet
    * (pane just opened, or shell has not set a title). Empty string means the
@@ -358,6 +381,10 @@ export function applySnapshot(snapshot: SnapshotMessage): {
       exitCode: p.dead ? p.exitCode : undefined,
       // tc-1a8z: durable, driver-owned pane name. Absent ⇒ no name set.
       label: p.label,
+      // tc-i9aq.1 (cold-start.md §4.A): durable policy/intent. Absent ⇒ unset.
+      bound: p.bound ?? false,
+      detach: p.detach,
+      icon: p.icon,
       // tc-2mn8: live shell title from OSC-0/2 sniff. Absent ⇒ not yet observed.
       paneTitle: p.paneTitle,
       // tc-ozk.2: snapshot panes carry no per-pane origin — they are
@@ -426,6 +453,11 @@ export function applyDelta(model: ClientModel, msg: SessionProxyMessage): Client
         // tc-1a8z: born already carrying a durable name (e.g. cold attach to a
         // previously-renamed pane). Absent on the wire ⇒ no name set.
         label: msg.label,
+        // tc-i9aq.1 (cold-start.md §4.A): born carrying durable policy/intent
+        // (cold-attach restore reads these). Absent ⇒ unset.
+        bound: msg.bound ?? false,
+        detach: msg.detach,
+        icon: msg.icon,
         // tc-2mn8: pane.opened does NOT carry paneTitle (only the snapshot and
         // pane.title-changed delta do — matching the session-proxy projection).
         paneTitle: undefined,
@@ -486,6 +518,23 @@ export function applyDelta(model: ClientModel, msg: SessionProxyMessage): Client
       if (pane.label === msg.label) return model; // no observable change
       const panes = new Map(model.panes);
       panes.set(msg.paneId, { ...pane, label: msg.label });
+      return { ...model, panes };
+    }
+
+    // tc-i9aq.1 (cold-start.md §4.A): durable policy/intent changed. Carries
+    // the per-pane @tmuxcc-bound/-detach/-icon values surfaced by a requery (or
+    // an optimistic pane-scope set-object-policy). `detach`/`icon` absent ⇒ that
+    // aspect returned to unset.
+    case "pane.policy-changed": {
+      const pane = model.panes.get(msg.paneId);
+      if (!pane) return model;
+      const detach = msg.detach;
+      const icon = msg.icon;
+      if (pane.bound === msg.bound && pane.detach === detach && pane.icon === icon) {
+        return model; // no observable change
+      }
+      const panes = new Map(model.panes);
+      panes.set(msg.paneId, { ...pane, bound: msg.bound, detach, icon });
       return { ...model, panes };
     }
 
@@ -1139,7 +1188,7 @@ export class Mirror {
 
     // Track previously-seen model to diff against.
     let prevModel: {
-      panes: ReadonlyMap<PaneId, { cols: number; rows: number; dead: boolean; exitCode: number | undefined; label: string | undefined; paneTitle: string | undefined }>;
+      panes: ReadonlyMap<PaneId, { cols: number; rows: number; dead: boolean; exitCode: number | undefined; label: string | undefined; bound: boolean; detach: "detach" | "kill" | undefined; icon: string | undefined; paneTitle: string | undefined }>;
       windows: ReadonlyMap<WindowId, { name: string; layout: WindowLayout }>;
       focus: { paneId: PaneId | null; windowId: WindowId | null };
       exitCodes: ReadonlyMap<PaneId, number>;
@@ -1222,6 +1271,11 @@ export class Mirror {
             ...(pane.dead && pane.exitCode !== undefined ? { exitCode: pane.exitCode } : {}),
             // tc-1a8z: carry a durable name so the renderer composes it on open.
             ...(pane.label !== undefined ? { label: pane.label } : {}),
+            // tc-i9aq.1 (cold-start.md §4.A): carry durable policy/intent so the
+            // renderer (and the cold-attach restore path) sees it on open.
+            ...(pane.bound ? { bound: true } : {}),
+            ...(pane.detach !== undefined ? { detach: pane.detach } : {}),
+            ...(pane.icon !== undefined ? { icon: pane.icon } : {}),
           });
           subscribeBytes(pid);
         } else {
@@ -1235,6 +1289,19 @@ export class Mirror {
           // tc-1a8z: durable pane-name change on an existing pane.
           if (prevPane.label !== pane.label) {
             hook.onPaneLabelChanged(pid, pane.label);
+          }
+          // tc-i9aq.1 (cold-start.md §4.A): durable policy/intent change on an
+          // existing pane (requery re-read or optimistic set-object-policy).
+          if (
+            prevPane.bound !== pane.bound ||
+            prevPane.detach !== pane.detach ||
+            prevPane.icon !== pane.icon
+          ) {
+            hook.onPanePolicyChanged(pid, {
+              bound: pane.bound,
+              detach: pane.detach,
+              icon: pane.icon,
+            });
           }
           // tc-2mn8: live shell title change on an existing pane.
           if (prevPane.paneTitle !== pane.paneTitle) {
@@ -1261,9 +1328,9 @@ export class Mirror {
       }
 
       // Update prevModel to reflect current state.
-      const newPanes = new Map<PaneId, { cols: number; rows: number; dead: boolean; exitCode: number | undefined; label: string | undefined; paneTitle: string | undefined }>();
+      const newPanes = new Map<PaneId, { cols: number; rows: number; dead: boolean; exitCode: number | undefined; label: string | undefined; bound: boolean; detach: "detach" | "kill" | undefined; icon: string | undefined; paneTitle: string | undefined }>();
       for (const [pid, p] of curr.panes) {
-        newPanes.set(pid, { cols: p.cols, rows: p.rows, dead: p.dead, exitCode: p.exitCode, label: p.label, paneTitle: p.paneTitle });
+        newPanes.set(pid, { cols: p.cols, rows: p.rows, dead: p.dead, exitCode: p.exitCode, label: p.label, bound: p.bound, detach: p.detach, icon: p.icon, paneTitle: p.paneTitle });
       }
       const newWindows = new Map<WindowId, { name: string; layout: WindowLayout }>();
       for (const [wid, w] of curr.windows) {
@@ -1316,6 +1383,11 @@ export class Mirror {
         // tc-1a8z: replay a pre-existing durable name so the renderer composes
         // it on first paint.
         ...(pane.label !== undefined ? { label: pane.label } : {}),
+        // tc-i9aq.1 (cold-start.md §4.A): replay durable policy/intent so the
+        // cold-attach restore path (and the renderer) sees it on first paint.
+        ...(pane.bound ? { bound: true } : {}),
+        ...(pane.detach !== undefined ? { detach: pane.detach } : {}),
+        ...(pane.icon !== undefined ? { icon: pane.icon } : {}),
       });
       subscribeBytes(pid);
     }
@@ -1327,9 +1399,9 @@ export class Mirror {
     hook.onConnected();
 
     // Seed prevModel from initial state.
-    const seedPanes = new Map<PaneId, { cols: number; rows: number; dead: boolean; exitCode: number | undefined; label: string | undefined; paneTitle: string | undefined }>();
+    const seedPanes = new Map<PaneId, { cols: number; rows: number; dead: boolean; exitCode: number | undefined; label: string | undefined; bound: boolean; detach: "detach" | "kill" | undefined; icon: string | undefined; paneTitle: string | undefined }>();
     for (const [pid, p] of initial.panes) {
-      seedPanes.set(pid, { cols: p.cols, rows: p.rows, dead: p.dead, exitCode: p.exitCode, label: p.label, paneTitle: p.paneTitle });
+      seedPanes.set(pid, { cols: p.cols, rows: p.rows, dead: p.dead, exitCode: p.exitCode, label: p.label, bound: p.bound, detach: p.detach, icon: p.icon, paneTitle: p.paneTitle });
     }
     const seedWindows = new Map<WindowId, { name: string; layout: WindowLayout }>();
     for (const [wid, w] of initial.windows) {

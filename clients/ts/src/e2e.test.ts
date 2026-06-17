@@ -145,6 +145,9 @@ function buildBaseModel() {
     dead: false,
     exitCode: undefined,
     label: undefined,
+    bound: false,
+    detach: undefined,
+    icon: undefined,
     // scrollbackHandle is optional — omit rather than passing undefined (exactOptionalPropertyTypes)
   });
   m = addPane(m, {
@@ -157,6 +160,9 @@ function buildBaseModel() {
     dead: false,
     exitCode: undefined,
     label: undefined,
+    bound: false,
+    detach: undefined,
+    icon: undefined,
     // scrollbackHandle is optional — omit rather than passing undefined (exactOptionalPropertyTypes)
   });
   m = setFocus(m, { paneId: P0, windowId: W0, sessionId: S0 });

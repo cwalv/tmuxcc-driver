@@ -74,6 +74,7 @@ import type {
   PaneLabelChangedMessage,
   PaneDeadChangedMessage,
   PaneTitleChangedMessage,
+  PanePolicyChangedMessage,
   WindowAddedMessage,
   WindowClosedMessage,
   WindowRenamedMessage,
@@ -223,6 +224,11 @@ export function projectSnapshot(
       cols: pane.cols,
       rows: pane.rows,
       ...(pane.label !== undefined ? { label: pane.label } : {}),
+      // tc-i9aq.1 (cold-start.md §4.A): durable policy/intent. Kept off the wire
+      // when unset; `bound` only when true.
+      ...(pane.bound ? { bound: true } : {}),
+      ...(pane.detach !== undefined ? { detach: pane.detach } : {}),
+      ...(pane.icon !== undefined ? { icon: pane.icon } : {}),
       ...(pane.paneTitle !== undefined ? { paneTitle: pane.paneTitle } : {}),
     };
     if (pane.dead) {
@@ -338,6 +344,11 @@ export function diffModel(
         // tc-1a8z: born already carrying a durable name (e.g. cold attach to a
         // previously-renamed pane). Off when unset (additive optional).
         ...(pane.label !== undefined ? { label: pane.label } : {}),
+        // tc-i9aq.1 (cold-start.md §4.A): born carrying durable policy/intent
+        // (the cold-attach restore path reads these). Off when unset.
+        ...(pane.bound ? { bound: true } : {}),
+        ...(pane.detach !== undefined ? { detach: pane.detach } : {}),
+        ...(pane.icon !== undefined ? { icon: pane.icon } : {}),
         ...(origin !== undefined ? { origin } : {}),
       };
       out.push(msg);
@@ -414,6 +425,35 @@ export function diffModel(
         seq: SEQ,
         paneId: pane.paneId,
         ...(pane.label !== undefined ? { label: pane.label } : {}),
+      };
+      out.push(msg);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 5a3. pane.policy-changed — durable policy/intent changes (tc-i9aq.1, §4.A)
+  //
+  // The per-pane @tmuxcc-bound/-detach/-icon options change either optimistically
+  // (input-path injects internal:set-pane-policy after a pane-scope
+  // set-object-policy) or when a requery re-reads them (incl. the RESOLVED
+  // detach when a window/session default changed). A pane in BOTH prev and next
+  // whose policy fields differ gets a delta; absent fields = returned to unset.
+  // -------------------------------------------------------------------------
+  for (const [id, pane] of next.panes) {
+    const prevPane = prev.panes.get(id);
+    if (!prevPane) continue; // new panes carry policy in pane.opened
+    if (
+      prevPane.bound !== pane.bound ||
+      prevPane.detach !== pane.detach ||
+      prevPane.icon !== pane.icon
+    ) {
+      const msg: PanePolicyChangedMessage = {
+        type: "pane.policy-changed",
+        seq: SEQ,
+        paneId: pane.paneId,
+        bound: pane.bound,
+        ...(pane.detach !== undefined ? { detach: pane.detach } : {}),
+        ...(pane.icon !== undefined ? { icon: pane.icon } : {}),
       };
       out.push(msg);
     }

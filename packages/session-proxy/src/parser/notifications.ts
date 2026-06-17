@@ -355,6 +355,42 @@ export interface InternalPaneLabelSetNotification {
   readonly label: string | undefined;
 }
 
+/**
+ * Synthetic internal event: the session-proxy applied a `set-object-policy`
+ * command at PANE scope (optimistic) and is now updating the pane's durable
+ * policy/intent fields (tc-i9aq.1, cold-start.md §4.A).
+ *
+ * This event is NEVER parsed from tmux control-mode output — it is injected by
+ * input-path.ts on two occasions:
+ *
+ *   1. After sending `set-option -pt %N @tmuxcc-<opt> <value>` (optimistic
+ *      apply). Each field is present iff that aspect was the one written; the
+ *      reducer patches only the present fields.
+ *   2. If tmux subsequently replies with %error, with the captured before-value
+ *      (compensating reversal — tc-7xv.37).
+ *
+ * Only PANE-scope writes inject this event: window/session writes change the
+ * RESOLVED pane `detach` and reconcile on the next requery (their per-scope-own
+ * values are not separately modelled — cold-start.md §4.A keeps resolution
+ * host-side and the canonical pane carries the effective value).
+ */
+export interface InternalPanePolicySetNotification {
+  readonly kind: "internal:set-pane-policy";
+  readonly paneId: PaneId;
+  /** New binding-intent value, when this write touched `@tmuxcc-bound`. */
+  readonly bound?: boolean;
+  /**
+   * New detach policy, when this write touched `@tmuxcc-detach` at pane scope.
+   * `null` means cleared (returned to inherit/unset).
+   */
+  readonly detach?: "detach" | "kill" | null;
+  /**
+   * New icon policy, when this write touched `@tmuxcc-icon`.  `null` means
+   * cleared.
+   */
+  readonly icon?: string | null;
+}
+
 // ---------------------------------------------------------------------------
 // Discriminated union
 // ---------------------------------------------------------------------------
@@ -382,7 +418,9 @@ export type NotificationEvent =
   | InternalWindowMonitorActivitySetNotification
   | InternalWindowMonitorSilenceSetNotification
   // tc-1a8z: durable pane name (@tmuxcc_label)
-  | InternalPaneLabelSetNotification;
+  | InternalPaneLabelSetNotification
+  // tc-i9aq.1: durable pane policy/intent (@tmuxcc-bound/-detach/-icon)
+  | InternalPanePolicySetNotification;
 
 // ---------------------------------------------------------------------------
 // Internal parsing helpers (byte-level, zero-copy where possible)

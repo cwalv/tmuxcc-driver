@@ -183,6 +183,37 @@ export interface Pane {
    */
   readonly label: string | undefined;
   /**
+   * Durable binding intent (tc-i9aq.1, cold-start.md §4.A) from the per-pane
+   * `@tmuxcc-bound` user-option.  True when the user wants a VS Code terminal
+   * recreated for this pane on attach; false when no intent is recorded.
+   *
+   * Authoritative source: the `@tmuxcc-bound` pane user-option, re-read on
+   * every bootstrap requery, so binding intent survives a VS Code restart and
+   * vanishes with the pane.  Written ONLY via the `set-object-policy` command
+   * (the driver is the sole tmux writer); the extension never shells out.
+   */
+  readonly bound: boolean;
+  /**
+   * RESOLVED detach-on-close policy (tc-i9aq.1, cold-start.md §4.A) from the
+   * `@tmuxcc-detach` user-option, read through a `#{@tmuxcc-detach}` FORMAT
+   * that walks pane→window→session — so this is the EFFECTIVE first-wins
+   * cascade value (pane override, else window default, else session default).
+   *
+   * `"detach"` keeps the tmux pane running when the VS Code tab closes;
+   * `"kill"` exits it.  `undefined` means no scope set a policy (the extension
+   * applies its own default).  The host owns the close DECISION; tmux merely
+   * computes the same first-wins walk.  Per-scope-OWN values (for the toggle
+   * UI's current-setting display) live in the extension's ephemeral policy
+   * cache, written through the verb.
+   */
+  readonly detach: "detach" | "kill" | undefined;
+  /**
+   * Durable icon policy (tc-i9aq.1, cold-start.md §4.A) from the per-pane
+   * `@tmuxcc-icon` user-option, or undefined when unset.  Opaque string (e.g. a
+   * ThemeIcon id); the extension interprets it.
+   */
+  readonly icon: string | undefined;
+  /**
    * Handle into tc-fx2's scrollback buffer store, or undefined if no buffer
    * has been allocated yet. The reducer mints a handle on pane creation;
    * tc-fx2 registers the buffer under it. This field is session-proxy-internal and
@@ -814,7 +845,23 @@ export function removePane(model: SessionModel, paneId: PaneId): SessionModel {
 export function updatePane(
   model: SessionModel,
   paneId: PaneId,
-  patch: Partial<Pick<Pane, "cols" | "rows" | "mode" | "dead" | "exitCode" | "label" | "scrollbackHandle" | "paneTitle">>,
+  patch: Partial<
+    Pick<
+      Pane,
+      | "cols"
+      | "rows"
+      | "mode"
+      | "dead"
+      | "exitCode"
+      | "label"
+      | "scrollbackHandle"
+      | "paneTitle"
+      // tc-i9aq.1: durable policy/intent optimistic-update fields.
+      | "bound"
+      | "detach"
+      | "icon"
+    >
+  >,
 ): SessionModel {
   const pane = model.panes.get(paneId);
   if (!pane) return model;

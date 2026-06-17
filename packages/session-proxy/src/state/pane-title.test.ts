@@ -58,6 +58,9 @@ function buildBaseModel(): SessionModel {
     dead: false,
     exitCode: undefined,
     label: undefined,
+    bound: false,
+    detach: undefined,
+    icon: undefined,
     // paneTitle absent (undefined → no title seen yet)
   });
   return model;
@@ -187,6 +190,9 @@ describe("paneTitle – SnapshotPane carries paneTitle (tc-2mn8)", () => {
       dead: false,
       exitCode: undefined,
       label: undefined,
+      bound: false,
+      detach: undefined,
+      icon: undefined,
       paneTitle: "born-with-title",
     });
     const snapshot = projectSnapshot(model);

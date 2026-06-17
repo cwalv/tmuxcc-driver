@@ -134,6 +134,22 @@ export interface PaneOpenedMessage extends MessageBase {
    */
   readonly label?: string;
   /**
+   * Durable binding intent (tc-i9aq.1, cold-start.md §4.A) when this pane is
+   * born already carrying `@tmuxcc-bound` — e.g. a cold attach that observes a
+   * pane a previous session marked.  Absent means no intent.  Additive optional.
+   */
+  readonly bound?: boolean;
+  /**
+   * RESOLVED detach-on-close policy (tc-i9aq.1) when this pane is born carrying
+   * a `@tmuxcc-detach` policy at any scope.  Absent means inherit.  Additive.
+   */
+  readonly detach?: "detach" | "kill";
+  /**
+   * Durable icon policy (tc-i9aq.1) when this pane is born carrying
+   * `@tmuxcc-icon`.  Absent means no policy.  Additive optional.
+   */
+  readonly icon?: string;
+  /**
    * Causality tag (tc-ozk.2). PRESENT when this pane was created by a wire verb
    * (split-pane / open-window): names the connection + requestId that caused
    * it. ABSENT when foreign (native client, script). Additive optional field
@@ -380,6 +396,25 @@ export interface SnapshotPane {
    */
   readonly label?: string;
   /**
+   * Durable binding intent (tc-i9aq.1, cold-start.md §4.A) from the per-pane
+   * `@tmuxcc-bound` user-option.  True when the user wants a VS Code terminal
+   * recreated for this pane on attach.  Additive optional field — absent/false
+   * means no intent.
+   */
+  readonly bound?: boolean;
+  /**
+   * RESOLVED detach-on-close policy (tc-i9aq.1, cold-start.md §4.A) — the
+   * effective first-wins value of `@tmuxcc-detach` walked pane→window→session.
+   * "detach" keeps the tmux pane alive when the tab closes; "kill" exits it.
+   * Absent means no scope set a policy (the extension applies its default).
+   */
+  readonly detach?: "detach" | "kill";
+  /**
+   * Durable icon policy (tc-i9aq.1, cold-start.md §4.A) from the per-pane
+   * `@tmuxcc-icon` user-option.  Absent means no policy.
+   */
+  readonly icon?: string;
+  /**
    * Live shell window title for this pane, as sniffed from OSC-0/2 sequences
    * in the pane's `%output` stream (tc-2mn8). Absent when no OSC title has
    * been observed yet (pane just opened, or shell has not set a title).
@@ -604,6 +639,37 @@ export interface PaneTitleChangedMessage extends MessageBase {
   readonly paneId: PaneId;
   /** The new live shell window title. Empty string means the shell cleared it. */
   readonly title: string;
+}
+
+/**
+ * A pane's durable policy/intent (cold-start.md §4.A) changed.
+ * direction: session-proxy→client
+ *
+ * Carries the per-pane `@tmuxcc-*` user-options surfaced by the requery
+ * (tc-i9aq.1):
+ *   - `bound`  — binding intent (recreate a terminal on attach).
+ *   - `detach` — RESOLVED close policy ("detach"|"kill"); absent = inherit (no
+ *                scope set a policy).  The `#{@tmuxcc-detach}` format walks
+ *                pane→window→session, so this is the effective first-wins value.
+ *   - `icon`   — durable icon policy string; absent = no policy.
+ *
+ * Emitted either optimistically (the input-path injects `internal:set-pane-policy`
+ * right after a `set-object-policy` command) or when a later requery re-reads the
+ * options' new values.  A pane present in BOTH prev and next whose policy fields
+ * differ gets a delta; absent fields mean that aspect returned to unset.
+ *
+ * Non-breaking additive delta — older clients that do not recognise this type
+ * fall through to the `default` branch in `applyDelta` and ignore it.
+ */
+export interface PanePolicyChangedMessage extends MessageBase {
+  readonly type: "pane.policy-changed";
+  readonly paneId: PaneId;
+  /** Binding intent: true when `@tmuxcc-bound` is set. */
+  readonly bound: boolean;
+  /** Resolved detach-on-close policy; absent when unset at every scope. */
+  readonly detach?: "detach" | "kill";
+  /** Durable icon policy; absent when unset. */
+  readonly icon?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -1149,6 +1215,55 @@ export interface RenamePaneCommand {
   /** New durable pane name.  Empty string clears the durable name. */
   readonly title: string;
 }
+// ── tc-i9aq.1: durable object-policy/intent write (cold-start.md §4.A/§6.1) ──
+
+/**
+ * Write a durable per-object policy/intent `@tmuxcc-*` user-option.
+ * direction: client→session-proxy
+ *
+ * This is the SOLE channel by which the extension's policy layer makes durable
+ * per-object state changes (cold-start.md §6.1: "the extension never shells out
+ * to tmux" — it issues this verb; the driver runs the `set-option`).  The
+ * change reappears in the next requery as canonical state (one fact, one owner).
+ *
+ * Scopes (tmux does not inherit user-options across scopes; the extension
+ * resolves the cascade host-side):
+ *   - `"pane"`    → `set-option -pt %N <option> <value>` (target = `paneId`).
+ *   - `"window"`  → `set-option -wt @N <option> <value>` (target = `windowId`).
+ *   - `"session"` → `set-option -t = <option> <value>` (the bound session; no
+ *                   target id — the session-proxy is bound to exactly one
+ *                   session for its lifetime).
+ *
+ * Options (cold-start.md §4.A):
+ *   - `"bound"`  (pane)                 — binding intent.
+ *   - `"detach"` (pane/window/session)  — detach-on-close policy.
+ *   - `"icon"`   (pane)                 — icon policy.
+ * (The durable name `@tmuxcc-name` is the pre-existing `@tmuxcc_label`, written
+ * via `rename-pane`; it is NOT routed through this verb.)
+ *
+ * `value: null` CLEARS the option (`set-option -u`), which the requery maps back
+ * to unset.  A non-null string sets it.  The session-proxy injects an optimistic
+ * `internal:set-pane-policy` event for pane-scope writes (the model + the
+ * `pane.policy-changed` delta update immediately) with %error reversal; window /
+ * session writes reconcile on the next requery (their values surface as the
+ * RESOLVED pane `detach`).
+ *
+ * Additive addition — non-breaking per the versioning policy.
+ */
+export interface SetObjectPolicyCommand {
+  readonly kind: "set-object-policy";
+  /** Object scope the option is written at. */
+  readonly scope: "pane" | "window" | "session";
+  /** Target pane id (scope "pane"). */
+  readonly paneId?: PaneId;
+  /** Target window id (scope "window"). */
+  readonly windowId?: WindowId;
+  /** Which `@tmuxcc-*` option to write. */
+  readonly option: "bound" | "detach" | "icon";
+  /** New value, or null to clear (unset) the option. */
+  readonly value: string | null;
+}
+
 // ── tc-7xv.15: monitor-activity / monitor-silence commands ──────────────────
 
 /**
@@ -1261,6 +1376,8 @@ export type WireCommand =
   | BreakPaneCommand
   | SwapPaneCommand
   | RenamePaneCommand
+  // tc-i9aq.1: durable object-policy/intent write (cold-start.md §4.A)
+  | SetObjectPolicyCommand
   // tc-7xv.18: window verbs
   | KillWindowCommand
   | SwapWindowCommand
@@ -1519,6 +1636,8 @@ export type SessionProxyMessage =
   | PaneDeadChangedMessage
   // Live shell title delta (tc-2mn8)
   | PaneTitleChangedMessage
+  // Durable policy/intent delta (tc-i9aq.1, cold-start.md §4.A)
+  | PanePolicyChangedMessage
   // Window deltas
   | WindowAddedMessage
   | WindowClosedMessage

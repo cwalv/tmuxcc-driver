@@ -75,6 +75,10 @@ import {
   parseEffectIds,
   setOptionForWindow,
   setOptionForPane,
+  unsetOptionForPane,
+  unsetOptionForWindow,
+  setOptionForSession,
+  unsetOptionForSession,
   setWindowSizeManual,
   setWindowSizeDefault,
   resizeWindow,
@@ -82,7 +86,12 @@ import {
 } from "../parser/commands.js";
 import type { NotificationEvent } from "../parser/notifications.js";
 import type { SessionModel } from "../state/model.js";
-import { TMUXCC_LABEL_OPTION } from "../state/bootstrap.js";
+import {
+  TMUXCC_LABEL_OPTION,
+  TMUXCC_BOUND_OPTION,
+  TMUXCC_DETACH_OPTION,
+  TMUXCC_ICON_OPTION,
+} from "../state/bootstrap.js";
 
 // ---------------------------------------------------------------------------
 // Id-mapping helpers
@@ -146,6 +155,66 @@ function defaultWindowIdToTmux(id: WindowId): number {
     );
   }
   return n;
+}
+
+// ---------------------------------------------------------------------------
+// tc-i9aq.1: set-object-policy helpers (cold-start.md §4.A)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the optimistic `internal:set-pane-policy` event for a PANE-scope
+ * `set-object-policy` write.  Only the field the write touched is set; `null`
+ * value means the option was cleared (returns to unset/inherit).
+ */
+function buildPanePolicyEvent(
+  paneId: PaneId,
+  option: "bound" | "detach" | "icon",
+  value: string | null,
+): NotificationEvent {
+  switch (option) {
+    case "bound":
+      return { kind: "internal:set-pane-policy", paneId, bound: value !== null };
+    case "detach":
+      return {
+        kind: "internal:set-pane-policy",
+        paneId,
+        detach: value === "detach" || value === "kill" ? value : null,
+      };
+    case "icon":
+      return { kind: "internal:set-pane-policy", paneId, icon: value };
+  }
+}
+
+/**
+ * Build the compensating `internal:set-pane-policy` event that restores the
+ * before-value of the touched field (tc-7xv.37 reversal) on tmux %error.
+ */
+function buildPanePolicyRevert(
+  paneId: PaneId,
+  option: "bound" | "detach" | "icon",
+  prev: { readonly bound: boolean; readonly detach: "detach" | "kill" | undefined; readonly icon: string | undefined },
+): NotificationEvent {
+  switch (option) {
+    case "bound":
+      return { kind: "internal:set-pane-policy", paneId, bound: prev.bound };
+    case "detach":
+      return { kind: "internal:set-pane-policy", paneId, detach: prev.detach ?? null };
+    case "icon":
+      return { kind: "internal:set-pane-policy", paneId, icon: prev.icon ?? null };
+  }
+}
+
+/**
+ * The bound session's name from the live model.  The session-proxy is bound to
+ * exactly one session for its lifetime, so the first (only) session's name is
+ * the right `set-option -t <name>` target for a session-scope write.  Returns
+ * undefined when the model carries no session yet (cold bootstrap race).
+ */
+function firstSessionName(model: SessionModel): string | undefined {
+  for (const session of model.sessions.values()) {
+    return session.name;
+  }
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -1063,6 +1132,89 @@ export function createInputPath(
               },
               respond !== undefined ? { respond, correlationId, verbKind: "rename-pane" } : undefined,
             );
+            break;
+          }
+
+          case "set-object-policy": {
+            // tc-i9aq.1 (cold-start.md §4.A/§6.1): write a durable per-object
+            // @tmuxcc-* user-option.  The driver is the SOLE tmux writer; the
+            // extension issues this verb instead of shelling out.  The change
+            // reappears in the next requery as canonical state.
+            const optionName =
+              command.option === "bound" ? TMUXCC_BOUND_OPTION
+              : command.option === "detach" ? TMUXCC_DETACH_OPTION
+              : TMUXCC_ICON_OPTION;
+            const clear = command.value === null;
+
+            if (command.scope === "pane") {
+              if (command.paneId === undefined) {
+                respond?.(correlationId, {
+                  ok: false,
+                  code: "verb.failed",
+                  message: "set-object-policy: scope 'pane' requires paneId",
+                });
+                break;
+              }
+              const tmuxPaneNum = toTmuxPane(command.paneId);
+              const pid = command.paneId;
+              const cmd = clear
+                ? unsetOptionForPane(tmuxPaneNum, optionName)
+                : setOptionForPane(tmuxPaneNum, optionName, command.value as string);
+              // Optimistic apply with %error reversal (tc-7xv.37 pattern): patch
+              // only the field this write touched; capture the before-value so a
+              // rejection restores it.  The next requery re-confirms (incl. the
+              // RESOLVED detach).
+              const optimistic = buildPanePolicyEvent(pid, command.option, command.value);
+              sendCommandWithReversal(
+                cmd,
+                optimistic,
+                (before) => {
+                  const prev = before.panes.get(pid);
+                  if (prev === undefined) return null; // pane gone — nothing to revert.
+                  return buildPanePolicyRevert(pid, command.option, prev);
+                },
+                respond !== undefined ? { respond, correlationId, verbKind: "set-object-policy" } : undefined,
+              );
+              break;
+            }
+
+            if (command.scope === "window") {
+              if (command.windowId === undefined) {
+                respond?.(correlationId, {
+                  ok: false,
+                  code: "verb.failed",
+                  message: "set-object-policy: scope 'window' requires windowId",
+                });
+                break;
+              }
+              const tmuxWinNum = toTmuxWindow(command.windowId);
+              const cmd = clear
+                ? unsetOptionForWindow(tmuxWinNum, optionName)
+                : setOptionForWindow(tmuxWinNum, optionName, command.value as string);
+              // Window/session scope: no per-scope-own model field — the change
+              // surfaces as the RESOLVED pane `detach` on the next requery.  ACK
+              // only (no optimistic patch).
+              runAckVerb(respond, correlationId, "set-object-policy", cmd);
+              break;
+            }
+
+            // scope === "session": target the bound session by name.  The
+            // session-proxy is bound to exactly one session; read its name from
+            // the live model (the only session present).
+            const model = getModel?.();
+            const sessionName = model !== undefined ? firstSessionName(model) : undefined;
+            if (sessionName === undefined) {
+              respond?.(correlationId, {
+                ok: false,
+                code: "verb.failed",
+                message: "set-object-policy: scope 'session' but no bound session in model",
+              });
+              break;
+            }
+            const cmd = clear
+              ? unsetOptionForSession(sessionName, optionName)
+              : setOptionForSession(sessionName, optionName, command.value as string);
+            runAckVerb(respond, correlationId, "set-object-policy", cmd);
             break;
           }
           // ── tc-7xv.18: window verbs ──────────────────────────────────────────

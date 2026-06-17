@@ -1160,6 +1160,35 @@ class RuntimePipelineImpl implements RuntimePipeline {
       this._fireNotificationHandlers(event);
       return;
     }
+    // tc-i9aq.1: durable pane policy/intent optimistic update
+    // (@tmuxcc-bound/-detach/-icon). Patch only the fields this write touched;
+    // a later requery re-confirms them (and the RESOLVED detach) from tmux.
+    if (event.kind === "internal:set-pane-policy") {
+      this.patchModel((model) => {
+        const pane = model.panes.get(event.paneId);
+        if (pane === undefined) return model;
+        const patch: {
+          bound?: boolean;
+          detach?: "detach" | "kill" | undefined;
+          icon?: string | undefined;
+        } = {};
+        if (event.bound !== undefined && pane.bound !== event.bound) {
+          patch.bound = event.bound;
+        }
+        if (event.detach !== undefined) {
+          const next = event.detach === null ? undefined : event.detach;
+          if (pane.detach !== next) patch.detach = next;
+        }
+        if (event.icon !== undefined) {
+          const next = event.icon === null ? undefined : event.icon;
+          if (pane.icon !== next) patch.icon = next;
+        }
+        if (Object.keys(patch).length === 0) return model;
+        return updatePane(model, event.paneId, patch);
+      });
+      this._fireNotificationHandlers(event);
+      return;
+    }
 
     // Topology classification: anything that may have changed the structure
     // gets demoted to a dirty bit; the coalescer drives the requery.

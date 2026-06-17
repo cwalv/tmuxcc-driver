@@ -144,6 +144,9 @@ function makePane(
     dead: false,
     exitCode: undefined,
     label: undefined,
+    bound: false,
+    detach: undefined,
+    icon: undefined,
     // scrollbackHandle is optional — omit rather than passing undefined (exactOptionalPropertyTypes)
   };
 }

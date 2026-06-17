@@ -93,6 +93,10 @@ function makePane(
     dead,
     exitCode,
     label: undefined,
+    // tc-i9aq.1: durable policy/intent fields (required).
+    bound: false,
+    detach: undefined,
+    icon: undefined,
     // scrollbackHandle and paneTitle are optional — omit to avoid
     // exactOptionalPropertyTypes TS2375 when passing undefined explicitly.
   };

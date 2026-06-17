@@ -1432,6 +1432,9 @@ function makeReversalModel(opts: {
     dead: false,
     exitCode: undefined,
     label: undefined,
+    bound: false,
+    detach: undefined,
+    icon: undefined,
     // scrollbackHandle and paneTitle are optional — omit to avoid
     // exactOptionalPropertyTypes TS2375 when passing undefined explicitly.
   };
@@ -2276,5 +2279,221 @@ describe("createInputPath — runAckVerb ACK path (tc-u7cu.8)", () => {
 
     assert.equal(results.length, 1);
     assert.deepEqual(results[0]!.result, { ok: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite: tc-i9aq.1 set-object-policy — durable @tmuxcc-* user-option writes
+// (cold-start.md §4.A/§6.1). The driver is the sole tmux writer; this verb is
+// how the extension's policy layer makes durable per-object state changes.
+// ---------------------------------------------------------------------------
+
+describe("createInputPath — set-object-policy (tc-i9aq.1)", () => {
+  it("pane scope, set bound → set-option -pt %N @tmuxcc-bound 1 + optimistic event", () => {
+    const host = makeFakeDeps();
+    const dispatched: NotificationEvent[] = [];
+    const before = makeReversalModel({
+      windowSuffix: "5",
+      synchronizePanes: false,
+      monitorActivity: true,
+      monitorSilence: 0,
+    });
+    const path = createInputPath(host, {
+      dispatchSynthetic: (ev) => dispatched.push(ev),
+      getModel: () => before,
+    });
+    const pid = paneId("p500");
+
+    path.handleClientMessage({
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "sop-bound-set",
+      command: { kind: "set-object-policy", scope: "pane", paneId: pid, option: "bound", value: "1" },
+    });
+
+    assert.equal(host.lastWrite, "set-option -pt %500 @tmuxcc-bound 1\n");
+    assert.equal(dispatched.length, 1);
+    assert.deepEqual(dispatched[0], { kind: "internal:set-pane-policy", paneId: pid, bound: true });
+  });
+
+  it("pane scope, clear bound (value:null) → set-option -upt %N + optimistic clear", () => {
+    const host = makeFakeDeps();
+    const dispatched: NotificationEvent[] = [];
+    const before = makeReversalModel({
+      windowSuffix: "5",
+      synchronizePanes: false,
+      monitorActivity: true,
+      monitorSilence: 0,
+    });
+    const path = createInputPath(host, {
+      dispatchSynthetic: (ev) => dispatched.push(ev),
+      getModel: () => before,
+    });
+    const pid = paneId("p500");
+
+    path.handleClientMessage({
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "sop-bound-clear",
+      command: { kind: "set-object-policy", scope: "pane", paneId: pid, option: "bound", value: null },
+    });
+
+    assert.equal(host.lastWrite, "set-option -upt %500 @tmuxcc-bound\n");
+    assert.deepEqual(dispatched[0], { kind: "internal:set-pane-policy", paneId: pid, bound: false });
+  });
+
+  it("pane scope, set detach=kill → set-option -pt %N @tmuxcc-detach kill", () => {
+    const host = makeFakeDeps();
+    const dispatched: NotificationEvent[] = [];
+    const before = makeReversalModel({
+      windowSuffix: "5",
+      synchronizePanes: false,
+      monitorActivity: true,
+      monitorSilence: 0,
+    });
+    const path = createInputPath(host, {
+      dispatchSynthetic: (ev) => dispatched.push(ev),
+      getModel: () => before,
+    });
+    const pid = paneId("p500");
+
+    path.handleClientMessage({
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "sop-detach-set",
+      command: { kind: "set-object-policy", scope: "pane", paneId: pid, option: "detach", value: "kill" },
+    });
+
+    assert.equal(host.lastWrite, "set-option -pt %500 @tmuxcc-detach kill\n");
+    assert.deepEqual(dispatched[0], { kind: "internal:set-pane-policy", paneId: pid, detach: "kill" });
+  });
+
+  it("pane scope, on %error reverts to the captured before-value", async () => {
+    const host = makeFakeDeps();
+    const dispatched: NotificationEvent[] = [];
+    const before = makeReversalModel({
+      windowSuffix: "5",
+      synchronizePanes: false,
+      monitorActivity: true,
+      monitorSilence: 0,
+    });
+    const d = defer<InputPathCommandResult>();
+    host.enqueueSendResult(d.promise);
+    const path = createInputPath(host, {
+      dispatchSynthetic: (ev) => dispatched.push(ev),
+      getModel: () => before,
+    });
+    const pid = paneId("p500");
+
+    path.handleClientMessage({
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "sop-revert",
+      command: { kind: "set-object-policy", scope: "pane", paneId: pid, option: "detach", value: "kill" },
+    });
+
+    // Optimistic apply: detach=kill.
+    assert.deepEqual(dispatched[0], { kind: "internal:set-pane-policy", paneId: pid, detach: "kill" });
+
+    d.resolve({ ok: false });
+    await Promise.resolve();
+
+    // Compensating event restores the before-value (the fixture pane had detach: undefined → null).
+    assert.equal(dispatched.length, 2);
+    assert.deepEqual(dispatched[1], { kind: "internal:set-pane-policy", paneId: pid, detach: null });
+  });
+
+  it("window scope, set detach=detach → set-option -wt @N @tmuxcc-detach detach (no optimistic event)", () => {
+    const host = makeFakeDeps();
+    const dispatched: NotificationEvent[] = [];
+    const path = createInputPath(host, { dispatchSynthetic: (ev) => dispatched.push(ev) });
+
+    path.handleClientMessage({
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "sop-win",
+      command: { kind: "set-object-policy", scope: "window", windowId: windowId("w3"), option: "detach", value: "detach" },
+    });
+
+    assert.equal(host.lastWrite, "set-option -wt @3 @tmuxcc-detach detach\n");
+    // Window/session scope surfaces via the RESOLVED pane detach on requery — no
+    // pane-scope optimistic event.
+    assert.equal(dispatched.length, 0);
+  });
+
+  it("window scope, clear detach (value:null) → set-option -uwt @N @tmuxcc-detach", () => {
+    const host = makeFakeDeps();
+    const path = createInputPath(host);
+
+    path.handleClientMessage({
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "sop-win-clear",
+      command: { kind: "set-object-policy", scope: "window", windowId: windowId("w3"), option: "detach", value: null },
+    });
+
+    assert.equal(host.lastWrite, "set-option -uwt @3 @tmuxcc-detach\n");
+  });
+
+  it("session scope, set detach=kill → set-option -t <boundSessionName> @tmuxcc-detach kill", () => {
+    const host = makeFakeDeps();
+    // The bound session name is read from the live model (the only session).
+    const before = makeReversalModel({
+      windowSuffix: "9",
+      synchronizePanes: false,
+      monitorActivity: true,
+      monitorSilence: 0,
+    });
+    const path = createInputPath(host, { getModel: () => before });
+
+    path.handleClientMessage({
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "sop-sess",
+      command: { kind: "set-object-policy", scope: "session", option: "detach", value: "kill" },
+    });
+
+    // makeReversalModel names the session "sess".
+    assert.equal(host.lastWrite, "set-option -t sess @tmuxcc-detach kill\n");
+  });
+
+  it("session scope, clear detach (value:null) → set-option -ut <boundSessionName> @tmuxcc-detach", () => {
+    const host = makeFakeDeps();
+    const before = makeReversalModel({
+      windowSuffix: "9",
+      synchronizePanes: false,
+      monitorActivity: true,
+      monitorSilence: 0,
+    });
+    const path = createInputPath(host, { getModel: () => before });
+
+    path.handleClientMessage({
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "sop-sess-clear",
+      command: { kind: "set-object-policy", scope: "session", option: "detach", value: null },
+    });
+
+    assert.equal(host.lastWrite, "set-option -ut sess @tmuxcc-detach\n");
+  });
+
+  it("pane scope, set icon → set-option -pt %N @tmuxcc-icon <value>", () => {
+    const host = makeFakeDeps();
+    const before = makeReversalModel({
+      windowSuffix: "5",
+      synchronizePanes: false,
+      monitorActivity: true,
+      monitorSilence: 0,
+    });
+    const path = createInputPath(host, { getModel: () => before });
+
+    path.handleClientMessage({
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "sop-icon",
+      command: { kind: "set-object-policy", scope: "pane", paneId: paneId("p500"), option: "icon", value: "terminal" },
+    });
+
+    assert.equal(host.lastWrite, "set-option -pt %500 @tmuxcc-icon terminal\n");
   });
 });

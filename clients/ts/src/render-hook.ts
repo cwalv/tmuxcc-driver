@@ -107,6 +107,26 @@ export interface PaneInfo {
    */
   readonly label?: string;
   /**
+   * tc-i9aq.1 (cold-start.md §4.A): durable binding intent (`@tmuxcc-bound`)
+   * when this pane is born / replayed already carrying it.  Absent ⇒ no intent.
+   * Subsequent changes arrive via `onPanePolicyChanged`.  The cold-attach
+   * restore path (tc-i9aq.3) reads this to decide which panes to recreate.
+   */
+  readonly bound?: boolean;
+  /**
+   * tc-i9aq.1 (cold-start.md §4.A): RESOLVED detach-on-close policy
+   * (`@tmuxcc-detach`, effective first-wins pane→window→session value) when this
+   * pane is born / replayed carrying one.  Absent ⇒ inherit (no scope set it).
+   * Subsequent changes arrive via `onPanePolicyChanged`.
+   */
+  readonly detach?: "detach" | "kill";
+  /**
+   * tc-i9aq.1 (cold-start.md §4.A): durable icon policy (`@tmuxcc-icon`) when
+   * this pane is born / replayed carrying one.  Absent ⇒ no policy.  Subsequent
+   * changes arrive via `onPanePolicyChanged`.
+   */
+  readonly icon?: string;
+  /**
    * tc-2mn8: the live shell window title sniffed from OSC-0/2 sequences, when
    * this pane is replayed from the snapshot already carrying one.  Absent ⇒ no
    * title has been observed yet.  Subsequent changes arrive via
@@ -114,6 +134,20 @@ export interface PaneInfo {
    * (render precedence is the renderer's concern; see tc-asyq.6).
    */
   readonly paneTitle?: string;
+}
+
+/**
+ * Durable per-pane policy/intent (cold-start.md §4.A), as delivered to the
+ * renderer by `onPanePolicyChanged`.  Mirrors the `@tmuxcc-*` user-options the
+ * requery surfaces (tc-i9aq.1).
+ */
+export interface PanePolicy {
+  /** Binding intent (`@tmuxcc-bound`): recreate a terminal on attach. */
+  readonly bound: boolean;
+  /** RESOLVED detach-on-close policy; undefined ⇒ inherit (no scope set it). */
+  readonly detach: "detach" | "kill" | undefined;
+  /** Durable icon policy; undefined ⇒ no policy. */
+  readonly icon: string | undefined;
 }
 
 /**
@@ -282,6 +316,21 @@ export interface RenderHook {
    * surface a per-pane name.
    */
   onPaneLabelChanged(paneId: PaneId, label: string | undefined): void;
+
+  /**
+   * A pane's DURABLE policy/intent changed (tc-i9aq.1, cold-start.md §4.A).
+   *
+   * Called when a `pane.policy-changed` delta arrives — the per-pane
+   * `@tmuxcc-bound` / `@tmuxcc-detach` / `@tmuxcc-icon` user-options surfaced by
+   * a requery (or an optimistic pane-scope `set-object-policy`).  `policy`
+   * carries the current values: `bound` (binding intent), `detach` (RESOLVED
+   * close policy; undefined = inherit), `icon` (icon policy; undefined = unset).
+   *
+   * Renderers consume this for unbound-node decoration (tc-i9aq.2), close-policy
+   * display, and the cold-attach restore decision (tc-i9aq.3).
+   * Default-implementable as a no-op.
+   */
+  onPanePolicyChanged(paneId: PaneId, policy: PanePolicy): void;
 
   /**
    * A pane's live shell window title changed (tc-2mn8).
@@ -502,6 +551,7 @@ export const NoOpRenderHook: RenderHook = {
   onPaneDeadChanged(_paneId: PaneId, _dead: boolean, _exitCode?: number): void {},
   onPaneModeChanged(_paneId: PaneId, _mode: PaneMode): void {},
   onPaneLabelChanged(_paneId: PaneId, _label: string | undefined): void {},
+  onPanePolicyChanged(_paneId: PaneId, _policy: PanePolicy): void {},
   onPaneTitleChanged(_paneId: PaneId, _title: string | undefined): void {},
   onPaneOutput(_paneId: PaneId, _bytes: Uint8Array): void {},
   onWindowAdded(_window: WindowInfo): void {},
@@ -531,6 +581,7 @@ export type RenderHookCall =
   | { type: "paneDeadChanged"; paneId: PaneId; dead: boolean; exitCode?: number }
   | { type: "paneModeChanged"; paneId: PaneId; mode: PaneMode }
   | { type: "paneLabelChanged"; paneId: PaneId; label?: string }
+  | { type: "panePolicyChanged"; paneId: PaneId; policy: PanePolicy }
   | { type: "paneTitleChanged"; paneId: PaneId; title?: string }
   | { type: "paneOutput"; paneId: PaneId; bytes: Uint8Array }
   | { type: "windowAdded"; window: WindowInfo }
@@ -596,6 +647,10 @@ export class EchoRenderHook implements RenderHook {
     } else {
       this.calls.push({ type: "paneLabelChanged", paneId });
     }
+  }
+
+  onPanePolicyChanged(paneId: PaneId, policy: PanePolicy): void {
+    this.calls.push({ type: "panePolicyChanged", paneId, policy });
   }
 
   onPaneTitleChanged(paneId: PaneId, title: string | undefined): void {

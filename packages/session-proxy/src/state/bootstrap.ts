@@ -116,6 +116,46 @@ import type { PaneId, WindowId, SessionId } from "../wire/ids.js";
 export const TMUXCC_LABEL_OPTION = "@tmuxcc_label";
 
 // ---------------------------------------------------------------------------
+// Cold-start durable policy/intent user-options (tc-i9aq.1, cold-start.md §4.A)
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-pane binding-intent marker (cold-start.md §4.A).  `1` means "the user
+ * wants a VS Code terminal recreated for this pane on attach" (durable binding
+ * intent); unset/empty means no intent.  Written by the `set-object-policy`
+ * verb at PANE scope (`set-option -pt %N @tmuxcc-bound 1` / `-u` to clear) and
+ * re-read on every requery.  Lives WITH the pane in tmux, so it survives a VS
+ * Code restart and vanishes with the pane — staleness is structurally
+ * impossible (it cannot outlive its referent).
+ */
+export const TMUXCC_BOUND_OPTION = "@tmuxcc-bound";
+
+/**
+ * Detach-on-close policy (cold-start.md §4.A).  Value is `detach` or `kill`;
+ * unset/empty means "inherit" (defer to the next scope in the cascade).  Set at
+ * PANE, WINDOW, or SESSION scope by the `set-object-policy` verb.
+ *
+ * tmux does NOT inherit user-options across scopes for `show-options`, but a
+ * `#{@tmuxcc-detach}` FORMAT reference DOES walk pane→window→session (verified
+ * tmux 3.4).  The requery reads this through `list-panes -F`, so the pane row
+ * carries the RESOLVED (effective) close policy — pane override, else window
+ * default, else session default — which is exactly the first-wins cascade the
+ * host's close decision consumes.  Per-scope-OWN values (for the toggle UI's
+ * "current setting" display) are tracked optimistically in the extension's
+ * in-memory policy cache (bucket B), written through this verb; the durable
+ * truth is the tmux object.
+ */
+export const TMUXCC_DETACH_OPTION = "@tmuxcc-detach";
+
+/**
+ * Per-pane icon policy (cold-start.md §4.A).  Opaque string (a VS Code
+ * ThemeIcon id or icon-policy token); unset/empty means "no durable icon
+ * policy".  Written at PANE scope by the `set-object-policy` verb and re-read
+ * on every requery.
+ */
+export const TMUXCC_ICON_OPTION = "@tmuxcc-icon";
+
+// ---------------------------------------------------------------------------
 // Format strings
 // ---------------------------------------------------------------------------
 
@@ -137,7 +177,15 @@ export const BOOTSTRAP_PANES_FORMAT =
   "#{pane_id}\t#{window_id}\t#{session_id}\t#{pane_index}\t" +
   "#{pane_width}\t#{pane_height}\t#{pane_top}\t#{pane_left}\t" +
   "#{?pane_active,1,0}\t#{pane_pid}\t#{pane_current_command}\t" +
-  "#{?pane_dead,1,0}\t#{pane_dead_status}\t#{@tmuxcc_label}";
+  "#{?pane_dead,1,0}\t#{pane_dead_status}\t#{@tmuxcc_label}\t" +
+  // tc-i9aq.1 (cold-start.md §4.A): durable per-pane policy/intent.
+  //   [14] @tmuxcc-bound  — "1" if the pane carries binding intent, else empty.
+  //   [15] @tmuxcc-detach — RESOLVED close policy ("detach"|"kill"); empty =
+  //                         inherit. `#{@}` format walks pane→window→session,
+  //                         so this is the effective first-wins cascade value.
+  //   [16] @tmuxcc-icon   — durable icon policy string, else empty.
+  // Unset → empty string (no error; verified tmux 3.4, cold-start.md §9.3).
+  "#{@tmuxcc-bound}\t#{@tmuxcc-detach}\t#{@tmuxcc-icon}";
 
 // ---------------------------------------------------------------------------
 // Bootstrap command set
@@ -263,6 +311,26 @@ export interface PanesReplyRow {
    * requery so the durable name survives a driver restart.
    */
   readonly label: string | undefined;
+  /**
+   * Durable binding intent from the `@tmuxcc-bound` pane user-option
+   * (tc-i9aq.1, cold-start.md §4.A).  True when the option is `1`; false when
+   * unset/empty.  Re-read on every requery so binding intent survives a VS
+   * Code restart for free.
+   */
+  readonly bound: boolean;
+  /**
+   * RESOLVED detach-on-close policy from the `@tmuxcc-detach` user-option
+   * (tc-i9aq.1, cold-start.md §4.A), read via a `#{@tmuxcc-detach}` format that
+   * walks pane→window→session, so this is the effective first-wins cascade
+   * value.  `"detach"` or `"kill"` when set at any scope; undefined when unset
+   * at every scope (the extension applies its default).
+   */
+  readonly detach: "detach" | "kill" | undefined;
+  /**
+   * Durable icon policy from the `@tmuxcc-icon` pane user-option (tc-i9aq.1,
+   * cold-start.md §4.A), or undefined when unset/empty.
+   */
+  readonly icon: string | undefined;
 }
 
 /**
@@ -361,6 +429,19 @@ export function parsePanesReply(body: Uint8Array): PanesReplyRow[] {
     const labelRaw = (parts[13] ?? "").trim();
     const label = labelRaw === "" ? undefined : labelRaw;
 
+    // Durable per-pane policy/intent (tc-i9aq.1, cold-start.md §4.A). Read
+    // defensively — legacy replies (or unset options) carry empty strings.
+    //   [14] @tmuxcc-bound  → binding intent ("1" = bound).
+    //   [15] @tmuxcc-detach → RESOLVED close policy (format walk gives the
+    //                         pane→window→session first-wins value).
+    //   [16] @tmuxcc-icon   → durable icon policy.
+    const bound = (parts[14] ?? "").trim() === "1";
+    const detachRaw = (parts[15] ?? "").trim();
+    const detach: "detach" | "kill" | undefined =
+      detachRaw === "detach" || detachRaw === "kill" ? detachRaw : undefined;
+    const iconRaw = (parts[16] ?? "").trim();
+    const icon = iconRaw === "" ? undefined : iconRaw;
+
     const tmuxPaneId = parseSigilId(paneIdStr, "%");
     const tmuxWindowId = parseSigilId(winIdStr, "@");
     const tmuxSessionId = parseSigilId(sessIdStr, "$");
@@ -380,6 +461,9 @@ export function parsePanesReply(body: Uint8Array): PanesReplyRow[] {
       dead,
       exitCode,
       label,
+      bound,
+      detach,
+      icon,
     });
   }
 
@@ -500,6 +584,12 @@ export function buildInitialModel(
       // Durable pane name from the @tmuxcc_label user-option (tc-1a8z).
       // Re-read on every requery → survives a driver restart for free.
       label: row.label,
+      // Durable binding-intent / close-policy / icon-policy from the
+      // @tmuxcc-* user-options (tc-i9aq.1, cold-start.md §4.A). Re-read on
+      // every requery → survive a VS Code restart, vanish with the pane.
+      bound: row.bound,
+      detach: row.detach,
+      icon: row.icon,
       // scrollbackHandle and paneTitle are absent (optional) — tc-fx2 and
       // tc-2mn8 populate them respectively via updatePane after creation.
     };

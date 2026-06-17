@@ -111,6 +111,12 @@ function paneLine(args: {
   deadStatus?: number;
   /** tc-1a8z: @tmuxcc_label durable pane name. Empty string when unset. */
   label?: string;
+  /** tc-i9aq.1: @tmuxcc-bound binding intent ("1" when set). */
+  bound?: boolean;
+  /** tc-i9aq.1: @tmuxcc-detach RESOLVED close policy. Empty string when unset. */
+  detach?: "detach" | "kill";
+  /** tc-i9aq.1: @tmuxcc-icon durable icon policy. Empty string when unset. */
+  icon?: string;
 }): string {
   return [
     `%${args.paneNum}`,
@@ -127,6 +133,10 @@ function paneLine(args: {
     args.dead ? "1" : "0",
     args.deadStatus !== undefined ? String(args.deadStatus) : "",
     args.label ?? "",
+    // tc-i9aq.1 (cold-start.md §4.A): @tmuxcc-bound / -detach / -icon.
+    args.bound ? "1" : "",
+    args.detach ?? "",
+    args.icon ?? "",
   ].join("\t") + "\n";
 }
 
@@ -447,6 +457,81 @@ describe("requeryDiff: durable pane-name (@tmuxcc_label, tc-1a8z)", () => {
     const lc = deltas.filter((d) => d.type === "pane.label-changed");
     assert.equal(lc.length, 1);
     assert.ok(!("label" in (lc[0] as object)), "label omitted when cleared");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Durable policy/intent re-read from @tmuxcc-bound / -detach / -icon (tc-i9aq.1)
+//
+// cold-start.md §4.A: the per-pane @tmuxcc-* options are re-read on every
+// requery, so binding intent / close policy / icon policy survive a driver
+// restart. unset → empty → undefined (false for bound). A changed value emits
+// exactly one pane.policy-changed delta (not a structural open/close).
+// ---------------------------------------------------------------------------
+
+describe("requeryDiff: durable policy/intent (@tmuxcc-bound/-detach/-icon, tc-i9aq.1)", () => {
+  const winSingle = winLine({
+    sessNum: 0,
+    sessName: "main",
+    winNum: 1,
+    winName: "shell",
+    layout: SINGLE_PANE_LAYOUT(1),
+    active: true,
+  });
+
+  it("bootstrap re-reads @tmuxcc-bound/-detach/-icon into the model", () => {
+    const line = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true, bound: true, detach: "kill", icon: "rocket" });
+    const { next, deltas } = requeryDiff(emptyModel(), okResult(winSingle), okResult(line));
+    const p = next.panes.get(paneId("p1"))!;
+    assert.equal(p.bound, true, "binding intent re-read on bootstrap");
+    assert.equal(p.detach, "kill", "resolved detach re-read on bootstrap");
+    assert.equal(p.icon, "rocket", "icon policy re-read on bootstrap");
+    // The bootstrap diff carries the policy on pane.opened (born-with-policy).
+    const opened = deltas.filter((d) => d.type === "pane.opened");
+    assert.equal(opened.length, 1);
+    assert.equal((opened[0] as { bound?: boolean }).bound, true, "pane.opened carries bound");
+    assert.equal((opened[0] as { detach?: string }).detach, "kill", "pane.opened carries detach");
+    assert.equal((opened[0] as { icon?: string }).icon, "rocket", "pane.opened carries icon");
+  });
+
+  it("unset @tmuxcc-* leaves bound=false, detach/icon undefined", () => {
+    const bare = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true });
+    const { next } = requeryDiff(emptyModel(), okResult(winSingle), okResult(bare));
+    const p = next.panes.get(paneId("p1"))!;
+    assert.equal(p.bound, false);
+    assert.equal(p.detach, undefined);
+    assert.equal(p.icon, undefined);
+  });
+
+  it("a changed policy on a later requery emits exactly one pane.policy-changed", () => {
+    const bare = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true });
+    const prev = requeryDiff(emptyModel(), okResult(winSingle), okResult(bare)).next;
+
+    const marked = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true, bound: true, detach: "detach" });
+    const { next, deltas } = requeryDiff(prev, okResult(winSingle), okResult(marked));
+
+    assert.equal(next.panes.get(paneId("p1"))!.bound, true);
+    assert.equal(next.panes.get(paneId("p1"))!.detach, "detach");
+    const pc = deltas.filter((d) => d.type === "pane.policy-changed");
+    assert.equal(pc.length, 1, "exactly one pane.policy-changed");
+    assert.equal((pc[0] as { bound?: boolean }).bound, true);
+    assert.equal((pc[0] as { detach?: string }).detach, "detach");
+    // A policy change is NOT structural — no spurious open/close.
+    assert.equal(deltas.filter((d) => d.type === "pane.closed").length, 0);
+    assert.equal(deltas.filter((d) => d.type === "pane.opened").length, 0);
+  });
+
+  it("clearing detach on a later requery emits pane.policy-changed with detach ABSENT", () => {
+    const marked = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true, detach: "kill" });
+    const prev = requeryDiff(emptyModel(), okResult(winSingle), okResult(marked)).next;
+
+    const bare = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true }); // detach cleared → ""
+    const { next, deltas } = requeryDiff(prev, okResult(winSingle), okResult(bare));
+
+    assert.equal(next.panes.get(paneId("p1"))!.detach, undefined, "detach cleared");
+    const pc = deltas.filter((d) => d.type === "pane.policy-changed");
+    assert.equal(pc.length, 1);
+    assert.ok(!("detach" in (pc[0] as object)), "detach omitted when cleared");
   });
 });
 
@@ -1284,6 +1369,9 @@ function applyDeltaToModel(m: MutableModel, delta: SessionProxyMessage): void {
         dead: delta.dead ?? false,
         exitCode: delta.dead ? delta.exitCode : undefined,
         label: delta.label,
+        bound: delta.bound ?? false,
+        detach: delta.detach,
+        icon: delta.icon,
         // scrollbackHandle and paneTitle are optional — omit to avoid
         // exactOptionalPropertyTypes TS2375 when passing undefined explicitly.
       };
@@ -1487,6 +1575,9 @@ function randomModel(rng: () => number, opts: { minWindows?: number } = {}): Ses
         dead: false,
         exitCode: undefined,
         label: undefined,
+        bound: false,
+        detach: undefined,
+        icon: undefined,
         // scrollbackHandle and paneTitle are optional — omit to avoid
         // exactOptionalPropertyTypes TS2375 when passing undefined explicitly.
       };

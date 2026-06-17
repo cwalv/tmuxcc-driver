@@ -177,6 +177,8 @@ export function isTopologyEvent(event: NotificationEvent): boolean {
     case "internal:set-window-monitor-silence":
     // tc-1a8z: durable pane-name optimistic/compensating patch.
     case "internal:set-pane-label":
+    // tc-i9aq.1: durable pane policy/intent optimistic/compensating patch.
+    case "internal:set-pane-policy":
       return false;
 
     // Everything else from tmux — every topology-affecting notification —

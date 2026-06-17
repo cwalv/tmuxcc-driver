@@ -183,7 +183,7 @@ const P2 = paneId("p2");
 function makePane(id: PaneId, winId: WindowId, sessId: SessionId, cols = 80, rows = 24): Pane {
   // exitCode and label are required (X | undefined); scrollbackHandle and
   // paneTitle are optional — omit to avoid exactOptionalPropertyTypes TS2375.
-  return { paneId: id, windowId: winId, sessionId: sessId, cols, rows, mode: "normal", dead: false, exitCode: undefined, label: undefined };
+  return { paneId: id, windowId: winId, sessionId: sessId, cols, rows, mode: "normal", dead: false, exitCode: undefined, label: undefined, bound: false, detach: undefined, icon: undefined };
 }
 
 function makeModel1(): SessionModel {
