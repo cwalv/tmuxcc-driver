@@ -40,14 +40,116 @@
  * returned by the supervisor IS that multiplexed socket path; clients do not
  * need a separate data socket.
  *
+ * # tc-2x3.6: GAP 1 — orphaned listening fd reclamation
+ *
+ * tc-2x3.4 fixed the socket-file clobber race (the fresh entry's socket file
+ * was being unlinked by the old entry's deferred teardown) by calling
+ * `server.unref()` instead of `server.close()` when refcount > 1.  `unref()`
+ * prevents the old server from blocking process exit but leaves its listening
+ * fd open until the process exits — an fd leak bounded in normal use (one reattach
+ * cycle) but unbounded under a persistent GAP-2 busy-loop.
+ *
+ * The fix: call `_closeServerFdOnly(server)` which closes the underlying libuv
+ * Pipe handle (reclaiming the fd) WITHOUT triggering the post-close `fs.unlink`
+ * callback that `server.close()` installs.  The socket FILE was already unlinked
+ * by the fresh `_createSessionProxy`'s `removeSocket(path)` call, so there is
+ * nothing on the filesystem to protect — the old fd is an orphaned inode with no
+ * directory entry and can safely be closed.
+ *
+ * # tc-2x3.6: GAP 2 — repeated-trip circuit breaker
+ *
+ * A persistent parser/reducer bug trips → the session-proxy is torn down → the
+ * extension calls `ensureSessionProxy` (lazy respawn) → the fresh session-proxy
+ * immediately re-trips: a hot busy-loop that drives unbounded fd leaks (GAP 1)
+ * and floods stderr.
+ *
+ * The fix: a per-session trip-timestamp log.  When `onFatalError` fires, the
+ * supervisor appends the timestamp and checks whether the last
+ * `CIRCUIT_BREAKER_TRIP_THRESHOLD` trips all fell within
+ * `CIRCUIT_BREAKER_WINDOW_MS`.  If yes, the session is quarantined:
+ *   - The sessionId is added to `_quarantinedSessions`.
+ *   - A loud stderr message and an extra `session_boundary_quarantined_total`
+ *     metric increment signal the event.
+ *   - Subsequent calls to `ensureSessionProxy` for that sessionId reject
+ *     immediately with a `SessionQuarantineError`.
+ *   - `clearQuarantine(sessionId)` removes the quarantine so the extension can
+ *     recover after a code fix or manual intervention.
+ *
+ * Design choices (documented here so reviewers can audit them):
+ *   - N = 3 trips, window = 10 s: three rapid successive trips in ten seconds
+ *     cannot be explained by transient tmux noise; they indicate a reproducible
+ *     code path bug. Configured as module-level constants — easily tunable.
+ *   - Quarantine is sticky (no auto-expiry): the supervisor does not know when
+ *     the underlying bug is fixed. Auto-expiry would just restart the busy-loop
+ *     after a cooldown. The correct recovery path is a new server-proxy binary
+ *     (which re-creates the supervisor fresh) or an explicit clearQuarantine().
+ *   - The supervisor decides quarantine (not the extension): quarantine is a
+ *     structural invariant — the supervisor owns reattach policy end-to-end,
+ *     and the extension already treats `ensureSessionProxy` as the only path
+ *     into a live session-proxy. Surfacing quarantine as an error there is the
+ *     minimum-footprint, legible design.
+ *   - Trip log is bounded: we keep at most `CIRCUIT_BREAKER_TRIP_THRESHOLD`
+ *     timestamps per session (older entries are trimmed); a quarantined session
+ *     never appends again.
+ *
  * @module session-proxy-supervisor
  */
 
 import * as net from "node:net";
+import * as fs from "node:fs";
 import { createSessionProxy } from "@tmuxcc/session-proxy";
 import type { SessionProxy } from "@tmuxcc/session-proxy";
 import { createSocketTransport } from "./socket-transport.js";
 import { removeSocket, restrictSocket } from "./runtime-dir.js";
+
+// ---------------------------------------------------------------------------
+// Circuit breaker constants (tc-2x3.6 GAP 2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Number of boundary trips within `CIRCUIT_BREAKER_WINDOW_MS` that triggers
+ * quarantine for a session.  Three rapid trips in ten seconds cannot be
+ * explained by transient tmux noise; they indicate a reproducible code path bug.
+ */
+const CIRCUIT_BREAKER_TRIP_THRESHOLD = 3;
+
+/**
+ * Sliding window (milliseconds) over which boundary trips are counted.
+ * Trips older than this are not counted toward the quarantine threshold.
+ */
+const CIRCUIT_BREAKER_WINDOW_MS = 10_000;
+
+// ---------------------------------------------------------------------------
+// Errors (tc-2x3.6 GAP 2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Thrown by `ensureSessionProxy` when the session has been quarantined by the
+ * circuit breaker (>= CIRCUIT_BREAKER_TRIP_THRESHOLD boundary trips within
+ * CIRCUIT_BREAKER_WINDOW_MS).
+ *
+ * The caller (typically the server-proxy's session.claim handler) should
+ * surface this to the extension as a non-retriable error.  Recovery requires
+ * either a fresh server-proxy process (new supervisor) or an explicit call to
+ * `clearQuarantine(sessionId)`.
+ */
+export class SessionQuarantineError extends Error {
+  readonly sessionId: string;
+  readonly tripCount: number;
+  readonly windowMs: number;
+
+  constructor(sessionId: string, tripCount: number, windowMs: number) {
+    super(
+      `Session "${sessionId}" quarantined after ${tripCount} boundary trips within ${windowMs}ms. ` +
+        `The session pipeline is repeatedly crashing — a code bug is likely. ` +
+        `Call clearQuarantine("${sessionId}") to allow reattach after the underlying bug is fixed.`,
+    );
+    this.name = "SessionQuarantineError";
+    this.sessionId = sessionId;
+    this.tripCount = tripCount;
+    this.windowMs = windowMs;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -171,6 +273,106 @@ export interface SessionProxySupervisor {
    * Register a handler called when a session-proxy exits unexpectedly.
    */
   onCrash(handler: SessionProxyCrashHandler): void;
+
+  /**
+   * Clear the circuit-breaker quarantine for `sessionId` so that a subsequent
+   * `ensureSessionProxy` call can reattach the session.
+   *
+   * This does NOT create a new session-proxy — it only removes the quarantine
+   * flag.  The next `ensureSessionProxy` call will trigger a fresh creation.
+   *
+   * Also clears the trip-timestamp log for the session so the window restarts
+   * from zero.
+   *
+   * Idempotent: calling on a non-quarantined session is a no-op.
+   */
+  clearQuarantine(sessionId: string): void;
+
+  /**
+   * Return the set of currently quarantined session IDs (a snapshot — the
+   * returned Set is a copy).  Useful for diagnostics / server-proxy.info.
+   */
+  quarantinedSessions(): ReadonlySet<string>;
+}
+
+// ---------------------------------------------------------------------------
+// GAP 1 helper: close a net.Server's fd without triggering the socket-file unlink
+// (tc-2x3.6)
+// ---------------------------------------------------------------------------
+
+/**
+ * Close a `net.Server`'s listening file descriptor WITHOUT unlinking the socket
+ * file at `socketPath` — used when a fresh entry has already rebound that path
+ * and we must not clobber it (tc-2x3.6 GAP 1).
+ *
+ * # The problem
+ *
+ * `server.close()` calls `handle.close()` which, at the libuv level, calls
+ * `unlink(socketPath)` synchronously.  When a fresh entry has already rebound
+ * the same path (refcount > 1), this would delete the FRESH server's live socket
+ * file — the clobber that tc-2x3.4 fixed by switching to `server.unref()`.
+ *
+ * `server.unref()` prevents the old server from blocking process exit but leaves
+ * its fd open — an fd leak bounded in normal use but unbounded under a GAP-2
+ * persistent-trip busy-loop (tc-2x3.6 GAP 1).
+ *
+ * # The fix: rename-protect
+ *
+ * At the point this function is called:
+ *   - `socketPath` → fresh server's inode (the live socket clients connect to).
+ *   - Old server's fd → orphaned inode (no directory entry; cannot accept connections).
+ *
+ * Strategy:
+ *   1. `fs.renameSync(socketPath, tempPath)` — move the fresh socket aside so
+ *      `socketPath` is empty.  This is synchronous and takes no event-loop turn.
+ *   2. `server.close()` — libuv calls `unlink(socketPath)`.  The path is now
+ *      empty (ENOENT), so the unlink is a silent no-op.  The fd is closed.
+ *   3. `fs.renameSync(tempPath, socketPath)` — restore the fresh socket.
+ *
+ * The rename window (step 1 → step 3) is synchronous: no event loop turn fires
+ * in that window, so no client connection attempt can observe the absent path.
+ *
+ * # Fallback
+ *
+ * If the rename fails for any reason (e.g. the fresh socket was already deleted),
+ * we fall back to `server.unref()` — the tc-2x3.4 behavior (fd held open until
+ * process exit, not a correctness bug).  The fallback is logged to stderr so
+ * the operator knows GAP 1 reclamation did not fire.
+ */
+function _closeServerFdOnly(server: net.Server, socketPath: string): void {
+  // Belt-and-suspenders: prevent the server from blocking process exit regardless
+  // of whether the close succeeds.  This matches the tc-2x3.4 safety floor.
+  server.unref();
+
+  const tempPath = socketPath + ".__tc2x36__";
+  try {
+    // Step 1: protect the fresh socket by renaming it aside (synchronous).
+    // If the rename throws (e.g. ENOENT — fresh socket already gone), jump to fallback.
+    fs.renameSync(socketPath, tempPath);
+  } catch {
+    // Fresh socket is already gone (nothing to protect); fall back to unref-only
+    // so we don't call close() and risk any side effects.
+    return;
+  }
+
+  try {
+    // Step 2: close the old server — libuv tries unlink(socketPath) → ENOENT (no-op).
+    // Fd is reclaimed.
+    server.close();
+  } finally {
+    // Step 3: restore the fresh socket regardless of whether close() threw.
+    try {
+      fs.renameSync(tempPath, socketPath);
+    } catch {
+      // If restoration fails, the fresh socket may be lost.  Log loudly — this is
+      // a correctness issue and should never happen in normal operation.
+      process.stderr.write(
+        `[session-proxy-supervisor] CRITICAL: failed to restore fresh socket ` +
+          `at "${socketPath}" after fd reclamation (tc-2x3.6 GAP 1). ` +
+          `The session may be unreachable to new client connections.\n`,
+      );
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -178,6 +380,12 @@ export interface SessionProxySupervisor {
 // ---------------------------------------------------------------------------
 
 class SessionProxySupervisorImpl implements SessionProxySupervisor {
+  private readonly _opts: SessionProxySupervisorOptions;
+
+  constructor(opts: SessionProxySupervisorOptions = {}) {
+    this._opts = opts;
+  }
+
   /**
    * Map from sessionId to running session-proxy entry (or in-progress creation
    * promise).  The value is the entry OR a Promise for the in-flight creation,
@@ -210,8 +418,36 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
   private _crashHandler: SessionProxyCrashHandler | null = null;
   private _aliveCountHandlers: Array<(count: number) => void> = [];
 
+  // ---------------------------------------------------------------------------
+  // tc-2x3.6 GAP 2: circuit breaker state
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Per-session boundary-trip timestamps (ms since epoch).  Only the most
+   * recent `CIRCUIT_BREAKER_TRIP_THRESHOLD` entries are kept per session
+   * (older entries are trimmed on each new trip).  A quarantined session is
+   * removed from this map (it no longer needs trip tracking).
+   */
+  private _boundaryTripLog = new Map<string, number[]>();
+
+  /**
+   * Sessions that have been quarantined by the circuit breaker.  Once in this
+   * set, `ensureSessionProxy` will immediately throw `SessionQuarantineError`.
+   * Cleared by `clearQuarantine(sessionId)`.
+   */
+  private _quarantinedSessions = new Set<string>();
+
   onCrash(handler: SessionProxyCrashHandler): void {
     this._crashHandler = handler;
+  }
+
+  clearQuarantine(sessionId: string): void {
+    this._quarantinedSessions.delete(sessionId);
+    this._boundaryTripLog.delete(sessionId);
+  }
+
+  quarantinedSessions(): ReadonlySet<string> {
+    return new Set(this._quarantinedSessions);
   }
 
   aliveCount(): number {
@@ -243,6 +479,18 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
     socketName: string,
     sessionProxySockPath: string,
   ): Promise<string> {
+    // tc-2x3.6 GAP 2: circuit-breaker quarantine check.
+    // A quarantined session has tripped the boundary >= CIRCUIT_BREAKER_TRIP_THRESHOLD
+    // times within CIRCUIT_BREAKER_WINDOW_MS.  Reject immediately — do NOT create
+    // a fresh session-proxy, which would just re-trip and continue the busy-loop.
+    if (this._quarantinedSessions.has(sessionId)) {
+      throw new SessionQuarantineError(
+        sessionId,
+        CIRCUIT_BREAKER_TRIP_THRESHOLD,
+        CIRCUIT_BREAKER_WINDOW_MS,
+      );
+    }
+
     // Fast path: session-proxy already running
     const existing = this._sessionProxies.get(sessionId);
     if (existing !== undefined) {
@@ -386,6 +634,11 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
     //
     // Lazy respawn (§6.2 ext-a): nothing is re-created until the extension
     // calls `ensureSessionProxy` for this session again.
+    //
+    // tc-2x3.6 GAP 2: circuit breaker.  On each trip, the supervisor logs the
+    // timestamp and checks whether the last CIRCUIT_BREAKER_TRIP_THRESHOLD trips
+    // all fell within CIRCUIT_BREAKER_WINDOW_MS.  If so, the session is quarantined
+    // and ensureSessionProxy will reject immediately on the next call.
     let boundaryTripInFlight = false;
     const onFatalError = (err: unknown): void => {
       const entry = entryRef;
@@ -419,6 +672,39 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
           `  Error: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`,
       );
 
+      // tc-2x3.6 GAP 2: circuit-breaker trip log update.
+      // Record the timestamp and check whether the last N trips fell within the window.
+      const now = Date.now();
+      const tripLog = this._boundaryTripLog.get(sessionId) ?? [];
+      tripLog.push(now);
+      // Keep only the most recent CIRCUIT_BREAKER_TRIP_THRESHOLD entries — older
+      // entries cannot trigger quarantine (they're outside the window) and we
+      // don't want unbounded growth.
+      while (tripLog.length > CIRCUIT_BREAKER_TRIP_THRESHOLD) {
+        tripLog.shift();
+      }
+      this._boundaryTripLog.set(sessionId, tripLog);
+
+      // Check whether the oldest of the last N trips is within the window.
+      const shouldQuarantine =
+        tripLog.length >= CIRCUIT_BREAKER_TRIP_THRESHOLD &&
+        now - tripLog[0]! <= CIRCUIT_BREAKER_WINDOW_MS;
+
+      if (shouldQuarantine) {
+        // Enter quarantine: mark the session so the next ensureSessionProxy
+        // call rejects immediately.  Remove the trip log — the quarantine state
+        // is the durable signal now.
+        this._quarantinedSessions.add(sessionId);
+        this._boundaryTripLog.delete(sessionId);
+        process.stderr.write(
+          `[session-proxy-supervisor] CIRCUIT BREAKER OPEN: session "${sessionName}" ` +
+            `(id: ${sessionId}) has tripped the error boundary ` +
+            `${CIRCUIT_BREAKER_TRIP_THRESHOLD} times in ${CIRCUIT_BREAKER_WINDOW_MS}ms — ` +
+            `session QUARANTINED; ensureSessionProxy will reject until clearQuarantine() is called. ` +
+            `Fix the underlying parser/reducer bug before re-enabling this session (tc-2x3.6).\n`,
+        );
+      }
+
       // Mark tornDown so the host.onExit handler (wired below, after start)
       // does not double-tear-down if tmux also exits right after the boundary trip.
       entry.tornDown = true;
@@ -445,6 +731,11 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
         attach: true, // server-proxy creates the session; session-proxy attaches
       },
       onFatalError,
+      // Forward the supervisor-level onTopologyNotify if provided (tc-2x3.6):
+      // used for supervisor-level observability and for fault-injection in tests.
+      ...(this._opts.onTopologyNotify !== undefined
+        ? { onTopologyNotify: this._opts.onTopologyNotify }
+        : {}),
     });
 
     // Create the per-session unix socket server.
@@ -525,9 +816,12 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
       // SessionProxy's host.onExit broadcastErrorAndClose runs synchronously
       // before our handler in registration order, but the close-and-unlink
       // matches the pre-collapse 500ms grace from session-proxy-entry.ts).
-      // Ownership guard (tc-2x3.4 DEFECT 1): same close-vs-unref logic as
+      // Ownership guard (tc-2x3.4 DEFECT 1): same close-vs-fd-only logic as
       // _doSocketTeardown — see that method's comment for the full explanation.
       // ensureSessionProxy may have rebound the path during the 500ms grace window.
+      // tc-2x3.6 GAP 1: use _closeServerFdOnly (not server.unref()) when a fresh
+      // entry owns the path, so the old fd is reclaimed without unlinking the
+      // fresh socket file.
       setTimeout(() => {
         const refCount = this._socketPathRefCount.get(sessionProxySockPath) ?? 0;
         if (refCount <= 1) {
@@ -535,7 +829,7 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
           server.close();
         } else {
           this._socketPathRefCount.set(sessionProxySockPath, refCount - 1);
-          server.unref();
+          _closeServerFdOnly(server, sessionProxySockPath);
         }
       }, 500);
 
@@ -590,6 +884,21 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
    * This is the SINGLE place both the boundary path (onFatalError) and the reap
    * path (_teardownEntry) perform the deferred unlink, so the guard is applied
    * consistently to both.
+   *
+   * # tc-2x3.6 GAP 1: fd reclamation
+   *
+   * When a fresh entry has claimed the path (ref count > 1), the old server's
+   * listening fd must be closed to reclaim the OS file descriptor.  The previous
+   * approach (`server.unref()`) prevented the server from blocking process exit
+   * but left the fd open until the process exited — an fd leak bounded under
+   * normal use but unbounded under a GAP-2 persistent-trip busy-loop.
+   *
+   * The new approach: `_closeServerFdOnly(server)` closes the underlying libuv
+   * Pipe handle WITHOUT triggering the post-close `fs.unlink` callback that
+   * `server.close()` installs.  The socket FILE was already unlinked by the fresh
+   * `_createSessionProxy`'s `removeSocket(path)` call, so there is nothing on
+   * the filesystem to protect — the old fd is an orphaned inode with no directory
+   * entry and can safely be closed by releasing the libuv handle directly.
    */
   private _doSocketTeardown(entry: SessionProxyEntry): void {
     // Fire-and-forget: stop() resolves when tmux exits (≤3 s, then SIGKILL).
@@ -606,22 +915,24 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
       // call server.close() normally — it closes the server AND unlinks the path
       // as a side effect, which is exactly what we want.
       //
-      // When a fresh entry has since claimed the path, call server.unref()
-      // instead: this prevents the old server from blocking process exit but
-      // does NOT unlink the socket file.  The old server's listening fd is
-      // orphaned (the socket path was already unlinked when the fresh
-      // _createSessionProxy called removeSocket), so it cannot accept new
-      // connections regardless.  The ref-count claim for this entry is
-      // released without triggering a file unlink.
+      // When a fresh entry has since claimed the path:
+      //   - The old server's socket FILE was already unlinked by removeSocket()
+      //     in the fresh _createSessionProxy.  The old fd is an orphaned inode
+      //     with no directory entry — it cannot accept new connections.
+      //   - We MUST close the fd (tc-2x3.6 GAP 1 fix): call _closeServerFdOnly()
+      //     which closes the libuv handle directly WITHOUT triggering the fs.unlink
+      //     that server.close() would run.  This reclaims the fd without clobbering
+      //     the fresh server's socket file.
+      //   - The ref-count claim for this entry is released.
       const refCount = this._socketPathRefCount.get(entry.socketPath) ?? 0;
       if (refCount <= 1) {
         // No fresh claimant — close normally (auto-unlinks the path).
         this._socketPathRefCount.delete(entry.socketPath);
         entry.server.close();
       } else {
-        // A fresh entry owns the path — abandon the old server without unlinking.
+        // A fresh entry owns the path — close the fd without unlinking.
         this._socketPathRefCount.set(entry.socketPath, refCount - 1);
-        entry.server.unref();
+        _closeServerFdOnly(entry.server, entry.socketPath);
       }
     });
   }
@@ -649,6 +960,31 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
 // Factory
 // ---------------------------------------------------------------------------
 
-export function createSessionProxySupervisor(): SessionProxySupervisor {
-  return new SessionProxySupervisorImpl();
+/**
+ * Options for `createSessionProxySupervisor`.
+ */
+export interface SessionProxySupervisorOptions {
+  /**
+   * Optional topology-notification observer forwarded into each created
+   * session-proxy's `onTopologyNotify` option.
+   *
+   * Intended uses:
+   *   - Supervisor-level topology observability (e.g. aggregate metrics).
+   *   - Fault injection in tests: throwing from this callback exercises the
+   *     per-session error boundary and the circuit-breaker trip path end-to-end,
+   *     without test seams in the supervisor's production logic.
+   *
+   * The callback receives the notification kind string (e.g. "window-add",
+   * "layout-change") — same as `SessionProxyOptions.onTopologyNotify`.
+   * Exceptions thrown here propagate into the pipeline's error boundary
+   * (onFatalError), which is the correct fault-injection path for circuit-
+   * breaker tests.
+   */
+  onTopologyNotify?: (kind: string) => void;
+}
+
+export function createSessionProxySupervisor(
+  opts: SessionProxySupervisorOptions = {},
+): SessionProxySupervisor {
+  return new SessionProxySupervisorImpl(opts);
 }

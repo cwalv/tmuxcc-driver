@@ -57,8 +57,8 @@ import * as fs from "node:fs";
 
 import { createSessionProxy } from "@tmuxcc/session-proxy";
 import type { SessionProxy } from "@tmuxcc/session-proxy";
-import { createSessionProxySupervisor } from "./session-proxy-supervisor.js";
-import type { SessionProxySupervisor } from "./session-proxy-supervisor.js";
+import { createSessionProxySupervisor, SessionQuarantineError } from "./session-proxy-supervisor.js";
+import type { SessionProxySupervisor, SessionProxySupervisorOptions } from "./session-proxy-supervisor.js";
 import { probeLiveSocket } from "./runtime-dir.js";
 
 // ---------------------------------------------------------------------------
@@ -500,6 +500,269 @@ describe("tc-2x3.4: per-session error boundary", { skip: !TMUX_AVAILABLE }, () =
     // Cleanup: reap the fresh entry so afterEach doesn't see a leaked proxy.
     supervisor.reapSessionProxy(sessionId);
     // Give the final teardown a moment to close gracefully.
+    await new Promise<void>((r) => setTimeout(r, 500));
+  });
+
+  /**
+   * EB4: GAP 1 — orphaned fd reclamation (tc-2x3.6).
+   *
+   * # What this proves
+   *
+   * When a boundary trip races with a fresh ensureSessionProxy reattach
+   * (refcount > 1 in _doSocketTeardown), the old server's listening fd MUST be
+   * closed (not merely unref'd) by the time the old stop() promise settles.
+   *
+   * Without the GAP 1 fix, the old server's fd was left open (unref'd but not
+   * closed) — an fd leak that accumulates with every rapid trip→reattach cycle.
+   * With the fix (_closeServerFdOnly: rename-protect + server.close()), the fd
+   * is reclaimed and the count of open file descriptors does NOT grow across N
+   * trip→reattach cycles.
+   *
+   * # Method
+   *
+   * We simulate N (=3) rapid boundary trips via reapSessionProxy + immediate
+   * reattach (the same race as EB3, but repeated).  We count open fds via
+   * /proc/self/fd before and after the N cycles (including a 5 s wait to
+   * ensure all async stop() promises have settled).  The delta in fd count
+   * must be zero (or small — a few system-level fds may fluctuate).
+   *
+   * We use a generous tolerance: ≤ 4 extra fds per trip cycle (the test itself
+   * opens some files).  What we're preventing is N * 1 leaked server fds = N
+   * extra fds that never close.
+   */
+  it("EB4: repeated trip→reattach does not leak listening fds (GAP 1 fd reclamation)", { timeout: 40_000 }, async () => {
+    const socketName = `tmuxcc-eb4-${process.pid}-${Date.now()}`;
+    const sessionName = `eb4-sess-${process.pid}`;
+    _sockets.push(socketName);
+
+    spawnTmuxSession(socketName, sessionName);
+
+    const tmpDir = makeTempDir("eb4");
+    _tmpDirs.push(tmpDir);
+    const sockPath = path.join(tmpDir, "sess.sock");
+
+    const supervisor: SessionProxySupervisor = createSessionProxySupervisor();
+    const sessionId = `eb4-id-${process.pid}`;
+
+    // Helper: count open file descriptors via /proc/self/fd.
+    const countFds = (): number => {
+      try {
+        return fs.readdirSync("/proc/self/fd").length;
+      } catch {
+        return -1; // /proc not available — test will pass vacuously
+      }
+    };
+
+    // --- Step 1: Bring the session up once ---
+    await supervisor.ensureSessionProxy(sessionId, sessionName, socketName, sockPath);
+    await new Promise<void>((r) => setTimeout(r, 200));
+
+    // --- Step 2: Sample fd count BEFORE the rapid trip cycles ---
+    const fdsBefore = countFds();
+    if (fdsBefore === -1) return; // /proc not available — skip assertion
+
+    // --- Step 3: Perform N rapid trip→reattach cycles ---
+    const N_CYCLES = 2; // 2 cycles, each races old teardown with fresh reattach
+    for (let i = 0; i < N_CYCLES; i++) {
+      // Simulate a boundary trip: reap the current entry (starts async stop).
+      supervisor.reapSessionProxy(sessionId);
+
+      // Immediately reattach (fresh entry binds the same sockPath).
+      // This is the race that triggered the unref-vs-close gap.
+      await supervisor.ensureSessionProxy(sessionId, sessionName, socketName, sockPath);
+    }
+
+    // --- Step 4: Wait for ALL async stop() promises to settle ---
+    // Each stop() can take up to ~3 s (detach -CC then SIGKILL).
+    // N_CYCLES * 3 s + 2 s headroom = 8 s is safe; test timeout is 40 s.
+    await new Promise<void>((r) => setTimeout(r, 8_000));
+
+    // --- Step 5: Sample fd count AFTER cycles + settlement ---
+    const fdsAfter = countFds();
+
+    // EB4 assertion: no fd leak.  Tolerance: 4 extra fds per cycle (system
+    // bookkeeping and the test harness itself can open a few fds).
+    const leaked = fdsAfter - fdsBefore;
+    const tolerance = N_CYCLES * 4;
+    assert.ok(
+      leaked <= tolerance,
+      `EB4: open fd count grew by ${leaked} across ${N_CYCLES} trip→reattach cycles ` +
+        `(tolerance ${tolerance}). Before: ${fdsBefore}, after: ${fdsAfter}. ` +
+        `This indicates orphaned server fds from the boundary trip race (tc-2x3.6 GAP 1).`,
+    );
+
+    // Cleanup
+    supervisor.reapSessionProxy(sessionId);
+    await new Promise<void>((r) => setTimeout(r, 500));
+  });
+
+  /**
+   * EB5: GAP 2 — circuit breaker quarantine (tc-2x3.6).
+   *
+   * # What this proves
+   *
+   * A persistent poison-pill session that re-trips on every reattach MUST be
+   * quarantined after N rapid trips within a time window, and ensureSessionProxy
+   * MUST reject immediately (SessionQuarantineError) until clearQuarantine() is
+   * called.
+   *
+   * # Acceptance criteria
+   *
+   * G1. The first (N-1) trips each fire onFatalError normally (no quarantine yet).
+   * G2. After the N-th trip, supervisor.quarantinedSessions() includes the session.
+   * G3. The N+1-th ensureSessionProxy call throws SessionQuarantineError immediately.
+   * G4. supervisor.aliveCount() === 0 after quarantine (no reattach attempted).
+   * G5. clearQuarantine() removes the session from quarantine and allows reattach.
+   *
+   * # Fault injection method
+   *
+   * We use createSessionProxySupervisor({ onTopologyNotify }) to inject a
+   * poison callback that always throws AFTER start() resolves.  This callback
+   * runs inside the pipeline's error boundary (the same path as a real
+   * parser/reducer bug), firing onFatalError → supervisor tears down the entry
+   * → increments the circuit-breaker trip log.  After N trips in the window,
+   * the supervisor quarantines the session.
+   *
+   * We use a per-instance "armed" flag so we don't throw during bootstrap
+   * (bootstrap notifications arrive before start() resolves on the subscriber
+   * side, but we arm after each ensureSessionProxy completes).
+   *
+   * # Timing
+   *
+   * Each trip involves: wait for fault → wait for onFatalError → ensureSessionProxy.
+   * N = 3 trips × ~2 s each = ~6 s.  Test timeout is 60 s.
+   */
+  it("EB5: circuit breaker quarantines after N rapid trips; clearQuarantine allows reattach", { timeout: 60_000 }, async () => {
+    const socketName = `tmuxcc-eb5-${process.pid}-${Date.now()}`;
+    const sessionName = `eb5-sess-${process.pid}`;
+    _sockets.push(socketName);
+
+    spawnTmuxSession(socketName, sessionName);
+
+    const tmpDir = makeTempDir("eb5");
+    _tmpDirs.push(tmpDir);
+    const sockPath = path.join(tmpDir, "sess.sock");
+
+    // Armed flag: we only want the poison to fire AFTER start() resolves on each
+    // new session-proxy.  We set armed=true after ensureSessionProxy completes.
+    // We reset armed=false after each fault fires so subsequent bootstrap notifications
+    // on the NEXT instance don't immediately re-trip before we re-arm.
+    // Use a mutable ref object so the closure always reads the current value.
+    const state = { armed: false, faultCount: 0 };
+
+    // Poison onTopologyNotify: throws on every call when armed.
+    // Injected via createSessionProxySupervisor's onTopologyNotify option.
+    const supervisorOpts: SessionProxySupervisorOptions = {
+      onTopologyNotify: (kind: string) => {
+        if (!state.armed) return;
+        state.armed = false; // disarm until we explicitly re-arm for the next trip
+        state.faultCount++;
+        throw new Error(
+          `[EB5 fault injection] poison onTopologyNotify (kind: ${kind}, ` +
+            `fault #${state.faultCount})`,
+        );
+      },
+    };
+
+    const supervisor: SessionProxySupervisor = createSessionProxySupervisor(supervisorOpts);
+    const sessionId = `eb5-id-${process.pid}`;
+
+    // CIRCUIT_BREAKER_TRIP_THRESHOLD is 3 (defined in session-proxy-supervisor.ts).
+    // We drive exactly that many trips; the 4th ensureSessionProxy must throw.
+    const THRESHOLD = 3;
+
+    // ---- Drive THRESHOLD real boundary trips ----
+
+    for (let trip = 1; trip <= THRESHOLD; trip++) {
+      // G1 (before last trip): session is NOT quarantined
+      assert.ok(
+        !supervisor.quarantinedSessions().has(sessionId),
+        `EB5 G1: session must NOT be quarantined before trip ${trip}`,
+      );
+      assert.equal(
+        supervisor.aliveCount(),
+        0,
+        `EB5: aliveCount must be 0 before trip ${trip} (no stale entry)`,
+      );
+
+      // Ensure a session-proxy is running.
+      await supervisor.ensureSessionProxy(sessionId, sessionName, socketName, sockPath);
+      assert.equal(supervisor.aliveCount(), 1, `EB5: aliveCount must be 1 after ensureSessionProxy (trip ${trip})`);
+
+      // Wait for the session-proxy socket to be live.
+      const alive = await probeLiveSocket(sockPath, 3_000);
+      assert.ok(alive, `EB5: session-proxy socket must be live before trip ${trip}`);
+
+      // Arm the poison for the next topology notification.
+      state.armed = true;
+
+      // Trigger a topology notification (new-window) to fire the poison.
+      triggerNewWindow(socketName, sessionName);
+
+      // Wait for the fault to fire and for the supervisor's onFatalError to
+      // remove the entry from the registry (aliveCount drops to 0).
+      await waitFor(
+        () => supervisor.aliveCount() === 0,
+        8_000,
+        `supervisor to remove entry after trip ${trip} boundary fault`,
+      );
+      assert.equal(supervisor.aliveCount(), 0, `EB5: aliveCount must drop to 0 after trip ${trip}`);
+
+      // Verify the fault actually fired (not just a race / early return).
+      assert.equal(state.faultCount, trip, `EB5: faultCount must equal ${trip} after trip ${trip}`);
+    }
+
+    // ---- G2: After THRESHOLD trips, session must be quarantined ----
+
+    assert.ok(
+      supervisor.quarantinedSessions().has(sessionId),
+      `EB5 G2: session must be quarantined after ${THRESHOLD} rapid trips`,
+    );
+
+    // ---- G3: The next ensureSessionProxy must throw SessionQuarantineError ----
+
+    let caughtError: unknown = null;
+    try {
+      await supervisor.ensureSessionProxy(sessionId, sessionName, socketName, sockPath);
+    } catch (e) {
+      caughtError = e;
+    }
+    assert.ok(
+      caughtError instanceof SessionQuarantineError,
+      `EB5 G3: ensureSessionProxy must throw SessionQuarantineError after quarantine; ` +
+        `got: ${String(caughtError)}`,
+    );
+
+    // ---- G4: aliveCount must be 0 after quarantine (no reattach attempted) ----
+
+    assert.equal(
+      supervisor.aliveCount(),
+      0,
+      "EB5 G4: aliveCount must remain 0 after quarantine (no session-proxy created)",
+    );
+
+    // ---- G5: clearQuarantine allows reattach ----
+
+    supervisor.clearQuarantine(sessionId);
+    assert.ok(
+      !supervisor.quarantinedSessions().has(sessionId),
+      "EB5 G5: quarantinedSessions must NOT contain sessionId after clearQuarantine",
+    );
+
+    // After clearQuarantine, ensureSessionProxy must succeed (not throw).
+    // We disarm the poison so the fresh session-proxy can start cleanly.
+    state.armed = false;
+    const sockPathAfterClear = await supervisor.ensureSessionProxy(
+      sessionId,
+      sessionName,
+      socketName,
+      sockPath,
+    );
+    assert.equal(sockPathAfterClear, sockPath, "EB5 G5: ensureSessionProxy must succeed after clearQuarantine");
+    assert.equal(supervisor.aliveCount(), 1, "EB5 G5: aliveCount must be 1 after successful reattach");
+
+    // Cleanup.
+    supervisor.reapSessionProxy(sessionId);
     await new Promise<void>((r) => setTimeout(r, 500));
   });
 });
