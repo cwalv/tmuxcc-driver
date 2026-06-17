@@ -63,6 +63,15 @@ export interface ParsedEntryConfig {
   socketName: string | null;
   runtimeDir?: string;
   idleExitMs?: number;
+  /**
+   * tc-0eds / tc-295a.41: keep the broker alive through a transient empty tmux
+   * server (re-enter watcher poll mode instead of self-exiting "tmux-gone").
+   * A test-harness affordance for a long-lived shared broker whose specs churn
+   * sessions (the e2e harness kills every accumulated session per spec).
+   * Production never sets it.  Set via `--persist-through-tmux-gone` or
+   * `TMUXCC_PERSIST_THROUGH_TMUX_GONE=1`.
+   */
+  persistThroughTmuxGone?: boolean;
 }
 
 /**
@@ -102,6 +111,7 @@ export function _parseEntryConfig(
   let socketName = "";
   let runtimeDir: string | undefined;
   let idleExitMs: number | undefined;
+  let persistThroughTmuxGone = false;
 
   for (let i = 0; i < argv.length; i++) {
     switch (argv[i]) {
@@ -115,6 +125,9 @@ export function _parseEntryConfig(
         idleExitMs = _parseIdleExitMs(argv[++i]);
         break;
       }
+      case "--persist-through-tmux-gone":
+        persistThroughTmuxGone = true;
+        break;
     }
   }
 
@@ -125,19 +138,35 @@ export function _parseEntryConfig(
     idleExitMs = _parseIdleExitMs(env.TMUXCC_IDLE_EXIT_MS);
   }
 
+  // tc-0eds: TMUXCC_PERSIST_THROUGH_TMUX_GONE env fallback (the e2e harness
+  // path — the wdio config inherits the spawned server-proxy's env).  Either
+  // the flag or a truthy env var enables it; absence keeps the production
+  // default (self-exit on tmux-gone) unchanged.
+  if (!persistThroughTmuxGone) {
+    const raw = env.TMUXCC_PERSIST_THROUGH_TMUX_GONE;
+    persistThroughTmuxGone = raw === "1" || raw === "true";
+  }
+
   return {
     socketName: socketName.length > 0 ? socketName : null,
     ...(runtimeDir !== undefined ? { runtimeDir } : {}),
     ...(idleExitMs !== undefined ? { idleExitMs } : {}),
+    ...(persistThroughTmuxGone ? { persistThroughTmuxGone } : {}),
   };
 }
 
-function parseArgs(): { socketName: string; runtimeDir?: string; idleExitMs?: number } {
+function parseArgs(): {
+  socketName: string;
+  runtimeDir?: string;
+  idleExitMs?: number;
+  persistThroughTmuxGone?: boolean;
+} {
   const cfg = _parseEntryConfig(process.argv.slice(2), process.env);
 
   if (cfg.socketName === null) {
     process.stderr.write(
-      "Usage: server-proxy-entry --socket-name <name> [--runtime-dir <path>] [--idle-exit-ms <n>]\n",
+      "Usage: server-proxy-entry --socket-name <name> [--runtime-dir <path>] " +
+        "[--idle-exit-ms <n>] [--persist-through-tmux-gone]\n",
     );
     process.exit(1);
   }
@@ -146,6 +175,9 @@ function parseArgs(): { socketName: string; runtimeDir?: string; idleExitMs?: nu
     socketName: cfg.socketName,
     ...(cfg.runtimeDir !== undefined ? { runtimeDir: cfg.runtimeDir } : {}),
     ...(cfg.idleExitMs !== undefined ? { idleExitMs: cfg.idleExitMs } : {}),
+    ...(cfg.persistThroughTmuxGone !== undefined
+      ? { persistThroughTmuxGone: cfg.persistThroughTmuxGone }
+      : {}),
   };
 }
 
@@ -154,7 +186,7 @@ function parseArgs(): { socketName: string; runtimeDir?: string; idleExitMs?: nu
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-  const { socketName, runtimeDir, idleExitMs } = parseArgs();
+  const { socketName, runtimeDir, idleExitMs, persistThroughTmuxGone } = parseArgs();
 
   // tc-k6v: mirror stderr into the append-only server-proxy log file.  Best-effort:
   // a failed open (unwritable runtime dir) leaves the server-proxy running without
@@ -183,6 +215,7 @@ async function main(): Promise<void> {
     socketName,
     ...(runtimeDir !== undefined ? { runtimeDir } : {}),
     ...(idleExitMs !== undefined ? { idleExitMs } : {}),
+    ...(persistThroughTmuxGone !== undefined ? { persistThroughTmuxGone } : {}),
     ...(log !== null ? { logPath: log.path } : {}),
   };
   const serverProxy = createServerProxy(serverProxyOpts);

@@ -95,4 +95,39 @@ describe("server-proxy-entry – _parseEntryConfig (tc-eqgp)", () => {
     );
     assert.equal(cfg.idleExitMs, undefined);
   });
+
+  // tc-0eds: --persist-through-tmux-gone / TMUXCC_PERSIST_THROUGH_TMUX_GONE.
+  it("persistThroughTmuxGone is undefined by default (production default unchanged)", () => {
+    const cfg = _parseEntryConfig(["--socket-name", "x"], {});
+    assert.equal(cfg.persistThroughTmuxGone, undefined);
+  });
+
+  it("returns persistThroughTmuxGone=true from --persist-through-tmux-gone", () => {
+    const cfg = _parseEntryConfig(["--socket-name", "x", "--persist-through-tmux-gone"], {});
+    assert.equal(cfg.persistThroughTmuxGone, true);
+  });
+
+  it("reads TMUXCC_PERSIST_THROUGH_TMUX_GONE=1 from env when the flag is absent", () => {
+    const cfg = _parseEntryConfig(
+      ["--socket-name", "x"],
+      { TMUXCC_PERSIST_THROUGH_TMUX_GONE: "1" },
+    );
+    assert.equal(cfg.persistThroughTmuxGone, true);
+  });
+
+  it("reads TMUXCC_PERSIST_THROUGH_TMUX_GONE=true from env", () => {
+    const cfg = _parseEntryConfig(
+      ["--socket-name", "x"],
+      { TMUXCC_PERSIST_THROUGH_TMUX_GONE: "true" },
+    );
+    assert.equal(cfg.persistThroughTmuxGone, true);
+  });
+
+  it("ignores a non-truthy TMUXCC_PERSIST_THROUGH_TMUX_GONE (default stays off)", () => {
+    const cfg = _parseEntryConfig(
+      ["--socket-name", "x"],
+      { TMUXCC_PERSIST_THROUGH_TMUX_GONE: "0" },
+    );
+    assert.equal(cfg.persistThroughTmuxGone, undefined);
+  });
 });
