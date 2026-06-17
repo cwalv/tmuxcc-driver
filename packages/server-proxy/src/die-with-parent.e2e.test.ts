@@ -14,10 +14,14 @@
  *
  * # Scenarios
  *
- * D1. serverProxy(subprocess) + session.claim → session-proxy + PTY bridge running.
+ * D1. serverProxy(subprocess) + session.claim → session-proxy + node-pty-hosted tmux running.
  *     SIGKILL the serverProxy:
  *       a. the session-proxy process exits ≤ 3 s (poll ≤ 1 s + graceful stop)
- *       b. the python PTY bridge exits with it (enforcement one level down)
+ *       b. the tmux -CC client (node-pty child) exits with it
+ *          NOTE (tc-2x3.1): the former python PTY bridge is replaced by node-pty.
+ *          The tmux process is now a direct child of the session-proxy (not a
+ *          grandchild via a bridge).  When the session-proxy exits, the PTY master fd
+ *          is closed and tmux receives EIO/SIGHUP on its controlling tty.
  *       c. the tmux server + session SURVIVE — tmux is the persistence layer
  *     Then the recovery path (ext-a §6.3, server-proxy README "Lifetime"):
  *       d. a fresh server-proxy spawns, claims the SAME session against the
@@ -28,7 +32,7 @@
  *
  * Unique tmux socket name (tmuxcc-test-dwp-…) and a unique runtime dir per
  * run.  The finally block SIGKILLs both server-proxies and any surviving session-proxy /
- * bridge pids, kills the tmux test server, and removes the runtime dir —
+ * tmux pids, kills the tmux test server, and removes the runtime dir —
  * even on assertion failure.
  *
  * @module die-with-parent.e2e.test
@@ -252,7 +256,7 @@ describe(
   { skip: !TMUX_AVAILABLE ? "tmux not found on PATH" : false },
   () => {
     it(
-      "D1: SIGKILL server-proxy → session-proxy + bridge die ≤ 3 s; tmux survives; fresh server-proxy recovers",
+      "D1: SIGKILL server-proxy → session-proxy + tmux client die ≤ 3 s; tmux survives; fresh server-proxy recovers",
       { timeout: 60_000 },
       async () => {
         const socketName = `tmuxcc-test-dwp-${process.pid}-${Date.now()}`;
@@ -262,7 +266,7 @@ describe(
         let broker1: ChildProcess | undefined;
         let broker2: ChildProcess | undefined;
         let sessionProxyPid: number | undefined;
-        let bridgePid: number | undefined;
+        let tmuxClientPid: number | undefined;
         let daemon2Pid: number | undefined;
 
         try {
@@ -272,24 +276,26 @@ describe(
           await claimSession(endpoint, sessionName);
 
           // Locate the spawned sessionProxy (direct child of the server-proxy running
-          // session-proxy-entry) and its python PTY bridge (direct child of the
-          // sessionProxy).  Both exist by the time session.claim resolves — the
-          // supervisor waits for the session-proxy's READY, which follows
-          // sessionProxy.start() (bridge spawned).
+          // session-proxy-entry) and the tmux -CC client process (direct child of the
+          // sessionProxy, spawned via node-pty — tc-2x3.1).  Both exist by the time
+          // session.claim resolves — the supervisor waits for the session-proxy's
+          // READY, which follows sessionProxy.start() (tmux spawned via node-pty).
           const serverProxyPid = broker1.pid!;
           sessionProxyPid = await waitForPid(
             () => findChildPid(serverProxyPid, "session-proxy-entry"),
             5_000,
             "session-proxy process (child of server-proxy matching session-proxy-entry)",
           );
-          bridgePid = await waitForPid(
-            () => findChildPid(sessionProxyPid!, "tmux-pty-bridge"),
+          // tc-2x3.1: with node-pty the tmux -CC client is a direct child of the
+          // session-proxy process (no intermediate python bridge).
+          tmuxClientPid = await waitForPid(
+            () => findChildPid(sessionProxyPid!, "tmux"),
             5_000,
-            "PTY bridge (child of session-proxy matching tmux-pty-bridge)",
+            "tmux -CC client (direct child of session-proxy via node-pty)",
           );
 
           assert.ok(alive(sessionProxyPid), "sanity: session-proxy alive before server-proxy kill");
-          assert.ok(alive(bridgePid), "sanity: bridge alive before server-proxy kill");
+          assert.ok(alive(tmuxClientPid), "sanity: tmux client alive before server-proxy kill");
 
           // ── Act: SIGKILL the server-proxy — no signal reaches its children ──────
           broker1.kill("SIGKILL");
@@ -303,13 +309,14 @@ describe(
             `session-proxy must exit ≤ 3000 ms after server-proxy SIGKILL; took ${sessionProxyGoneMs} ms`,
           );
 
-          // ── Assert (b): the PTY bridge dies with the sessionProxy (it is reaped
-          // by the session-proxy's graceful stop; its own getppid watch + bounded
-          // teardown backstop the hard-exit path).
-          const bridgeGoneMs = await waitUntilGone(bridgePid, 3_000);
+          // ── Assert (b): the tmux -CC client exits with the session-proxy.
+          // When the session-proxy's node-pty handle is closed (either by graceful
+          // stop or by the process dying), the PTY master fd closes and tmux
+          // receives EIO / SIGHUP on its controlling tty, causing it to exit.
+          const tmuxClientGoneMs = await waitUntilGone(tmuxClientPid, 5_000);
           assert.ok(
-            bridgeGoneMs >= 0,
-            `bridge gone ${bridgeGoneMs} ms after session-proxy`, // waitUntilGone throws on timeout
+            tmuxClientGoneMs >= 0,
+            `tmux client gone ${tmuxClientGoneMs} ms after session-proxy`, // waitUntilGone throws on timeout
           );
 
           // ── Assert (c): tmux is the persistence layer — server + session
@@ -348,7 +355,7 @@ describe(
           killQuiet(broker1?.pid);
           killQuiet(daemon2Pid);
           killQuiet(sessionProxyPid);
-          killQuiet(bridgePid);
+          killQuiet(tmuxClientPid);
           // The tmux server intentionally survives the scenario — reap it.
           spawnSync("tmux", ["-L", socketName, "kill-server"], { stdio: "ignore", timeout: 5_000 });
           // Backstop: anything still holding the unique socket name in argv.

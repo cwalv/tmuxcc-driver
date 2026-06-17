@@ -19,15 +19,13 @@
  *     assertion from the tc-2c5 acceptance (poll path, not prctl — see bead
  *     comment for the decision).
  *
- * ## Bridge (one level down — python tmux-pty-bridge)
- *
- * B1. The PTY bridge exits within 4 s of its parent being SIGKILLed even when
- *     (a) its stdin never sees EOF (the test holds the pipe's write end open
- *     across the SIGKILL — the leaked-fd case where only the bridge's own
- *     getppid watch can detect parent death), and (b) the bridged child
- *     ignores the PTY master close (sleep(1) never reads its tty — the case
- *     where the old unbounded proc.wait() hung forever).  Also asserts the
- *     bridged child itself is reaped before the bridge exits.
+ * NOTE (tc-2x3.1): the former B1 "Bridge" test category that tested the
+ * Python tmux-pty-bridge.py die-with-parent behaviour has been removed.
+ * The bridge was deleted as part of tc-2x3.1 (replaced by node-pty); there
+ * is no longer an intermediate bridge process to test.  The die-with-parent
+ * enforcement for the tmux child is now exercised end-to-end via
+ * die-with-parent.e2e.test.ts in server-proxy, which verifies that the
+ * node-pty-hosted tmux process exits when the session-proxy is SIGKILLed.
  *
  * # Cleanup
  *
@@ -39,7 +37,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { join, dirname } from "node:path";
 
@@ -53,7 +51,6 @@ const __dir = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = join(__dir, "..", "..");
 const PARENT_FIXTURE = join(__dir, "fixtures", "dwp-parent.mjs");
 const CHILD_FIXTURE = join(__dir, "fixtures", "dwp-child.mjs");
-const BRIDGE_SCRIPT = join(__dir, "tmux-pty-bridge.py");
 
 /**
  * URL of the module under test, handed to dwp-child.mjs for dynamic import.
@@ -153,19 +150,6 @@ function readStdoutUntil<T>(
     });
   });
 }
-
-/** First child pid of `parentPid` via pgrep -P, or undefined. */
-function firstChildPid(parentPid: number): number | undefined {
-  const r = spawnSync("pgrep", ["-P", String(parentPid)], { encoding: "utf8", timeout: 3_000 });
-  const line = (r.stdout ?? "").trim().split("\n")[0];
-  const pid = line ? parseInt(line, 10) : NaN;
-  return Number.isNaN(pid) ? undefined : pid;
-}
-
-const python3Available = (() => {
-  const r = spawnSync("python3", ["--version"], { stdio: "ignore", timeout: 2_000 });
-  return r.status === 0 && !r.error;
-})();
 
 // ---------------------------------------------------------------------------
 // Unit tests — injected getPpid
@@ -288,78 +272,6 @@ describe("tc-2c5: installDieWithParent — subprocess (real reparenting)", () =>
   );
 });
 
-// ---------------------------------------------------------------------------
-// Bridge test — one level down (python tmux-pty-bridge)
-// ---------------------------------------------------------------------------
-
-describe(
-  "tc-2c5: tmux-pty-bridge — die-with-parent one level down",
-  { skip: !python3Available ? "python3 not found on PATH" : false },
-  () => {
-    it(
-      "B1: bridge exits ≤ 4 s after parent SIGKILL — no stdin EOF, EOF-deaf child",
-      { timeout: 25_000 },
-      async () => {
-        // parent(node dwp-parent.mjs) → bridge(python3 tmux-pty-bridge.py sleep 600)
-        //
-        // The bridge inherits the parent's stdin, which is THIS process's pipe
-        // (dwp-parent spawns with stdio "inherit").  We keep the write end open
-        // for the whole test, so the bridge NEVER sees stdin EOF — parent death
-        // is only observable via the bridge's getppid watch.  And `sleep`
-        // never reads its tty, so the PTY-master close is invisible to it —
-        // exercising the bounded SIGTERM/SIGKILL escalation that replaced the
-        // unbounded proc.wait().
-        const parent = spawn(
-          process.execPath,
-          [PARENT_FIXTURE, "python3", BRIDGE_SCRIPT, "sleep", "600"],
-          { stdio: ["pipe", "pipe", "pipe"], cwd: PACKAGE_ROOT },
-        );
-        let bridgePid: number | undefined;
-        let sleepPid: number | undefined;
-
-        try {
-          bridgePid = await readStdoutUntil(
-            parent,
-            (l) => (l.startsWith("CHILD_PID=") ? parseInt(l.slice("CHILD_PID=".length), 10) : undefined),
-            10_000,
-            "CHILD_PID (bridge)",
-          );
-
-          // Wait for the bridge to spawn its sleep child so we can track it.
-          await waitFor(
-            () => {
-              sleepPid = firstChildPid(bridgePid!);
-              return sleepPid !== undefined;
-            },
-            5_000,
-            "bridge did not spawn its child",
-          );
-
-          assert.ok(alive(bridgePid), "sanity: bridge must be alive before the parent is killed");
-
-          parent.kill("SIGKILL");
-
-          // Budget: ppid watch fires within one ~50 ms select tick, then the
-          // bounded teardown runs (2 s EOF grace → SIGTERM).  ≈ 2.1 s typical.
-          const elapsed = await waitUntilGone(bridgePid, 10_000);
-          assert.ok(
-            elapsed <= 4_000,
-            `bridge must exit ≤ 4000 ms after parent SIGKILL; took ${elapsed} ms`,
-          );
-
-          // The bridge reaps its child BEFORE exiting (proc.wait in the
-          // escalation path) — so by now the sleep child must be gone too.
-          assert.ok(sleepPid !== undefined, "sanity: sleep child pid was captured");
-          assert.ok(
-            !alive(sleepPid!),
-            `bridged child (pid ${sleepPid}) must not outlive the bridge`,
-          );
-        } finally {
-          killQuiet(parent.pid);
-          killQuiet(bridgePid);
-          killQuiet(sleepPid);
-        }
-      },
-    );
-  },
-);
+// (tc-2x3.1: Bridge test B1 removed — tmux-pty-bridge.py deleted, replaced by node-pty.
+//  End-to-end die-with-parent for the node-pty-hosted tmux child is covered by
+//  die-with-parent.e2e.test.ts in @tmuxcc/server-proxy.)

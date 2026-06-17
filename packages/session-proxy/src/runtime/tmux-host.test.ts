@@ -261,30 +261,29 @@ describe("TmuxHost — hermetic (fake-tmux)", () => {
 // ---------------------------------------------------------------------------
 
 describe("TmuxHost — error paths", () => {
-  it("onError fires when python binary is not found", async () => {
+  it("onExit fires when tmux binary is not found (tc-2x3.1: node-pty spawns, exec fails, exits non-zero)", async () => {
+    // node-pty.spawn() does NOT throw when the target binary does not exist.
+    // Instead, start() resolves (forkpty succeeded), but the child process
+    // immediately exits with a non-zero code because exec() of the nonexistent
+    // binary fails.  onExit fires with exitCode !== 0.
     const host = createTmuxHost({
       socketName: `tmuxcc-test-${process.pid}-err-${Date.now()}`,
       sessionName: "tc-kyp-err",
-      pythonPath: "/nonexistent/python3-xyz-404",
+      tmuxPath: "/nonexistent/tmux-xyz-404",
     });
 
-    let errFired = false;
-    host.onError(() => { errFired = true; });
+    let exitFired = false;
+    let exitCode: number | null = null;
+    host.onExit((code) => { exitFired = true; exitCode = code; });
+    host.onError(() => { /* absorb any error events */ });
 
-    let startRejected = false;
-    try {
-      await host.start();
-    } catch {
-      startRejected = true;
-    }
+    await host.start(); // must not throw
 
-    // Allow a tick for error propagation
-    await new Promise<void>((r) => setTimeout(r, 30));
+    // Wait for the quick exit
+    await new Promise<void>((r) => setTimeout(r, 200));
 
-    assert.ok(
-      errFired || startRejected,
-      "onError should fire OR start() should reject when binary not found",
-    );
+    assert.ok(exitFired, "onExit should fire when the binary is not found");
+    assert.notEqual(exitCode, 0, "exit code should be non-zero when binary not found");
   });
 
   it("write() throws before start()", () => {

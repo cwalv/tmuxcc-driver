@@ -1,20 +1,21 @@
 /**
  * tmux -CC subprocess host (tc-kyp).
  *
- * Spawns and owns a `tmux -CC` child process via a Python PTY bridge that
- * satisfies tmux's tcgetattr() requirement without adding a native Node addon.
+ * Spawns and owns a `tmux -CC` child process via node-pty (tc-2x3.1).
+ * node-pty allocates a real POSIX PTY pair via forkpty(3) and executes the
+ * target process with the slave end — satisfying tmux's tcgetattr() requirement
+ * without a Python runtime dependency.
  *
- * # Why a PTY bridge?
+ * # Why a PTY?
  *
  * tmux's control-mode client calls tcgetattr() on its stdin/stdout at startup.
  * When those fds are plain pipes (as they would be from Node's child_process.spawn),
  * tcgetattr fails with ENXIO and tmux exits immediately with:
  *   "tcgetattr failed: Inappropriate ioctl for device"
  *
- * The bridge script (tmux-pty-bridge.py, a sibling of this file) allocates a
- * POSIX PTY pair, spawns tmux with the slave end, and bridges the master end
- * to its own stdin/stdout — which ARE plain pipes to our Node process.
- * Result: tmux sees a tty; we see a pipe.
+ * node-pty solves this in-process: it calls forkpty(), gives the slave fd to
+ * tmux as its stdio, and exposes the master fd as a readable/writable stream.
+ * Result: tmux sees a tty; we see a stream — no Python bridge needed.
  *
  * # Spawn invocation defaults
  *
@@ -37,10 +38,16 @@
  *   All beads:           `onExit`, `onError`, `stop`, `kill`, `pid`
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
 import { appendFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { join, dirname } from "node:path";
+
+// node-pty 1.1.0 — current stable release (2024-11-xx).
+// Vendored for linux-x64: build/Release/pty.node (compiled from source;
+// no linux prebuild in the 1.1.0 tarball — darwin/win32 only).
+// tc-2x3.2 handles the full cross-platform prebuild matrix.
+// Must be marked external in esbuild — the native .node module is loaded via
+// relative paths from node-pty/lib/utils.js and cannot be bundled.
+import * as pty from "node-pty";
+import type { IPty } from "node-pty";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -96,12 +103,6 @@ export interface TmuxHostOptions {
    * Rarely needed — use for custom session configs.
    */
   args?: string[];
-
-  /**
-   * Path to the Python interpreter used for the PTY bridge.
-   * Default: "python3"
-   */
-  pythonPath?: string;
 
   /**
    * Dimensions reported to the PTY. tmux may use these for layout.
@@ -168,8 +169,11 @@ export interface TmuxHost {
   onError(handler: ErrorHandler): () => void;
 
   /**
-   * Register a handler for stderr output from tmux or the bridge.
+   * Register a handler for stderr output from tmux.
    * Returns an unsubscribe function. Mostly for diagnostics.
+   * Note: node-pty merges stderr into the PTY stream on Unix; this handler
+   * fires for stderr-like content embedded in the PTY output when discernible.
+   * In practice tmux -CC writes nothing to stderr on a clean run.
    */
   onStderr(handler: DataHandler): () => void;
 
@@ -187,7 +191,7 @@ export interface TmuxHost {
   kill(signal?: NodeJS.Signals): void;
 
   /**
-   * PID of the bridge process (not the inner tmux pid).
+   * PID of the tmux process.
    * Undefined before start() resolves.
    */
   readonly pid: number | undefined;
@@ -198,27 +202,6 @@ export interface TmuxHost {
    */
   readonly exited: boolean;
 }
-
-// ---------------------------------------------------------------------------
-// Implementation
-// ---------------------------------------------------------------------------
-
-// tmux-pty-bridge.py lives in src/runtime/ — a direct sibling of this module —
-// NOT under fixtures/ (it is production runtime code on the hot path of every
-// keystroke, not a test artifact; tc-nkz). Sibling placement is load-bearing:
-// the script is resolved relative to the module that spawns it, and that
-// resolution must hold in BOTH dist layouts —
-//   - session-proxy standalone: dist/runtime/tmux-host.js → dist/runtime/tmux-pty-bridge.py
-//     (the build step copies it there),
-//   - vscode bundle: import.meta.url collapses to the single bundle file
-//     (dist/extension.cjs / dist/session-proxy-entry.js) → dist/tmux-pty-bridge.py
-//     (the extension's esbuild step copies it there).
-// A separate src/bridge/ home would need a `../bridge` hop that escapes dist/
-// in the flattened bundle, so the flat sibling is the cleaner invariant.
-const BRIDGE_SCRIPT_PATH = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "tmux-pty-bridge.py",
-);
 
 // ---------------------------------------------------------------------------
 // Wire trace (tc-3y8.9 forensics aid)
@@ -253,13 +236,18 @@ function wireTrace(file: string, dir: ">>>" | "<<<", data: string | Uint8Array |
   }
 }
 
+// ---------------------------------------------------------------------------
+// join/dirname for trace file path
+// ---------------------------------------------------------------------------
+import { join } from "node:path";
+
 class TmuxHostImpl implements TmuxHost {
   private readonly opts: Required<TmuxHostOptions>;
 
   /** Wire-trace file path, or null when TMUXCC_WIRE_TRACE is unset. */
   private _traceFile: string | null = null;
 
-  private _proc: ChildProcess | null = null;
+  private _pty: IPty | null = null;
   private _pid: number | undefined = undefined;
   private _exited = false;
   private _exitCode: number | null = null;
@@ -281,7 +269,6 @@ class TmuxHostImpl implements TmuxHost {
       env: opts.env ?? {},
       tmuxPath: opts.tmuxPath ?? "tmux",
       args: opts.args ?? [],
-      pythonPath: opts.pythonPath ?? "python3",
       cols: opts.cols ?? 220,
       rows: opts.rows ?? 50,
     };
@@ -302,11 +289,11 @@ class TmuxHostImpl implements TmuxHost {
     this._started = true;
 
     return new Promise<void>((resolve, reject) => {
-      const { socketName, sessionName, attach, tmuxPath, pythonPath, args, cwd, env, cols, rows } =
+      const { socketName, sessionName, attach, tmuxPath, args, cwd, env, cols, rows } =
         this.opts;
 
       // Build the tmux subcommand args
-      const tmuxArgs: string[] = [tmuxPath, "-L", socketName, "-CC"];
+      const tmuxArgs: string[] = ["-L", socketName, "-CC"];
       if (attach) {
         tmuxArgs.push("attach-session", "-t", sessionName);
       } else {
@@ -314,18 +301,12 @@ class TmuxHostImpl implements TmuxHost {
       }
       tmuxArgs.push(...args);
 
-      // Bridge invocation: python3 <bridge_script> <tmux-args...>
-      const bridgeArgs = [BRIDGE_SCRIPT_PATH, ...tmuxArgs];
-
       const mergedEnv: Record<string, string> = {
         ...process.env,
         // Provide a TERM so tmux doesn't complain about unknown terminal
         TERM: "xterm-256color",
         // Override with user env
         ...env,
-        // PTY dimensions as env vars that the bridge can set via stty
-        COLUMNS: String(cols),
-        LINES: String(rows),
       } as Record<string, string>;
 
       // tc-4bv2: a control-mode client MUST NOT inherit an outer $TMUX /
@@ -343,30 +324,6 @@ class TmuxHostImpl implements TmuxHost {
       delete mergedEnv["TMUX"];
       delete mergedEnv["TMUX_PANE"];
 
-      const proc = spawn(pythonPath, bridgeArgs, {
-        cwd,
-        env: mergedEnv,
-        stdio: ["pipe", "pipe", "pipe"],
-      });
-
-      this._proc = proc;
-
-      let spawned = false;
-
-      proc.on("spawn", () => {
-        spawned = true;
-        this._pid = proc.pid;
-        resolve();
-      });
-
-      proc.on("error", (err) => {
-        if (!spawned) {
-          // Spawn failed — reject start() and fire error handlers
-          reject(err);
-        }
-        this._emitError(err);
-      });
-
       if (WIRE_TRACE_DIR !== undefined && WIRE_TRACE_DIR !== "") {
         this._traceFile = join(
           WIRE_TRACE_DIR,
@@ -374,56 +331,58 @@ class TmuxHostImpl implements TmuxHost {
         );
       }
 
-      proc.stdout!.on("data", (chunk: Buffer) => {
-        const bytes = new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+      let term: IPty;
+      try {
+        // node-pty spawns tmux with a real PTY via forkpty(3), satisfying
+        // tmux's tcgetattr() requirement without a Python bridge.
+        // encoding: null → onData fires with Buffer (raw bytes); we convert
+        // to Uint8Array for the existing API contract.
+        term = pty.spawn(tmuxPath, tmuxArgs, {
+          cols,
+          rows,
+          cwd,
+          env: mergedEnv,
+          encoding: null,
+        });
+      } catch (err) {
+        const e = err instanceof Error ? err : new Error(String(err));
+        this._emitError(e);
+        reject(e);
+        return;
+      }
+
+      this._pty = term;
+      this._pid = term.pid;
+
+      // node-pty's spawn is synchronous (forkpty + exec in-process).
+      // By the time pty.spawn() returns without throwing, the process exists.
+      resolve();
+
+      term.onData((chunk: string | Buffer) => {
+        // With encoding: null, chunk arrives as a Buffer.
+        const buf: Buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string, "utf8");
+        const bytes = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
         if (this._traceFile !== null) wireTrace(this._traceFile, "<<<", bytes);
         for (const handler of this._dataHandlers) {
           try {
             handler(bytes);
-          } catch (e) {
+          } catch {
             // Don't let handler errors crash the host
           }
         }
       });
 
-      proc.stdout!.on("error", (err) => {
-        this._emitError(err);
-      });
-
-      // tc-295a.38: proc.stdin can receive EPIPE when the bridge process dies
-      // (e.g. after an external kill-server) while the pipeline is still active
-      // and trying to send commands. Without an error handler on proc.stdin the
-      // EPIPE becomes an uncaughtException → crash. Route it through _emitError
-      // so it is handled identically to proc.stdout errors and proc errors.
-      proc.stdin!.on("error", (err) => {
-        this._emitError(err);
-      });
-
-      proc.stderr!.on("data", (chunk: Buffer) => {
-        if (this._stderrHandlers.size > 0) {
-          const bytes = new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
-          for (const handler of this._stderrHandlers) {
-            try {
-              handler(bytes);
-            } catch (e) {
-              // ignore
-            }
-          }
-        }
-      });
-
-      proc.stderr!.on("error", (err) => {
-        this._emitError(err);
-      });
-
-      proc.on("close", (code, signal) => {
+      term.onExit(({ exitCode, signal }) => {
         this._exited = true;
-        this._exitCode = code;
-        this._exitSignal = signal;
+        this._exitCode = exitCode ?? null;
+        // node-pty onExit gives signal as a number; convert to NodeJS signal name
+        // format by mapping 0/undefined → null and letting the code stand otherwise.
+        // Callers compare against null (no signal) or a non-null value.
+        this._exitSignal = (signal !== undefined && signal !== 0) ? String(signal) : null;
         for (const handler of this._exitHandlers) {
           try {
-            handler(code, signal);
-          } catch (e) {
+            handler(this._exitCode, this._exitSignal);
+          } catch {
             // ignore
           }
         }
@@ -438,17 +397,18 @@ class TmuxHostImpl implements TmuxHost {
     if (this._exited) {
       throw new Error("TmuxHost: write() called after process has exited");
     }
-    const proc = this._proc;
-    if (!proc || !proc.stdin) {
-      throw new Error("TmuxHost: stdin not available");
+    const term = this._pty;
+    if (!term) {
+      throw new Error("TmuxHost: pty not available");
     }
 
     if (this._traceFile !== null) wireTrace(this._traceFile, ">>>", data);
 
     if (typeof data === "string") {
-      proc.stdin.write(data, "utf8");
+      term.write(data);
     } else {
-      proc.stdin.write(data);
+      // node-pty write() accepts string | Buffer
+      term.write(Buffer.isBuffer(data) ? data : Buffer.from(data));
     }
   }
 
@@ -479,6 +439,9 @@ class TmuxHostImpl implements TmuxHost {
   }
 
   onStderr(handler: DataHandler): () => void {
+    // On Unix, node-pty merges stderr into the PTY stream; there is no
+    // separate stderr fd. Register the handler for interface compatibility
+    // but it will never fire (tmux -CC emits nothing to stderr on a clean run).
     this._stderrHandlers.add(handler);
     return () => {
       this._stderrHandlers.delete(handler);
@@ -492,7 +455,7 @@ class TmuxHostImpl implements TmuxHost {
     if (this._exited) {
       return Promise.resolve();
     }
-    if (!this._proc) {
+    if (!this._pty) {
       return Promise.resolve();
     }
 
@@ -506,9 +469,10 @@ class TmuxHostImpl implements TmuxHost {
       const cleanup = () => resolve();
       this._exitHandlers.add(cleanup);
 
-      // Close stdin to signal EOF to the bridge → tmux gets SIGHUP/detach
+      // Send Ctrl-D (EOF) to the PTY master — tmux receives it on its stdin
+      // and exits cleanly (%exit). This mirrors the python bridge's stdin.end().
       try {
-        this._proc?.stdin?.end();
+        this._pty?.write("\x04");
       } catch {
         // already closed
       }
@@ -539,11 +503,11 @@ class TmuxHostImpl implements TmuxHost {
   }
 
   kill(signal: NodeJS.Signals = "SIGKILL"): void {
-    if (this._exited || !this._proc) {
+    if (this._exited || !this._pty) {
       return;
     }
     try {
-      this._proc.kill(signal);
+      this._pty.kill(signal);
     } catch {
       // process may have already exited
     }
@@ -581,9 +545,10 @@ class TmuxHostImpl implements TmuxHost {
  * The host is NOT yet started. Call `host.start()` to spawn the process.
  *
  * Default spawn invocation:
- *   python3 <bridge> tmux -L <socketName> -CC new-session -s <sessionName>
+ *   tmux -L <socketName> -CC new-session -s <sessionName>
  *
- * where <bridge> is tmux-pty-bridge.py (bundled alongside this file).
+ * Spawned via node-pty (forkpty + exec), which gives tmux a real PTY fd on
+ * its stdin/stdout — satisfying tmux's tcgetattr() requirement (tc-2x3.1).
  *
  * @example
  * ```ts
@@ -600,8 +565,3 @@ class TmuxHostImpl implements TmuxHost {
 export function createTmuxHost(opts: TmuxHostOptions): TmuxHost {
   return new TmuxHostImpl(opts);
 }
-
-// ---------------------------------------------------------------------------
-// Convenience: path to the bridge script (for tests that want to bundle it)
-// ---------------------------------------------------------------------------
-export { BRIDGE_SCRIPT_PATH };
