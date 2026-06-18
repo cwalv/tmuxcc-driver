@@ -630,6 +630,74 @@ describe("e2e — scenario 5: input/resize round-trip", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Scenario 5b — disconnect() drains the deferred coalesced resize (p8lh)
+// ---------------------------------------------------------------------------
+
+describe("e2e — scenario 5b: disconnect() drains the pending coalesced resize (p8lh)", () => {
+  it("a coalesced resize scheduled just before disconnect() does NOT send() on the closed connection", async () => {
+    // RED-before: connectClient() coalesces resizes by DEFAULT; resizePane()
+    // defers send() to a `Promise.resolve().then(flushResizes)` microtask.
+    // disconnect() (rejectAllPending → mirror.detachHook → connection.close)
+    // did NOT drain that buffer, so the microtask fired AFTER close() and
+    // called send() on a "closed" connection → threw
+    // `SessionProxyConnection.send() ... in state "closed"` as a FLOATING
+    // unhandled rejection that randomly failed whichever Layer-A spec was
+    // running (the open-session-picker flake).  GREEN-after: disconnect() now
+    // calls inputApi.cancelPendingResizes() before close(), so the obsolete
+    // resize is dropped and never sent; the close-state send() tripwire stays.
+    const { sessionProxy: sessionProxyTransport, client: clientTransport } =
+      createInMemoryTransportPair();
+
+    const echo = new EchoRenderHook();
+    const model = buildBaseModel();
+    const snapshot: SnapshotMessage = projectSnapshot(model, { seq: 2 });
+
+    // DEFAULT coalescing (the production path) — do NOT disable it.
+    const sessionProxyHandshake = runSessionProxyHandshake(sessionProxyTransport, SESSION_PROXY_CAPS);
+    const handle = await connectClient(clientTransport);
+    await sessionProxyHandshake;
+    handle.mirror.attach(echo);
+
+    const sessionProxyReceived: unknown[] = [];
+    sessionProxyTransport.onControl((msg) => sessionProxyReceived.push(msg));
+    sessionProxyTransport.sendControl(snapshot);
+
+    // Capture any floating unhandled rejection (the exact p8lh failure shape).
+    let unhandled: unknown = null;
+    const onRej = (err: unknown): void => { unhandled = err; };
+    process.on("unhandledRejection", onRej);
+
+    // Schedule a coalesced resize (buffered + microtask flush armed), then tear
+    // down via the REAL production path before the microtask can run.
+    handle.controller.resizePane(P0, 220, 50);
+    handle.disconnect();
+    sessionProxyTransport.close();
+
+    // Drain the microtask queue + a macrotask so any (incorrect) deferred send
+    // would fire and throw here.
+    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 5));
+    process.off("unhandledRejection", onRej);
+
+    assert.equal(
+      unhandled,
+      null,
+      `disconnect() must drain the pending resize — no floating throw expected; got: ${String(
+        unhandled instanceof Error ? unhandled.message : unhandled,
+      )}`,
+    );
+    const resizeSent = sessionProxyReceived.some(
+      (m) => typeof m === "object" && m !== null && (m as { type?: string }).type === "resize.request",
+    );
+    assert.equal(
+      resizeSent,
+      false,
+      "no resize.request must reach the session-proxy after disconnect (obsolete send dropped)",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Scenario 6 — onLayoutChanged delivers geometry (tc-7ml.3)
 // ---------------------------------------------------------------------------
 

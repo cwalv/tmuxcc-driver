@@ -1267,6 +1267,70 @@ describe("seq-gap detection", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 4c. connectTo unsubscribe severs the resync send path (p8lh)
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimal fake SessionProxyConnection capturing only what `connectTo()` uses:
+ * onControl (single-slot replace), send (records calls), close.  `deliver()`
+ * pushes a control message to the currently-installed handler so a test can
+ * simulate a delta arriving AFTER the connectTo unsubscribe ran.
+ */
+function makeFakeConnection(): {
+  connection: import("./connection.js").SessionProxyConnection;
+  sent: import("@tmuxcc/session-proxy").ClientMessage[];
+  deliver: (msg: SessionProxyMessage) => void;
+} {
+  const sent: import("@tmuxcc/session-proxy").ClientMessage[] = [];
+  let handler: ((msg: SessionProxyMessage) => void) | null = null;
+  const fake = {
+    onControl(h: (msg: SessionProxyMessage) => void): void { handler = h; },
+    send(msg: import("@tmuxcc/session-proxy").ClientMessage): void { sent.push(msg); },
+    close(): void { /* no-op for the test */ },
+  };
+  return {
+    connection: fake as unknown as import("./connection.js").SessionProxyConnection,
+    sent,
+    deliver: (msg) => handler?.(msg),
+  };
+}
+
+describe("Mirror.connectTo — unsubscribe severs the resync send path (p8lh)", () => {
+  it("a gap delta AFTER the connectTo unsubscribe does NOT send resync.request", () => {
+    // RED-before (connectClient discarded the connectTo unsubscribe and only
+    // called detachHook on disconnect): the mirror's onControl handler + its
+    // injected #sendFn stayed live after connection.close(), so a post-close
+    // control delta tripped seq-gap detection → connection.send(resync.request)
+    // on the CLOSED connection → the p8lh send-on-closed throw (resync path).
+    // GREEN-after: disconnect() calls this unsubscribe, no-oping the handler and
+    // clearing #sendFn, so the late delta is dropped and no send fires.
+    const mirror = new Mirror();
+    const { connection, sent, deliver } = makeFakeConnection();
+
+    const unsubscribe = mirror.connectTo(connection);
+
+    // Seed lastSeq via a snapshot so a subsequent out-of-order delta is a gap.
+    deliver(makeSnapshot(5));
+    // Sanity: an in-order delta routes fine while still wired.
+    deliver({ type: "pane.resized", seq: 6, paneId: P1, cols: 10, rows: 10 });
+
+    // Disconnect severs the mirror from the connection.
+    unsubscribe();
+
+    // A late gap delta arrives (expected seq 7, got 9).  With the handler
+    // no-oped and #sendFn cleared, it must NOT produce a resync.request send.
+    deliver({ type: "pane.resized", seq: 9, paneId: P1, cols: 20, rows: 20 });
+
+    const resyncSent = sent.some((m) => m.type === "resync.request");
+    assert.equal(
+      resyncSent,
+      false,
+      "no resync.request must be sent after the connectTo unsubscribe (severed connection)",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 5. Mirror.onModelChange
 // ---------------------------------------------------------------------------
 

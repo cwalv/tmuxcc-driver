@@ -180,7 +180,13 @@ export async function connectClient(
 
   // Wire mirror to the connection's control stream.
   // Must be called AFTER connect() so buffered messages are delivered.
-  mirror.connectTo(connection);
+  // p8lh: KEEP the unsubscribe — disconnect() calls it to sever the mirror from
+  // the connection (no-op the onControl handler + clear the mirror's injected
+  // send/close fns).  Otherwise a control delta arriving AFTER close() routes
+  // into the still-wired mirror, trips seq-gap detection, and fires a
+  // `resync.request` send() on the CLOSED connection → the p8lh send-on-closed
+  // throw (the second, resync-driven path of this flake).
+  const detachMirrorFromConnection = mirror.connectTo(connection);
 
   // tc-ozk.1: route command.response messages from the mirror's control stream
   // to the InputApi so awaited sendVerb() promises resolve with the returned
@@ -220,6 +226,21 @@ export async function connectClient(
     _disconnected = true;
     // tc-ozk.1: fail any in-flight sendVerb() / sendPaneCapture() awaits so callers don't hang.
     inputApi.rejectAllPending("connection disconnected before verb response arrived");
+    // p8lh: stop BOTH deferred/event-driven sends that could otherwise fire
+    // send() on the about-to-close connection and throw a floating unhandled
+    // rejection (the cross-spec flake that fails whichever test/turn is active):
+    //   (a) the coalesced-resize microtask — markDisconnected() drains the
+    //       pending resize, disarms the scheduled flush, AND no-ops any LATER
+    //       resizePane (VS Code fires setDimensions asynchronously during
+    //       teardown), so no obsolete resize is ever sent on the dead connection;
+    //   (b) the mirror's resync.request — severing the mirror from the
+    //       connection no-ops its onControl handler and clears its injected
+    //       send/close fns, so a post-close control delta can't trip seq-gap
+    //       detection into a send() on the closed connection.
+    // Both are obsolete-by-disconnect; we STOP the illegal sends, the
+    // close-state send() tripwire stays intact for any real caller.
+    inputApi.markDisconnected();
+    detachMirrorFromConnection();
     mirror.detachHook();
     connection.close();
   }

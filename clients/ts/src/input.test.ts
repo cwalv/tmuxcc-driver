@@ -207,6 +207,105 @@ describe("resizePane — coalescing (default enabled)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 4b. markDisconnected — stop deferred resize sends on disconnect (p8lh)
+// ---------------------------------------------------------------------------
+
+/**
+ * Sender that THROWS on send() once flipped "closed" — models
+ * SessionProxyConnection.send() after connection.close() (connection.ts:367,
+ * the intentional close-state tripwire).
+ */
+function makeClosableSender(): {
+  sender: InputSender;
+  messages: SentMessage[];
+  close: () => void;
+} {
+  const messages: SentMessage[] = [];
+  let closed = false;
+  const sender: InputSender = {
+    send(msg) {
+      if (closed) {
+        throw new Error(
+          'SessionProxyConnection.send() called in state "closed"; must be "ready"',
+        );
+      }
+      messages.push(msg as SentMessage);
+    },
+  };
+  return { sender, messages, close: () => { closed = true; } };
+}
+
+describe("resizePane — markDisconnected stops deferred sends (p8lh)", () => {
+  it("a coalesced resize scheduled then markDisconnected never reaches send()", async () => {
+    const { sender, messages } = makeSender();
+    const api = createInputApi(sender); // coalesce default true
+
+    api.resizePane(P0, 80, 24); // buffers + schedules microtask flush
+    assert.equal(messages.length, 0, "resize must still be buffered (not yet sent)");
+
+    api.markDisconnected(); // disconnect-time drain
+
+    // Let the previously-scheduled microtask run — it must be a no-op now.
+    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 0));
+
+    assert.equal(
+      messages.length,
+      0,
+      "drained resize must NOT be sent by the deferred microtask flush",
+    );
+  });
+
+  it("the already-buffered flush does NOT send() on a sender closed after markDisconnected (the p8lh throw)", async () => {
+    // RED-before (without markDisconnected wired into disconnect): the microtask
+    // flush would call send() on the closed sender and THROW
+    // `SessionProxyConnection.send() ... in state "closed"` as a floating
+    // unhandled rejection.  GREEN-after: markDisconnected drops the pending
+    // resize so the microtask is a no-op and nothing is sent on the closed
+    // connection.
+    const { sender, messages, close } = makeClosableSender();
+    const api = createInputApi(sender);
+
+    api.resizePane(P0, 120, 40); // schedules the deferred flush
+    api.markDisconnected(); // disconnect drains it BEFORE close
+    close(); // connection.close() → send() now throws
+
+    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 0));
+
+    assert.equal(
+      messages.length,
+      0,
+      "no resize must be sent after markDisconnected + close (no throw on the closed sender)",
+    );
+  });
+
+  it("a resize arriving AFTER markDisconnected is a no-op (the post-teardown setDimensions path)", async () => {
+    // VS Code fires pty.setDimensions asynchronously — including AFTER the spawn
+    // was disposed (disconnect already ran).  Such a late resizePane must be
+    // dropped at the door so it never schedules a fresh deferred send that would
+    // call send() on the closed connection.
+    const { sender, messages, close } = makeClosableSender();
+    const api = createInputApi(sender);
+
+    api.markDisconnected(); // disconnect happened first
+    close();                // connection now closed → send() throws
+
+    api.resizePane(P0, 90, 25); // late setDimensions → must NOT schedule a send
+    api.flush();                // even an explicit flush stays a no-op (nothing buffered)
+
+    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 0));
+
+    assert.equal(
+      messages.length,
+      0,
+      "a resize after markDisconnected must be dropped (no send on the closed connection)",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 5. No-coalesce mode — every resize goes through immediately
 // ---------------------------------------------------------------------------
 

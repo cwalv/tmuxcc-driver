@@ -185,6 +185,31 @@ export interface InputApi {
   flush(): void;
 
   /**
+   * Mark the connection disconnected: discard any pending coalesced resize
+   * WITHOUT sending it, disarm the scheduled microtask flush, and make all
+   * FUTURE `resizePane()` calls no-ops (p8lh).
+   *
+   * Called by `disconnect()` BEFORE `connection.close()`.  A coalesced
+   * `resizePane()` defers its `sender.send()` to a microtask
+   * (`Promise.resolve().then(flushResizes)`).  If that microtask runs after
+   * `connection.close()` it calls `send()` on a CLOSED connection and throws
+   * `SessionProxyConnection.send() ... in state "closed"` — a floating-microtask
+   * UNHANDLED REJECTION (the p8lh flake).  Two windows must be closed:
+   *   - the resize already buffered at disconnect (drained here), and
+   *   - a resize that arrives AFTER disconnect (VS Code fires pty.setDimensions
+   *     asynchronously during teardown / spawn-churn) which would otherwise
+   *     schedule a fresh deferred send — now dropped by the `disconnected` gate.
+   *
+   * A resize on a disconnected connection is obsolete by definition, so dropping
+   * it is correct; we are STOPPING an illegal send, not muzzling the tripwire
+   * (`send()` still throws on a closed connection for any real caller).
+   *
+   * Symmetric with `rejectAllPending` (which drains the pending verb/capture
+   * promises on the same teardown).
+   */
+  markDisconnected(): void;
+
+  /**
    * Send a model-level command to the sessionProxy (VS Code → tmux direction).
    *
    * Wraps `cmd` in a `command.request` wire message with a unique
@@ -314,6 +339,16 @@ export function createInputApi(
   // Per-api-instance seq counter.  Starts at 1 per wire spec (control.ts:107).
   let seq = 1;
 
+  // p8lh: set by markDisconnected() (called from connectClient().disconnect()).
+  // Once disconnected the connection is closed and any further resize is
+  // obsolete; resizePane() becomes a no-op so it cannot schedule a deferred
+  // flush that would call send() on the closed connection and throw.  VS Code
+  // fires pty.setDimensions ASYNCHRONOUSLY — including after the spawn was
+  // disposed during teardown / spawn-churn — so resizePane() legitimately
+  // arrives post-disconnect; dropping it is correct (the connection is gone),
+  // not muzzling the close-state send() tripwire.
+  let disconnected = false;
+
   // tc-ozk.1: pending sendVerb() promises keyed by correlationId.  Resolved by
   // handleCommandResponse when the matching command.response arrives; rejected
   // en masse by rejectAllPending on disconnect.
@@ -374,6 +409,9 @@ export function createInputApi(
     },
 
     resizePane(paneId: PaneId, cols: number, rows: number): void {
+      // p8lh: after disconnect the connection is closed; a resize is obsolete
+      // and sending it would throw "send() ... in state closed".  Drop it.
+      if (disconnected) return;
       if (!coalesce) {
         const msg: ResizeRequestMessage = {
           type: "resize.request",
@@ -394,6 +432,19 @@ export function createInputApi(
       if (coalesce && pending.size > 0) {
         flushResizes();
       }
+    },
+
+    markDisconnected(): void {
+      // p8lh: the connection is closing — block further coalesced-resize sends.
+      // 1. Drop the pending coalesced resize and disarm the scheduled flush so
+      //    the already-queued `flushResizes` microtask is a no-op (empty
+      //    `pending`) instead of calling send() on the closing connection.
+      // 2. Set `disconnected` so any LATER resizePane() (VS Code fires
+      //    pty.setDimensions asynchronously during teardown) is dropped at the
+      //    door and never schedules a new deferred send.
+      disconnected = true;
+      pending.clear();
+      flushScheduled = false;
     },
 
     sendCommand(cmd: WireCommand): void {
