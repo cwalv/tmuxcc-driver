@@ -127,11 +127,17 @@ export interface PaneInfo {
    */
   readonly icon?: string;
   /**
-   * tc-2mn8: the live shell window title sniffed from OSC-0/2 sequences, when
-   * this pane is replayed from the snapshot already carrying one.  Absent ⇒ no
-   * title has been observed yet.  Subsequent changes arrive via
-   * `onPaneTitleChanged`.  Renderers compose the user-visible name from this
-   * (render precedence is the renderer's concern; see tc-asyq.6).
+   * The live shell window title (canonical `#{pane_title}`), when this pane is
+   * replayed from the snapshot already carrying one.  Absent ⇒ no title has
+   * been observed yet.  Subsequent changes arrive via `onPaneTitleChanged`.
+   * Renderers compose the user-visible name from this (render precedence is the
+   * renderer's concern; see tc-asyq.6).
+   *
+   * Sourced by the session-proxy from a control-mode `%*` (all-panes)
+   * `#{pane_title}` subscription (tc-s6ov.4), which supersedes the original
+   * OSC-0/2 sniff (tc-2mn8): the subscription catches every title source,
+   * including out-of-band changes (another client's `select-pane -T`,
+   * automatic title from the current command) that the sniff was blind to.
    */
   readonly paneTitle?: string;
 }
@@ -333,12 +339,15 @@ export interface RenderHook {
   onPanePolicyChanged(paneId: PaneId, policy: PanePolicy): void;
 
   /**
-   * A pane's live shell window title changed (tc-2mn8).
+   * A pane's live shell window title changed (tc-2mn8; canonical source
+   * reworked in tc-s6ov.4).
    *
-   * Called when a `pane.title-changed` delta arrives — the OSC-0/2 title
-   * sniffed from the pane's %output byte stream.  This is a SEPARATE channel
-   * from the durable label (tc-1a8z): it is set by the shell via title escape
-   * sequences and reflects the current shell activity.
+   * Called when a `pane.title-changed` delta arrives — the canonical
+   * `#{pane_title}` value, sourced by the session-proxy from a control-mode
+   * `%*` subscription that catches every title source (shell OSC-0/2, another
+   * client's `select-pane -T`, automatic title from the current command).  This
+   * is a SEPARATE channel from the durable label (tc-1a8z): it reflects the
+   * current shell activity rather than a user-pinned name.
    *
    * `title` is the new live title (empty string means the shell cleared it), or
    * `undefined` when the title was cleared back to the unset state.

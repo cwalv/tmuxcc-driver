@@ -891,3 +891,45 @@ export function refreshClientSubscribeWindows(name: string, format: string): str
   const arg = `${name}:@*:${format}`;
   return `refresh-client -B '${arg.replace(/'/g, "'\\''")}'`;
 }
+
+/**
+ * Register a tmux control-mode subscription that polls a format string for
+ * EACH PANE every ~1 second and delivers `%subscription-changed` only when the
+ * value changes — the per-pane analogue of {@link refreshClientSubscribeWindows}.
+ *
+ * Emits: `refresh-client -B 'name:%*:format'`
+ *
+ * The `%*` scope (cmd-refresh-client.c:65 → `CONTROL_SUB_ALL_PANES`) means one
+ * notification per pane. tmux fires the check on its 1-second internal timer
+ * (control.c control_check_subs_timer → control_check_subs_all_panes_one) and
+ * walks EVERY pane in the session, INCLUDING panes created after the
+ * subscription was registered. Each pane's value is diffed against the
+ * remembered last value (`csp->last`), so a notification is emitted only when
+ * the evaluated format actually changes — regardless of HOW it changed (shell
+ * OSC-0/2, `select-pane -T` from another client, automatic title from
+ * `#{pane_current_command}`, …). Notifications arrive as:
+ *   `%subscription-changed <name> $<sess> @<win> <idx> %<pane> : <value>`
+ *
+ * This is why pane_title is sourced from a SINGLE session-wide `%*`
+ * subscription rather than per-pane `%<id>` subscribe/unsubscribe: tmux's own
+ * per-pane walk handles the lifecycle (panes that appear are picked up on the
+ * next tick; panes that close stop being walked) with zero bookkeeping and no
+ * leak. SUPERSEDES the OSC-0/2 sniff (tc-2mn8) as the canonical pane_title
+ * source — the sniff missed every OUT-OF-BAND title change that never flows
+ * through this client's `%output` (tc-s6ov.4).
+ *
+ * Available since tmux 3.2 (CHANGES "3.1c TO 3.2", "subscribe to a format").
+ * The repo already hard-depends on 3.4 features and unconditionally registers
+ * the sync-watch `@*` window subscription, so this introduces no new floor.
+ *
+ * @param name    Subscription name (the `name` field in %subscription-changed).
+ * @param format  tmux format evaluated per pane (e.g. `#{pane_title}`).
+ * @returns       e.g. `refresh-client -B 'title-watch:%*:#{pane_title}'`
+ */
+export function refreshClientSubscribePanes(name: string, format: string): string {
+  // The argument to -B is `name:%*:format`. Single-quote the entire argument
+  // so #{ } is not interpreted by the shell. Escape embedded single-quotes via
+  // the `'\''` idiom.
+  const arg = `${name}:%*:${format}`;
+  return `refresh-client -B '${arg.replace(/'/g, "'\\''")}'`;
+}

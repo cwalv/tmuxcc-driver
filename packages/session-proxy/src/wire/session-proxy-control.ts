@@ -415,10 +415,14 @@ export interface SnapshotPane {
    */
   readonly icon?: string;
   /**
-   * Live shell window title for this pane, as sniffed from OSC-0/2 sequences
-   * in the pane's `%output` stream (tc-2mn8). Absent when no OSC title has
-   * been observed yet (pane just opened, or shell has not set a title).
-   * Empty string means the shell explicitly cleared the title.
+   * Live shell window title for this pane — the canonical `#{pane_title}`
+   * value (tc-2mn8; canonical source reworked in tc-s6ov.4). Sourced by the
+   * session-proxy from a control-mode `%*` `#{pane_title}` subscription, which
+   * catches every title source (shell OSC-0/2, another client's
+   * `select-pane -T`, automatic title from the current command), superseding
+   * the original OSC-0/2 `%output` sniff. Absent when no title has been
+   * observed yet (pane just opened, or shell has not set a title). Empty
+   * string means the title was explicitly cleared.
    *
    * Additive optional field — older clients that do not read it are unaffected.
    */
@@ -621,12 +625,16 @@ export interface WindowMonitorSilenceChangedMessage extends MessageBase {
  * The live shell window title of a pane has changed.
  * direction: session-proxy→client
  *
- * Emitted when an OSC-0 or OSC-2 title sequence is sniffed from the pane's
- * `%output` byte stream (tc-2mn8). No tmux polling is required — the OSC
- * bytes ALREADY arrive in the `%output` demux and are sniffed in-stream.
+ * Emitted when the canonical `#{pane_title}` for a pane changes (tc-2mn8
+ * introduced the delta; tc-s6ov.4 reworked the source). The session-proxy
+ * sources the value from a control-mode `%*` `#{pane_title}` subscription,
+ * which catches EVERY title source — shell OSC-0/2, another client's
+ * `select-pane -T`, automatic title from `#{pane_current_command}` — and
+ * supersedes the original in-stream OSC-0/2 `%output` sniff (which was blind
+ * to out-of-band changes that never reached this client's `%output`).
  *
- * `title` is the new title string (may be an empty string when the shell
- * cleared the title).
+ * `title` is the new title string (may be an empty string when the title was
+ * cleared).
  *
  * Consumer precedence for display:
  *   @tmuxcc_label (durable name) > pane.title-changed (live) > paneId (fallback)

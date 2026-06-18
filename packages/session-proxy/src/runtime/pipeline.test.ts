@@ -546,6 +546,24 @@ describe("Pipeline: post-bootstrap setup commands", () => {
     pipeline.stop();
   });
 
+  it("registers refresh-client -B title-watch (%* pane_title) subscription after bootstrap (tc-s6ov.4)", async () => {
+    const host = new FakeTmuxHost();
+    const pipeline = createRuntimePipeline(host);
+
+    const startPromise = pipeline.start();
+    host.popWritten();
+    host.pushData(buildBootstrapReplies());
+    await startPromise;
+
+    const postBootstrapWrites = host.popWritten();
+    const titleWatchCmd = "refresh-client -B 'title-watch:%*:#{pane_title}'\n";
+    assert.ok(
+      postBootstrapWrites.some((w) => w === titleWatchCmd),
+      `expected title-watch subscription command; got: ${JSON.stringify(postBootstrapWrites)}`,
+    );
+    pipeline.stop();
+  });
+
   it("does NOT write monitor-activity / sync-watch before bootstrap resolves", async () => {
     const host = new FakeTmuxHost();
     const pipeline = createRuntimePipeline(host);
@@ -650,6 +668,133 @@ describe("Pipeline: sync-watch subscription (tc-7xv.28)", () => {
     pipeline.onModelChange(() => { changeCount++; });
 
     host.pushData(bytes(syncWatchLine(99, "1")));
+    assert.equal(changeCount, 0);
+    assert.ok(pipeline.isLive());
+    pipeline.stop();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite — title-watch subscription (tc-s6ov.4) — CANONICAL pane_title source,
+// superseding the OSC-0/2 sniff. Model patch on the pane, NOT a topology requery.
+// ---------------------------------------------------------------------------
+
+describe("Pipeline: title-watch subscription (tc-s6ov.4)", () => {
+  // Exact all-panes wire format from tmux control.c:953
+  //   %subscription-changed <name> $<sess> @<win> <idx> %<pane> : <value>
+  function titleWatchLine(tmuxPaneNum: number, value: string): string {
+    return `%subscription-changed title-watch $0 @1 0 %${tmuxPaneNum} : ${value}\r\n`;
+  }
+
+  it("sets the canonical paneTitle from the subscription value", async () => {
+    const host = new FakeTmuxHost();
+    const pipeline = createRuntimePipeline(host);
+
+    const startPromise = pipeline.start();
+    host.pushData(buildBootstrapReplies({ windowId: "@1", paneId: "%1" }));
+    await startPromise;
+
+    const before = pipeline.getModel().panes.get(paneId("p1"));
+    assert.ok(before !== undefined);
+    assert.equal(before!.paneTitle, undefined, "no title before the subscription fires");
+
+    let changeCount = 0;
+    pipeline.onModelChange(() => { changeCount++; });
+
+    host.pushData(bytes(titleWatchLine(1, "vim ~/notes.md")));
+
+    const after = pipeline.getModel().panes.get(paneId("p1"));
+    assert.ok(after !== undefined);
+    assert.equal(after!.paneTitle, "vim ~/notes.md");
+    assert.ok(changeCount >= 1, "onModelChange must fire for the title patch");
+    pipeline.stop();
+  });
+
+  it("an out-of-band title change (no %output) still updates paneTitle", async () => {
+    // The whole point of tc-s6ov.4: a title set by `select-pane -T` from
+    // ANOTHER client never flows through THIS client's %output, so the OSC
+    // sniff is blind to it. The subscription catches it regardless of source.
+    const host = new FakeTmuxHost();
+    const pipeline = createRuntimePipeline(host);
+
+    const startPromise = pipeline.start();
+    host.pushData(buildBootstrapReplies({ windowId: "@1", paneId: "%1" }));
+    await startPromise;
+
+    // No %output is ever fed — only the subscription notification.
+    host.pushData(bytes(titleWatchLine(1, "set-by-other-client")));
+
+    assert.equal(
+      pipeline.getModel().panes.get(paneId("p1"))!.paneTitle,
+      "set-by-other-client",
+    );
+    pipeline.stop();
+  });
+
+  it("preserves leading/trailing spaces and does not trim the value", async () => {
+    const host = new FakeTmuxHost();
+    const pipeline = createRuntimePipeline(host);
+
+    const startPromise = pipeline.start();
+    host.pushData(buildBootstrapReplies({ windowId: "@1", paneId: "%1" }));
+    await startPromise;
+
+    host.pushData(bytes(titleWatchLine(1, " spaced title ")));
+    assert.equal(
+      pipeline.getModel().panes.get(paneId("p1"))!.paneTitle,
+      " spaced title ",
+    );
+    pipeline.stop();
+  });
+
+  it("empty value clears the title to '' (shell cleared the title)", async () => {
+    const host = new FakeTmuxHost();
+    const pipeline = createRuntimePipeline(host);
+
+    const startPromise = pipeline.start();
+    host.pushData(buildBootstrapReplies({ windowId: "@1", paneId: "%1" }));
+    await startPromise;
+
+    // First set a non-empty title, then clear it.
+    host.pushData(bytes(titleWatchLine(1, "something")));
+    assert.equal(pipeline.getModel().panes.get(paneId("p1"))!.paneTitle, "something");
+
+    // tmux renders an empty #{pane_title} as a trailing " : " with empty suffix.
+    host.pushData(bytes("%subscription-changed title-watch $0 @1 0 %1 : \r\n"));
+    assert.equal(pipeline.getModel().panes.get(paneId("p1"))!.paneTitle, "");
+    pipeline.stop();
+  });
+
+  it("no-op: same title value does not fire onModelChange", async () => {
+    const host = new FakeTmuxHost();
+    const pipeline = createRuntimePipeline(host);
+
+    const startPromise = pipeline.start();
+    host.pushData(buildBootstrapReplies({ windowId: "@1", paneId: "%1" }));
+    await startPromise;
+
+    host.pushData(bytes(titleWatchLine(1, "stable")));
+
+    let changeCount = 0;
+    pipeline.onModelChange(() => { changeCount++; });
+
+    host.pushData(bytes(titleWatchLine(1, "stable")));
+    assert.equal(changeCount, 0, "no model change expected when title is unchanged");
+    pipeline.stop();
+  });
+
+  it("unknown pane id in title-watch is silently dropped (no crash, still live)", async () => {
+    const host = new FakeTmuxHost();
+    const pipeline = createRuntimePipeline(host);
+
+    const startPromise = pipeline.start();
+    host.pushData(buildBootstrapReplies({ windowId: "@1", paneId: "%1" }));
+    await startPromise;
+
+    let changeCount = 0;
+    pipeline.onModelChange(() => { changeCount++; });
+
+    host.pushData(bytes(titleWatchLine(99, "ghost")));
     assert.equal(changeCount, 0);
     assert.ok(pipeline.isLive());
     pipeline.stop();

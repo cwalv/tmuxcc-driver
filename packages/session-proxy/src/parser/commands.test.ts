@@ -21,6 +21,7 @@ import {
   refreshClientWindowSize,
   refreshClientFlow,
   refreshClientSubscribeWindows,
+  refreshClientSubscribePanes,
   listWindows,
   listPanes,
   capturePane,
@@ -709,6 +710,30 @@ describe("refreshClientSubscribeWindows", () => {
     assert.equal(
       refreshClientSubscribeWindows("it's", "#{window_name}"),
       "refresh-client -B 'it'\\''s:@*:#{window_name}'",
+    );
+  });
+});
+
+// refreshClientSubscribePanes — tc-s6ov.4
+describe("refreshClientSubscribePanes", () => {
+  it("emits refresh-client -B with %* (all-panes) scope for the pane_title watch", () => {
+    assert.equal(
+      refreshClientSubscribePanes("title-watch", "#{pane_title}"),
+      "refresh-client -B 'title-watch:%*:#{pane_title}'",
+    );
+  });
+
+  it("works with a simple name and format", () => {
+    assert.equal(
+      refreshClientSubscribePanes("my-sub", "#{pane_current_command}"),
+      "refresh-client -B 'my-sub:%*:#{pane_current_command}'",
+    );
+  });
+
+  it("escapes embedded single quotes in name via the \\' idiom", () => {
+    assert.equal(
+      refreshClientSubscribePanes("it's", "#{pane_title}"),
+      "refresh-client -B 'it'\\''s:%*:#{pane_title}'",
     );
   });
 });

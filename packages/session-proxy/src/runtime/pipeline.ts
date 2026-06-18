@@ -114,7 +114,11 @@ import { paneId as mintPaneId } from "../wire/ids.js";
 import type { TmuxHost } from "./tmux-host.js";
 import { diffModel } from "../state/projection.js";
 import type { SessionProxyMessage } from "../wire/session-proxy-control.js";
-import { setOption, refreshClientSubscribeWindows } from "../parser/commands.js";
+import {
+  setOption,
+  refreshClientSubscribeWindows,
+  refreshClientSubscribePanes,
+} from "../parser/commands.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -458,6 +462,25 @@ export interface RuntimePipeline {
  * `synchronizePanes`.
  */
 const SYNC_WATCH_SUBSCRIPTION_NAME = "sync-watch";
+
+/**
+ * Name of the tmux control-mode subscription used to source the CANONICAL live
+ * pane title (tc-s6ov.4), SUPERSEDING the OSC-0/2 sniff (tc-2mn8).
+ *
+ * Registered via `refresh-client -B 'title-watch:%*:#{pane_title}'` after
+ * bootstrap. The `%*` (all-panes) scope makes tmux re-evaluate `#{pane_title}`
+ * for EVERY pane on its 1-second timer and emit `%subscription-changed
+ * title-watch …` only when the value changes — so it catches every source of a
+ * title change, including OUT-OF-BAND ones the OSC sniff is blind to (another
+ * client's `select-pane -T`, automatic title from `#{pane_current_command}`,
+ * etc.) because those never flow through THIS client's `%output` stream.
+ *
+ * The OSC sniffer (tc-2mn8) is RETAINED but demoted: it no longer feeds the
+ * canonical `paneTitle` model field; it stays solely to STRIP OSC-0/2 title
+ * sequences out of the byte stream so they don't reach the renderer's display
+ * surface. See `_dispatchEvent` for the demotion site.
+ */
+const TITLE_WATCH_SUBSCRIPTION_NAME = "title-watch";
 
 // ---------------------------------------------------------------------------
 // Implementation
@@ -841,6 +864,22 @@ class RuntimePipelineImpl implements RuntimePipeline {
       "refresh-client sync-watch subscribe",
     );
 
+    // tc-s6ov.4: register an all-panes (%*) subscription on #{pane_title} so the
+    // CANONICAL pane title is sourced from tmux's per-pane format diff, not the
+    // OSC-0/2 sniff (tc-2mn8). This catches every out-of-band title source —
+    // another client's `select-pane -T`, automatic title from the current
+    // command — that never flows through this client's %output stream. tmux's
+    // 1s timer walks all panes (incl. ones created later) and only emits on
+    // change, so the subscription lifecycle is handled by tmux itself: no
+    // per-pane subscribe/unsubscribe, no leak.
+    this._sendSetup(
+      refreshClientSubscribePanes(
+        TITLE_WATCH_SUBSCRIPTION_NAME,
+        "#{pane_title}",
+      ),
+      "refresh-client title-watch subscribe",
+    );
+
     // Drain notifications buffered during bootstrap. Replay every buffered event
     // uniformly through _dispatchEvent. Topology events route to the normal
     // choke point (onTopologyNotify + coalescer.notify), which treats them as a
@@ -1063,11 +1102,13 @@ class RuntimePipelineImpl implements RuntimePipeline {
       const pid = mintPaneId("p" + event.paneId);
       const decoded = decodeOutputPayload(event.rawPayload);
 
-      // tc-2mn8: sniff OSC-0/2 title sequences from the decoded byte stream.
-      // Each pane has its own streaming sniffer to handle sequences that span
-      // multiple %output chunks. The sniffer returns:
+      // tc-2mn8 / tc-s6ov.4: run the per-pane OSC sniffer to STRIP OSC-0/2 title
+      // sequences out of the byte stream (so they don't reach the renderer's
+      // display surface). Each pane has its own streaming sniffer to handle
+      // sequences that span multiple %output chunks. The sniffer returns:
       //   - passthrough: decoded bytes with title OSC sequences stripped
-      //   - updatedTitle: new title string if a complete OSC-0/2 was found
+      //   - updatedTitle: title parsed from a complete OSC-0/2 (NO LONGER USED
+      //     as the canonical title source — see below)
       let sniffer = this._oscSniffers.get(pid);
       if (sniffer === undefined) {
         sniffer = new OscTitleSniffer();
@@ -1079,16 +1120,16 @@ class RuntimePipelineImpl implements RuntimePipeline {
       const bytes = sniffResult.passthrough;
       this.buffers.append(pid, bytes);
 
-      // If a new title was found, patch the model (paneTitle field).
-      if (sniffResult.updatedTitle !== null) {
-        const newTitle = sniffResult.updatedTitle;
-        this.patchModel((model) => {
-          const pane = model.panes.get(pid);
-          if (pane === undefined) return model;
-          if (pane.paneTitle === newTitle) return model;
-          return updatePane(model, pid, { paneTitle: newTitle });
-        });
-      }
+      // tc-s6ov.4: the CANONICAL paneTitle is now sourced from the title-watch
+      // %* subscription (see _applyTitleWatchPatch), NOT from
+      // sniffResult.updatedTitle. The sniff was blind to out-of-band title
+      // changes (another client's `select-pane -T`, automatic title from
+      // #{pane_current_command}) that never flow through this client's %output.
+      // The subscription's #{pane_title} format diff catches all of them. We
+      // keep the sniffer ONLY for its byte-stripping side-effect above and
+      // deliberately DROP sniffResult.updatedTitle here to avoid two writers
+      // racing on the same model field (the OSC-stripped value would also be
+      // reported a beat later by the subscription anyway).
 
       // tc-3si.6: aggregate output-throughput accounting. Two hot-path
       // calls per frame: one counter inc + one histogram observe, no
@@ -1111,6 +1152,22 @@ class RuntimePipelineImpl implements RuntimePipeline {
       event.windowId !== null
     ) {
       this._applySyncWatchPatch(event.windowId, event.value);
+      this._fireNotificationHandlers(event);
+      return;
+    }
+
+    // tc-s6ov.4: CANONICAL pane title delivery (title-watch %* subscription).
+    // tmux re-evaluates #{pane_title} per pane and emits this only on change,
+    // catching every source incl. out-of-band ones the OSC sniff misses. This
+    // SUPERSEDES the sniffer as the source of the model's paneTitle field.
+    // Content-kind: a title change is not a structural change, so it must NOT
+    // trip the coalescer (no requery).
+    if (
+      event.kind === "subscription-changed" &&
+      event.name === TITLE_WATCH_SUBSCRIPTION_NAME &&
+      event.paneId !== null
+    ) {
+      this._applyTitleWatchPatch(event.paneId, event.value);
       this._fireNotificationHandlers(event);
       return;
     }
@@ -1215,6 +1272,24 @@ class RuntimePipelineImpl implements RuntimePipeline {
       if (win === undefined) return model;
       if (win.synchronizePanes === on) return model;
       return updateWindow(model, wid, { synchronizePanes: on });
+    });
+  }
+
+  /**
+   * Apply the title-watch value to the matching pane (tc-s6ov.4).
+   *
+   * `value` is the verbatim `#{pane_title}` expansion — NOT trimmed: a pane
+   * title may legitimately contain leading/trailing spaces, and the empty
+   * string is a valid title (the shell cleared it). Idempotent: no model
+   * touch when the value is unchanged (mirrors the prior OSC-sniff guard).
+   */
+  private _applyTitleWatchPatch(tmuxPaneId: number, value: string): void {
+    const pid = mintPaneId("p" + tmuxPaneId);
+    this.patchModel((model) => {
+      const pane = model.panes.get(pid);
+      if (pane === undefined) return model;
+      if (pane.paneTitle === value) return model;
+      return updatePane(model, pid, { paneTitle: value });
     });
   }
 

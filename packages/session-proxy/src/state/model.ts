@@ -221,12 +221,21 @@ export interface Pane {
    */
   readonly scrollbackHandle?: ScrollbackHandle;
   /**
-   * Live shell window title for this pane, extracted by sniffing OSC-0 and
-   * OSC-2 sequences from the per-pane `%output` byte stream (tc-2mn8).
+   * Live shell window title for this pane — the canonical `#{pane_title}`
+   * value (tc-2mn8 introduced the field; tc-s6ov.4 reworked the source).
    *
-   * Updated in real-time as OSC title sequences flow through the pipeline —
-   * no tmux round-trips or polling required.  Absent when no title has been
-   * seen yet.  An empty string is a valid title (the shell cleared it).
+   * Sourced from a control-mode `%*` (all-panes) `#{pane_title}` subscription
+   * (`refresh-client -B 'title-watch:%*:#{pane_title}'`): tmux re-evaluates the
+   * format per pane on its ~1s timer and emits `%subscription-changed` only on
+   * change, so this catches EVERY title source — shell OSC-0/2, another
+   * client's `select-pane -T`, automatic title from `#{pane_current_command}`,
+   * etc. This SUPERSEDES the original OSC-0/2 `%output` sniff (tc-2mn8), which
+   * was blind to out-of-band changes that never flowed through this client's
+   * `%output`. The OSC sniffer is retained only to STRIP title sequences from
+   * the byte stream, not to feed this field.
+   *
+   * Absent when no title has been seen yet. An empty string is a valid title
+   * (the shell cleared it).
    *
    * Consumer precedence (for tab/tree display):
    *   @tmuxcc_label (durable name) > paneTitle (live) > paneId (fallback)
