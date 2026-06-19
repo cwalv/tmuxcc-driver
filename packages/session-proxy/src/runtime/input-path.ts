@@ -1073,7 +1073,8 @@ export function createInputPath(
           // ── tc-7xv.9: pane verbs ───────────────────────────────────────────
 
           case "break-pane": {
-            // break-pane -d -P -F '#{pane_id} #{window_id}' -t %<N>
+            // break-pane -d -P -F '#{pane_id} #{window_id}' -s %<N>  (tc-6dof:
+            // `-s` is the SOURCE pane; `-t` is the DESTINATION window.)
             // -d keeps the new window in the background (no focus steal).
             // tc-ozk.1: -P -F now PRINTS the broken-out pane id + its new
             // window id into the reply block; runCreatingVerb parses them and

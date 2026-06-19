@@ -744,10 +744,21 @@ export interface BreakPaneOptions {
 /**
  * Serialize a `break-pane` command.
  *
- * Emits `break-pane -d -t %<paneId>`.  The `-d` flag keeps the new window in
+ * Emits `break-pane -d -s %<paneId>`.  The `-d` flag keeps the new window in
  * the background so a host tab strip doesn't jump focus.  With `printIds` the
  * created pane/window ids are printed into the reply body (`-P -F`), which is
  * how the daemon returns them in the VerbResult (tc-ozk.1).
+ *
+ * tc-6dof: the SOURCE pane MUST be named with `-s`, NOT `-t`.  In tmux's
+ * `break-pane` grammar `-t` is the DESTINATION window (where to re-home the
+ * pane) and `-s` is the SOURCE pane.  Passing a pane id to `-t` makes tmux
+ * reject the command with `can't specify pane here` (verified against tmux 3.4;
+ * the same error fires on the whole supported floor — tmux has used `-s
+ * src-pane` / `-t dst-window` for break-pane since well before 3.2).  The
+ * earlier `-t %N` form silently no-op'd EVERY break-pane (user-facing
+ * `tmuxcc.pane.break` AND the geometry-model auto-promotion / Unsplit
+ * break-out), and was masked because the only coverage was a string-equality
+ * unit test that never ran real tmux.
  *
  * Note on field ordering: tmux's `#{pane_id}` for a broken-out pane is the
  * SAME pane id that previously lived in the source window (break-pane moves the
@@ -757,15 +768,15 @@ export interface BreakPaneOptions {
  *
  * @param paneId  Numeric pane id (the N in `%N`) to break out.
  * @param opts    Optional break options.
- * @returns       e.g. `break-pane -d -t %3`
- *                or   `break-pane -d -P -F '#{pane_id} #{window_id}' -t %3`
+ * @returns       e.g. `break-pane -d -s %3`
+ *                or   `break-pane -d -P -F '#{pane_id} #{window_id}' -s %3`
  */
 export function breakPane(paneId: number, opts?: BreakPaneOptions): string {
   const parts: string[] = ["break-pane -d"];
   if (opts?.printIds === true) {
     parts.push(`-P -F ${quoteArg(EFFECT_IDS_FORMAT)}`);
   }
-  parts.push(`-t %${paneId}`);
+  parts.push(`-s %${paneId}`);
   return parts.join(" ");
 }
 

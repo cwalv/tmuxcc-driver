@@ -465,14 +465,18 @@ describe("splitWindow", () => {
 // ---------------------------------------------------------------------------
 
 describe("breakPane", () => {
-  it("bare break-pane is -d -t %N (no print)", () => {
-    assert.equal(breakPane(3), "break-pane -d -t %3");
+  // tc-6dof: the SOURCE pane is named with `-s`, NOT `-t` (which is the
+  // DESTINATION window).  The earlier `-t %N` form made tmux reject the command
+  // ("can't specify pane here"), silently no-op'ing every break-pane.  These
+  // assertions now codify the form a live tmux actually accepts.
+  it("bare break-pane is -d -s %N (no print)", () => {
+    assert.equal(breakPane(3), "break-pane -d -s %3");
   });
 
-  it("printIds adds -P -F EFFECT_IDS_FORMAT before -t", () => {
+  it("printIds adds -P -F EFFECT_IDS_FORMAT before -s", () => {
     assert.equal(
       breakPane(3, { printIds: true }),
-      "break-pane -d -P -F '#{pane_id} #{window_id}' -t %3",
+      "break-pane -d -P -F '#{pane_id} #{window_id}' -s %3",
     );
   });
 });

@@ -766,7 +766,7 @@ describe("createInputPath — mixed message sequence", () => {
 // ---------------------------------------------------------------------------
 
 describe("createInputPath — break-pane command (tc-7xv.9)", () => {
-  it("break-pane → break-pane -d -P -F '#{pane_id} #{window_id}' -t %<N>", () => {
+  it("break-pane → break-pane -d -P -F '#{pane_id} #{window_id}' -s %<N>", () => {
     const host = makeFakeDeps();
     const path = createInputPath(host);
 
@@ -778,8 +778,9 @@ describe("createInputPath — break-pane command (tc-7xv.9)", () => {
     };
     path.handleClientMessage(msg);
 
-    // tc-ozk.1: break-pane now prints its effect ids via -P -F.
-    assert.equal(host.lastWrite, "break-pane -d -P -F '#{pane_id} #{window_id}' -t %3\n");
+    // tc-ozk.1: break-pane prints its effect ids via -P -F.
+    // tc-6dof: the source pane is `-s %N` (NOT `-t`, which is the dst window).
+    assert.equal(host.lastWrite, "break-pane -d -P -F '#{pane_id} #{window_id}' -s %3\n");
   });
 
   it("invalid pane id throws TypeError", () => {

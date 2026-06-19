@@ -1159,7 +1159,8 @@ export interface SetSynchronizePanesCommand {
  * Break a pane out of its window into a new window.
  * direction: client→session-proxy
  *
- * Corresponds to `break-pane -dP -t %<N>`.  The `-d` flag keeps the new
+ * Corresponds to `break-pane -dP -s %<N>` (tc-6dof: `-s` names the SOURCE
+ * pane; `-t` is the DESTINATION window).  The `-d` flag keeps the new
  * window in the background so VS Code's tab strip doesn't jump focus.
  *
  * The session-proxy will emit a window.added delta (new window) followed by
