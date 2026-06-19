@@ -392,12 +392,30 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
   // 4. Wrap the demux store so the flow controller is notified of every append.
   //    The wrapper delegates everything to demux.store and additionally calls
   //    fc.onPaneBytes so backpressure accounting stays accurate.
+  //
+  //    tc-t4k1: COUNT BEFORE FAN-OUT. `demux.store.append` fans the bytes out to
+  //    every attached transport synchronously; an un-backpressured socket's
+  //    `sendData` returns void, so the draining wrapper credits `fc.noteDrained`
+  //    SYNCHRONOUSLY inside that append call (the void branch). If we counted
+  //    (onPaneBytes) only afterwards, the drain credit would land while the
+  //    ledger still read 0 for these bytes — an FC-1 over-credit the clamp
+  //    absorbed (the "DRAIN CLAMPED" tripwire). Incrementing the ledger first
+  //    makes the credit-before-debit inversion impossible by construction: the
+  //    byte is counted before any transport can drain it.
+  //
+  //    Pause-edge note (FC-2): when this append crosses HIGH_WATER, onPaneBytes
+  //    pauses the pane *before* demux.store.append runs, so the crossing chunk
+  //    is gated rather than fanned out. That is harmless — the chunk is already
+  //    in the scrollback store (demux.store always appends to _inner) and is
+  //    replayed on resume/hydration; no byte is lost, and the pane was going to
+  //    be gated for the very next chunk anyway. Crucially it also means the
+  //    crossing chunk is NOT drained synchronously, so it cannot invert.
   const accountingStore: PaneBufferStore = {
     append(paneId: PaneId, bytes: Uint8Array): void {
-      demux.store.append(paneId, bytes);
       if (bytes.length > 0) {
         fc.onPaneBytes(paneId, bytes.length);
       }
+      demux.store.append(paneId, bytes);
     },
     getContents(paneId: PaneId): Uint8Array {
       return demux.store.getContents(paneId);
@@ -688,7 +706,17 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
   }
 
   /**
-   * Validate `pid` exists in the model and hydrate it on `dataTransport`.
+   * Validate `pid` exists in the model and hydrate it.
+   *
+   * tc-t4k1: the clear+replay frame is delivered on `replayTransport` (the RAW
+   * control transport), NOT on the draining wrapper. The replay body comes from
+   * `capture-pane` — it never passed through `fc.onPaneBytes`, so crediting it
+   * via `fc.noteDrained` (which the draining wrapper does on every sendData)
+   * over-credits the FC-1 ledger and trips the "DRAIN CLAMPED" tripwire. The
+   * `sentinels` still gate the DRAINING transport (the object the demux fans
+   * live %output out to), so the no-interleave queue contract is unchanged; only
+   * the replay frame itself bypasses the drain-credit path. See the addClient
+   * `drainingTransport` comment for the full accounting argument.
    *
    * On a vanished pane, emits pane.attach.failed{pane.not-found} (fail-loud)
    * and skips the capture round-trip. The capture itself can ALSO reveal the
@@ -697,7 +725,7 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
    */
   async function attachAndHydratePane(
     controlTransport: Transport,
-    dataTransport: Transport,
+    replayTransport: Transport,
     sentinels: HydrationSentinels,
     pid: PaneId,
   ): Promise<void> {
@@ -710,7 +738,7 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
       });
       return;
     }
-    const found = await hydratePane(pipeline, dataTransport, pid, sentinels);
+    const found = await hydratePane(pipeline, replayTransport, pid, sentinels);
     if (!found) {
       server.sendDirected(controlTransport, {
         type: "pane.attach.failed",
@@ -864,6 +892,13 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
       //
       //     tc-295a.9: wrap each pane's clear+replay with hydration sentinels
       //     and the demux no-interleave queue gate (see makeSentinels).
+      //
+      //     tc-t4k1: the sentinels gate the DRAINING transport (the demux's
+      //     fan-out target), but the clear+replay frame is delivered on the RAW
+      //     `transport` — its bytes come from capture-pane and were never
+      //     counted by fc.onPaneBytes, so routing them through the draining
+      //     wrapper would credit fc.noteDrained for un-buffered bytes and
+      //     over-credit the FC-1 ledger. See attachAndHydratePane's docstring.
       const sentinels = makeSentinels(transport, drainingTransport);
 
       if (primaryPaneId !== undefined) {
@@ -871,17 +906,17 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
         // pane exists; hydrate it FIRST (guaranteed before any live delta for
         // it), then hydrate the remaining known panes. A vanished primary pane
         // surfaces pane.attach.failed{pane.not-found} — fail-loud.
-        void attachAndHydratePane(transport, drainingTransport, sentinels, primaryPaneId).then(() => {
+        void attachAndHydratePane(transport, transport, sentinels, primaryPaneId).then(() => {
           const others: PaneId[] = [];
           for (const pid of pipeline.getModel().panes.keys()) {
             if (pid !== primaryPaneId) others.push(pid);
           }
-          void hydrateTransport(pipeline, drainingTransport, others, sentinels);
+          void hydrateTransport(pipeline, transport, others, sentinels);
         });
       } else {
         void hydrateTransport(
           pipeline,
-          drainingTransport,
+          transport,
           pipeline.getModel().panes.keys(),
           sentinels,
         );
@@ -906,9 +941,11 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
         // Validate + hydrate; a vanished pane surfaces pane.attach.failed.
         if (msg.type === "pane.attach") {
           const attach = msg as import("../wire/session-proxy-control.js").PaneAttachMessage;
+          // tc-t4k1: replay frame on the RAW transport (see addClient); the
+          // sentinels still gate the draining transport for no-interleave.
           void attachAndHydratePane(
             transport,
-            drainingTransport,
+            transport,
             makeSentinels(transport, drainingTransport),
             attach.paneId,
           );

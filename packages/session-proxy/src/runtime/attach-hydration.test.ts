@@ -29,9 +29,11 @@ import assert from "node:assert/strict";
 import { createOutputDemux } from "./output-demux.js";
 import { hydratePane, hydrateTransport, CLEAR_AND_SCROLLBACK } from "./hydration.js";
 import type { HydrationPipeline, HydrationSentinels } from "./hydration.js";
+import { createFlowController } from "./flow-control.js";
 import { createInMemoryTransportPair } from "../wire/transport.js";
 import { paneId } from "../wire/ids.js";
 import type { PaneId } from "../wire/ids.js";
+import type { Transport } from "../wire/transport.js";
 import type { CommandResult } from "../parser/correlator.js";
 
 const P1 = paneId("p1");
@@ -267,5 +269,148 @@ describe("tc-295a.9 live-bytes-during-hydration queueing", () => {
     }
     assert.deepEqual(paneSeq(P1), ["C:pane.hydration.begin", "D", "C:pane.hydration.end"]);
     assert.deepEqual(paneSeq(P9), ["C:pane.hydration.begin", "D", "C:pane.hydration.end"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// tc-t4k1 — FC-1 drain over-credit regression.
+//
+// Root cause: the session-proxy.ts addClient wiring credited fc.noteDrained on
+// EVERY sendData call of the per-client draining wrapper. The hydration replay
+// frame (capture-pane body + CLEAR_AND_SCROLLBACK escape) is delivered via a
+// direct sendData — its bytes were NEVER counted by fc.onPaneBytes (they come
+// from capture-pane, not the live %output append path). So the wrapper credited
+// drain for bytes the FC-1 ledger never held → noteDrained's byteCount exceeded
+// buffered → the "DRAIN CLAMPED" tripwire fired (onDrainClamped). It fired only
+// on panes WITH scrollback history (big replay body) and not on clean fresh
+// creates (empty replay body after trimTrailingBlankLines) — exactly the
+// production trigger pinning.
+//
+// Fix: the replay frame is delivered on the RAW transport, never the draining
+// wrapper, so only counted live %output reaches fc.noteDrained. The harness
+// below mirrors the exact session-proxy.ts wiring (accounting store →
+// onPaneBytes; per-client draining wrapper → noteDrained) and asserts the clamp
+// NEVER fires across attach-then-stream.
+// ---------------------------------------------------------------------------
+
+/**
+ * Reconstruct the session-proxy.ts FC wiring over the REAL demux + flow
+ * controller + the exported hydration primitives.
+ *
+ * - `accountingStore.append` calls `fc.onPaneBytes` (the only ledger credit).
+ * - the demux fans live %output out to `drainingTransport`.
+ * - `drainingTransport.sendData` calls `fc.noteDrained` on drain (in-memory
+ *   transport is synchronous → credit fires immediately, the `void` branch).
+ * - the replay frame is delivered on the bare `replayTransport` per the fix.
+ */
+function makeFcHarness() {
+  const demux = createOutputDemux();
+  const { sessionProxy: rawTransport, client } = createInMemoryTransportPair();
+  client.onData(() => {}); // sink — we only care about FC accounting
+
+  const clamps: Array<{ pane: PaneId; excess: number }> = [];
+  const fc = createFlowController(
+    () => new Promise<CommandResult>(() => {}), // fire-and-forget send
+    demux,
+    {
+      // Small water marks so a modest flood exercises pause/resume too.
+      highWaterBytes: 4_000,
+      lowWaterBytes: 1_000,
+      metrics: {
+        onDrainClamped: (pane, excess) => clamps.push({ pane, excess }),
+      },
+    },
+  );
+
+  // Per-client draining wrapper — mirrors session-proxy.ts addClient exactly.
+  const drainingTransport: Transport = {
+    ...rawTransport,
+    sendData(pid: PaneId, bytes: Uint8Array): void | Promise<void> {
+      const result = rawTransport.sendData(pid, bytes);
+      if (bytes.length === 0) return result;
+      if (result !== undefined && typeof (result as Promise<void>).then === "function") {
+        return (result as Promise<void>).then(() => fc.noteDrained(pid, bytes.length));
+      }
+      fc.noteDrained(pid, bytes.length);
+      return undefined;
+    },
+  };
+  demux.attachTransport(drainingTransport);
+
+  // Accounting store wrapper — mirrors session-proxy.ts accountingStore.
+  // tc-t4k1: COUNT BEFORE FAN-OUT — onPaneBytes(+n) must run before
+  // demux.store.append fans out (which synchronously drains → noteDrained(-n)
+  // for an un-backpressured transport). Counting first makes the credit-before-
+  // debit inversion impossible.
+  const append = (pid: PaneId, bytes: Uint8Array): void => {
+    if (bytes.length > 0) fc.onPaneBytes(pid, bytes.length);
+    demux.store.append(pid, bytes);
+  };
+
+  // Sentinels gate the DRAINING transport (the demux fan-out target), matching
+  // makeSentinels(controlTransport=raw, dataTransport=draining).
+  const sentinels: HydrationSentinels = {
+    begin(pid: PaneId): void {
+      demux.beginPaneHydration(drainingTransport, pid);
+    },
+    end(pid: PaneId): void {
+      demux.endPaneHydration(drainingTransport, pid);
+    },
+  };
+
+  return { demux, rawTransport, drainingTransport, fc, append, sentinels, clamps };
+}
+
+describe("tc-t4k1 FC-1 drain over-credit on hydration", () => {
+  it("hydrating a pane with scrollback history does NOT trip the DRAIN CLAMPED tripwire", async () => {
+    const h = makeFcHarness();
+    h.demux.notifyPaneBound(P1);
+
+    // A pane that produced real output before this client attached. The replay
+    // body is large (the production trigger: panes WITH history).
+    const captureBody = new TextEncoder().encode("scrollback ".repeat(500)); // ~5.5 KiB
+    const { pipeline } = makePipeline(new Map([["capture-pane -t %1", ok(captureBody)]]));
+
+    // Hydrate: per the fix, the replay frame is delivered on the RAW transport.
+    await hydratePane(pipeline, h.rawTransport, P1, h.sentinels);
+
+    assert.deepEqual(
+      h.clamps,
+      [],
+      "replay bytes were never counted by onPaneBytes — crediting them via " +
+        "noteDrained over-credits the FC-1 ledger and trips the clamp",
+    );
+    // The ledger is untouched by hydration: no live %output was appended.
+    assert.equal(h.fc.bufferedBytes(P1), 0, "hydration must not move the FC ledger");
+  });
+
+  it("attach-then-stream stays balanced: live %output drains exactly, clamp never fires", async () => {
+    const h = makeFcHarness();
+    h.demux.notifyPaneBound(P1);
+
+    const captureBody = new TextEncoder().encode("old-history ".repeat(300));
+    const { pipeline } = makePipeline(new Map([["capture-pane -t %1", ok(captureBody)]]));
+    await hydratePane(pipeline, h.rawTransport, P1, h.sentinels);
+
+    // Now a live flood through the accounting store: onPaneBytes(+n) per append,
+    // demux fans out to the draining wrapper → noteDrained(-n) on synchronous
+    // in-memory drain. Each appended byte is counted once and drained once.
+    for (let i = 0; i < 50; i++) {
+      h.append(P1, new TextEncoder().encode("live-output-chunk\n"));
+    }
+
+    assert.deepEqual(h.clamps, [], "balanced live accounting must never clamp");
+    assert.equal(h.fc.bufferedBytes(P1), 0, "every appended byte was drained exactly once");
+  });
+
+  it("over-crediting un-buffered bytes DOES trip the clamp (guards the harness fidelity)", () => {
+    // Negative control: prove the harness's clamp hook is live by driving the
+    // exact illegal accounting the fix prevents — crediting drain for bytes the
+    // ledger never held. If this did not clamp, the positive tests above would
+    // be vacuous.
+    const h = makeFcHarness();
+    h.fc.noteDrained(P1, 1_234); // no prior onPaneBytes → pure over-credit
+    assert.equal(h.clamps.length, 1, "drain for un-buffered bytes must clamp");
+    assert.equal(h.clamps[0]!.excess, 1_234);
   });
 });
