@@ -689,6 +689,22 @@ describe("requeryDiff: reparenting (break-pane)", () => {
     // Both window layouts must update.
     const layoutCount = types.filter((t) => t === "layout.updated").length;
     assert.ok(layoutCount >= 1, `expected layout.updated, got ${types.join(", ")}`);
+
+    // tc-4gor: the re-home MUST surface as a dedicated pane.moved carrying the
+    // pane's NEW windowId — the single wire signal that re-points an existing
+    // pane's owner. Without it a windowId-deriving client (the Mirror) renders
+    // the new window empty with the pane stuck under its old window.
+    const moved = deltas.find((d) => d.type === "pane.moved");
+    assert.ok(moved !== undefined, `expected a pane.moved delta, got ${types.join(", ")}`);
+    assert.equal((moved as { paneId: string }).paneId, paneId("p2"));
+    assert.equal((moved as { windowId: string }).windowId, windowId("w2"));
+
+    // Ordering: window.added (announces w2) must precede pane.moved (re-homes
+    // p2 into w2) so the client never references a not-yet-announced window.
+    assert.ok(
+      types.indexOf("window.added") < types.indexOf("pane.moved"),
+      `window.added must precede pane.moved; got ${types.join(", ")}`,
+    );
   });
 });
 

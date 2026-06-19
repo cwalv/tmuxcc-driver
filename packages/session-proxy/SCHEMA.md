@@ -642,6 +642,26 @@ focused. The session is always the bound session; no `sessionId` field.
 | `cols`   | `number` | New width in columns.      |
 | `rows`   | `number` | New height in rows.        |
 
+#### `pane.moved` — `PaneMovedMessage`
+
+An EXISTING pane was re-homed into a different window (tc-4gor) — same
+`paneId`, new `windowId`. The canonical cause is a detached `break-pane -d -s
+%N`, which keeps the pane id but moves it into a brand-new window. The driver
+observes the move on a requery (the broken-out pane's `list-panes` row carries
+the new `#{window_id}`) and emits this delta to re-point the client's
+window→pane grouping. The pane is MOVED, not recreated: there is NO
+`pane.closed` + `pane.opened` pair, so clients keep its scrollback, dimensions,
+mode, title, dead-state, and durable policy. The target window is announced by
+`window.added` BEFORE this delta (delta-ordering rule), so a client never
+references a not-yet-announced window. Without this delta, a client that derives
+window membership from `pane.windowId` would keep the pane under its old window
+and render the new window EMPTY (stable-wrong until a resnapshot).
+
+| Field      | Type       | Description                     |
+|------------|------------|---------------------------------|
+| `paneId`   | `PaneId`   | The re-homed pane (unchanged).  |
+| `windowId` | `WindowId` | The pane's NEW owning window.   |
+
 #### `pane.mode-changed` — `PaneModeChangedMessage`
 
 | Field    | Type       | Description                                                                              |

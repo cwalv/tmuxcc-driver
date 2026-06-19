@@ -139,6 +139,30 @@ function baseModel(): SessionModel {
   return { sessions, windows, panes, focus };
 }
 
+/**
+ * tc-4gor: from a baseModel() (S1 → W1 → [P1, P2]), produce the model after a
+ * detached break-pane re-homes P2 into a NEW single-pane window W2. W1 keeps
+ * P1; P2's `windowId` becomes W2. Structural maps are kept consistent (W1.paneIds
+ * drops P2, W2 owns P2, P2.windowId === W2) so the result is a valid model.
+ */
+function rehomeP2ToW2(prev: SessionModel): SessionModel {
+  // Add the new window W2 owning P2. A freshly-added window carries a null
+  // layout (window.added carries no layout tree; the real layout arrives on a
+  // later requery as a layout.updated for the now-existing window) — matching
+  // the existing "add a window + pane" round-trip fixture.
+  let next = addWindow(prev, makeWindow(W2, S1, [P2], P2, "broken", null));
+  // W1 reflows to a single-pane window holding only P1.
+  const w1 = next.windows.get(W1)!;
+  const windows = new Map(next.windows);
+  windows.set(W1, { ...w1, paneIds: [P1], activePaneId: P1, layout: LAYOUT_1 });
+  // P2 is re-homed: same id, new windowId.
+  const p2 = next.panes.get(P2)!;
+  const panes = new Map(next.panes);
+  panes.set(P2, { ...p2, windowId: W2 });
+  next = { ...next, windows, panes };
+  return next;
+}
+
 // ---------------------------------------------------------------------------
 // Round-trip helper: apply a sequence of deltas to a snapshot-shaped state.
 //
@@ -235,6 +259,14 @@ function applyDeltas(snap: SnapshotMessage, deltas: SessionProxyMessage[]): Snap
           p.paneId === delta.paneId
             ? { ...p, cols: delta.cols, rows: delta.rows }
             : p,
+        );
+        break;
+
+      // tc-4gor: pane re-homed into a different window — update ONLY the pane's
+      // windowId in place (the pane is moved, not recreated; identity preserved).
+      case "pane.moved":
+        panes = panes.map((p) =>
+          p.paneId === delta.paneId ? { ...p, windowId: delta.windowId } : p,
         );
         break;
 
@@ -485,6 +517,47 @@ describe("diffModel — minimal deltas (v3 single-session)", () => {
     }
   });
 
+  it("break-pane re-home: pane's windowId changes → exactly one pane.moved delta (tc-4gor)", () => {
+    // prev: W1 has [P1, P2]. next: P2 re-homed into a new window W2.
+    const prev = baseModel();
+    const next = rehomeP2ToW2(prev);
+
+    const deltas = diffModel(prev, next);
+    const types = deltas.map((d) => d.type);
+
+    // No pane.opened / pane.closed — the pane KEEPS its identity (scrollback).
+    assert.ok(!types.includes("pane.opened"), `unexpected pane.opened: ${types.join(", ")}`);
+    assert.ok(!types.includes("pane.closed"), `unexpected pane.closed: ${types.join(", ")}`);
+
+    // Exactly one pane.moved carrying P2's NEW windowId.
+    const moved = deltas.filter((d) => d.type === "pane.moved");
+    assert.equal(moved.length, 1, `expected exactly one pane.moved; got ${types.join(", ")}`);
+    const d = moved[0]!;
+    if (d.type === "pane.moved") {
+      assert.equal(d.paneId, P2);
+      assert.equal(d.windowId, W2);
+      assert.ok(!("sessionId" in d), "pane.moved must not carry sessionId");
+    }
+
+    // window.added (announces W2) must precede pane.moved (re-homes P2 into W2).
+    assert.ok(
+      types.indexOf("window.added") < types.indexOf("pane.moved"),
+      `window.added must precede pane.moved; got ${types.join(", ")}`,
+    );
+  });
+
+  it("a pane whose windowId is unchanged → no pane.moved delta (tc-4gor)", () => {
+    const prev = baseModel();
+    // Resize P1 in place — windowId unchanged. Must NOT emit pane.moved.
+    const next = updatePane(prev, P1, { cols: 120 });
+    const deltas = diffModel(prev, next);
+    assert.equal(
+      deltas.filter((d) => d.type === "pane.moved").length,
+      0,
+      "pane.moved must not fire when windowId is unchanged",
+    );
+  });
+
   it("pane mode change → exactly one pane.mode-changed delta", () => {
     const prev = baseModel();
     const next = updatePane(prev, P1, { mode: "copy" });
@@ -663,6 +736,13 @@ describe("round-trip: applyDeltas(snapshot(prev), diff(prev,next)) == snapshot(n
     const prev = baseModel();
     let next = addWindow(prev, makeWindow(W2, S1, [], null, "win-two"));
     next = addPane(next, makePane(P3, W2, S1, 100, 40));
+    roundTrip(prev, next);
+  });
+
+  it("break-pane re-home (window-membership change) round-trips (tc-4gor)", () => {
+    const prev = baseModel();
+    // P2 breaks out of W1 into a new window W2.
+    const next = rehomeP2ToW2(prev);
     roundTrip(prev, next);
   });
 

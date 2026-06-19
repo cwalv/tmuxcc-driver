@@ -252,6 +252,41 @@ export interface PaneResizedMessage extends MessageBase {
 }
 
 /**
+ * A pane was RE-HOMED into a different window (tc-4gor).
+ * direction: session-proxy→client
+ *
+ * Emitted when an EXISTING pane (same `paneId`, present in both the prior and
+ * the new model) has a changed `windowId` — the canonical case is a detached
+ * `break-pane -d -s %N`, which keeps the pane id but moves it into a brand-new
+ * window.  tmux reports the move on a requery (the broken-out pane's
+ * `list-panes` row carries the new `#{window_id}`), so the driver model
+ * re-homes; this delta is what carries that membership change to the client.
+ *
+ * Without it the move was INVISIBLE on the wire: `pane.opened` fires only for a
+ * NEW pane id, `pane.closed` only for a GONE id, and `layout.updated` only
+ * carries a window's layout tree — none of them re-point an existing pane's
+ * window membership.  A client that derives window→pane grouping from
+ * `pane.windowId` (the Mirror's ClientModel, hence VS Code's side-tree) would
+ * therefore keep the pane under its old window and render the new window EMPTY,
+ * stable-wrong, until a full resnapshot.
+ *
+ * The client updates ONLY the pane's window membership — the pane's identity,
+ * scrollback, dimensions, mode, title, dead-state, and durable policy are all
+ * preserved (the pane was moved, not recreated).  This is the wire-level reason
+ * a break-pane keeps the client's scrollback: no pane.closed + pane.opened pair.
+ *
+ * Non-breaking additive delta — older clients that do not recognise this type
+ * ignore it (the pane keeps rendering under its old window until the next
+ * snapshot).
+ */
+export interface PaneMovedMessage extends MessageBase {
+  readonly type: "pane.moved";
+  readonly paneId: PaneId;
+  /** The pane's new owning window. */
+  readonly windowId: WindowId;
+}
+
+/**
  * A pane's durable, driver-owned name changed (tc-1a8z).
  * direction: session-proxy→client
  *
@@ -1621,7 +1656,7 @@ export interface ResyncRequestMessage extends MessageBase {
  * Grouped by family:
  *   Capabilities:  SessionProxyCapabilitiesMessage
  *   Snapshot:      SnapshotMessage
- *   Pane deltas:   PaneOpenedMessage | PaneClosedMessage | PaneResizedMessage | PaneModeChangedMessage | PaneLabelChangedMessage | PaneTitleChangedMessage
+ *   Pane deltas:   PaneOpenedMessage | PaneClosedMessage | PaneResizedMessage | PaneMovedMessage | PaneModeChangedMessage | PaneLabelChangedMessage | PaneTitleChangedMessage
  *   Window deltas: WindowAddedMessage | WindowClosedMessage | WindowRenamedMessage | WindowSyncChangedMessage | WindowMonitorActivityChangedMessage | WindowMonitorSilenceChangedMessage
  *   Layout deltas: LayoutUpdatedMessage
  *   Focus deltas:  FocusChangedMessage
@@ -1640,6 +1675,8 @@ export type SessionProxyMessage =
   | PaneClosedMessage
   | PaneResizedMessage
   | PaneModeChangedMessage
+  // Pane re-home (window-membership change) delta (tc-4gor)
+  | PaneMovedMessage
   // Durable pane-name delta (tc-1a8z)
   | PaneLabelChangedMessage
   // Dead-pane state delta (tc-4bv2 / tc-295a.10)
@@ -1711,6 +1748,8 @@ export function isSessionProxyMessage(msg: ControlMessage): msg is SessionProxyM
     t === "pane.resized" ||
     t === "pane.mode-changed" ||
     t === "pane.dead-changed" ||
+    // Pane re-home (window-membership change) delta (tc-4gor)
+    t === "pane.moved" ||
     // Durable pane name delta (tc-1a8z)
     t === "pane.label-changed" ||
     // Live shell title delta (tc-2mn8)

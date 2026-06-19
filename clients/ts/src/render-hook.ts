@@ -281,6 +281,22 @@ export interface RenderHook {
   onPaneResized(paneId: PaneId, cols: number, rows: number): void;
 
   /**
+   * A pane was RE-HOMED into a different window (tc-4gor).
+   *
+   * Called when a `pane.moved` delta arrives: an EXISTING pane (same id) changed
+   * its owning window — the canonical case is a detached `break-pane -d -s %N`,
+   * which keeps the pane id but moves it into a brand-new window.  The pane is
+   * NOT recreated and NOT closed: its terminal/tab, scrollback, dimensions,
+   * mode, title, dead-state, and durable policy are all preserved.  Renderers
+   * that group panes by window (a side-tree, a window-tab strip) MUST re-home
+   * the pane on this event; renderers that key purely by paneId can ignore it.
+   *
+   * Default-implementable as a no-op for renderers that do not surface window
+   * membership.
+   */
+  onPaneMoved(paneId: PaneId, windowId: WindowId): void;
+
+  /**
    * A pane's dead state changed WITHOUT the pane leaving the session
    * (tc-4bv2 / tc-295a.10 shared pane-state shape).
    *
@@ -557,6 +573,7 @@ export const NoOpRenderHook: RenderHook = {
   onPaneOpened(_pane: PaneInfo): void {},
   onPaneClosed(_paneId: PaneId, _exitCode?: number, _cause?: Origin): void {},
   onPaneResized(_paneId: PaneId, _cols: number, _rows: number): void {},
+  onPaneMoved(_paneId: PaneId, _windowId: WindowId): void {},
   onPaneDeadChanged(_paneId: PaneId, _dead: boolean, _exitCode?: number): void {},
   onPaneModeChanged(_paneId: PaneId, _mode: PaneMode): void {},
   onPaneLabelChanged(_paneId: PaneId, _label: string | undefined): void {},
@@ -587,6 +604,7 @@ export type RenderHookCall =
   | { type: "paneOpened"; pane: PaneInfo }
   | { type: "paneClosed"; paneId: PaneId; exitCode?: number; cause?: Origin }
   | { type: "paneResized"; paneId: PaneId; cols: number; rows: number }
+  | { type: "paneMoved"; paneId: PaneId; windowId: WindowId }
   | { type: "paneDeadChanged"; paneId: PaneId; dead: boolean; exitCode?: number }
   | { type: "paneModeChanged"; paneId: PaneId; mode: PaneMode }
   | { type: "paneLabelChanged"; paneId: PaneId; label?: string }
@@ -636,6 +654,10 @@ export class EchoRenderHook implements RenderHook {
 
   onPaneResized(paneId: PaneId, cols: number, rows: number): void {
     this.calls.push({ type: "paneResized", paneId, cols, rows });
+  }
+
+  onPaneMoved(paneId: PaneId, windowId: WindowId): void {
+    this.calls.push({ type: "paneMoved", paneId, windowId });
   }
 
   onPaneDeadChanged(paneId: PaneId, dead: boolean, exitCode?: number): void {

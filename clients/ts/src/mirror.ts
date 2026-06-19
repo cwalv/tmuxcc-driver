@@ -510,6 +510,21 @@ export function applyDelta(model: ClientModel, msg: SessionProxyMessage): Client
       return { ...model, panes };
     }
 
+    // tc-4gor: a pane was RE-HOMED into a different window (break-pane). Update
+    // ONLY the pane's window membership — identity, scrollback, dimensions, mode,
+    // title, dead-state, and durable policy are all preserved (moved, not
+    // recreated). The window→pane grouping (ClientModel pane.windowId) is what
+    // the side-tree reads, so this re-points it to the new window. The target
+    // window is announced by window.added before this delta (ordering rule).
+    case "pane.moved": {
+      const pane = model.panes.get(msg.paneId);
+      if (!pane) return model;
+      if (pane.windowId === msg.windowId) return model; // no observable change
+      const panes = new Map(model.panes);
+      panes.set(msg.paneId, { ...pane, windowId: msg.windowId });
+      return { ...model, panes };
+    }
+
     // tc-1a8z: the durable, driver-owned pane name changed. `label` absent on
     // the wire ⇒ the name was cleared (back to undefined).
     case "pane.label-changed": {
@@ -1188,7 +1203,7 @@ export class Mirror {
 
     // Track previously-seen model to diff against.
     let prevModel: {
-      panes: ReadonlyMap<PaneId, { cols: number; rows: number; dead: boolean; exitCode: number | undefined; label: string | undefined; bound: boolean; detach: "detach" | "kill" | undefined; icon: string | undefined; paneTitle: string | undefined }>;
+      panes: ReadonlyMap<PaneId, { windowId: WindowId; cols: number; rows: number; dead: boolean; exitCode: number | undefined; label: string | undefined; bound: boolean; detach: "detach" | "kill" | undefined; icon: string | undefined; paneTitle: string | undefined }>;
       windows: ReadonlyMap<WindowId, { name: string; layout: WindowLayout }>;
       focus: { paneId: PaneId | null; windowId: WindowId | null };
       exitCodes: ReadonlyMap<PaneId, number>;
@@ -1282,6 +1297,12 @@ export class Mirror {
           if (prevPane.cols !== pane.cols || prevPane.rows !== pane.rows) {
             hook.onPaneResized(pid, pane.cols, pane.rows);
           }
+          // tc-4gor: window-membership change on an existing pane (break-pane
+          // re-home). The pane kept its id and all live state — only its owning
+          // window changed. Renderers that group by window re-home on this.
+          if (prevPane.windowId !== pane.windowId) {
+            hook.onPaneMoved(pid, pane.windowId);
+          }
           // tc-4bv2 / tc-295a.10: dead-state flip on an existing pane.
           if (prevPane.dead !== pane.dead || prevPane.exitCode !== pane.exitCode) {
             hook.onPaneDeadChanged(pid, pane.dead, pane.dead ? pane.exitCode : undefined);
@@ -1328,9 +1349,9 @@ export class Mirror {
       }
 
       // Update prevModel to reflect current state.
-      const newPanes = new Map<PaneId, { cols: number; rows: number; dead: boolean; exitCode: number | undefined; label: string | undefined; bound: boolean; detach: "detach" | "kill" | undefined; icon: string | undefined; paneTitle: string | undefined }>();
+      const newPanes = new Map<PaneId, { windowId: WindowId; cols: number; rows: number; dead: boolean; exitCode: number | undefined; label: string | undefined; bound: boolean; detach: "detach" | "kill" | undefined; icon: string | undefined; paneTitle: string | undefined }>();
       for (const [pid, p] of curr.panes) {
-        newPanes.set(pid, { cols: p.cols, rows: p.rows, dead: p.dead, exitCode: p.exitCode, label: p.label, bound: p.bound, detach: p.detach, icon: p.icon, paneTitle: p.paneTitle });
+        newPanes.set(pid, { windowId: p.windowId, cols: p.cols, rows: p.rows, dead: p.dead, exitCode: p.exitCode, label: p.label, bound: p.bound, detach: p.detach, icon: p.icon, paneTitle: p.paneTitle });
       }
       const newWindows = new Map<WindowId, { name: string; layout: WindowLayout }>();
       for (const [wid, w] of curr.windows) {
@@ -1399,9 +1420,9 @@ export class Mirror {
     hook.onConnected();
 
     // Seed prevModel from initial state.
-    const seedPanes = new Map<PaneId, { cols: number; rows: number; dead: boolean; exitCode: number | undefined; label: string | undefined; bound: boolean; detach: "detach" | "kill" | undefined; icon: string | undefined; paneTitle: string | undefined }>();
+    const seedPanes = new Map<PaneId, { windowId: WindowId; cols: number; rows: number; dead: boolean; exitCode: number | undefined; label: string | undefined; bound: boolean; detach: "detach" | "kill" | undefined; icon: string | undefined; paneTitle: string | undefined }>();
     for (const [pid, p] of initial.panes) {
-      seedPanes.set(pid, { cols: p.cols, rows: p.rows, dead: p.dead, exitCode: p.exitCode, label: p.label, bound: p.bound, detach: p.detach, icon: p.icon, paneTitle: p.paneTitle });
+      seedPanes.set(pid, { windowId: p.windowId, cols: p.cols, rows: p.rows, dead: p.dead, exitCode: p.exitCode, label: p.label, bound: p.bound, detach: p.detach, icon: p.icon, paneTitle: p.paneTitle });
     }
     const seedWindows = new Map<WindowId, { name: string; layout: WindowLayout }>();
     for (const [wid, w] of initial.windows) {

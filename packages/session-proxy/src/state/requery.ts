@@ -68,13 +68,21 @@
  * `break-pane` keeps the pane id (`%N` unchanged) but moves it to a new
  * window. Because the model and the wire use stable ids, the diff sees this
  * mechanically as: same paneId present in both `prev` and `next`, but with a
- * different `windowId`. The existing `diffModel` does NOT emit a delta for a
- * pane.windowId change — it only emits pane.opened (new id) / pane.closed
- * (gone id) / pane.resized / pane.mode-changed. A break-pane therefore
- * surfaces as: the OLD window's layout.updated (pane gone from layout) and
- * the NEW window's layout.updated (pane present in new layout). The pane
- * itself is unchanged on the wire, which is correct — clients keep its
- * scrollback. See the reparenting round-trip test in requery.test.ts.
+ * different `windowId`. `diffModel` emits a dedicated `pane.moved` delta
+ * (tc-4gor) carrying the pane's new `windowId` — the SINGLE wire signal that
+ * re-points an existing pane's window membership. There is NO pane.closed +
+ * pane.opened pair, so clients keep the pane's scrollback / dimensions / mode /
+ * title / dead-state — the pane was moved, not recreated. The new window is
+ * announced by `window.added` first (delta-ordering rule), then `pane.moved`
+ * re-homes the existing pane into it.
+ *
+ * NOTE (tc-4gor): the `layout.updated` deltas alone are NOT sufficient. tmux 3.4
+ * emits `%layout-change` for the OLD window but NOT for the detached new window,
+ * and a layout tree never re-points a pane's owner anyway; a client that derives
+ * window→pane grouping from `pane.windowId` (the Mirror's ClientModel, hence the
+ * VS Code side-tree) MUST get `pane.moved` or it renders the new window empty
+ * with the pane stuck under its old window (stable-wrong until a resnapshot).
+ * See the reparenting round-trip test in requery.test.ts.
  *
  * # Convergence under mid-flight dirties (commit-only-clean, tc-128.5)
  *

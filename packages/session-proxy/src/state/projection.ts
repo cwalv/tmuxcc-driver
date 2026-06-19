@@ -39,6 +39,9 @@
  *   1. window.added        — new windows (panes reference them)
  *   2. pane.opened         — new panes
  *   3. layout.updated      — window layout changes (may ref existing panes)
+ *   3b. pane.moved         — window-membership change on an existing pane
+ *                            (break-pane re-home; the target window is already
+ *                            announced by window.added above) (tc-4gor)
  *   4. pane.resized        — size changes on existing panes
  *   5. pane.mode-changed   — mode changes on existing panes
  *   5a2. pane.label-changed — durable pane-name changes on existing panes (tc-1a8z)
@@ -70,6 +73,7 @@ import type {
   PaneOpenedMessage,
   PaneClosedMessage,
   PaneResizedMessage,
+  PaneMovedMessage,
   PaneModeChangedMessage,
   PaneLabelChangedMessage,
   PaneDeadChangedMessage,
@@ -367,6 +371,35 @@ export function diffModel(
         seq: SEQ,
         windowId: win.windowId,
         layout: win.layout,
+      };
+      out.push(msg);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 3b. pane.moved — window-membership change on an existing pane (tc-4gor)
+  //
+  // A pane present in BOTH prev and next whose `windowId` differs was re-homed
+  // into another window. The canonical cause is a detached `break-pane -d -s %N`
+  // (same pane id, new window) observed by the requery: the broken-out pane's
+  // `list-panes` row carries the new `#{window_id}`, so the rebuilt model
+  // re-homes it. Stable ids make this mechanical — there is NO pane.closed +
+  // pane.opened pair, so clients keep the pane's scrollback / dimensions / mode
+  // / title / dead-state. This is the SINGLE delta that re-points window
+  // membership; a client deriving window→pane grouping from `pane.windowId`
+  // (the Mirror's ClientModel) needs it, because layout.updated only carries a
+  // window's layout tree and never re-points an existing pane's owner.
+  // The target window is already announced by window.added (group 1) above.
+  // -------------------------------------------------------------------------
+  for (const [id, pane] of next.panes) {
+    const prevPane = prev.panes.get(id);
+    if (!prevPane) continue; // new panes carry their windowId in pane.opened
+    if (prevPane.windowId !== pane.windowId) {
+      const msg: PaneMovedMessage = {
+        type: "pane.moved",
+        seq: SEQ,
+        paneId: pane.paneId,
+        windowId: pane.windowId,
       };
       out.push(msg);
     }

@@ -17,6 +17,7 @@
     "src/runtime/resize-roundtrip.test.ts",
     "src/runtime/resilience.test.ts",
     "src/runtime/resync.test.ts",
-    "src/runtime/topology-canary.test.ts"
+    "src/runtime/topology-canary.test.ts",
+    "src/runtime/break-pane-rehome.test.ts"
   ]
 }

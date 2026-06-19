@@ -87,6 +87,7 @@ export type {
   PaneOpenedMessage,
   PaneClosedMessage,
   PaneResizedMessage,
+  PaneMovedMessage,
   PaneMode,
   PaneModeChangedMessage,
   // SessionProxy → Client (window deltas)

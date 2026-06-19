@@ -278,6 +278,22 @@
       "additionalProperties": false
     },
 
+    "PaneMovedMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "An existing pane was re-homed into a different window (tc-4gor): same paneId, new windowId. Canonical cause is a detached break-pane. The pane keeps its identity, scrollback and all live state; only its window membership changes. direction: session-proxy→client.",
+      "required": ["type", "seq", "paneId", "windowId"],
+      "properties": {
+        "type": { "const": "pane.moved" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" },
+        "windowId": { "$ref": "tmuxcc:shared/primitives#/$defs/WindowId" }
+      },
+      "additionalProperties": false
+    },
+
     "PaneModeChangedMessage": {
       "allOf": [
         { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
@@ -669,6 +685,7 @@
         { "$ref": "#/$defs/PaneOpenedMessage" },
         { "$ref": "#/$defs/PaneClosedMessage" },
         { "$ref": "#/$defs/PaneResizedMessage" },
+        { "$ref": "#/$defs/PaneMovedMessage" },
         { "$ref": "#/$defs/PaneModeChangedMessage" },
         { "$ref": "#/$defs/PaneLabelChangedMessage" },
         { "$ref": "#/$defs/PaneDeadChangedMessage" },
