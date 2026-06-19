@@ -16,6 +16,8 @@
   },
   "main": "./dist/index.js",
   "scripts": {
+    "preinstall": "node -e \"if(process.env.INIT_CWD&&process.env.INIT_CWD===process.cwd()){console.error('[tmuxcc] npm must run from the weave/workweave ROOT, not this subdir ('+process.cwd()+').\\n[tmuxcc] From the root: npm install  |  npm run build -w '+require('./package.json').name);process.exit(1)}\"",
+    "prebuild": "node -e \"if(process.env.INIT_CWD&&process.env.INIT_CWD===process.cwd()){console.error('[tmuxcc] npm must run from the weave/workweave ROOT, not this subdir ('+process.cwd()+').\\n[tmuxcc] From the root: npm install  |  npm run build -w '+require('./package.json').name);process.exit(1)}\"",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "clean": "rm -rf dist *.tsbuildinfo",
