@@ -472,6 +472,209 @@ describe("createFlowController — byte integrity", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Multi-client per-client ledgers (tc-0wtb)
+//
+// The bug: one shared FC-1 ledger but each attached client wraps its own
+// draining transport that credits noteDrained independently. The demux fans
+// one %output append out to ALL N transports, so a single onPaneBytes(+n) was
+// matched by N×noteDrained(−n). With N≥2 the shared ledger nets +n−N·n, clamps
+// at 0, never reaches high-water → backpressure silently disabled.
+//
+// Fix (option b): per-(pane × client) sub-ledgers. onPaneBytes fans +n into
+// every registered client; noteDrained(client,…,−n) debits ONLY that client.
+// Pause on the MAX over clients; resume only when ALL ≤ low-water; removeClient
+// re-evaluates the max (detaching the slowest may itself resume).
+// ---------------------------------------------------------------------------
+
+describe("createFlowController — multi-client per-client ledgers (tc-0wtb)", () => {
+  // RED baseline: the exact probe that confirmed the bug. Two clients, one
+  // 6-byte append. Under the OLD shared ledger: onPaneBytes(+6) then TWO
+  // noteDrained(−6) (one per draining transport) → 6 − 12 clamps at 0 with an
+  // excess-6 DRAIN CLAMPED tripwire. Under per-client ledgers each client owes
+  // its own 6 bytes, so the SECOND drain debits a DIFFERENT sub-ledger and
+  // never over-credits: zero clamps, and neither sub-ledger pins below 0.
+  it("RED→GREEN: 2 clients + one 6-byte append does NOT over-credit (no clamp, no pin)", () => {
+    const { send } = makeFakeSend();
+    const demux = createOutputDemux();
+    const clamps: Array<{ pane: PaneId; excess: number }> = [];
+    const fc = createFlowController(send, demux, {
+      highWaterBytes: 1_000,
+      lowWaterBytes: 200,
+      metrics: { onDrainClamped: (pane, excess) => clamps.push({ pane, excess }) },
+    });
+
+    const clientA = { id: "A" };
+    const clientB = { id: "B" };
+    fc.addClient(clientA);
+    fc.addClient(clientB);
+
+    // One %output append of 6 bytes — fanned to BOTH draining transports.
+    fc.onPaneBytes(P3, 6);
+
+    // The demux fan-out matches the single append with one drain PER transport.
+    fc.noteDrained(P3, 6, clientA);
+    fc.noteDrained(P3, 6, clientB);
+
+    // The bug: the second drain over-credits the shared ledger by 6 and trips
+    // the clamp. Per-client ledgers debit separate sub-ledgers → no clamp.
+    assert.equal(
+      clamps.length,
+      0,
+      `expected NO drain-clamp (per-client ledgers), got ${clamps.length}: ${JSON.stringify(clamps)}`,
+    );
+    assert.equal(fc.bufferedBytes(P3), 0, "both clients drained their own 6 bytes → max backlog 0");
+  });
+
+  it("does NOT pin at ~0 under a flood with 2 clients — pause still engages", () => {
+    const { writes, send } = makeFakeSend();
+    const demux = createOutputDemux();
+    const fc = createFlowController(send, demux, {
+      highWaterBytes: 1_000,
+      lowWaterBytes: 200,
+    });
+
+    const clientA = { id: "A" };
+    const clientB = { id: "B" };
+    fc.addClient(clientA);
+    fc.addClient(clientB);
+
+    // Flood: 11 appends of 100 bytes each = 1100 bytes per client.
+    // Client A keeps up (drains each chunk); client B is the slow consumer and
+    // drains nothing. Under the OLD shared ledger A's drains would cancel the
+    // appends and the counter would pin at ~0, never pausing. Under per-client
+    // ledgers B's sub-ledger climbs to 1100 > high-water and pauses on B.
+    for (let i = 0; i < 11; i++) {
+      fc.onPaneBytes(P3, 100);
+      fc.noteDrained(P3, 100, clientA); // A is the fast client
+    }
+
+    assert.equal(fc.isPanePaused(P3), true, "pause must engage on the slow client (B), not pin at 0");
+    assert.equal(fc.bufferedBytes(P3), 1_100, "max backlog is the slow client B's 1100 bytes");
+    const cmds = commands(writes);
+    assert.ok(cmds.some((c) => c.includes("%3:pause")), `expected a %3:pause command, got: ${cmds}`);
+  });
+
+  it("resumes only when ALL clients fall to/below low-water (slowest gates resume)", () => {
+    const { writes, send } = makeFakeSend();
+    const demux = createOutputDemux();
+    const fc = createFlowController(send, demux, {
+      highWaterBytes: 1_000,
+      lowWaterBytes: 200,
+    });
+
+    const clientA = { id: "A" };
+    const clientB = { id: "B" };
+    fc.addClient(clientA);
+    fc.addClient(clientB);
+
+    // Flood both clients past high-water → pause (max = 1100 > 1000).
+    for (let i = 0; i < 11; i++) fc.onPaneBytes(P3, 100);
+    assert.equal(fc.isPanePaused(P3), true, "paused after flood");
+    writes.length = 0;
+
+    // Drain client A all the way below low-water (A: 1100 → 100 ≤ 200).
+    fc.noteDrained(P3, 1_000, clientA);
+    assert.equal(
+      fc.isPanePaused(P3),
+      true,
+      "must STILL be paused: client B is still at 1100 > low-water",
+    );
+    assert.equal(commands(writes).length, 0, "no continue while the slow client is above low-water");
+
+    // Now drain client B below low-water too (B: 1100 → 100 ≤ 200).
+    fc.noteDrained(P3, 1_000, clientB);
+    assert.equal(fc.isPanePaused(P3), false, "resumes once ALL clients ≤ low-water");
+    const cmds = commands(writes);
+    assert.equal(cmds.length, 1, "exactly one continue command");
+    assert.ok(cmds[0]?.includes("%3:continue"), `expected %3:continue, got: ${cmds[0]}`);
+  });
+
+  it("removeClient re-evaluates the max: detaching the slowest client resumes", () => {
+    const { writes, send } = makeFakeSend();
+    const demux = createOutputDemux();
+    const fc = createFlowController(send, demux, {
+      highWaterBytes: 1_000,
+      lowWaterBytes: 200,
+    });
+
+    const fast = { id: "fast" };
+    const slow = { id: "slow" };
+    fc.addClient(fast);
+    fc.addClient(slow);
+
+    // Flood past high-water → pause (both at 1100).
+    for (let i = 0; i < 11; i++) fc.onPaneBytes(P3, 100);
+    assert.equal(fc.isPanePaused(P3), true, "paused after flood");
+
+    // The fast client drains below low-water; the slow client does not.
+    fc.noteDrained(P3, 1_000, fast); // fast: 100 ≤ 200
+    assert.equal(fc.isPanePaused(P3), true, "still paused: slow client pins the max at 1100");
+    writes.length = 0;
+
+    // The slow client detaches. Its sub-ledger is dropped and the max is
+    // re-evaluated → now only `fast` at 100 ≤ low-water → resume must fire.
+    fc.removeClient(slow);
+    assert.equal(
+      fc.isPanePaused(P3),
+      false,
+      "detaching the slowest client must re-evaluate the max and resume",
+    );
+    const cmds = commands(writes);
+    assert.equal(cmds.length, 1, "exactly one continue command from the removeClient re-eval");
+    assert.ok(cmds[0]?.includes("%3:continue"), `expected %3:continue, got: ${cmds[0]}`);
+  });
+
+  it("a client attaching mid-flood starts at 0 (only live deltas count)", () => {
+    const { send } = makeFakeSend();
+    const demux = createOutputDemux();
+    const fc = createFlowController(send, demux, {
+      highWaterBytes: 1_000,
+      lowWaterBytes: 200,
+    });
+
+    const early = { id: "early" };
+    fc.addClient(early);
+
+    // Pre-attach flood for the early client only.
+    fc.onPaneBytes(P3, 500);
+    assert.equal(fc.bufferedBytes(P3), 500, "early client owes 500");
+
+    // A late client attaches mid-flood. Its replay is on the raw transport and
+    // is never counted; it starts at 0 and only accrues subsequent live deltas.
+    const late = { id: "late" };
+    fc.addClient(late);
+    assert.equal(fc.bufferedBytes(P3), 500, "late client starts at 0 → max unchanged (early still 500)");
+
+    // One more live append: both clients accrue it.
+    fc.onPaneBytes(P3, 100);
+    assert.equal(fc.bufferedBytes(P3), 600, "early=600, late=100 → max=600");
+
+    // Drain the early client to 0; the late client (only the post-attach 100)
+    // is now the max.
+    fc.noteDrained(P3, 600, early);
+    assert.equal(fc.bufferedBytes(P3), 100, "late client's post-attach 100 bytes are the residual max");
+  });
+
+  it("reduces to single-client behavior at N=1 (per-client == shared ledger)", () => {
+    const { writes, send } = makeFakeSend();
+    const demux = createOutputDemux();
+    const fc = createFlowController(send, demux, {
+      highWaterBytes: 1_000,
+      lowWaterBytes: 200,
+    });
+
+    const only = { id: "only" };
+    fc.addClient(only);
+
+    fc.onPaneBytes(P3, 1_001); // crosses high-water
+    assert.equal(fc.isPanePaused(P3), true, "single client pauses exactly like the old shared ledger");
+    fc.noteDrained(P3, 1_001, only); // drains below low-water
+    assert.equal(fc.isPanePaused(P3), false, "single client resumes exactly like the old shared ledger");
+    assert.ok(commands(writes).some((c) => c.includes("%3:continue")), "continue issued");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Defaults
 // ---------------------------------------------------------------------------
 

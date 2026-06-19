@@ -22,15 +22,27 @@
  * is a test bug, not a product bug (see tc-cbh, where a test assumed FC-5's
  * negation). Conventions: packages/session-proxy/TESTING.md.
  *
- *   FC-1  Ledger. bufferedBytes(p) = Σ onPaneBytes(p,n) − Σ noteDrained(p,n),
- *         clamped at 0. Updates are synchronous, applied on-receipt.
- *   FC-2  Pause edge. An upward crossing of HIGH_WATER (strict >) gates the
- *         demux and issues `refresh-client -A '%N:pause'` synchronously
- *         within the onPaneBytes call that crossed. No re-pause while paused.
+ *   FC-1  Ledger. The ledger is (pane × client). One %output append for a pane
+ *         fans into EVERY registered client's sub-ledger; a drain credit debits
+ *         ONLY the crediting client's sub-ledger. Per client:
+ *           subBuffered(p,c) = Σ onPaneBytes(p,n) − Σ noteDrained(c,p,n),
+ *         clamped at 0. bufferedBytes(p) = max over clients of subBuffered(p,c)
+ *         (the slowest client's backlog — the quantity that drives pause/resume,
+ *         tc-0wtb). Updates are synchronous, applied on-receipt. At N=1 this
+ *         reduces to the single shared counter (one sub-ledger == the max).
+ *   FC-2  Pause edge. An upward crossing of HIGH_WATER (strict >) by the MAX
+ *         over clients gates the demux and issues `refresh-client -A '%N:pause'`
+ *         synchronously within the onPaneBytes call that crossed. The pause is
+ *         shared/global per pane (the session-proxy is a single control-mode
+ *         client to tmux). No re-pause while paused.
  *   FC-3  Resume edge. Resume is evaluated synchronously within noteDrained:
- *         it fires iff the pane is backpressure-paused and the counter falls
- *         to or at LOW_WATER (inclusive ≤; see the comment at the check).
- *         isPanePaused() reflects the transition before noteDrained returns.
+ *         it fires iff the pane is backpressure-paused and ALL clients' backlogs
+ *         have fallen to or at LOW_WATER (inclusive ≤; see the comment at the
+ *         check). One slow client keeps the pane paused for everyone (its queue
+ *         is the resource bound FC exists to enforce). isPanePaused() reflects
+ *         the transition before noteDrained returns. removeClient re-evaluates
+ *         the max: detaching the slowest client may itself drop the max to or
+ *         below low-water and trigger a resume.
  *   FC-4  Accounting never pauses. onPaneBytes counts regardless of pause
  *         state — buffered means "held", and held bytes keep arriving while
  *         the gate is closed.
@@ -47,7 +59,10 @@
  *
  * 1. **Backpressure (high/low-water)**: the session-proxy's own byte accounting.
  *    Each time `onPaneBytes(paneId, n)` is called (by whoever appends to the
- *    demux store), buffered bytes are incremented.  When a pane crosses the
+ *    demux store), the `n` bytes are credited to EVERY registered client's
+ *    per-pane sub-ledger — the demux fans one append out to all N attached
+ *    transports, so each client independently owes those bytes until its own
+ *    transport drains them.  When the MAX backlog over clients crosses the
  *    HIGH-WATER mark the controller:
  *      a. Sends `refresh-client -A '%<tmuxN>:pause'` to tmux via the
  *         slot-write `send` callback (typically `pipeline.send`).
@@ -55,10 +70,32 @@
  *         tmux's `%pause` notification arrives (eliminates the notification
  *         round-trip from the gate path).
  *
- *    When the caller notifies that bytes have been drained (`noteDrained(id, n)`)
- *    and the counter falls below the LOW-WATER mark, the controller:
+ *    When a client notifies that bytes have been drained
+ *    (`noteDrained(clientKey, id, n)`) the controller debits ONLY that client's
+ *    sub-ledger, and when ALL clients' backlogs have fallen to/below the
+ *    LOW-WATER mark it:
  *      a. Sends `refresh-client -A '%<tmuxN>:continue'` to tmux.
  *      b. Calls `demux.resumePane(paneId)` to open the fan-out gate.
+ *
+ *    ## Why per-client ledgers (tc-0wtb)
+ *
+ *    A single shared counter over-credits under N≥2 simultaneously-attached
+ *    clients: one `onPaneBytes(+n)` is matched by N independent
+ *    `noteDrained(−n)` (one per draining transport), so the counter nets
+ *    +n−N·n, clamps at 0, and never reaches high-water — backpressure is
+ *    silently disabled and the slowest consumer's transport queue grows
+ *    unbounded.  Per-client sub-ledgers keep each client's debit local; pausing
+ *    on the MAX (the slowest client) and resuming only when ALL are drained
+ *    bounds the worst consumer.  The pause/resume command itself stays shared
+ *    (`refresh-client -A` pauses tmux for every downstream client) — the
+ *    sub-ledgers decide only TIMING.  At N=1 this is exactly the old behavior.
+ *
+ *    The client set is maintained via `addClient(clientKey)` /
+ *    `removeClient(clientKey)`.  A client attaching mid-flood starts at 0 (its
+ *    history replay is delivered on the raw transport and never counted; only
+ *    live deltas from its attach point are credited).  When zero clients are
+ *    registered the controller accounts against a single implicit client, which
+ *    is the N=1 reduction used by direct-drive callers/tests.
  *
  * 2. **Honor tmux's unsolicited %pause/%continue**: tmux may also send these
  *    notifications on its own (e.g. capacity management across multiple clients).
@@ -124,9 +161,28 @@ export const DEFAULT_HIGH_WATER_BYTES = 262_144; // 256 KiB
 /** Default low-water mark in bytes (64 KiB). Resume triggered below this. */
 export const DEFAULT_LOW_WATER_BYTES = 65_536; // 64 KiB
 
+/**
+ * The implicit single client used when no clients are explicitly registered
+ * (tc-0wtb). Direct-drive callers (tests, the single-client integration layer)
+ * never call `addClient`/`removeClient`; accounting routes to this one
+ * sub-ledger, reducing the per-client model to the original single shared
+ * counter (the N=1 case).
+ */
+const DEFAULT_CLIENT: ClientKey = { default: true };
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
+
+/**
+ * Opaque per-client identity for the per-client FC-1 ledgers (tc-0wtb).
+ *
+ * Any stable object reference unique to a client connection works — in
+ * production wiring (session-proxy.ts) this is the client's `Transport`.  The
+ * controller only ever uses it as a `Map`/`Set` key (reference identity); it
+ * never inspects the value.
+ */
+export type ClientKey = object;
 
 /**
  * Invariant-tripwire hooks (tc-d7i).
@@ -140,8 +196,11 @@ export const DEFAULT_LOW_WATER_BYTES = 65_536; // 64 KiB
 export interface FlowControllerMetricsHooks {
   /**
    * `noteDrained`'s clamp-at-zero clipped: a drain credit exceeded the
-   * buffered total (an FC-1 violation the clamp absorbed). Expected never —
-   * every call is an accounting bug (double credit, drain for a dead pane).
+   * crediting client's per-pane sub-ledger (an FC-1 violation the clamp
+   * absorbed). Expected never — every call is an accounting bug (double credit,
+   * drain for a dead pane/client). Per-client ledgers (tc-0wtb) make the
+   * old multi-client structural over-credit impossible, so this stays a
+   * genuine expected-zero tripwire.
    */
   onDrainClamped?(paneId: PaneId, excessBytes: number): void;
   /**
@@ -208,14 +267,34 @@ export interface FlowController {
   onPaneBytes(paneId: PaneId, byteCount: number): void;
 
   /**
-   * Record that `byteCount` bytes have been drained (acknowledged by the
-   * client or freed from the send queue) for `paneId`.
-   *
-   * When the remaining buffered total falls below the low-water mark while
-   * the pane is paused, the controller issues a continue command and opens
-   * the demux gate.
+   * Register a client so its per-pane sub-ledger participates in accounting
+   * (tc-0wtb). Idempotent. Subsequent `onPaneBytes` calls fan bytes into this
+   * client's sub-ledger; a client added mid-flood starts at 0 (only live
+   * deltas from here on are credited — its history replay is on the raw
+   * transport and is never counted).
    */
-  noteDrained(paneId: PaneId, byteCount: number): void;
+  addClient(clientKey: ClientKey): void;
+
+  /**
+   * Deregister a client (tc-0wtb): drop its per-pane sub-ledgers and
+   * re-evaluate every paused pane's MAX. Detaching the slowest client may drop
+   * the max to/below low-water and trigger a resume, so this fires the resume
+   * edge where warranted. Idempotent.
+   */
+  removeClient(clientKey: ClientKey): void;
+
+  /**
+   * Record that `byteCount` bytes have been drained (acknowledged by the
+   * client or freed from the send queue) for `paneId`, debiting ONLY
+   * `clientKey`'s per-pane sub-ledger (tc-0wtb).
+   *
+   * When ALL clients' backlogs for the pane have fallen to/below the low-water
+   * mark while the pane is paused, the controller issues a continue command and
+   * opens the demux gate. `clientKey` may be omitted by direct-drive callers
+   * (tests / the single-client integration layer); it then debits the implicit
+   * default client used when no clients are explicitly registered.
+   */
+  noteDrained(paneId: PaneId, byteCount: number, clientKey?: ClientKey): void;
 
   /**
    * Honor an incoming `%pause %<pane>` notification from tmux.
@@ -252,8 +331,9 @@ export interface FlowController {
   isPanePaused(paneId: PaneId): boolean;
 
   /**
-   * Current buffered byte count for a pane.
-   * Reflects `onPaneBytes` minus `noteDrained` calls.  For diagnostics/tests.
+   * Current buffered byte count for a pane: the MAX backlog over all clients —
+   * i.e. the slowest client's sub-ledger (tc-0wtb). This is the quantity the
+   * pause/resume edges are evaluated against. For diagnostics/tests.
    */
   bufferedBytes(paneId: PaneId): number;
 }
@@ -270,8 +350,21 @@ class FlowControllerImpl implements FlowController {
   private readonly _toTmux: (id: PaneId) => number;
   private readonly _metrics: FlowControllerMetricsHooks;
 
-  /** Per-pane buffered byte counter. */
-  private readonly _buffered = new Map<PaneId, number>();
+  /**
+   * Per-(pane × client) buffered byte counter — the FC-1 sub-ledgers (tc-0wtb).
+   * Outer key is the pane; inner key is the client. `subBuffered(p,c)` is
+   * `inner.get(c) ?? 0`. The pause/resume edges are driven by the MAX over the
+   * inner map (the slowest client's backlog).
+   */
+  private readonly _buffered = new Map<PaneId, Map<ClientKey, number>>();
+
+  /**
+   * The registered client set (tc-0wtb). `onPaneBytes` fans bytes into each of
+   * these clients' sub-ledgers. When empty, `_DEFAULT_CLIENT` stands in (the
+   * N=1 reduction for direct-drive callers/tests). Once any real client is
+   * registered the default is no longer used.
+   */
+  private readonly _clients = new Set<ClientKey>();
 
   /** Tracks which panes are currently paused (by any source). */
   private readonly _paused = new Set<PaneId>();
@@ -299,44 +392,81 @@ class FlowControllerImpl implements FlowController {
   // Public interface
   // -------------------------------------------------------------------------
 
+  addClient(clientKey: ClientKey): void {
+    // Idempotent. A client added mid-flood starts at 0: we create no
+    // sub-ledger entry here, so onPaneBytes only credits it from the next
+    // append onward (its history replay rides the raw transport and is never
+    // counted). The implicit DEFAULT_CLIENT sub-ledger, if any, is left in
+    // place but ignored once a real client exists (accounting iterates
+    // _clients).
+    this._clients.add(clientKey);
+  }
+
+  removeClient(clientKey: ClientKey): void {
+    if (!this._clients.delete(clientKey)) return;
+    // Drop the client's sub-ledger in every pane and re-evaluate each paused
+    // pane's MAX: detaching the slowest client can drop the max to/below
+    // low-water and must then fire the resume edge (FC-3). We snapshot the
+    // paused panes first so resume-driven mutations don't disturb iteration.
+    const pausedPanes = [...this._paused];
+    for (const [, inner] of this._buffered) {
+      inner.delete(clientKey);
+    }
+    for (const paneId of pausedPanes) {
+      if (this._paused.has(paneId) && this._maxBuffered(paneId) <= this._lowWater) {
+        this._resume(paneId);
+      }
+    }
+  }
+
   onPaneBytes(paneId: PaneId, byteCount: number): void {
     if (byteCount <= 0) return;
     if (this._paused.has(paneId)) {
       // FC-5 in-flight window — expected small bursts at each pause edge.
       this._metrics.onBytesWhilePaused?.(paneId, byteCount);
     }
-    const prev = this._buffered.get(paneId) ?? 0;
-    const next = prev + byteCount;
-    this._buffered.set(paneId, next);
+    // Fan the bytes into EVERY registered client's sub-ledger — the demux fans
+    // one append out to all attached transports, so each client independently
+    // owes these bytes until its own transport drains them (tc-0wtb).
+    const inner = this._innerFor(paneId);
+    for (const clientKey of this._effectiveClients()) {
+      inner.set(clientKey, (inner.get(clientKey) ?? 0) + byteCount);
+    }
 
-    // Trigger pause if we just crossed the high-water mark (avoid re-pausing).
-    if (!this._paused.has(paneId) && next > this._highWater) {
+    // Trigger pause if the MAX over clients just crossed high-water (avoid
+    // re-pausing). The pause is shared/global per pane — see FC-2.
+    if (!this._paused.has(paneId) && this._maxBuffered(paneId) > this._highWater) {
       this._pause(paneId);
     }
   }
 
-  noteDrained(paneId: PaneId, byteCount: number): void {
+  noteDrained(paneId: PaneId, byteCount: number, clientKey?: ClientKey): void {
     if (byteCount <= 0) return;
-    const prev = this._buffered.get(paneId) ?? 0;
+    const client = this._resolveClient(clientKey);
+    const inner = this._innerFor(paneId);
+    const prev = inner.get(client) ?? 0;
     if (byteCount > prev) {
-      // FC-1 violation absorbed by the clamp — expected never (tc-d7i).
+      // FC-1 violation absorbed by the clamp — expected never (tc-d7i). Now a
+      // per-client check: the structural multi-client over-credit is gone, so
+      // this remains a genuine expected-zero tripwire (tc-0wtb).
       this._metrics.onDrainClamped?.(paneId, byteCount - prev);
     }
-    const next = Math.max(0, prev - byteCount);
-    this._buffered.set(paneId, next);
+    inner.set(client, Math.max(0, prev - byteCount));
 
-    // Trigger resume if we fell at or below low-water and the pane is
-    // currently paused by backpressure (we only resume what we paused —
-    // unsolicited tmux pauses are released via onContinueNotification).
+    // Trigger resume only when ALL clients have fallen to/below low-water and
+    // the pane is currently paused by backpressure (we only resume what we
+    // paused — unsolicited tmux pauses are released via onContinueNotification).
+    // One slow client keeps the pane paused for everyone (FC-3); its queue is
+    // the resource bound FC exists to enforce.
     //
-    // The original condition was `next < this._lowWater` (strict less-than),
-    // but real-world drain credits often arrive in chunk-sized batches that
-    // land EXACTLY on the low-water boundary (e.g. drained 192 KiB out of a
-    // 256-KiB pause, the last credit lands at 64 KiB = low_water).  Strict
-    // less-than would never trigger resume in that case, leaving the pane
-    // paused forever under perfectly-aligned drains.  Hysteresis is still
-    // preserved by the 192-KiB gap between high- and low-water defaults.
-    if (this._paused.has(paneId) && next <= this._lowWater) {
+    // The boundary is inclusive (≤) rather than strict (<): real-world drain
+    // credits often arrive in chunk-sized batches that land EXACTLY on the
+    // low-water boundary (e.g. drained 192 KiB out of a 256-KiB pause, the
+    // last credit lands at 64 KiB = low_water). Strict less-than would never
+    // trigger resume in that case, leaving the pane paused forever under
+    // perfectly-aligned drains. Hysteresis is still preserved by the 192-KiB
+    // gap between high- and low-water defaults.
+    if (this._paused.has(paneId) && this._maxBuffered(paneId) <= this._lowWater) {
       this._resume(paneId);
     }
   }
@@ -367,7 +497,50 @@ class FlowControllerImpl implements FlowController {
   }
 
   bufferedBytes(paneId: PaneId): number {
-    return this._buffered.get(paneId) ?? 0;
+    return this._maxBuffered(paneId);
+  }
+
+  // -------------------------------------------------------------------------
+  // Internal: per-client sub-ledger helpers (tc-0wtb)
+  // -------------------------------------------------------------------------
+
+  /** The inner (client → bytes) sub-ledger map for a pane, created on demand. */
+  private _innerFor(paneId: PaneId): Map<ClientKey, number> {
+    let inner = this._buffered.get(paneId);
+    if (inner === undefined) {
+      inner = new Map();
+      this._buffered.set(paneId, inner);
+    }
+    return inner;
+  }
+
+  /** The MAX backlog over all clients for a pane — the slowest client's queue. */
+  private _maxBuffered(paneId: PaneId): number {
+    const inner = this._buffered.get(paneId);
+    if (inner === undefined) return 0;
+    let max = 0;
+    for (const v of inner.values()) {
+      if (v > max) max = v;
+    }
+    return max;
+  }
+
+  /**
+   * The clients accounting fans into: the registered set, or the implicit
+   * default when none are registered (the N=1 direct-drive reduction).
+   */
+  private _effectiveClients(): Iterable<ClientKey> {
+    return this._clients.size > 0 ? this._clients : [DEFAULT_CLIENT];
+  }
+
+  /**
+   * Resolve a `noteDrained` client key to the sub-ledger it debits. An omitted
+   * key (direct-drive callers) maps to DEFAULT_CLIENT; an explicit key debits
+   * its own sub-ledger even if it was never registered via addClient (the
+   * draining-wrapper credit can legitimately race the onClose removeClient).
+   */
+  private _resolveClient(clientKey?: ClientKey): ClientKey {
+    return clientKey ?? DEFAULT_CLIENT;
   }
 
   // -------------------------------------------------------------------------

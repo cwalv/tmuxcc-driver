@@ -820,6 +820,21 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
       // 1. Run control-plane handshake + send snapshot + subscribe deltas.
       const session = await server.addClient(transport);
 
+      // 1a. Register this client's FC-1 sub-ledger (tc-0wtb). The demux fans one
+      //     %output append out to EVERY attached transport, so each client owes
+      //     those bytes independently until its own draining transport credits
+      //     them back. The shared single ledger over-credited by (N−1)·n per
+      //     fanned-out chunk and silently disabled backpressure for N≥2 clients;
+      //     per-client sub-ledgers pause on the slowest and resume only when all
+      //     are drained. The client key is the raw `transport` (stable identity;
+      //     the same object the draining-wrapper closure below credits against,
+      //     and the same object removeClient drops on transport close).
+      //
+      //     A client attaching mid-flood correctly starts at 0: its history
+      //     replay rides the RAW transport (never counted by fc.onPaneBytes), so
+      //     only live deltas from this point forward are credited.
+      fc.addClient(transport);
+
       // 2. Wire data plane: attach a wrapped transport to the demux so that
       //    each sendData call also notifies the flow controller that bytes have
       //    been drained from the backpressure counter for that pane.
@@ -845,16 +860,20 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
         sendData(pid: PaneId, bytes: Uint8Array): void | Promise<void> {
           const result = transport.sendData(pid, bytes);
           if (bytes.length === 0) return result;
+          // tc-0wtb: credit THIS client's sub-ledger only (key = raw transport),
+          // matching the per-client fan-out the demux performs. Crediting the
+          // shared ledger would over-debit by (N−1)·n under multiple clients.
+          //
           // Promise<void>: transport is backpressured; defer the drain credit
           // until the underlying socket reports drain.
           if (result !== undefined && typeof (result as Promise<void>).then === "function") {
             return (result as Promise<void>).then(() => {
-              fc.noteDrained(pid, bytes.length);
+              fc.noteDrained(pid, bytes.length, transport);
             });
           }
           // void: kernel send buffer accepted the bytes immediately.  Credit
           // drain synchronously — there's no further wait.
-          fc.noteDrained(pid, bytes.length);
+          fc.noteDrained(pid, bytes.length, transport);
           return undefined;
         },
       };
@@ -1120,6 +1139,10 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
       // 4. Clean up data plane when the transport closes.
       transport.onClose(() => {
         detach();
+        // tc-0wtb: drop this client's FC-1 sub-ledger and re-evaluate every
+        // paused pane's max. Detaching the slowest consumer can itself drop the
+        // max to/below low-water and resume the pane for the remaining clients.
+        fc.removeClient(transport);
         server.removeClient(transport);
       });
 
