@@ -64,6 +64,7 @@ import type {
   ServerProxyCommandResponseMessage,
   ServerProxyInfoPayload,
   ServerProxyInfoSession,
+  SpawnInfo,
   SessionTopologyPayload,
   ErrorMessage,
   MessageBase,
@@ -117,6 +118,15 @@ export interface ServerProxyOptions {
    * (`server-proxy.info` then reports `logPath: null`).
    */
   logPath?: string;
+
+  /**
+   * Provenance stamp passed by the spawner at spawn time (tc-7aqb.2).
+   *
+   * Set by the extension via `--spawn-info '<json>'`; absent for programmatic
+   * in-process server-proxies.  The driver holds it opaquely and echoes it via
+   * `server-proxy.info` — it NEVER branches on its contents.
+   */
+  spawnInfo?: SpawnInfo;
 
   /**
    * tc-295a.41 (test-harness affordance): when true, the broker does NOT
@@ -1027,6 +1037,8 @@ class ServerProxyImpl implements ServerProxyHandle {
       sessions,
       // tc-x6l: metricsText deferred to async; populated in _buildInfoAsync.
       metricsText: null,
+      // tc-7aqb.2: echo the spawn-info provenance stamp opaquely.
+      ...(this._opts.spawnInfo !== undefined ? { spawnInfo: this._opts.spawnInfo } : {}),
     };
   }
 

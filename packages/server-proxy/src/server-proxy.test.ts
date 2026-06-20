@@ -322,6 +322,61 @@ describe("server-proxy – unit (no tmux)", () => {
     }
   });
 
+  // tc-7aqb.2: spawn-info provenance stamp round-trip tests.
+
+  it("U5 (tc-7aqb.2): server-proxy.info echoes spawnInfo.buildId when opts.spawnInfo is set", async () => {
+    const socketName = nextSocketName();
+    const spawnInfo = { buildId: "1.2.3+dev.1718886000000" };
+    const serverProxy = createServerProxy({ socketName, spawnInfo });
+    await serverProxy.start();
+
+    try {
+      const { mux } = await connectToServerProxy(serverProxy.endpoint());
+      const seq = { value: 1 };
+      const resp = await sendServerProxyCommand(mux, { kind: "server-proxy.info" }, seq);
+      assert.ok(resp.result.ok, `Expected ok=true, got: ${JSON.stringify(resp.result)}`);
+      const info = (resp.result as {
+        ok: true;
+        payload: { info: import("@tmuxcc/session-proxy").ServerProxyInfoPayload };
+      }).payload.info;
+
+      assert.deepEqual(
+        info.spawnInfo,
+        spawnInfo,
+        `spawnInfo round-trip: expected ${JSON.stringify(spawnInfo)}, got ${JSON.stringify(info.spawnInfo)}`,
+      );
+      mux.transport.close();
+    } finally {
+      await serverProxy.shutdown();
+    }
+  });
+
+  it("U6 (tc-7aqb.2): server-proxy.info omits spawnInfo when opts.spawnInfo is not set (backward-compat)", async () => {
+    const socketName = nextSocketName();
+    const serverProxy = createServerProxy({ socketName }); // no spawnInfo
+    await serverProxy.start();
+
+    try {
+      const { mux } = await connectToServerProxy(serverProxy.endpoint());
+      const seq = { value: 1 };
+      const resp = await sendServerProxyCommand(mux, { kind: "server-proxy.info" }, seq);
+      assert.ok(resp.result.ok, `Expected ok=true, got: ${JSON.stringify(resp.result)}`);
+      const info = (resp.result as {
+        ok: true;
+        payload: { info: import("@tmuxcc/session-proxy").ServerProxyInfoPayload };
+      }).payload.info;
+
+      assert.equal(
+        info.spawnInfo,
+        undefined,
+        `spawnInfo must be absent when not configured, got ${JSON.stringify(info.spawnInfo)}`,
+      );
+      mux.transport.close();
+    } finally {
+      await serverProxy.shutdown();
+    }
+  });
+
   it("U2: serverProxy.endpoint() equals serverProxySocketPath(socketName) — well-known path", async () => {
     // This is the core regression guard for tc-j9c.8:
     // serverProxy.endpoint() must equal the path that vscode computes via

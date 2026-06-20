@@ -44,6 +44,7 @@ import { fileURLToPath } from "node:url";
 
 import { createServerProxy } from "./server-proxy.js";
 import type { ServerProxyOptions } from "./server-proxy.js";
+import type { SpawnInfo } from "@tmuxcc/session-proxy";
 import { serverProxyLogPath, resolveBaseRuntimeDir, gcStaleRuntimeDirs } from "./runtime-dir.js";
 import { openServerProxyLog, installStderrMirror } from "./server-proxy-log.js";
 
@@ -72,6 +73,14 @@ export interface ParsedEntryConfig {
    * `TMUXCC_PERSIST_THROUGH_TMUX_GONE=1`.
    */
   persistThroughTmuxGone?: boolean;
+  /**
+   * tc-7aqb.2: provenance stamp passed by the spawner at spawn time.
+   *
+   * Parsed from `--spawn-info '<json>'`.  Absent when the flag is omitted
+   * (older launchers, programmatic in-process server-proxies).  The driver
+   * holds it opaquely and echoes it via `server-proxy.info`.
+   */
+  spawnInfo?: SpawnInfo;
 }
 
 /**
@@ -112,6 +121,7 @@ export function _parseEntryConfig(
   let runtimeDir: string | undefined;
   let idleExitMs: number | undefined;
   let persistThroughTmuxGone = false;
+  let spawnInfo: SpawnInfo | undefined;
 
   for (let i = 0; i < argv.length; i++) {
     switch (argv[i]) {
@@ -128,6 +138,28 @@ export function _parseEntryConfig(
       case "--persist-through-tmux-gone":
         persistThroughTmuxGone = true;
         break;
+      case "--spawn-info": {
+        // tc-7aqb.2: parse the JSON provenance stamp from the spawner.
+        // Malformed JSON or missing buildId is silently dropped — the driver
+        // must remain functional regardless of what the spawner passes.
+        const raw = argv[++i];
+        if (raw !== undefined) {
+          try {
+            const parsed: unknown = JSON.parse(raw);
+            if (
+              parsed !== null &&
+              typeof parsed === "object" &&
+              "buildId" in parsed &&
+              typeof (parsed as { buildId: unknown }).buildId === "string"
+            ) {
+              spawnInfo = parsed as SpawnInfo;
+            }
+          } catch {
+            // Malformed JSON — leave spawnInfo undefined.
+          }
+        }
+        break;
+      }
     }
   }
 
@@ -152,6 +184,7 @@ export function _parseEntryConfig(
     ...(runtimeDir !== undefined ? { runtimeDir } : {}),
     ...(idleExitMs !== undefined ? { idleExitMs } : {}),
     ...(persistThroughTmuxGone ? { persistThroughTmuxGone } : {}),
+    ...(spawnInfo !== undefined ? { spawnInfo } : {}),
   };
 }
 
@@ -160,13 +193,14 @@ function parseArgs(): {
   runtimeDir?: string;
   idleExitMs?: number;
   persistThroughTmuxGone?: boolean;
+  spawnInfo?: SpawnInfo;
 } {
   const cfg = _parseEntryConfig(process.argv.slice(2), process.env);
 
   if (cfg.socketName === null) {
     process.stderr.write(
       "Usage: server-proxy-entry --socket-name <name> [--runtime-dir <path>] " +
-        "[--idle-exit-ms <n>] [--persist-through-tmux-gone]\n",
+        "[--idle-exit-ms <n>] [--persist-through-tmux-gone] [--spawn-info '<json>']\n",
     );
     process.exit(1);
   }
@@ -178,6 +212,7 @@ function parseArgs(): {
     ...(cfg.persistThroughTmuxGone !== undefined
       ? { persistThroughTmuxGone: cfg.persistThroughTmuxGone }
       : {}),
+    ...(cfg.spawnInfo !== undefined ? { spawnInfo: cfg.spawnInfo } : {}),
   };
 }
 
@@ -186,7 +221,7 @@ function parseArgs(): {
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-  const { socketName, runtimeDir, idleExitMs, persistThroughTmuxGone } = parseArgs();
+  const { socketName, runtimeDir, idleExitMs, persistThroughTmuxGone, spawnInfo } = parseArgs();
 
   // tc-k6v: mirror stderr into the append-only server-proxy log file.  Best-effort:
   // a failed open (unwritable runtime dir) leaves the server-proxy running without
@@ -217,6 +252,7 @@ async function main(): Promise<void> {
     ...(idleExitMs !== undefined ? { idleExitMs } : {}),
     ...(persistThroughTmuxGone !== undefined ? { persistThroughTmuxGone } : {}),
     ...(log !== null ? { logPath: log.path } : {}),
+    ...(spawnInfo !== undefined ? { spawnInfo } : {}),
   };
   const serverProxy = createServerProxy(serverProxyOpts);
 

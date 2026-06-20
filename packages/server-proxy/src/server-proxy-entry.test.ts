@@ -130,4 +130,50 @@ describe("server-proxy-entry – _parseEntryConfig (tc-eqgp)", () => {
     );
     assert.equal(cfg.persistThroughTmuxGone, undefined);
   });
+
+  // tc-7aqb.2: --spawn-info JSON flag.
+  it("returns spawnInfo from --spawn-info with valid JSON", () => {
+    const cfg = _parseEntryConfig(
+      ["--socket-name", "x", "--spawn-info", '{"buildId":"1.2.3"}'],
+      {},
+    );
+    assert.deepEqual(cfg.spawnInfo, { buildId: "1.2.3" });
+  });
+
+  it("returns spawnInfo with dev buildId (semver+discriminator)", () => {
+    const cfg = _parseEntryConfig(
+      ["--socket-name", "x", "--spawn-info", '{"buildId":"0.0.0+dev.1718886000000"}'],
+      {},
+    );
+    assert.deepEqual(cfg.spawnInfo, { buildId: "0.0.0+dev.1718886000000" });
+  });
+
+  it("returns spawnInfo=undefined when --spawn-info is absent (backward-compat)", () => {
+    const cfg = _parseEntryConfig(["--socket-name", "x"], {});
+    assert.equal(cfg.spawnInfo, undefined);
+  });
+
+  it("returns spawnInfo=undefined when --spawn-info JSON is malformed (resilient)", () => {
+    const cfg = _parseEntryConfig(
+      ["--socket-name", "x", "--spawn-info", "not-json"],
+      {},
+    );
+    assert.equal(cfg.spawnInfo, undefined);
+  });
+
+  it("returns spawnInfo=undefined when --spawn-info JSON is missing buildId (resilient)", () => {
+    const cfg = _parseEntryConfig(
+      ["--socket-name", "x", "--spawn-info", '{"other":"field"}'],
+      {},
+    );
+    assert.equal(cfg.spawnInfo, undefined);
+  });
+
+  it("returns spawnInfo=undefined when --spawn-info buildId is not a string (resilient)", () => {
+    const cfg = _parseEntryConfig(
+      ["--socket-name", "x", "--spawn-info", '{"buildId":42}'],
+      {},
+    );
+    assert.equal(cfg.spawnInfo, undefined);
+  });
 });

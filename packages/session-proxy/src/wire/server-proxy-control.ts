@@ -509,6 +509,28 @@ export interface ServerProxyInfoSession {
 }
 
 /**
+ * Provenance stamp written by the spawner at spawn time and echoed
+ * read-only by the driver via `server-proxy.info` (tc-7aqb.2).
+ *
+ * Ownership: the spawner (the extension) is the sole writer — the driver
+ * parses and holds it opaquely, never branching on its contents.
+ * The struct is intentionally extensible without touching the driver CLI.
+ */
+export interface SpawnInfo {
+  /**
+   * A string that identifies the extension build that spawned this driver.
+   *
+   * In production (compiled dist): the package.json semver (e.g. "1.2.3").
+   * In development (tsx source): semver + "+dev." + dist-bundle mtime in
+   * milliseconds (e.g. "0.0.0+dev.1718886000000"), changing on every rebuild.
+   *
+   * The driver treats this as an opaque string — only the extension defines
+   * and reads the schema.
+   */
+  readonly buildId: string;
+}
+
+/**
  * Payload of a successful `server-proxy.info` response (tc-k6v).
  */
 export interface ServerProxyInfoPayload {
@@ -562,6 +584,15 @@ export interface ServerProxyInfoPayload {
    * `null` when metrics are unavailable (should never happen in practice).
    */
   readonly metricsText: string | null;
+  /**
+   * Provenance stamp passed by the spawner at spawn time (tc-7aqb.2).
+   *
+   * Present when the driver was started with `--spawn-info '<json>'`; absent
+   * (`undefined`) when spawned without that flag (older launchers, programmatic
+   * in-process server-proxies, tests that don't pass it).  Additive/non-breaking:
+   * clients that don't know about this field simply ignore it.
+   */
+  readonly spawnInfo?: SpawnInfo;
 }
 
 /**

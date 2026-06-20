@@ -61,6 +61,8 @@ export type {
   ServerProxyInfoCommand,
   ServerProxyInfoSession,
   ServerProxyInfoPayload,
+  // tc-7aqb.2: spawn-info provenance stamp
+  SpawnInfo,
   // tc-i9aq.2: one-shot session topology query
   SessionTopologyCommand,
   SessionTopologyWindow,
