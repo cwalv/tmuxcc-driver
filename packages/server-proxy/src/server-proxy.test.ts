@@ -1197,33 +1197,28 @@ describe("server-proxy – self-exit: idle hysteresis (tc-3iv)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// tc-eqgp — live session-proxy children block idle exit
+// tc-7aqb.1 — broker-keyed idle exit: detached session must not block idle
 // ---------------------------------------------------------------------------
 //
-// The pre-tc-eqgp idle policy counted ONLY direct IPC clients of the
-// server-proxy's own socket.  The extension's control-plane connections are
-// transient (it sends `session.claim` and drops the server-proxy socket
-// immediately) and the data plane (EDH ↔ session-proxy over per-session
-// sockets) is invisible to the server-proxy — so the IPC client count was
-// the steady state of zero even during heavy terminal use, and the idle
-// timer always fired ~5 minutes after every spawn.
+// The broker connection (per-window keepalive) is the sole liveness gate.
+// A session that has been claimed but whose tmux clients have all detached
+// must NOT keep the driver alive — it can be warm-reattached after a
+// sub-idle-window EDH restart, but a fully-closed VS Code window (zero IPC
+// clients) should let the driver exit after the grace window.
 //
-// The fix (b) in the TL design: live session-proxy children count as
-// activity.  These tests prove the new policy.
+// This replaces the former tc-eqgp "children block idle" policy which caused
+// drivers to pin stale bundles across EDH rebuilds whenever a detached session
+// remained claimed.
 
-describe("server-proxy – self-exit: live session-proxy children block idle (tc-eqgp, requires tmux)", { skip: !TMUX_AVAILABLE }, () => {
-  it("S5: live session-proxy child → server-proxy stays up past the grace window; reaping the child re-arms idle", { timeout: 30_000 }, async () => {
+describe("server-proxy – self-exit: detached session does not block idle (tc-7aqb.1, requires tmux)", { skip: !TMUX_AVAILABLE }, () => {
+  it("S5: claimed+detached session with zero IPC clients → idle-exit fires after the grace window", { timeout: 30_000 }, async () => {
     const socketName = nextSocketName();
     const runtimeDir = makeRuntimeDir("s5");
-    // Short grace so the test doesn't wait minutes; the assertion is "no exit
-    // while child alive", and the wait is several grace windows long.
     const idleExitMs = 400;
 
-    // Seed a tmux session OUTSIDE the server-proxy's view of "tmuxcc-managed"
-    // so the tmux server stays alive after we destroy the tmuxcc session.
-    // Without this the destroy → last tmux session gone → watcher EOF +
-    // failed probe → tmux-gone self-exit (which races the idle exit we are
-    // trying to observe).
+    // Seed a tmux session outside the server-proxy's view of "tmuxcc-managed"
+    // so the tmux server stays alive for the duration of the test — we are
+    // observing an IDLE exit, not a tmux-gone exit.
     const seeded = spawnSync("tmux", ["-L", socketName, "new-session", "-d", "-s", "s5-seed"], {
       encoding: "utf8",
       timeout: 10_000,
@@ -1237,53 +1232,22 @@ describe("server-proxy – self-exit: live session-proxy children block idle (tc
     const endpoint = serverProxy.endpoint();
 
     try {
-      // ── Arrange: claim a session → server-proxy spawns a session-proxy
-      // child for it.  Drop the IPC connection immediately (this models the
-      // extension's transient control-plane usage today and isolates the
-      // child-aware path from the connected-client path).
-      let claimedSessionId: string | null = null;
+      // Claim a session → server-proxy spawns a session-proxy child.  Drop
+      // the IPC connection immediately — this is the "detached" state: a live
+      // child but zero broker (IPC) clients.
       {
         const { mux } = await connectToServerProxy(endpoint);
         const seq = { value: 1 };
-        const resp = await sendServerProxyCommand(mux, { kind: "session.claim", name: "child-keepalive" }, seq);
+        const resp = await sendServerProxyCommand(mux, { kind: "session.claim", name: "zombie-session" }, seq);
         assert.ok(resp.result.ok, `claim failed: ${JSON.stringify(resp.result)}`);
-        claimedSessionId = (resp.result as { ok: true; payload: { sessionId: string } }).payload.sessionId;
         mux.transport.close();
       }
       await waitFor(() => serverProxy.connectedClientCount === 0, 2_000, "IPC client gone after claim");
 
-      // ── Act + Assert (1): sit for ~6× the grace window.  Pre-fix the
-      // server-proxy would have exited after one grace window; with the
-      // child-aware policy it must stay up.
-      await new Promise((r) => setTimeout(r, idleExitMs * 6));
-
-      assert.equal(
-        exits.length,
-        0,
-        `server-proxy must NOT idle-exit while a session-proxy child is alive; got ${JSON.stringify(exits)}`,
-      );
-      assert.ok(fs.existsSync(endpoint), "server-proxy socket must still exist while children are alive");
-
-      // ── Act (2): destroy the session → supervisor reaps the child →
-      // alive count drops to zero → the idle timer arms → server-proxy
-      // exits after the grace window.  The seed session keeps tmux alive
-      // so we observe the IDLE exit, not tmux-gone.
-      {
-        const { mux } = await connectToServerProxy(endpoint);
-        const seq = { value: 1 };
-        const destroyResp = await sendServerProxyCommand(
-          mux,
-          { kind: "session.destroy", sessionId: claimedSessionId! },
-          seq,
-        );
-        assert.ok(destroyResp.result.ok, `destroy failed: ${JSON.stringify(destroyResp.result)}`);
-        mux.transport.close();
-      }
-      await waitFor(() => serverProxy.connectedClientCount === 0, 2_000, "IPC client gone after destroy");
-
-      // ── Assert (2): once the last child is reaped (and the IPC client is
-      // gone too), the server-proxy idle-exits within the grace window.
-      await waitFor(() => exits.length > 0, 5_000, "idle exit after last child reaped");
+      // The idle timer is already running (keyed solely on IPC client count).
+      // The server-proxy must idle-exit after the grace window despite the
+      // live session-proxy child — the zombie must not pin the driver.
+      await waitFor(() => exits.length > 0, idleExitMs * 5, "idle exit despite live child");
       assert.deepEqual(exits, ["idle"]);
       assert.equal(
         fs.existsSync(endpoint),
@@ -1292,53 +1256,6 @@ describe("server-proxy – self-exit: live session-proxy children block idle (tc
       );
     } finally {
       await serverProxy.shutdown(); // idempotent after self-exit
-      spawnSync("tmux", ["-L", socketName, "kill-server"], { stdio: "ignore", timeout: 5_000 });
-      fs.rmSync(runtimeDir, { recursive: true, force: true });
-    }
-  });
-
-  it("S6: idle timer that armed at zero clients no-ops while a child is alive", { timeout: 30_000 }, async () => {
-    // Race-shape coverage: the timer can have ALREADY been armed (e.g. from
-    // start() before any claim) when a child appears.  The on-fire guard
-    // must re-check the alive count and decline to self-exit.
-    //
-    // We arrange that by:
-    //   1. start the server-proxy (idle timer armed at zero clients/children).
-    //   2. claim a session BEFORE the timer fires → the supervisor's
-    //      onAliveCountChange callback clears the armed timer.
-    //   3. wait long past one grace window.
-    //   4. assert: no exit.
-    const socketName = nextSocketName();
-    const runtimeDir = makeRuntimeDir("s6");
-    const idleExitMs = 400;
-    const serverProxy = createServerProxy({ socketName, runtimeDir, idleExitMs });
-    const exits: ServerProxySelfExitReason[] = [];
-    serverProxy.onSelfExit((reason) => exits.push(reason));
-    await serverProxy.start();
-    const endpoint = serverProxy.endpoint();
-
-    try {
-      // Drive a claim immediately so the alive-count-change callback runs
-      // BEFORE the start-time idle timer would fire.
-      const { mux } = await connectToServerProxy(endpoint);
-      const seq = { value: 1 };
-      const resp = await sendServerProxyCommand(mux, { kind: "session.claim", name: "race-keepalive" }, seq);
-      assert.ok(resp.result.ok, `claim failed: ${JSON.stringify(resp.result)}`);
-      mux.transport.close();
-      await waitFor(() => serverProxy.connectedClientCount === 0, 2_000, "IPC client gone after claim");
-
-      // Sit several grace windows.  Pre-fix the start-time idle timer would
-      // have fired by now (no IPC client visible, never mind the child).
-      await new Promise((r) => setTimeout(r, idleExitMs * 5));
-
-      assert.equal(
-        exits.length,
-        0,
-        `armed idle timer must no-op while a child is alive; got ${JSON.stringify(exits)}`,
-      );
-      assert.ok(fs.existsSync(endpoint), "server-proxy socket must still exist");
-    } finally {
-      await serverProxy.shutdown();
       spawnSync("tmux", ["-L", socketName, "kill-server"], { stdio: "ignore", timeout: 5_000 });
       fs.rmSync(runtimeDir, { recursive: true, force: true });
     }

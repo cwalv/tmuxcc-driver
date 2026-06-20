@@ -19,13 +19,11 @@
  *   4. A session-proxy supervisor that instantiates/reaps per-session
  *      session-proxies IN-PROCESS, one per claimed session (tc-2x3.3 collapse)
  *   5. A set of connected client transports (fan-out for delta messages)
- *   6. Its own exit policy (tc-3iv, tc-eqgp, ext-a-design-context.md §6.2):
+ *   6. Its own exit policy (tc-3iv, ext-a-design-context.md §6.2):
  *      immediate self-exit when tmux is confirmed gone (watcher EOF + failed
- *      `tmux ls` probe), and an idle-grace self-exit at zero IPC clients AND
- *      zero live session-proxy children.  Live children are activity
- *      (they hold the data plane the IPC count is blind to — tc-eqgp); the
- *      grace period is configurable via `TMUXCC_IDLE_EXIT_MS` (default 5
- *      minutes).  Both exit paths unlink the server-proxy socket file before
+ *      `tmux ls` probe), and an idle-grace self-exit at zero IPC clients for
+ *      the full grace period (configurable via `TMUXCC_IDLE_EXIT_MS`, default
+ *      5 minutes).  Both exit paths unlink the server-proxy socket file before
  *      reporting exit.
  *
  * # Wire protocol (ServerProxy wire)
@@ -102,13 +100,12 @@ export interface ServerProxyOptions {
   runtimeDir?: string;
 
   /**
-   * Idle self-exit hysteresis (tc-3iv, tc-eqgp, §6.2): when the server-proxy
-   * has had zero IPC clients AND zero live session-proxy children for this
-   * long, it self-exits.  Default 5 minutes — sized for human-scale
-   * close+reopen workflows (reload-window gaps are sub-second).  Tests inject
-   * a short value instead of literally waiting 5 minutes; the
-   * entry-point reads `TMUXCC_IDLE_EXIT_MS` from the environment as a
-   * deployment-time knob.
+   * Idle self-exit hysteresis (tc-3iv, §6.2): when the server-proxy has had
+   * zero IPC clients for this long, it self-exits.  Default 5 minutes —
+   * sized for human-scale close+reopen workflows (reload-window gaps are
+   * sub-second).  Tests inject a short value instead of literally waiting
+   * 5 minutes; the entry-point reads `TMUXCC_IDLE_EXIT_MS` from the
+   * environment as a deployment-time knob.
    */
   idleExitMs?: number;
 
@@ -185,11 +182,8 @@ export interface ServerProxyHandle {
    * Self-exit triggers (§6.2):
    *   - The thin `-CC` watcher EOFs and the 1 s `tmux ls` probe fails
    *     (tmux genuinely gone) → immediate exit, reason "tmux-gone".
-   *   - Zero IPC clients AND zero live session-proxy children for the full
-   *     `idleExitMs` window (default 5 min, configurable via
-   *     `TMUXCC_IDLE_EXIT_MS`) → reason "idle".  Live children count as
-   *     activity (tc-eqgp) because their data plane (EDH ↔ session-proxy
-   *     over per-session sockets) is invisible to the IPC count.
+   *   - Zero IPC clients for the full `idleExitMs` window (default 5 min,
+   *     configurable via `TMUXCC_IDLE_EXIT_MS`) → reason "idle".
    *
    * If the watcher EOFs but the probe succeeds (the watcher process itself
    * was killed while tmux lives), the server-proxy re-spawns the watcher and does
@@ -527,17 +521,6 @@ class ServerProxyImpl implements ServerProxyHandle {
       this._onSessionProxyCrash(sessionId as SessionId, info);
     });
 
-    // tc-eqgp: re-evaluate the idle policy whenever the live-child count
-    // changes.  Two cases matter:
-    //   - first child appears: cancel any pending idle exit (children are
-    //     activity even though they don't connect to the server-proxy's IPC
-    //     socket — they are the data plane the IPC count is blind to).
-    //   - last child goes away (reap/crash): if there are also zero IPC
-    //     clients, arm the idle timer.
-    this._supervisor.onAliveCountChange((count) => {
-      this._onAliveChildCountChange(count);
-    });
-
     this._started = true;
     this._startedAtMs = Date.now();
 
@@ -668,45 +651,21 @@ class ServerProxyImpl implements ServerProxyHandle {
     }
     if (!this._started || this._selfExited) return;
     if (count === 0) {
-      // Last client gone — restart the hysteresis window (which itself no-ops
-      // when live session-proxy children are still around — tc-eqgp).
+      // Last client gone — restart the hysteresis window.
       this._startIdleTimer();
     } else {
       this._clearIdleTimer();
     }
   }
 
-  /**
-   * tc-eqgp: live-child count changed.  When children appear, cancel any
-   * pending idle exit; when the last child departs, arm the idle timer iff
-   * there are also zero IPC clients (otherwise the connected-client path
-   * already keeps us alive).
-   */
-  private _onAliveChildCountChange(count: number): void {
-    if (!this._started || this._selfExited) return;
-    if (count > 0) {
-      this._clearIdleTimer();
-    } else if (this._ipcClientCount === 0) {
-      this._startIdleTimer();
-    }
-  }
-
   private _startIdleTimer(): void {
     this._clearIdleTimer();
-    // tc-eqgp (b): live session-proxy children represent active VS Code
-    // terminals whose data path (EDH ↔ session-proxy over per-session sockets)
-    // is invisible to the IPC client count.  Treat them as activity — refuse
-    // to arm the idle timer while any child is alive.  When the last child
-    // departs the supervisor notifies us via `onAliveCountChange`, which
-    // re-enters this method.
-    if (this._supervisor.aliveCount() > 0) return;
     const timer = setTimeout(() => {
       this._idleTimer = null;
       if (
         this._started &&
         !this._selfExited &&
-        this._ipcClientCount === 0 &&
-        this._supervisor.aliveCount() === 0
+        this._ipcClientCount === 0
       ) {
         void this._selfExit("idle");
       }
