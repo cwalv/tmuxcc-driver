@@ -34,3 +34,10 @@ export { createSocketTransport, connectSocketTransport, createSocketServer } fro
 
 // Runtime directory helpers (useful for clients that need to compute socket paths)
 export { serverProxySocketPath, sessionProxySocketPath, serverProxyLogPath, resolveBaseRuntimeDir, gcStaleRuntimeDirs, probeLiveSocket } from "./runtime-dir.js";
+
+// tmux-liveness probe (`tmux -L <socketName> ls`, hard-timeout).  The broker
+// uses it for watcher-EOF disambiguation; the extension's broker-exit
+// classifier reuses the SAME probe for its crash-before-announce
+// "probe-or-presume-gone" fallback (tc-crnt.15) — one canonical tmux-liveness
+// implementation, no second shell-out in the extension.
+export { probeTmuxAlive } from "./tmux-south.js";
