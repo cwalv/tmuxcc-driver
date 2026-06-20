@@ -811,7 +811,7 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
     // broadcastErrorAndClose (session.unavailable) before this runs — see
     // createSessionProxy's start().  Here we just close the per-session socket
     // server and unlink the socket file, then fire the crash handler.
-    sessionProxy.host.onExit(() => {
+    const onHostDeath = (): void => {
       if (entry.tornDown) return; // intentional reap already owns teardown
       entry.tornDown = true;
 
@@ -846,7 +846,23 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
         this._fireAliveCount();
         this._crashHandler?.(sessionId, { sessionName, code: null, signal: null });
       }
-    });
+    };
+
+    sessionProxy.host.onExit(onHostDeath);
+
+    // tc-crnt.14: a host ERROR (a pty read-socket fault routed out of node-pty
+    // by tmux-host's `'error'` listener — see tmux-host.ts) is a session-fatal
+    // event just like an exit: the -CC client's pty is unusable.  WITHOUT this
+    // handler the TmuxHost's `_emitError` would find zero registered handlers
+    // and re-emit the error as a process `uncaughtException` — which in the
+    // tc-2x3.3 collapsed topology takes the WHOLE server-proxy (and every
+    // session it serves) down.  That was the intermittent
+    // "server-proxy process crashed (exit code signal)" (tc-crnt.14).  Routing
+    // the host error through the SAME per-session teardown as onExit reaps only
+    // THIS session; siblings and the broker survive (lazy respawn on next
+    // claim, §6.2).  `onHostDeath` is idempotent (tornDown guard), so a host
+    // error followed by the pty's exit event is handled exactly once.
+    sessionProxy.host.onError(onHostDeath);
 
     return entry;
   }

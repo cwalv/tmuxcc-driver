@@ -355,6 +355,60 @@ class TmuxHostImpl implements TmuxHost {
       this._pty = term;
       this._pid = term.pid;
 
+      // ── tc-crnt.14 ── pty read-socket 'error' listener ──────────────────────
+      //
+      // node-pty's UnixTerminal installs ONE 'error' listener on the pty read
+      // socket (its `_socket`).  That handler ignores EAGAIN and EIO (the benign
+      // pty-close codes) but for ANY OTHER socket error it RE-THROWS unless a
+      // SECOND 'error' listener exists:
+      //
+      //   if (this.listeners('error').length < 2) { throw err; }
+      //   (node-pty/lib/unixTerminal.js)
+      //
+      // Because we wire `onData`/`onExit` (node-pty's EventEmitter2 façades) but
+      // never registered a raw `'error'` listener, that count was always 1, so a
+      // non-EAGAIN/non-EIO read fault during a teardown race under rapid
+      // split/open churn (e.g. EBADF on the read fd as the tmux -CC child exits)
+      // was RE-THROWN as an uncaughtException — and in the tc-2x3.3 collapsed
+      // topology that exits the WHOLE server-proxy (one fault kills every
+      // session it serves), surfacing as the intermittent
+      // "server-proxy process crashed (exit code signal)" (tc-crnt.14).
+      //
+      // Registering a real `'error'` listener here (a) makes `listeners('error')`
+      // ≥ 2 so node-pty stops re-throwing and (b) routes the fault into our
+      // existing fail-loud `_emitError`/`onError` boundary, where the session's
+      // error boundary reaps just THIS session and the server-proxy survives.
+      // Same fault-isolation class as tc-9xf1 (EPIPE-proof stderr) and
+      // tc-295a.21 (per-connection rejection catch): a single-pty fault must
+      // never take the collapsed broker down.
+      //
+      // `IPty` does not type the legacy EventEmitter surface (`on`), but the
+      // underlying node-pty Terminal forwards `on`/`listeners` to its socket
+      // (node-pty/lib/terminal.js) — so this is sound at runtime.
+      const ptyEmitter = term as unknown as {
+        on(event: "error", listener: (err: Error) => void): void;
+      };
+      ptyEmitter.on("error", (err: Error) => {
+        // Mirror node-pty's OWN benign-code classification: EAGAIN is a transient
+        // read hiccup and EIO is the normal "child closed the pty" read error
+        // (the `onExit` path already owns that transition).  Neither is a host
+        // FAULT — surfacing them through onError would spuriously fire on every
+        // clean close.  We ignore them here exactly as node-pty does; the value
+        // of THIS listener for those codes is purely making `listeners('error')`
+        // ≥ 2 so node-pty's handler does not re-throw a *different* error that
+        // arrives while a benign one is in flight (the `< 2` guard is evaluated
+        // per-emit).
+        const code = (err as NodeJS.ErrnoException).code ?? "";
+        if (code.includes("EAGAIN") || code.includes("EIO")) return;
+        // Any OTHER pty read-socket fault (e.g. EBADF during a teardown race
+        // under rapid churn) is host-fatal: the -CC client's pty is unusable.
+        // Mark exited (so a racing write() throws the friendly "after exit"
+        // error instead of touching a dead fd) and surface through the error
+        // boundary, where the session's onError handler reaps just THIS session.
+        this._exited = true;
+        this._emitError(err instanceof Error ? err : new Error(String(err)));
+      });
+
       // node-pty's spawn is synchronous (forkpty + exec in-process).
       // By the time pty.spawn() returns without throwing, the process exists.
       resolve();

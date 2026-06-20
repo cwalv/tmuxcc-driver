@@ -594,4 +594,57 @@ describe("TmuxHost — real tmux 3.4", { skip: !tmuxAvailable ? "tmux not found 
     host.kill();
     await new Promise<void>((r) => { host.onExit(() => r()); });
   });
+
+  // tc-crnt.14: a non-EAGAIN/non-EIO error on the pty READ socket must be
+  // routed to onError, NOT re-thrown by node-pty as an uncaughtException.
+  //
+  // node-pty's UnixTerminal installs ONE 'error' listener on its read socket
+  // that ignores EAGAIN/EIO (benign pty-close) but RE-THROWS any other error
+  // unless a SECOND 'error' listener exists (`listeners('error').length < 2`).
+  // tmux-host wires onData/onExit (EventEmitter2 façades) but historically
+  // registered NO raw 'error' listener, so a read fault during a teardown race
+  // under rapid churn (e.g. EBADF as the -CC child exits) was re-thrown — and
+  // in the tc-2x3.3 collapsed topology that exits the WHOLE server-proxy,
+  // surfacing as the intermittent "server-proxy process crashed (exit code
+  // signal)" (tc-crnt.14).  The fix registers a real 'error' listener that
+  // routes the fault into the onError boundary.
+  //
+  // This test emits a synthetic non-EIO 'error' on the live pty socket and
+  // asserts (a) onError fires with that error and (b) the test process does
+  // NOT receive an uncaughtException (the re-throw is gone).
+  it("routes a non-EIO pty read-socket error to onError without crashing the process — tc-crnt.14", async () => {
+    const sock = sockName("ptyerr");
+    after(() => killServer(sock));
+
+    const host = createTmuxHost({ socketName: sock, sessionName: "tc-crnt14-ptyerr" });
+    let routed: Error | null = null;
+    host.onError((err) => { routed = err; });
+
+    await host.start();
+
+    // If the fix is absent, node-pty re-throws → uncaughtException.  Capture it
+    // so the test FAILS LOUDLY (assertion below) instead of aborting the runner.
+    let uncaught: Error | null = null;
+    const onUncaught = (err: Error): void => { uncaught = err; };
+    process.once("uncaughtException", onUncaught);
+
+    // Reach the underlying node-pty terminal (the test seam; production never
+    // touches it) and emit a non-EAGAIN/non-EIO socket error the way a real
+    // read fault would.  `_pty` is the IPty; node-pty's Terminal forwards
+    // `emit` to its read socket (node-pty/lib/terminal.js).
+    const pty = (host as unknown as { _pty: { emit(event: string, err: Error): void } })._pty;
+    const fault = Object.assign(new Error("simulated pty read fault"), { code: "EBADF" });
+    pty.emit("error", fault);
+
+    // Let any deferred re-emit (the no-handler nextTick path) settle.
+    await new Promise<void>((r) => setTimeout(r, 50));
+    process.removeListener("uncaughtException", onUncaught);
+
+    assert.equal(uncaught, null, "a pty read error must NOT escape as an uncaughtException");
+    assert.ok(routed !== null, "onError must fire for a non-EIO pty read error");
+    assert.equal((routed as unknown as { code?: string }).code, "EBADF");
+    assert.equal(host.exited, true, "host must mark exited after a fatal pty read error");
+
+    host.kill();
+  });
 });
