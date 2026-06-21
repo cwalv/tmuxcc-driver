@@ -634,6 +634,7 @@ export function createInputPath(
     correlationId: string,
     verbKind: string,
     cmd: string,
+    emptyBodyFallback?: () => VerbResult | null,
   ): void {
     const resultPromise = sendCommand(cmd);
     if (respond === undefined) return; // no return path wired.
@@ -664,6 +665,43 @@ export function createInputPath(
         const bodyText = result.body !== undefined ? new TextDecoder().decode(result.body) : "";
         const ids = parseEffectIds(bodyText);
         if (ids === null) {
+          // tmux accepted the command (%end) but the `-P -F` body did not parse.
+          // Two structurally distinct cases hide behind a null parse — keep them
+          // apart (tc-0c30.20):
+          //
+          //   (1) EMPTY body — tmux printed NOTHING. For `break-pane` this is a
+          //       legitimate IDEMPOTENT NO-OP: the source pane is already the
+          //       sole pane in its own window, so there is nothing to break out
+          //       and tmux's `-P` prints no `#{pane_id} #{window_id}` line
+          //       (verified against tmux 3.4: `break-pane -d -P -F … -s %N` on an
+          //       already-sole pane returns `%end` with an EMPTY body — 15/15).
+          //       This races the auto-promotion path: the promotion check picks
+          //       an outlier from the (coalesced-lag) model, but by the time the
+          //       command lands the sibling has exited / a prior promotion has
+          //       already re-homed it, so the pane is alone — the promotion's
+          //       goal is ALREADY met. An `emptyBodyFallback` lets the caller
+          //       resolve to the no-op success (the pane's CURRENT ids) instead
+          //       of a spurious "unparseable" failure that reddens the gate.
+          //
+          //   (2) NON-EMPTY but malformed body — tmux printed SOMETHING we could
+          //       not parse. That IS a contract violation; fail LOUD regardless
+          //       of the fallback (FAIL-LOUD policy).
+          //
+          // split-pane / open-window pass NO fallback: those verbs ALWAYS create
+          // a fresh entity, so an empty body there is a genuine anomaly and still
+          // fails loud.
+          if (bodyText.trim() === "" && emptyBodyFallback !== undefined) {
+            const fallback = emptyBodyFallback();
+            if (fallback !== null) {
+              console.info(
+                `[input-path] ${verbKind} returned %end with an empty -P -F body — ` +
+                  `treating as an idempotent no-op (source already its own window) ` +
+                  `(correlationId=${correlationId})`,
+              );
+              respond(correlationId, fallback);
+              return;
+            }
+          }
           // tmux accepted the command but we could not recover the printed ids.
           // This breaks the verb's contract — fail LOUD rather than silently
           // returning ok with no ids (FAIL-LOUD policy).
@@ -1082,7 +1120,34 @@ export function createInputPath(
             // is the window (the pane is re-homed, not freshly created) — see
             // breakPane() docs.
             const tmuxPaneNum = toTmuxPane(command.paneId);
-            runCreatingVerb(respond, correlationId, "break-pane", breakPane(tmuxPaneNum, { printIds: true }));
+            const breakSourcePaneId = command.paneId;
+            // tc-0c30.20: empty-body NO-OP fallback. tmux returns `%end` with an
+            // EMPTY `-P` body when the source pane is already the sole pane in
+            // its own window (nothing to break out). That races the auto-
+            // promotion path (the model lags tmux; the sibling exited / a prior
+            // promotion already re-homed the pane). In that case the pane keeps
+            // BOTH its id (break-pane never re-mints the pane) AND its current
+            // window, so resolve to those CURRENT ids: the verb succeeded as an
+            // idempotent no-op, and the client's id-bind re-fire lands on the
+            // pane already in place. Returns null (→ fail-loud) only when the
+            // pane is no longer in the model (it genuinely vanished), preserving
+            // the loud signal for a true contract violation.
+            runCreatingVerb(
+              respond,
+              correlationId,
+              "break-pane",
+              breakPane(tmuxPaneNum, { printIds: true }),
+              () => {
+                const model = getModel?.();
+                const pane = model?.panes.get(breakSourcePaneId);
+                if (pane === undefined) return null;
+                return {
+                  ok: true,
+                  newPaneId: breakSourcePaneId,
+                  newWindowId: pane.windowId,
+                };
+              },
+            );
             break;
           }
 

@@ -1002,6 +1002,210 @@ describe("createInputPath — creating verbs return effect ids (tc-ozk.1)", () =
   });
 });
 
+// ---------------------------------------------------------------------------
+// tc-0c30.20: break-pane empty `-P` body is an idempotent NO-OP, not a failure.
+//
+// tmux returns `%end` (success) with an EMPTY `-P -F` body when `break-pane
+// -s %N` targets a pane that is ALREADY the sole pane in its own window
+// (verified against tmux 3.4: 15/15 empty body). The auto-promotion path races
+// the coalesced-lag model: the outlier picked from the model is, by the time
+// the command lands, already alone (sibling exited / a prior promotion re-homed
+// it). The promotion's goal is already met, so an empty body must resolve to the
+// pane's CURRENT ids (an idempotent no-op success) — NOT the spurious
+// "unparseable" failure that reddened the random-walk gate.
+//
+// split-pane / open-window pass NO empty-body fallback (they ALWAYS create), so
+// an empty body there still fails loud — covered by the split-pane unparseable
+// test above (which now also exercises the empty-string branch indirectly).
+// ---------------------------------------------------------------------------
+describe("createInputPath — break-pane empty -P body no-op (tc-0c30.20)", () => {
+  const enc = (s: string) => new TextEncoder().encode(s);
+
+  /** One-window, one-pane model where the source pane is already alone. */
+  function makeSolePaneModel(paneSuffix: string, winSuffix: string): SessionModel {
+    const sid = makeSessionId("s0");
+    const wid = makeWindowId("w" + winSuffix);
+    const pid = makePaneId("p" + paneSuffix);
+    const session: Session = { sessionId: sid, name: "sess", windowIds: [wid], activeWindowId: wid };
+    const window: Window = {
+      windowId: wid,
+      sessionId: sid,
+      name: "win",
+      paneIds: [pid],
+      activePaneId: pid,
+      layout: null,
+      synchronizePanes: false,
+      monitorActivity: false,
+      monitorSilence: 0,
+    };
+    const pane: Pane = {
+      paneId: pid,
+      windowId: wid,
+      sessionId: sid,
+      cols: 80,
+      rows: 24,
+      mode: "normal",
+      dead: false,
+      exitCode: undefined,
+      label: undefined,
+      bound: false,
+      detach: undefined,
+      icon: undefined,
+    };
+    let m = emptyModel();
+    m = addSession(m, session);
+    m = addWindow(m, window);
+    m = addPane(m, pane);
+    return m;
+  }
+
+  it("break-pane: %end with EMPTY body → ok with the source pane's CURRENT ids (idempotent no-op)", async () => {
+    const host = makeFakeDeps();
+    // The source pane p3 is already the sole pane in window w7.
+    const model = makeSolePaneModel("3", "7");
+    const path = createInputPath(host, { getModel: () => model });
+    const results: Array<{ correlationId: string; result: VerbResult }> = [];
+
+    // tmux accepted (%end) but printed NOTHING (already-sole pane no-op).
+    host.enqueueSendResult(Promise.resolve({ ok: true, body: enc("") }));
+
+    path.handleClientMessage(
+      {
+        type: "command.request",
+        seq: nextSeq(),
+        correlationId: "bp-noop",
+        command: { kind: "break-pane", paneId: paneId("p3") },
+      },
+      (correlationId, result) => results.push({ correlationId, result }),
+    );
+
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    assert.equal(results.length, 1);
+    assert.deepEqual(results[0]!.result, {
+      ok: true,
+      newPaneId: paneId("p3"),
+      newWindowId: windowId("w7"),
+    });
+  });
+
+  it("break-pane: %end with a body that is only whitespace/newlines → still treated as the no-op", async () => {
+    const host = makeFakeDeps();
+    const model = makeSolePaneModel("5", "2");
+    const path = createInputPath(host, { getModel: () => model });
+    const results: Array<{ correlationId: string; result: VerbResult }> = [];
+
+    // Some tmux builds prepend a blank line; a whitespace-only body is still empty.
+    host.enqueueSendResult(Promise.resolve({ ok: true, body: enc("\n  \n") }));
+
+    path.handleClientMessage(
+      {
+        type: "command.request",
+        seq: nextSeq(),
+        correlationId: "bp-ws",
+        command: { kind: "break-pane", paneId: paneId("p5") },
+      },
+      (correlationId, result) => results.push({ correlationId, result }),
+    );
+
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    assert.equal(results.length, 1);
+    assert.deepEqual(results[0]!.result, {
+      ok: true,
+      newPaneId: paneId("p5"),
+      newWindowId: windowId("w2"),
+    });
+  });
+
+  it("break-pane: EMPTY body but source pane GONE from model → fail loud (genuine anomaly)", async () => {
+    const host = makeFakeDeps();
+    // Model that does NOT contain the source pane p9.
+    const model = makeSolePaneModel("3", "7");
+    const path = createInputPath(host, { getModel: () => model });
+    const results: Array<{ correlationId: string; result: VerbResult }> = [];
+
+    host.enqueueSendResult(Promise.resolve({ ok: true, body: enc("") }));
+
+    path.handleClientMessage(
+      {
+        type: "command.request",
+        seq: nextSeq(),
+        correlationId: "bp-gone",
+        command: { kind: "break-pane", paneId: paneId("p9") },
+      },
+      (correlationId, result) => results.push({ correlationId, result }),
+    );
+
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    assert.equal(results.length, 1);
+    assert.equal(results[0]!.result.ok, false);
+    if (results[0]!.result.ok === false) {
+      assert.equal(results[0]!.result.code, "verb.no-effect-ids");
+    }
+  });
+
+  it("break-pane: %end with a NON-empty malformed body → fail loud (contract violation, NOT no-op)", async () => {
+    const host = makeFakeDeps();
+    const model = makeSolePaneModel("3", "7");
+    const path = createInputPath(host, { getModel: () => model });
+    const results: Array<{ correlationId: string; result: VerbResult }> = [];
+
+    // tmux printed SOMETHING we cannot parse — that is a real anomaly, the
+    // empty-body no-op fallback must NOT swallow it.
+    host.enqueueSendResult(Promise.resolve({ ok: true, body: enc("not-an-id-line") }));
+
+    path.handleClientMessage(
+      {
+        type: "command.request",
+        seq: nextSeq(),
+        correlationId: "bp-garbage",
+        command: { kind: "break-pane", paneId: paneId("p3") },
+      },
+      (correlationId, result) => results.push({ correlationId, result }),
+    );
+
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    assert.equal(results.length, 1);
+    assert.equal(results[0]!.result.ok, false);
+    if (results[0]!.result.ok === false) {
+      assert.equal(results[0]!.result.code, "verb.no-effect-ids");
+    }
+  });
+
+  it("break-pane: %end with a REAL -P body still parses to the new window (no fallback regression)", async () => {
+    const host = makeFakeDeps();
+    const model = makeSolePaneModel("3", "7");
+    const path = createInputPath(host, { getModel: () => model });
+    const results: Array<{ correlationId: string; result: VerbResult }> = [];
+
+    // Genuine break-out: tmux prints the re-homed pane + its NEW window.
+    host.enqueueSendResult(Promise.resolve({ ok: true, body: enc("%3 @9") }));
+
+    path.handleClientMessage(
+      {
+        type: "command.request",
+        seq: nextSeq(),
+        correlationId: "bp-real",
+        command: { kind: "break-pane", paneId: paneId("p3") },
+      },
+      (correlationId, result) => results.push({ correlationId, result }),
+    );
+
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    assert.equal(results.length, 1);
+    // The NEW window @9 from tmux's print wins — the fallback is not consulted.
+    assert.deepEqual(results[0]!.result, {
+      ok: true,
+      newPaneId: paneId("p3"),
+      newWindowId: windowId("w9"),
+    });
+  });
+});
+
 describe("createInputPath — swap-pane command (tc-7xv.9)", () => {
   it("swap-pane without target → swap-pane -D -t %<N>", () => {
     const host = makeFakeDeps();
