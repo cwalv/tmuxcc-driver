@@ -503,6 +503,45 @@ describe("tc-2x3.4: per-session error boundary", { skip: !TMUX_AVAILABLE }, () =
     await new Promise<void>((r) => setTimeout(r, 500));
   });
 
+  // tc-hfxb.18.4: hasSessionProxy() must be true for the WHOLE live window —
+  // crucially including the IN-FLIGHT creation (where sessionProxyPid() is null).
+  // This is the liveness signal the broker's reconciliation removal gates on to
+  // reject spurious sessions.removed for a session whose -CC connection is live.
+  it("LIVENESS: hasSessionProxy is true while in-flight AND ready, false before/after", { timeout: 25_000 }, async () => {
+    const socketName = `tmuxcc-live-${process.pid}-${Date.now()}`;
+    const sessionName = `live-sess-${process.pid}`;
+    _sockets.push(socketName);
+    spawnTmuxSession(socketName, sessionName);
+
+    const tmpDir = makeTempDir("live");
+    _tmpDirs.push(tmpDir);
+    const sockPath = path.join(tmpDir, "live.sock");
+
+    const supervisor: SessionProxySupervisor = createSessionProxySupervisor();
+    const sessionId = `live-id-${process.pid}`;
+
+    // Before any claim: not live.
+    assert.equal(supervisor.hasSessionProxy(sessionId), false, "not live before claim");
+
+    // Start the creation but do NOT await yet — the in-flight promise is
+    // registered synchronously, so hasSessionProxy must already be true while
+    // sessionProxyPid is still null (in-flight).
+    const creating = supervisor.ensureSessionProxy(sessionId, sessionName, socketName, sockPath);
+    assert.equal(supervisor.hasSessionProxy(sessionId), true, "live (in-flight) immediately after ensureSessionProxy call");
+    assert.equal(supervisor.sessionProxyPid(sessionId), null, "sessionProxyPid is null while in-flight (contrast)");
+
+    await creating;
+    // Ready: still live, and now sessionProxyPid is non-null.
+    assert.equal(supervisor.hasSessionProxy(sessionId), true, "live (ready) after creation resolves");
+    assert.notEqual(supervisor.sessionProxyPid(sessionId), null, "sessionProxyPid non-null when ready");
+
+    // Reaped: no longer live (the genuine-gone path's precondition).
+    supervisor.reapSessionProxy(sessionId);
+    assert.equal(supervisor.hasSessionProxy(sessionId), false, "not live after reap");
+
+    await new Promise<void>((r) => setTimeout(r, 500));
+  });
+
   /**
    * EB4: GAP 1 — orphaned fd reclamation (tc-2x3.6).
    *

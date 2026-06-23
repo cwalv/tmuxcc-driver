@@ -76,7 +76,7 @@ import { createSocketServer, createSocketTransport } from "./socket-transport.js
 import { serverProxySocketPath, sessionProxySocketPath, removeSocket, restrictSocket } from "./runtime-dir.js";
 import { createServerProxyMetrics } from "./metrics.js";
 import type { ServerProxyMetrics } from "./metrics.js";
-import { listSessions, createSession, killSession, createTmuxWatcher, probeTmuxAlive, setWindowSynchronizePanes, setWindowMonitorActivity, setWindowMonitorSilence, setSessionMarker, getTmuxServerPid, countTmuxccClientsBySession, listSessionTopology } from "./tmux-south.js";
+import { listSessions, createSession, killSession, checkSessionPresence, createTmuxWatcher, probeTmuxAlive, setWindowSynchronizePanes, setWindowMonitorActivity, setWindowMonitorSilence, setSessionMarker, getTmuxServerPid, countTmuxccClientsBySession, listSessionTopology } from "./tmux-south.js";
 import type { TmuxWatcher, TmuxAvailabilityOut } from "./tmux-south.js";
 import { createSessionProxySupervisor } from "./session-proxy-supervisor.js";
 import type { SessionProxySupervisor, SessionProxyExitInfo } from "./session-proxy-supervisor.js";
@@ -847,14 +847,37 @@ class ServerProxyImpl implements ServerProxyHandle {
     // Build a set of current tmux ids
     const currentTmuxIds = new Set(rows.map((r) => r.tmuxId));
 
-    // Detect removals: any session in our table whose tmuxId is no longer present
+    // Detect removals.  A tracked session whose tmuxId is absent from this list
+    // is removed ONLY IF its absence is CONFIRMED by a trustworthy direct check.
+    //
+    // tc-hfxb.18.4: `list-sessions` is NOT trustworthy for absence on its own.
+    // During cold-boot `-CC` churn it transiently omits a live session — empty
+    // ("no server running" / "error connecting" both coerce to `[]`) OR partial
+    // (a successful list that just hasn't caught up).  Treating that omission as
+    // a removal broadcasts a spurious `sessions.removed`, which disposed the
+    // extension's SessionManager mid-(re)connect and produced the `openSession
+    // did not produce a new terminal` flake (RCA tc-hfxb.18.3/.18.4).  "removed"
+    // must mean was-present-then-CONFIRMED-absent, never transiently-omitted.
+    //
+    // The authoritative confirm is `has-session -t <id>` (checkSessionPresence),
+    // which — unlike `list-sessions` — distinguishes genuine absence on a
+    // reachable server ("absent") from a transiently-unreachable server
+    // ("inconclusive").  We remove ONLY on "absent".  A live/in-flight
+    // session-proxy is a free fast-path "definitely present" short-circuit that
+    // avoids the shell-out in the common case (it holds a live `-CC` connection,
+    // so the session provably exists).  Genuine teardown still removes promptly:
+    // a really-killed session fails `has-session` with "can't find session" →
+    // "absent" → removed; explicit `session.destroy` removes directly, not here.
     for (const [sid, entry] of this._sessions) {
-      if (!currentTmuxIds.has(entry.tmuxId)) {
-        this._sessions.delete(sid);
-        this._byName.delete(entry.name);
-        this._supervisor.reapSessionProxy(sid);
-        this._broadcastRemoved(sid);
-      }
+      if (currentTmuxIds.has(entry.tmuxId)) continue;
+      // Fast path: a live/in-flight session-proxy proves the session exists.
+      if (this._supervisor.hasSessionProxy(sid)) continue;
+      // Authoritative: only a positive "absent" from a reachable server removes.
+      if (checkSessionPresence(this._opts.socketName, entry.tmuxId) !== "absent") continue;
+      this._sessions.delete(sid);
+      this._byName.delete(entry.name);
+      this._supervisor.reapSessionProxy(sid);
+      this._broadcastRemoved(sid);
     }
 
     // Build a set of existing tmux ids in our table for addition/rename detection

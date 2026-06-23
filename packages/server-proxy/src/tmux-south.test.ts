@@ -33,6 +33,7 @@ import {
   setSessionMarker,
   probeTmuxLiveness,
   probeTmuxAlive,
+  checkSessionPresence,
 } from "./tmux-south.js";
 
 // ---------------------------------------------------------------------------
@@ -130,6 +131,46 @@ describe("tmux-south createSession (tc-zcqr)", { skip: !TMUX_AVAILABLE }, () => 
     } finally {
       killServer(socketName);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// checkSessionPresence (tc-hfxb.18.4)
+// ---------------------------------------------------------------------------
+
+describe("tmux-south checkSessionPresence (tc-hfxb.18.4)", () => {
+  afterEach(() => {
+    for (const sock of [...liveSockets]) killServer(sock);
+  });
+
+  it("returns 'present' for an existing session on a live server", { skip: !TMUX_AVAILABLE }, () => {
+    const socketName = nextSocketName();
+    try {
+      const { tmuxId } = createSession(socketName, "present-sess");
+      assert.equal(checkSessionPresence(socketName, tmuxId), "present");
+      assert.equal(checkSessionPresence(socketName, "present-sess"), "present");
+    } finally {
+      killServer(socketName);
+    }
+  });
+
+  it("returns 'absent' for a non-existent session on a live server (server reachable, session gone)", { skip: !TMUX_AVAILABLE }, () => {
+    const socketName = nextSocketName();
+    try {
+      // Bring the server up with one session, then ask about a DIFFERENT name.
+      createSession(socketName, "anchor");
+      assert.equal(checkSessionPresence(socketName, "ghost-session"), "absent");
+    } finally {
+      killServer(socketName);
+    }
+  });
+
+  it("returns 'inconclusive' when the server is not running (NOT 'absent')", () => {
+    // A socket no server is listening on: has-session fails with
+    // "error connecting"/"no server running" — a transient/unreachable signal,
+    // which MUST NOT be treated as positive evidence of session absence.
+    const socketName = `tmuxcc-test-south-noserver-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    assert.equal(checkSessionPresence(socketName, "whatever"), "inconclusive");
   });
 });
 

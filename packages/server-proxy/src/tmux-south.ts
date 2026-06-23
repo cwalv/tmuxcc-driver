@@ -613,6 +613,53 @@ export function killSession(socketName: string, id: string): void {
   }
 }
 
+/**
+ * Trustworthy single-session existence check (tc-hfxb.18.4) via
+ * `tmux -L <socketName> has-session -t <id>`.
+ *
+ * `list-sessions` conflates a genuinely-empty server with a transient one
+ * ("no server running" / "error connecting" during cold-boot `-CC` churn both
+ * yield `[]`).  Reconciliation must NOT declare a session removed on that flaky
+ * signal.  `has-session` against the SPECIFIC id is the authoritative check and
+ * its three outcomes are distinguishable:
+ *   - status 0                                  → "present"
+ *   - status≠0, stderr "can't find session"     → "absent" (POSITIVE evidence
+ *                                                 the session is gone, server up)
+ *   - status≠0 with any other stderr            → "inconclusive" (server
+ *     ("error connecting" / "no server running" / spawn error / timeout)         transiently unreachable — NOT evidence of absence)
+ *
+ * A session is removal-eligible ONLY on "absent".  "present"/"inconclusive"
+ * both mean "do not remove" — the conservative answer that closes the spurious
+ * cold-boot `sessions.removed` race (RCA tc-hfxb.18.3/.18.4).
+ *
+ * `id` can be a session name or tmux `$N` id.
+ */
+export type TmuxSessionPresence = "present" | "absent" | "inconclusive";
+
+export function checkSessionPresence(socketName: string, id: string): TmuxSessionPresence {
+  const result = spawnSync(
+    "tmux",
+    ["-L", socketName, "has-session", "-t", id],
+    { encoding: "utf8", timeout: 5_000 },
+  );
+  if (result.error) {
+    // Spawn-level failure (timeout, ENOENT) — no information about the session.
+    return "inconclusive";
+  }
+  if (result.status === 0) {
+    return "present";
+  }
+  // Non-zero: distinguish genuine absence on a reachable server from a transient
+  // server-unreachable condition.  tmux prints "can't find session: <name>" when
+  // the server is up but the session is gone; "no server running on …" / "error
+  // connecting to …" when the server itself is unreachable.
+  const stderr = (result.stderr ?? "").toLowerCase();
+  if (stderr.includes("can't find session") || stderr.includes("can’t find session")) {
+    return "absent";
+  }
+  return "inconclusive";
+}
+
 // ---------------------------------------------------------------------------
 // tmux liveness probe (tc-3iv)
 // ---------------------------------------------------------------------------

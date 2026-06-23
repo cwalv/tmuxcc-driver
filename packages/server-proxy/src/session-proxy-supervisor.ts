@@ -243,6 +243,25 @@ export interface SessionProxySupervisor {
   sessionProxyPid(sessionId: string): number | null;
 
   /**
+   * Whether a session-proxy for `sessionId` is live — a ready entry OR an
+   * in-flight creation (tc-hfxb.18.4).  Unlike {@link sessionProxyPid} (which
+   * returns null for an in-flight creation), this is true for the WHOLE window
+   * from `ensureSessionProxy` being called through ready, until the entry is
+   * reaped or its creation rejects.
+   *
+   * A live session-proxy holds a live `tmux -CC` connection to its session, so
+   * the session provably exists in the tmux server — it CANNOT have "left".  The
+   * reconciliation removal path uses this to reject spurious `sessions.removed`
+   * broadcasts: a transient `list-sessions` that momentarily omits a live
+   * session (an empty or partial list during cold-boot `-CC` churn) must not
+   * remove it.  The genuine-gone path is unaffected: when a tmux session is
+   * truly killed its `-CC` client EOFs, the session-proxy exits, and the
+   * supervisor reaps this entry FIRST — so by the time reconciliation runs,
+   * `hasSessionProxy` is already false and removal proceeds correctly.
+   */
+  hasSessionProxy(sessionId: string): boolean;
+
+  /**
    * Number of live session-proxies — both ready entries and in-flight
    * creations.  Used by the idle-exit policy (tc-eqgp): the server-proxy must
    * never idle-exit while it has live session-proxies, because those represent
@@ -547,6 +566,14 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
     if (entry === undefined || entry instanceof Promise) return null;
     // tc-2x3.3: in-process — the session-proxy IS the server-proxy process.
     return process.pid;
+  }
+
+  hasSessionProxy(sessionId: string): boolean {
+    // tc-hfxb.18.4: ready entry OR in-flight creation promise — both register in
+    // `_sessionProxies` (the in-flight promise is set synchronously by
+    // `ensureSessionProxy` before its first await), so this is true for the
+    // entire claim/create window.
+    return this._sessionProxies.has(sessionId);
   }
 
   reapSessionProxy(sessionId: string): void {
