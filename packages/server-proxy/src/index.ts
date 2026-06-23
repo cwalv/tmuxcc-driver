@@ -36,8 +36,10 @@ export { createSocketTransport, connectSocketTransport, createSocketServer } fro
 export { serverProxySocketPath, sessionProxySocketPath, serverProxyLogPath, resolveBaseRuntimeDir, gcStaleRuntimeDirs, probeLiveSocket } from "./runtime-dir.js";
 
 // tmux-liveness probe (`tmux -L <socketName> ls`, hard-timeout).  The broker
-// uses it for watcher-EOF disambiguation; the extension's broker-exit
-// classifier reuses the SAME probe for its crash-before-announce
-// "probe-or-presume-gone" fallback (tc-crnt.15) — one canonical tmux-liveness
+// uses `probeTmuxAlive` for watcher-EOF disambiguation; the extension's
+// broker-exit classifier reuses the SAME spawn via the three-way
+// `probeTmuxLiveness` so it can tell "ran and found no server" (gone) apart
+// from "could not run the probe" (inconclusive — host load) and avoid
+// presuming gone on a spawn-timeout (tc-vw10).  One canonical tmux-liveness
 // implementation, no second shell-out in the extension.
-export { probeTmuxAlive } from "./tmux-south.js";
+export { probeTmuxAlive, probeTmuxLiveness, type TmuxLiveness } from "./tmux-south.js";

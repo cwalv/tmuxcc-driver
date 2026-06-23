@@ -618,32 +618,59 @@ export function killSession(socketName: string, id: string): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Probe whether the tmux server on `socketName` is alive by running
- * `tmux -L <socketName> ls` with a hard timeout (§6.2 watcher-EOF
- * disambiguation).
+ * Three-way outcome of a tmux-liveness probe.
  *
- * Resolves `true` iff the command exits with status 0 within `timeoutMs`.
- * Any other outcome — non-zero exit ("no server running on …"), spawn
- * failure, or timeout — resolves `false`.
+ *   - `"alive"`        — `tmux ls` exited 0: the server answered, it is up.
+ *   - `"gone"`         — `tmux ls` RAN and exited non-zero ("no server
+ *                        running on …"): POSITIVE evidence the server is gone.
+ *   - `"inconclusive"` — the probe could not be RUN to a verdict: the spawn
+ *                        failed, or the command did not exit within
+ *                        `timeoutMs` (e.g. the host was too loaded for the
+ *                        subprocess to even start in budget).  This is NOT
+ *                        evidence the server is gone — only that we could not
+ *                        determine its state.
+ *
+ * The `"gone"` vs `"inconclusive"` split is the load-robustness invariant for
+ * the broker-exit classifier (tc-vw10): a spawn/exec timeout under host load
+ * must NOT masquerade as "server gone".
+ */
+export type TmuxLiveness = "alive" | "gone" | "inconclusive";
+
+/**
+ * Probe the tmux server on `socketName` by running `tmux -L <socketName> ls`
+ * with a hard timeout (§6.2 watcher-EOF disambiguation), distinguishing all
+ * three outcomes (see `TmuxLiveness`).
+ *
+ * Unlike `probeTmuxAlive`, this does NOT collapse "ran and found no server"
+ * (`"gone"` — positive evidence) into the same bucket as "could not run the
+ * probe" (`"inconclusive"` — spawn failure / timeout).  Callers that must only
+ * act on POSITIVE evidence of a dead server (the broker-exit classifier) use
+ * this; callers for which "presume gone on any indeterminate outcome" is the
+ * correct conservative answer (the broker's own watcher-EOF disambiguation)
+ * use `probeTmuxAlive`.
  *
  * Async (unlike the other helpers in this module) so the server-proxy stays
  * responsive to connected clients during the probe window.
  */
-export function probeTmuxAlive(socketName: string, timeoutMs: number): Promise<boolean> {
+export function probeTmuxLiveness(
+  socketName: string,
+  timeoutMs: number,
+): Promise<TmuxLiveness> {
   return new Promise((resolve) => {
     let settled = false;
-    const settle = (alive: boolean): void => {
+    const settle = (liveness: TmuxLiveness): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve(alive);
+      resolve(liveness);
     };
 
     let proc: ChildProcess;
     try {
       proc = spawn("tmux", ["-L", socketName, "ls"], { stdio: "ignore" });
     } catch {
-      resolve(false);
+      // The subprocess never started — we have no information about tmux.
+      resolve("inconclusive");
       return;
     }
 
@@ -653,17 +680,40 @@ export function probeTmuxAlive(socketName: string, timeoutMs: number): Promise<b
       } catch {
         // ignore
       }
-      settle(false);
+      // The probe did not finish in budget — under host load the spawn/exec
+      // itself can lose this race.  That is INCONCLUSIVE, never "gone".
+      settle("inconclusive");
     }, timeoutMs);
     timer.unref();
 
     proc.on("exit", (code) => {
-      settle(code === 0);
+      // The command RAN to completion: exit 0 ⇒ alive, anything else
+      // ("no server running on …") ⇒ POSITIVE evidence the server is gone.
+      settle(code === 0 ? "alive" : "gone");
     });
     proc.on("error", () => {
-      settle(false);
+      // Spawn-level failure (e.g. tmux not on PATH): inconclusive, not gone.
+      settle("inconclusive");
     });
   });
+}
+
+/**
+ * Probe whether the tmux server on `socketName` is alive by running
+ * `tmux -L <socketName> ls` with a hard timeout (§6.2 watcher-EOF
+ * disambiguation).
+ *
+ * Resolves `true` iff the command exits with status 0 within `timeoutMs`.
+ * Any other outcome — non-zero exit ("no server running on …"), spawn
+ * failure, or timeout — resolves `false` ("presume gone").  Callers that must
+ * distinguish "ran and found no server" from "could not run the probe" should
+ * use `probeTmuxLiveness` instead.
+ *
+ * Async (unlike the other helpers in this module) so the server-proxy stays
+ * responsive to connected clients during the probe window.
+ */
+export function probeTmuxAlive(socketName: string, timeoutMs: number): Promise<boolean> {
+  return probeTmuxLiveness(socketName, timeoutMs).then((l) => l === "alive");
 }
 
 // ---------------------------------------------------------------------------

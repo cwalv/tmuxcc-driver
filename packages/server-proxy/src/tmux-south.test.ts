@@ -27,7 +27,13 @@ import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 
-import { createSession, listSessions, setSessionMarker } from "./tmux-south.js";
+import {
+  createSession,
+  listSessions,
+  setSessionMarker,
+  probeTmuxLiveness,
+  probeTmuxAlive,
+} from "./tmux-south.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -347,6 +353,78 @@ describe("tmux-south listSessions enriched fields (tc-295a.4)", { skip: !TMUX_AV
       );
     } finally {
       killServer(socketName);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// probeTmuxLiveness — three-way liveness (tc-vw10)
+// ---------------------------------------------------------------------------
+//
+// The broker-exit classifier must presume tmux gone ONLY on POSITIVE evidence
+// (a probe that RAN and found no server), never on a probe it could not run to
+// a verdict (spawn failure / spawn-timeout under host load).  `probeTmuxAlive`
+// collapses both into `false`; `probeTmuxLiveness` keeps them distinct so the
+// classifier can route an inconclusive result to "reconnect" rather than the
+// misleading "your sessions are gone".
+describe("tmux-south probeTmuxLiveness (tc-vw10)", () => {
+  it('returns "gone" when the probe RUNS and finds no server (positive evidence)', { skip: !TMUX_AVAILABLE }, async () => {
+    // A fresh, never-used socket name: `tmux ls` runs and exits non-zero with
+    // "no server running on …" — a verdict, not a failure-to-run.
+    const socketName = `tmuxcc-test-south-probe-gone-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const liveness = await probeTmuxLiveness(socketName, 5_000);
+    assert.equal(
+      liveness,
+      "gone",
+      'a ran-and-found-no-server probe must report "gone", not "inconclusive"',
+    );
+  });
+
+  it('returns "alive" when the tmux server is up', { skip: !TMUX_AVAILABLE }, async () => {
+    const socketName = nextSocketName();
+    try {
+      createSession(socketName, "probe-alive");
+      const liveness = await probeTmuxLiveness(socketName, 5_000);
+      assert.equal(liveness, "alive", "a reachable tmux server must report alive");
+    } finally {
+      killServer(socketName);
+    }
+  });
+
+  it('returns "inconclusive" — NOT "gone" — on a spawn failure (binary unreachable)', async () => {
+    // Empty PATH ⇒ `spawn("tmux", …)` cannot resolve the binary ⇒ the spawn
+    // emits `error` (ENOENT).  The probe never ran: this is INCONCLUSIVE, the
+    // same bucket a loaded-host spawn-TIMEOUT lands in.  The whole point of
+    // tc-vw10 is that this is distinct from "gone".
+    const socketName = `tmuxcc-test-south-probe-inconc-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const savedPath = process.env.PATH;
+    try {
+      process.env.PATH = "";
+      const liveness = await probeTmuxLiveness(socketName, 5_000);
+      assert.equal(
+        liveness,
+        "inconclusive",
+        'a spawn failure (could not run the probe) must be "inconclusive", never "gone"',
+      );
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
+    }
+  });
+
+  it("probeTmuxAlive stays a true/false alias (true iff liveness === alive)", { skip: !TMUX_AVAILABLE }, async () => {
+    // The legacy boolean contract is preserved for the broker's watcher-EOF
+    // disambiguation: only a positive "alive" verdict yields `true`; "gone" and
+    // "inconclusive" both yield `false` ("presume gone").
+    const goneSocket = `tmuxcc-test-south-alias-gone-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    assert.equal(await probeTmuxAlive(goneSocket, 5_000), false, "no server ⇒ false");
+
+    const liveSocket = nextSocketName();
+    try {
+      createSession(liveSocket, "alias-alive");
+      assert.equal(await probeTmuxAlive(liveSocket, 5_000), true, "live server ⇒ true");
+    } finally {
+      killServer(liveSocket);
     }
   });
 });
