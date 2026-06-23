@@ -793,6 +793,13 @@ class ServerProxyImpl implements ServerProxyHandle {
    * listed and claimable), or removes it and broadcasts `sessions.removed`
    * when it is gone (the SCHEMA-specified signal for genuine session
    * disappearance).
+   *
+   * tc-hfxb.19: when this session was the LAST one, killing it also kills the
+   * whole tmux server.  `_refreshSessions`'s removal gate (tc-hfxb.18.4) handles
+   * that correctly because `checkSessionPresence` now classifies a "no server
+   * running" result as `"absent"` (a server that is DOWN has no sessions — see
+   * `tmux-south.ts`), so the dead session is removed even though the server is
+   * unreachable.  No special-case path is needed here.
    */
   private _onSessionProxyCrash(sessionId: SessionId, info: SessionProxyExitInfo): void {
     process.stderr.write(

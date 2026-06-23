@@ -577,3 +577,124 @@ describe("tc-295a.6 L3: kill-session-under-load ordering (requires tmux)", { ski
     mux.transport.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// L4 — kill the LAST session (empties the tmux server) — tc-hfxb.19
+//
+// The Mode-B random-walk flake: killing the LAST pane of the LAST session
+// empties the whole tmux server.  L3 above deliberately AVOIDS this (it seeds a
+// second session) because server death routes differently.  Here we hit it
+// head-on with `persistThroughTmuxGone` (the e2e/long-lived-broker config), so
+// the broker does NOT self-exit on tmux-gone — it must STILL broadcast
+// `sessions.removed` for the killed session.
+//
+// Pre-fix this hung: `_refreshSessions`'s tc-hfxb.18.4 removal gate removes on
+// `checkSessionPresence === "absent"`, and that check used to lump "no server
+// running" in with "error connecting" as "inconclusive" — so with the server
+// gone the removal was SKIPPED and the dead session lingered in the table and in
+// the tree (onlyInTree=[pN]).  The fix (tc-hfxb.19): `checkSessionPresence`
+// classifies "no server running" (a server that WENT DOWN) as "absent" — a tmux
+// session cannot outlive its server, so a down server has no sessions.  The
+// existing removal gate then removes the dead session on the EOF-driven (and any
+// other) `_refreshSessions`, even on an unreachable server.
+//
+// This must NOT regress tc-hfxb.18.4: that gate protects a TRANSIENT list that
+// omits a LIVE session whose session-proxy is still running — every such removal
+// is short-circuited by the gate's `hasSessionProxy` fast-path BEFORE
+// `checkSessionPresence` is consulted (covered by the tmux-south /
+// session-error-boundary tests), so classifying a down server as "absent" cannot
+// revive it.
+// ---------------------------------------------------------------------------
+
+describe("tc-hfxb.19 L4: last-session kill empties the server but still broadcasts sessions.removed (requires tmux)", { skip: !TMUX_AVAILABLE }, () => {
+  let serverProxy: ServerProxyHandle;
+  let socketName: string;
+  let runtimeDir: string;
+
+  beforeEach(async () => {
+    socketName = nextSocketName();
+    runtimeDir = makeRuntimeDir("l4");
+    // persistThroughTmuxGone: the long-lived (e2e) broker config — on tmux-gone
+    // it re-enters watcher poll mode instead of self-exiting, so the
+    // sessions.removed path under test is reachable.
+    serverProxy = createServerProxy({ socketName, runtimeDir, persistThroughTmuxGone: true });
+    await serverProxy.start();
+  });
+
+  afterEach(async () => {
+    await serverProxy.shutdown();
+    spawnSync("tmux", ["-L", socketName, "kill-server"], { stdio: "ignore", timeout: 5_000 });
+    fs.rmSync(runtimeDir, { recursive: true, force: true });
+  });
+
+  it("L4: killing the ONLY session (server dies) broadcasts sessions.removed on C1", { timeout: 60_000 }, async () => {
+    // ── Arrange: connect + claim the ONLY session (no seed — its death empties
+    // the whole tmux server).
+    const { mux } = await connectToServerProxy(serverProxy.endpoint());
+    const seq = { value: 1 };
+
+    const sessionName = "l4-last-session";
+    const claimResp = await sendCommand(mux, { kind: "session.claim", name: sessionName }, seq);
+    assert.ok(claimResp.result.ok, `session.claim failed: ${JSON.stringify(claimResp.result)}`);
+    const { sessionId } = (claimResp.result as {
+      ok: true;
+      payload: { sessionId: string; endpoint: string };
+    }).payload;
+
+    // Sanity: it is the only session on the socket.
+    const lsBefore = spawnSync("tmux", ["-L", socketName, "list-sessions"], { encoding: "utf8", timeout: 5_000 });
+    assert.equal((lsBefore.stdout ?? "").trim().split("\n").filter(Boolean).length, 1, "exactly one session before kill");
+
+    // ── Arm sessions.removed listener on C1 BEFORE the kill.
+    let removedAt: number | null = null;
+    const removedPromise = new Promise<void>((resolve) => {
+      const unsub = mux.subscribe((msg) => {
+        if (
+          msg.type === "sessions.removed" &&
+          (msg as unknown as { sessionId: string }).sessionId === sessionId
+        ) {
+          removedAt = Date.now();
+          unsub();
+          resolve();
+        }
+      });
+    });
+
+    // ── Act: kill the ONLY session — this empties the whole tmux server.
+    const killResult = spawnSync(
+      "tmux",
+      ["-L", socketName, "kill-session", "-t", sessionName],
+      { encoding: "utf8", timeout: 5_000 },
+    );
+    assert.equal(killResult.status, 0, `kill-session failed: ${killResult.stderr}`);
+
+    // ── Assert: the server is now gone (last session took it down).
+    await waitFor(
+      () => {
+        const ls = spawnSync("tmux", ["-L", socketName, "has-session", "-t", sessionName], {
+          encoding: "utf8",
+          timeout: 5_000,
+        });
+        // status !== 0 — the session (and with it the server) is gone.
+        return ls.status !== 0;
+      },
+      10_000,
+      "tmux server to be gone after the last session was killed",
+    );
+
+    // ── Assert (THE FIX): sessions.removed STILL arrives on C1 within 15s,
+    // driven by the session-proxy's -CC host.onExit even though the server is
+    // unreachable and `checkSessionPresence` can only answer "inconclusive".
+    const [tp, ct] = rejectAfter(15_000, "Timeout waiting for sessions.removed after last-session kill (empty server)");
+    await Promise.race([removedPromise, tp]);
+    ct();
+    assert.ok(
+      removedAt !== null,
+      "sessions.removed must arrive on C1 after the LAST session is killed and the server dies — " +
+        "the -CC EOF is authoritative genuine-gone evidence (tc-hfxb.19); a regression here is the " +
+        "onlyInTree random-walk flake",
+    );
+
+    mux.transport.close();
+  });
+});

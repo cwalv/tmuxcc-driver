@@ -29,6 +29,7 @@ import { spawnSync } from "node:child_process";
 
 import {
   createSession,
+  killSession,
   listSessions,
   setSessionMarker,
   probeTmuxLiveness,
@@ -165,12 +166,31 @@ describe("tmux-south checkSessionPresence (tc-hfxb.18.4)", () => {
     }
   });
 
-  it("returns 'inconclusive' when the server is not running (NOT 'absent')", () => {
-    // A socket no server is listening on: has-session fails with
-    // "error connecting"/"no server running" — a transient/unreachable signal,
-    // which MUST NOT be treated as positive evidence of session absence.
-    const socketName = `tmuxcc-test-south-noserver-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  it("returns 'inconclusive' for a NEVER-spawned socket (error connecting / no such file)", () => {
+    // A socket no server has ever listened on: has-session fails with
+    // "error connecting to <path> (No such file or directory)" — the cold-boot
+    // pre-spawn window.  The socket is missing/unreachable, which is NOT positive
+    // evidence of absence (the server may be coming up and publish the session
+    // momentarily), so this MUST stay "inconclusive" (tc-hfxb.18.4).
+    const socketName = `tmuxcc-test-south-nosock-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     assert.equal(checkSessionPresence(socketName, "whatever"), "inconclusive");
+  });
+
+  it("returns 'absent' when the server WENT DOWN (last session killed → no server running)", { skip: !TMUX_AVAILABLE }, () => {
+    // tc-hfxb.19: a server that was UP and then lost its last session SELF-EXITS;
+    // a subsequent has-session prints "no server running on <path>" — distinct
+    // from the never-spawned "error connecting / no such file" case above.  A tmux
+    // session cannot outlive its server, so a down server has NO sessions: this is
+    // POSITIVE, conclusive evidence the session is gone → "absent".  (This is the
+    // last-pane/empty-server case the Mode-B reconciliation needed; it does NOT
+    // touch the cold-boot transient, which is protected by the reconciliation
+    // gate's hasSessionProxy fast-path and is "error connecting"/"present", never
+    // "no server running".)
+    const socketName = nextSocketName();
+    createSession(socketName, "doomed");
+    // Kill the only session — the server self-exits (no sessions left).
+    killSession(socketName, "doomed");
+    assert.equal(checkSessionPresence(socketName, "doomed"), "absent");
   });
 });
 

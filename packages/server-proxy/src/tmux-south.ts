@@ -617,20 +617,46 @@ export function killSession(socketName: string, id: string): void {
  * Trustworthy single-session existence check (tc-hfxb.18.4) via
  * `tmux -L <socketName> has-session -t <id>`.
  *
- * `list-sessions` conflates a genuinely-empty server with a transient one
- * ("no server running" / "error connecting" during cold-boot `-CC` churn both
- * yield `[]`).  Reconciliation must NOT declare a session removed on that flaky
- * signal.  `has-session` against the SPECIFIC id is the authoritative check and
- * its three outcomes are distinguishable:
- *   - status 0                                  → "present"
- *   - status≠0, stderr "can't find session"     → "absent" (POSITIVE evidence
- *                                                 the session is gone, server up)
- *   - status≠0 with any other stderr            → "inconclusive" (server
- *     ("error connecting" / "no server running" / spawn error / timeout)         transiently unreachable — NOT evidence of absence)
+ * `list-sessions` conflates a genuinely-empty server with a transient one (it
+ * coerces several distinct outcomes to `[]`).  Reconciliation must NOT declare a
+ * session removed on that flaky signal.  `has-session` against the SPECIFIC id
+ * is the authoritative check, and — unlike `list-sessions` — its outcomes are
+ * distinguishable by status + stderr:
+ *   - status 0                                   → "present"
+ *   - status≠0, stderr "can't find session"      → "absent": the server is UP
+ *                                                  but this session is gone.
+ *   - status≠0, stderr "no server running"       → "absent": the server is DOWN.
+ *                                                  A tmux session cannot outlive
+ *                                                  its server, so a down server
+ *                                                  has NO sessions — this is
+ *                                                  POSITIVE, conclusive evidence
+ *                                                  the session is gone
+ *                                                  (tc-hfxb.19).
+ *   - status≠0, stderr "error connecting" /      → "inconclusive": the SOCKET is
+ *       "no such file or directory" / spawn         missing / unreachable.  This
+ *       error / timeout                              is the cold-boot pre-spawn
+ *                                                    window (the server is coming
+ *                                                    UP and may publish the
+ *                                                    session momentarily), so it
+ *                                                    is NOT evidence of absence.
  *
- * A session is removal-eligible ONLY on "absent".  "present"/"inconclusive"
- * both mean "do not remove" — the conservative answer that closes the spurious
+ * The "no server running" (server WENT DOWN) vs "error connecting / no such file"
+ * (socket never existed) distinction is exact in tmux ≥ 3.x and verified
+ * directly: a last-session kill makes the server self-exit and a subsequent
+ * `has-session` prints "no server running on <path>"; a never-spawned socket
+ * prints "error connecting to <path> (No such file or directory)".
+ *
+ * A session is removal-eligible ONLY on "absent".  "present"/"inconclusive" both
+ * mean "do not remove" — the conservative answer that closes the spurious
  * cold-boot `sessions.removed` race (RCA tc-hfxb.18.3/.18.4).
+ *
+ * Safety w.r.t. tc-hfxb.18.4: that flake's transient signal is a list-sessions
+ * that omits a LIVE session whose session-proxy is still running — every such
+ * removal is already short-circuited by the reconciliation gate's
+ * `hasSessionProxy` fast-path BEFORE this check is consulted, so classifying a
+ * down server as "absent" cannot revive that race.  (And the cold-boot trigger
+ * is a server coming UP — socket missing → "error connecting" → "inconclusive",
+ * or server reachable mid-attach → "present" — never "no server running".)
  *
  * `id` can be a session name or tmux `$N` id.
  */
@@ -649,12 +675,17 @@ export function checkSessionPresence(socketName: string, id: string): TmuxSessio
   if (result.status === 0) {
     return "present";
   }
-  // Non-zero: distinguish genuine absence on a reachable server from a transient
-  // server-unreachable condition.  tmux prints "can't find session: <name>" when
-  // the server is up but the session is gone; "no server running on …" / "error
-  // connecting to …" when the server itself is unreachable.
+  // Non-zero: distinguish CONCLUSIVE absence from a transient unreachable socket.
+  //   - "can't find session"  → server UP, session gone   → absent.
+  //   - "no server running"   → server DOWN (no sessions) → absent (tc-hfxb.19).
+  //   - "error connecting" / "no such file" / other       → socket missing /
+  //                                                          unreachable → inconclusive.
   const stderr = (result.stderr ?? "").toLowerCase();
-  if (stderr.includes("can't find session") || stderr.includes("can’t find session")) {
+  if (
+    stderr.includes("can't find session") ||
+    stderr.includes("can’t find session") ||
+    stderr.includes("no server running")
+  ) {
     return "absent";
   }
   return "inconclusive";
