@@ -81,6 +81,8 @@ interface Received {
 async function muxFixture(): Promise<{
   raw: net.Socket;
   received: Received;
+  /** The server-side SocketTransport (under test) once a client connects. */
+  serverTransport: () => Transport;
   cleanup: () => Promise<void>;
 }> {
   const sockPath = tmpSocketPath();
@@ -110,6 +112,11 @@ async function muxFixture(): Promise<{
   return {
     raw,
     received,
+    serverTransport: () => {
+      const t = transports[0];
+      if (t === undefined) throw new Error("no server-side transport accepted yet");
+      return t;
+    },
     cleanup: async () => {
       raw.destroy();
       for (const t of transports) {
@@ -233,6 +240,95 @@ describe("tc-3y8.9 · multiplexed-stream exact-boundary demux", () => {
       assert.ok(await waitFor(() => received.controls.length >= 1));
       assert.equal(received.controls[0]!.type, "pane.closed");
       assert.equal(received.closed, false);
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// tc-hfxb.20 · reliable flush: closeGracefully() flushes queued bytes
+// ---------------------------------------------------------------------------
+
+/**
+ * Collect every byte the raw client receives and parse exactly ONE
+ * length-prefixed control frame out of it.  Returns the parsed JSON, or null
+ * if a full frame's worth of bytes never arrived (i.e. it was truncated by an
+ * abrupt teardown).
+ */
+function collectOneControlFrame(raw: net.Socket): {
+  result: () => Record<string, unknown> | null;
+  bytesSeen: () => number;
+} {
+  const chunks: Buffer[] = [];
+  raw.on("data", (c: Buffer) => { chunks.push(c); });
+  const parse = (): Record<string, unknown> | null => {
+    const buf = Buffer.concat(chunks);
+    if (buf.length < 4) return null;
+    const len = buf.readUInt32BE(0);
+    if (buf.length < 4 + len) return null; // truncated — full frame never arrived
+    const json = buf.subarray(4, 4 + len).toString("utf8").replace(/\n$/, "");
+    try { return JSON.parse(json) as Record<string, unknown>; } catch { return null; }
+  };
+  return { result: parse, bytesSeen: () => Buffer.concat(chunks).length };
+}
+
+describe("tc-hfxb.20 · reliable flush (closeGracefully)", () => {
+  it("flushes a LARGE queued control frame in full before tearing down (where abrupt destroy would truncate)", async () => {
+    const { raw, serverTransport, cleanup } = await muxFixture();
+    try {
+      // Give the accept handler a tick to wrap the connection.
+      assert.ok(await waitFor(() => { try { serverTransport(); return true; } catch { return false; } }));
+      const server = serverTransport();
+
+      // A control message large enough that `socket.write()` cannot hand it to
+      // the kernel in one synchronous shot — the case `close()`/destroy would
+      // discard the unflushed tail of.  ~512 KiB of payload.
+      const bigIds = Array.from({ length: 20_000 }, (_, i) => `s${i}`);
+      const msg = { type: "server-proxy.exiting", seq: 1, reason: "tmux-gone", goneSessionIds: bigIds };
+      const expectedFrame = encodeControl(msg);
+
+      const collector = collectOneControlFrame(raw);
+
+      // Queue the big frame, then GRACEFULLY close.  The flush must complete
+      // before teardown so the client receives the WHOLE frame.
+      server.sendControl(msg as unknown as Parameters<typeof server.sendControl>[0]);
+      await server.closeGracefully();
+
+      // Wait until the client has seen the full frame's worth of bytes.
+      assert.ok(
+        await waitFor(() => collector.result() !== null, 5_000),
+        `closeGracefully must flush the full ${expectedFrame.length}-byte frame; only saw ${collector.bytesSeen()} bytes`,
+      );
+      const parsed = collector.result();
+      assert.ok(parsed !== null, "the full control frame must be received");
+      assert.equal(parsed!.type, "server-proxy.exiting");
+      assert.equal(parsed!.reason, "tmux-gone");
+      assert.equal((parsed!.goneSessionIds as string[]).length, bigIds.length, "all gone-ids flushed intact");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("is bounded: closeGracefully resolves promptly and fires onClose exactly once", async () => {
+    const { raw, serverTransport, received, cleanup } = await muxFixture();
+    try {
+      assert.ok(await waitFor(() => { try { serverTransport(); return true; } catch { return false; } }));
+      const server = serverTransport();
+      void raw; // client present; we assert on the server side's close handler.
+
+      const started = Date.now();
+      await server.closeGracefully();
+      const elapsed = Date.now() - started;
+      // A well-behaved (draining) client flushes immediately — far under the
+      // 1s bounded fallback.  This pins that the graceful path does not block
+      // on the full timeout in the common case.
+      assert.ok(elapsed < 1_000, `closeGracefully should resolve promptly with a draining client; took ${elapsed}ms`);
+      assert.equal(received.closed, true, "onClose must have fired exactly once on the server transport");
+
+      // Idempotent: a follow-up close()/closeGracefully is a no-op.
+      server.close();
+      await server.closeGracefully();
     } finally {
       await cleanup();
     }

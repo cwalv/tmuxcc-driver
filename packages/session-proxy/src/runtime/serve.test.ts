@@ -832,6 +832,7 @@ function createAsyncTransportPair(): { sessionProxy: Transport; client: Transpor
       for (const h of clientCloseHandlers) h(err);
       for (const h of sessionProxyCloseHandlers) h(err);
     },
+    closeGracefully(err) { this.close(err); return Promise.resolve(); },
   };
 
   const client: Transport = {
@@ -856,6 +857,7 @@ function createAsyncTransportPair(): { sessionProxy: Transport; client: Transpor
       for (const h of sessionProxyCloseHandlers) h(err);
       for (const h of clientCloseHandlers) h(err);
     },
+    closeGracefully(err) { this.close(err); return Promise.resolve(); },
   };
 
   return { sessionProxy, client };

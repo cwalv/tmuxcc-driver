@@ -59,6 +59,19 @@ import type { PaneId } from "@tmuxcc/session-proxy";
 /** Size of the control-plane length prefix. */
 const CTRL_LEN_SIZE = 4;
 
+/**
+ * Bounded budget for `closeGracefully()`'s flush (tc-hfxb.20).
+ *
+ * `socket.end()` flushes the userspace write buffer to the kernel and sends a
+ * FIN; its callback fires once the OS has accepted the queued bytes.  On a
+ * local AF_UNIX socket that is immediate, but a wedged peer whose receive
+ * window is full could stall the flush indefinitely.  We wait at most this long
+ * for the flush, then force `destroy()` so a wedged client can never hang the
+ * broker's self-exit.  Fail-loud, not block — the design's bounded-timeout
+ * requirement.
+ */
+const GRACEFUL_CLOSE_FLUSH_TIMEOUT_MS = 1_000;
+
 // Per-pane sequence counter map (per transport instance).
 // In production the session-proxy owns sequence numbers; the server-proxy socket transport
 // increments them per pane.
@@ -190,6 +203,74 @@ class SocketTransport implements Transport {
     this._drainResolve = null;
     if (r !== null) r();
     this._socket.destroy(err);
+    for (const h of this._closeHandlers) h(err);
+    this._closeHandlers.clear();
+  }
+
+  /**
+   * Graceful close that FLUSHES queued outbound bytes before teardown
+   * (tc-hfxb.20).
+   *
+   * Where `close()` calls `socket.destroy()` (which discards the unflushed
+   * userspace write buffer — best-effort delivery of the last frame),
+   * `closeGracefully()` calls `socket.end()`, which writes out the queued
+   * bytes and sends a FIN.  `end()`'s callback fires once the OS has accepted
+   * the queued bytes — that is the flush we wait for, so the broker's
+   * pre-self-exit `server-proxy.exiting` frame reliably reaches the client.
+   *
+   * Bounded: if the flush has not completed within
+   * `GRACEFUL_CLOSE_FLUSH_TIMEOUT_MS` (a wedged peer with a full receive
+   * window), we force `destroy()` so shutdown can never hang.  Either way the
+   * promise resolves and the transport ends fully closed (handlers fired
+   * exactly once via the shared `_closed` guard).
+   */
+  closeGracefully(err?: Error): Promise<void> {
+    if (this._closed) return Promise.resolve();
+
+    // Release any awaiters on the drain promise.  We do NOT set `_closed` yet:
+    // `_closed` short-circuits send*, but the buffered exiting frame is already
+    // enqueued in the socket — `end()` will flush it.  `_finishClose()` sets
+    // `_closed` and fires handlers exactly once, whether reached via the flush
+    // callback, the timeout, or a concurrent socket 'close'.
+    const r = this._drainResolve;
+    this._drainPromise = null;
+    this._drainResolve = null;
+    if (r !== null) r();
+
+    return new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this._finishClose(err);
+        resolve();
+      };
+
+      // Bounded fallback: a wedged peer must not hang shutdown.  Force a
+      // destroy() and resolve once the budget elapses.
+      const timer = setTimeout(() => {
+        this._socket.destroy(err);
+        finish();
+      }, GRACEFUL_CLOSE_FLUSH_TIMEOUT_MS);
+      // Do not keep the event loop alive solely for this timer.
+      if (typeof timer.unref === "function") timer.unref();
+
+      // socket.end() flushes the write buffer + sends FIN; the callback fires
+      // when the queued bytes have been handed to the kernel.
+      this._socket.end(() => { finish(); });
+    });
+  }
+
+  /**
+   * Idempotently mark closed and fire close handlers exactly once
+   * (tc-hfxb.20).  Shared by `closeGracefully()`'s flush/timeout paths; the
+   * socket's own 'close'/'error' events still route through `_onClose`, which
+   * is a no-op once `_closed` is set.
+   */
+  private _finishClose(err?: Error): void {
+    if (this._closed) return;
+    this._closed = true;
     for (const h of this._closeHandlers) h(err);
     this._closeHandlers.clear();
   }

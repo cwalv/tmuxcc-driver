@@ -261,11 +261,36 @@ export type ServerProxyExitReason =
  * extensions ignore unknown control messages (the keepalive's `onControl`
  * is a drain-only handler), so a new broker talking to an old extension
  * loses ONLY the classification refinement; lifecycle is unchanged.
+ *
+ * # `goneSessionIds` (tc-hfxb.20)
+ *
+ * On a WHOLE-SERVER death (`reason="tmux-gone"`) the broker self-exits, so the
+ * client never receives a per-session `sessions.removed` for the sessions it
+ * is losing — those frames would race (or be discarded by) the immediately
+ * following shutdown.  The broker DOES know the lost ids (its `_sessions` map
+ * is fully populated at self-exit), so it names them here once, in the same
+ * frame the classifier already keys off.  This lets the client scope a
+ * PRECISE per-session "session ended" reaction to exactly the lost tabs
+ * WITHOUT inferring from the dropped connection.
+ *
+ * Additive + backward-tolerant: the field is optional on the wire.  An older
+ * broker omits it (the client falls back to the un-scoped reaction); an older
+ * client ignoring it is unaffected (it never reads the field).  The `idle`
+ * reason carries no ids (no sessions are being lost — the broker had none).
  */
 export interface ServerProxyExitingMessage extends MessageBase {
   readonly type: "server-proxy.exiting";
   /** Why the broker is exiting.  See {@link ServerProxyExitReason}. */
   readonly reason: ServerProxyExitReason;
+  /**
+   * The ids of the sessions being lost with this exit (tc-hfxb.20).
+   *
+   * Populated on a whole-server `tmux-gone` self-exit with every session the
+   * broker still tracked.  Absent (or empty) when no sessions are being lost
+   * (e.g. `reason="idle"`).  Optional for backward-tolerance — see the
+   * docblock above.
+   */
+  readonly goneSessionIds?: readonly SessionId[];
 }
 
 // ---------------------------------------------------------------------------

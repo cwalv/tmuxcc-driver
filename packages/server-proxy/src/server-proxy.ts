@@ -341,6 +341,24 @@ class ServerProxyImpl implements ServerProxyHandle {
   private _clients = new Map<Transport, ClientState>();
   /** Session table: sessionId → SessionEntry */
   private _sessions = new Map<SessionId, SessionEntry>();
+  /**
+   * The session ids known at the last point `_sessions` was non-empty
+   * (tc-hfxb.20).
+   *
+   * On a whole-server `tmux-gone` death the broker's `-CC` watcher can emit a
+   * final `%sessions-changed` whose `_refreshSessions` confirms every session
+   * absent ("no server running" → "absent", tc-hfxb.19) and EMPTIES `_sessions`
+   * — and that data-callback can win the race against the watcher EOF that
+   * drives `_selfExit("tmux-gone")`.  Reading the live (now-empty) map at
+   * self-exit would then name ZERO lost sessions.  This mirror holds the
+   * last-known ids so the exiting announcement can still name exactly the
+   * sessions the user lost.  Kept in sync at the end of every refresh; an
+   * empty refresh does NOT clear it (the whole point is to survive the
+   * empty-out), so a genuine drain-to-zero leaves the prior set — acceptable
+   * because the only consumer is the tmux-gone self-exit (a brand-new broker
+   * that never saw a session has an empty set, which is correct).
+   */
+  private _lastKnownSessionIds: SessionId[] = [];
   /** Name index: session name → SessionEntry (for fast lookups) */
   private _byName = new Map<string, SessionEntry>();
 
@@ -387,6 +405,17 @@ class ServerProxyImpl implements ServerProxyHandle {
   private _idleTimer: ReturnType<typeof setTimeout> | null = null;
   /** Set once a self-exit has been initiated; suppresses re-entry. */
   private _selfExited = false;
+  /**
+   * The in-flight `shutdown()` promise, or null when not shutting down
+   * (tc-hfxb.20).  `shutdown()` now AWAITS the bounded graceful close of every
+   * client transport, which widens the window in which a concurrent caller can
+   * enter — e.g. a `tmux-gone` `_selfExit` running shutdown while the
+   * entry-point / a test's `finally` independently calls it.  Without a guard,
+   * both would race `net.Server.close()` and the second throws
+   * `ERR_SERVER_NOT_RUNNING`.  Sharing one in-flight promise makes shutdown
+   * re-entrancy-safe.
+   */
+  private _shutdownPromise: Promise<void> | null = null;
   /** True while a watcher-EOF tmux probe is in flight. */
   private _probeInFlight = false;
   private _selfExitHandlers: Array<(reason: ServerProxySelfExitReason) => void> = [];
@@ -492,6 +521,10 @@ class ServerProxyImpl implements ServerProxyHandle {
   async start(): Promise<void> {
     if (this._started) throw new Error("ServerProxy already started");
     this._selfExited = false;
+    // tc-hfxb.20: clear any prior shutdown's settled promise so THIS instance's
+    // shutdown runs (the guard keeps the promise set after completion to make a
+    // late repeat call a no-op; a fresh start must re-enable shutdown).
+    this._shutdownPromise = null;
 
     this._socketPath = serverProxySocketPath(this._socketDirName, this._runtimeDirOpts);
 
@@ -539,7 +572,20 @@ class ServerProxyImpl implements ServerProxyHandle {
     this._startIdleTimer();
   }
 
-  async shutdown(): Promise<void> {
+  shutdown(): Promise<void> {
+    // tc-hfxb.20: re-entrancy guard.  Concurrent callers (a `tmux-gone`
+    // `_selfExit` + an entry-point / test `finally`) share ONE in-flight
+    // shutdown so they cannot both race `net.Server.close()`.
+    if (this._shutdownPromise !== null) return this._shutdownPromise;
+    const p = this._shutdownOnce();
+    this._shutdownPromise = p;
+    // Leave `_shutdownPromise` set after completion so a late repeat call is a
+    // no-op (matches the pre-tc-hfxb.20 idempotent contract — a second
+    // shutdown found `_server` already null and skipped its close).
+    return p;
+  }
+
+  private async _shutdownOnce(): Promise<void> {
     this._clearIdleTimer();
     if (this._respawnTimer !== null) {
       clearTimeout(this._respawnTimer);
@@ -549,11 +595,30 @@ class ServerProxyImpl implements ServerProxyHandle {
     this._watcher?.stop();
     this._watcher = null;
 
-    // Disconnect all clients
+    // Disconnect all clients.
+    //
+    // tc-hfxb.20: close GRACEFULLY (flush-then-FIN) rather than abruptly
+    // (destroy, which discards the unflushed userspace write buffer).  This is
+    // what makes the broker's pre-self-exit `server-proxy.exiting` frame —
+    // broadcast by `_broadcastExiting` immediately before `_selfExit` calls
+    // shutdown() — reliably reach the client instead of being discarded with
+    // the socket.  Each graceful close is BOUNDED (a wedged peer cannot hang
+    // shutdown); we await all of them together so the flush completes before
+    // the socket file is removed below.  Harmless on the SIGTERM/explicit
+    // shutdown path (no exiting frame queued → end() flushes nothing and
+    // FINs immediately).
+    const closes: Array<Promise<void>> = [];
     for (const [transport] of this._clients) {
-      try { transport.close(); } catch { /* ignore */ }
+      try {
+        closes.push(transport.closeGracefully());
+      } catch {
+        // Graceful close threw synchronously — fall back to abrupt close so
+        // shutdown still tears the transport down.
+        try { transport.close(); } catch { /* ignore */ }
+      }
     }
     this._clients.clear();
+    await Promise.all(closes);
 
     // Reap all session-proxies
     this._supervisor.reapAll();
@@ -720,7 +785,25 @@ class ServerProxyImpl implements ServerProxyHandle {
     // tc-xnay / tc-ymxe: announce designed exit BEFORE shutdown closes
     // transports.  Mirrors `_broadcastToAll` shape; inlined here so the
     // shutdown path doesn't have to know about the announcement seq.
-    this._broadcastExiting(reason);
+    //
+    // tc-hfxb.20: name the sessions being lost so the client can scope a
+    // precise per-session "session ended" reaction.  A whole-server
+    // `tmux-gone` death loses EVERY tracked session (the broker is exiting,
+    // so no per-session `sessions.removed` will reach the client); an
+    // `idle` exit loses none (the broker had no sessions).
+    //
+    // Source: prefer the LIVE `_sessions`, but fall back to the
+    // last-known-ids mirror — a racing final `%sessions-changed` refresh can
+    // empty `_sessions` before this self-exit runs (the whole-server death
+    // confirms every session absent), and reading the now-empty map would name
+    // zero lost sessions.  `_lastKnownSessionIds` survives that empty-out.
+    let goneSessionIds: SessionId[] = [];
+    if (reason === "tmux-gone") {
+      goneSessionIds = this._sessions.size > 0
+        ? Array.from(this._sessions.keys())
+        : this._lastKnownSessionIds;
+    }
+    this._broadcastExiting(reason, goneSessionIds);
 
     try {
       await this.shutdown();
@@ -747,12 +830,18 @@ class ServerProxyImpl implements ServerProxyHandle {
    * whose write fails) is silently skipped — the connection-count change
    * listener will reap it during shutdown's transport.close() loop.
    */
-  private _broadcastExiting(reason: ServerProxySelfExitReason): void {
+  private _broadcastExiting(
+    reason: ServerProxySelfExitReason,
+    goneSessionIds: readonly SessionId[],
+  ): void {
     for (const [transport, state] of this._clients) {
       const msg: ServerProxyExitingMessage = {
         type: "server-proxy.exiting",
         seq: state.nextSeq,
         reason,
+        // tc-hfxb.20: name the lost sessions (omit the field entirely when
+        // none, so the frame matches the pre-tc-hfxb.20 shape for `idle`).
+        ...(goneSessionIds.length > 0 ? { goneSessionIds } : {}),
       };
       state.nextSeq++;
       try {
@@ -939,6 +1028,15 @@ class ServerProxyImpl implements ServerProxyHandle {
 
     // tc-x6l: update the sessions-active gauge after each refresh.
     this._metrics.setSessionsActive(this._sessions.size);
+
+    // tc-hfxb.20: keep the last-known-session-ids mirror current so a
+    // tmux-gone self-exit can name the lost sessions even if a racing
+    // empty-out refresh just cleared `_sessions`.  Only snapshot when
+    // non-empty — an empty refresh must NOT clobber the prior set (that race
+    // is exactly what this mirror exists to survive).
+    if (this._sessions.size > 0) {
+      this._lastKnownSessionIds = Array.from(this._sessions.keys());
+    }
   }
 
   // ---------------------------------------------------------------------------
