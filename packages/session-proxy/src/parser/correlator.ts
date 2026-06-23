@@ -180,6 +180,15 @@ interface PendingCommand {
   resolve: (result: CommandResult) => void;
   reject: (err: Error) => void;
   /**
+   * True iff this slot was abandoned by `cancelOldest()` (tc-hfxb.15). The
+   * waiter's Promise has ALREADY been rejected; the slot stays in the FIFO as
+   * a DRAINED PLACEHOLDER so the (possibly-late) tmux reply for the abandoned
+   * command still consumes THIS slot's position rather than mis-binding to a
+   * subsequent, live slot. On close, a cancelled slot is dequeued and its
+   * reply discarded — it is never resolved a second time.
+   */
+  cancelled: boolean;
+  /**
    * Wall-clock timestamp (milliseconds, from `Date.now()`) at which this
    * slot was registered. Used to compute the oldest-pending-slot age for
    * `correlator_pending_slot_max_age_seconds` (tc-3si.5). Captured at
@@ -269,6 +278,7 @@ export class CommandCorrelator {
         resolve,
         reject,
         registeredAtMs: this._nowMs(),
+        cancelled: false,
       });
       this._firePendingChanged();
     });
@@ -331,6 +341,42 @@ export class CommandCorrelator {
     }
     this._write(commands.map((c) => c + "\n").join(""));
     return promises;
+  }
+
+  /**
+   * Abandon the `count` OLDEST still-live pending slots (tc-hfxb.15).
+   *
+   * Used to recover from a STALLED command round-trip (the bootstrap requery
+   * whose first `list-*` reply never arrives under host load — see
+   * `pipeline.start()`). Each abandoned slot's waiter Promise is REJECTED with
+   * `err` so the caller stops awaiting and can re-issue, but the slot is NOT
+   * removed from the FIFO: it is flagged `cancelled` and left in place as a
+   * DRAINED PLACEHOLDER.
+   *
+   * Why leave it in the FIFO instead of removing it? The correlator binds
+   * replies to slots POSITIONALLY (oldest-first on `%end`/`%error`). If the
+   * stalled command's reply eventually does arrive — concurrently with the
+   * re-issued command and/or unrelated commands queued behind it — that late
+   * reply MUST consume the abandoned slot's position. Removing the slot would
+   * shift every later slot forward by one, so the late reply would mis-bind to
+   * a live command's slot and corrupt its response (the exact tc-3si.1 / tc-128.4
+   * mis-bind class). Keeping the placeholder makes the late reply land on the
+   * cancelled slot, where `_closeBlock` discards it.
+   *
+   * Already-cancelled slots are skipped (idempotent) and do NOT count toward
+   * `count`. Returns the number of slots actually cancelled (may be < `count`
+   * if fewer live slots are pending).
+   */
+  cancelOldest(count: number, err: Error): number {
+    let cancelledCount = 0;
+    for (const pending of this._pending) {
+      if (cancelledCount >= count) break;
+      if (pending.cancelled) continue;
+      pending.cancelled = true;
+      cancelledCount += 1;
+      pending.reject(err);
+    }
+    return cancelledCount;
   }
 
   /**
@@ -498,6 +544,16 @@ export class CommandCorrelator {
 
     // Slot consumed — let the gauge layer reflect the new (smaller) depth.
     this._firePendingChanged();
+
+    // tc-hfxb.15: a cancelled slot is a DRAINED PLACEHOLDER left in the FIFO
+    // by `cancelOldest()` so the (possibly-late) reply for an abandoned
+    // command consumes THIS slot's position instead of mis-binding to a live
+    // slot behind it. The waiter's Promise was already rejected at cancel
+    // time; discard this reply (do NOT resolve/reject again). The FIFO has now
+    // correctly advanced past the abandoned command.
+    if (pending.cancelled) {
+      return;
+    }
 
     // Secondary safety: if we bound a commandNumber to this pending entry on
     // %begin, verify it matches now.

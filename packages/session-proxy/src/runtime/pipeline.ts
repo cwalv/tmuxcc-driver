@@ -96,7 +96,7 @@ import {
 import type { PaneBufferStore } from "../state/scrollback.js";
 import type { SessionModel, InvariantViolation } from "../state/model.js";
 import type { SwitchClientOutcome } from "../state/switch-client.js";
-import { createRequeryEngine, type RequeryEngine, type SubmitCommand } from "../state/requery.js";
+import { createRequeryEngine, type RequeryEngine, type RequeryResult, type SubmitCommand } from "../state/requery.js";
 import {
   createCoalescer,
   isTopologyEvent,
@@ -282,6 +282,29 @@ export interface RuntimePipelineOptions {
    * (tests, integration setups) that do not wire an error boundary.
    */
   onFatalError?: (err: unknown) => void;
+
+  /**
+   * Bounded timeout (ms) for each attempt of the BOOTSTRAP requery in
+   * `start()` (tc-hfxb.15). The bootstrap requery is a `list-windows` /
+   * `list-panes` round-trip over the freshly-forked `tmux -CC` stream; under
+   * host load that first round-trip can STALL, and the round-trip has no
+   * timeout anywhere in the chain. A single stall would silently consume the
+   * caller's whole connect budget (the e2e suite's 15 s terminal-appearance
+   * wait — see tc-hfxb.15 / tc-crnt.17).
+   *
+   * On timeout, `start()` CANCELS the stalled requery's correlator slots (so a
+   * late `%end` can't mis-bind a subsequent command — see
+   * `CommandCorrelator.cancelOldest`) and RE-ISSUES the requery. The requery is
+   * a pure, idempotent read, so re-issuing is safe. The 15 s envelope is
+   * unchanged — this makes a transient stall RECOVERABLE within budget rather
+   * than fatal. Same class as tc-vw10's un-timeout'd liveness probe.
+   *
+   * Default 3500 ms (well under the 15 s envelope, with room for ~2-3
+   * attempts). Set to 0 / a non-positive value to DISABLE the bounded retry
+   * and fall back to a single unbounded `engine.requery()` (the pre-tc-hfxb.15
+   * behaviour) — used only by tests that assert the old shape.
+   */
+  bootstrapRequeryTimeoutMs?: number;
 }
 
 /**
@@ -550,6 +573,7 @@ class RuntimePipelineImpl implements RuntimePipeline {
       checkInvariantsOnUpdate: opts.checkInvariantsOnUpdate ?? false,
       ceilingMs: opts.ceilingMs ?? 1000,
       heartbeatMs: opts.heartbeatMs ?? 30_000,
+      bootstrapRequeryTimeoutMs: opts.bootstrapRequeryTimeoutMs ?? 3500,
       sessionName: opts.sessionName,
       onSwitchClientDetected: opts.onSwitchClientDetected,
       clock: opts.clock ?? realClock(),
@@ -800,7 +824,7 @@ class RuntimePipelineImpl implements RuntimePipeline {
     // notifications instead of feeding the coalescer — see _bootstrapBuffer.
     // After commit we drain the buffer; replays that classify as topology
     // mark dirty and the coalescer's leading-edge fire picks them up.
-    const initialResult = await engine.requery();
+    const initialResult = await this._bootstrapRequeryWithRetry(engine);
     if (initialResult.failed) {
       // Bootstrap %error: leave the model empty (the engine already did) and
       // let the coalescer's heartbeat retry. We still mark the pipeline live
@@ -903,6 +927,116 @@ class RuntimePipelineImpl implements RuntimePipeline {
 
     // Start the coalescer's heartbeat so silent changes get caught.
     coalescer.start();
+  }
+
+  /**
+   * Run the BOOTSTRAP requery with a bounded per-attempt timeout, re-issuing
+   * on a stall (tc-hfxb.15).
+   *
+   * THE BUG: the bootstrap requery (`engine.requery()` — a `list-windows` /
+   * `list-panes` round-trip over the freshly-forked `tmux -CC` stream) has no
+   * timeout anywhere in the chain. Under host load that FIRST round-trip can
+   * lose the CPU race and stall; with no timeout it stalls FOREVER, silently
+   * consuming the caller's whole connect budget (the e2e suite's 15 s
+   * terminal-appearance wait fails at serial position ~22 under load — the
+   * tc-crnt.17 / tc-0eds class). The only existing retry
+   * (`connectWithBoundedRetry` in the extension) fires on a thrown REJECTION,
+   * never on a stall.
+   *
+   * THE FIX (driver-side, idempotent locus): race each `engine.requery()`
+   * attempt against `bootstrapRequeryTimeoutMs`. On timeout, the stalled
+   * cycle's two `list-*` correlator slots are still pending; CANCEL them via
+   * `correlator.cancelOldest` (which leaves drained placeholders in the FIFO so
+   * a late `%end` can't mis-bind a subsequent command — the tc-3si.1 mis-bind
+   * class), let the abandoned `engine.requery()` settle, then RE-ISSUE. The
+   * requery is a PURE, IDEMPOTENT read (it does NOT mint anything — unlike the
+   * extension's `session.createUnique`, which is why the retry belongs HERE and
+   * not extension-side), so re-issuing after a stall is safe. The 15 s envelope
+   * is UNCHANGED — this makes a transient stall RECOVERABLE within budget, not
+   * a budget bump. Same shape as tc-vw10's un-timeout'd liveness probe.
+   *
+   * Bounded to `MAX_BOUNDED_ATTEMPTS` timed attempts (default 3500 ms each ⇒
+   * ≤ ~10.5 s, comfortably inside 15 s); after that a final UNBOUNDED attempt
+   * runs so a slow-but-live tmux still completes against the caller's outer
+   * budget rather than being abandoned. A non-positive `bootstrapRequeryTimeoutMs`
+   * disables the bounded path entirely (single unbounded `engine.requery()` —
+   * the pre-tc-hfxb.15 behaviour).
+   */
+  private async _bootstrapRequeryWithRetry(
+    engine: RequeryEngine,
+  ): Promise<RequeryResult> {
+    const timeoutMs = this._opts.bootstrapRequeryTimeoutMs;
+    if (timeoutMs <= 0) {
+      // Bounded retry disabled — original single unbounded round-trip.
+      return engine.requery();
+    }
+
+    // Each bootstrap cycle issues exactly two `list-*` commands (windows,
+    // panes); on a stall both slots are still pending. Cancel both.
+    const BOOTSTRAP_SLOT_COUNT = 2;
+    const MAX_BOUNDED_ATTEMPTS = 3;
+    const clock = this._opts.clock;
+
+    for (let attempt = 1; attempt <= MAX_BOUNDED_ATTEMPTS; attempt++) {
+      if (this._stopped) return engine.requery();
+
+      const cyclePromise = engine.requery();
+      let timedOut = false;
+      const timeoutResult = await new Promise<"done" | "timeout">((resolve) => {
+        const handle = clock.setTimeout(() => {
+          timedOut = true;
+          resolve("timeout");
+        }, timeoutMs);
+        cyclePromise.then(
+          () => {
+            clock.clearTimeout(handle);
+            resolve("done");
+          },
+          () => {
+            // The cycle settled (rejected) on its own — e.g. a prior cancel's
+            // %error, or a correlator protocol anomaly. Treat as "done" and
+            // let the await below surface the result/rejection uniformly.
+            clock.clearTimeout(handle);
+            resolve("done");
+          },
+        );
+      });
+
+      if (timeoutResult === "done" || !timedOut) {
+        // The cycle resolved before the deadline. Await it for the value
+        // (or to re-throw a genuine rejection — the bounded-retry only
+        // recovers from STALLS, not from real protocol failures).
+        return await cyclePromise;
+      }
+
+      // Stall: the deadline fired first. Cancel the stalled cycle's two
+      // `list-*` slots so a late reply can't mis-bind, then let the abandoned
+      // `engine.requery()` settle (the cancel rejects its submit Promises ⇒
+      // its `Promise.all` rejects ⇒ the engine clears its in-flight latch) so
+      // the next loop's `engine.requery()` issues a FRESH cycle rather than
+      // re-latching the dead one.
+      const cancelled = this._correlator.cancelOldest(
+        BOOTSTRAP_SLOT_COUNT,
+        new Error(
+          `bootstrap requery attempt ${attempt} stalled past ${timeoutMs} ms — ` +
+            `cancelling slots and re-issuing (tc-hfxb.15)`,
+        ),
+      );
+      process.stderr.write(
+        `[pipeline] bootstrap requery STALLED (attempt ${attempt}/${MAX_BOUNDED_ATTEMPTS}, ` +
+          `> ${timeoutMs} ms); cancelled ${cancelled} correlator slot(s) and re-issuing. ` +
+          `The freshly-forked tmux server's first list-* round-trip lost the CPU race under ` +
+          `host load (tc-hfxb.15 / tc-crnt.17 class).\n`,
+      );
+      await cyclePromise.then(
+        () => {},
+        () => {},
+      );
+    }
+
+    // Bounded attempts exhausted: fall back to one final UNBOUNDED requery so a
+    // slow-but-live tmux still bootstraps against the caller's outer budget.
+    return engine.requery();
   }
 
   /**
