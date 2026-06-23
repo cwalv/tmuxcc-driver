@@ -147,16 +147,19 @@ describe("createFlowController — drain → continue", () => {
       lowWaterBytes: 200,
     });
 
-    // Flood past high-water to trigger pause.
+    // Flood past high-water to trigger pause. The crossing chunk's overshoot
+    // is gate-dropped (FC-4, tc-2ztp), so buffered clamps to HIGH_WATER (1000)
+    // rather than the raw 1001 appended.
     fc.onPaneBytes(P3, 1_001);
+    assert.equal(fc.bufferedBytes(P3), 1_000, "buffered clamps to high-water at the pause edge");
     writes.length = 0; // reset to track only the resume command
 
     // Drain to just above low-water — not enough to resume.
-    fc.noteDrained(P3, 800); // buffered = 201 > 200 lowWater
+    fc.noteDrained(P3, 799); // buffered = 201 > 200 lowWater
     assert.equal(demux.isPanePaused(P3), true, "still paused above low-water");
     assert.equal(writes.length, 0, "no continue command yet");
 
-    // Drain one more byte — falls below low-water.
+    // Drain two more bytes — falls below low-water.
     fc.noteDrained(P3, 2); // buffered = 199 < 200
     assert.equal(demux.isPanePaused(P3), false, "demux resumed after draining below low-water");
 
@@ -538,18 +541,20 @@ describe("createFlowController — multi-client per-client ledgers (tc-0wtb)", (
     fc.addClient(clientA);
     fc.addClient(clientB);
 
-    // Flood: 11 appends of 100 bytes each = 1100 bytes per client.
-    // Client A keeps up (drains each chunk); client B is the slow consumer and
-    // drains nothing. Under the OLD shared ledger A's drains would cancel the
-    // appends and the counter would pin at ~0, never pausing. Under per-client
-    // ledgers B's sub-ledger climbs to 1100 > high-water and pauses on B.
+    // Flood: 11 appends of 100 bytes each. Client A keeps up (drains each
+    // chunk); client B is the slow consumer and drains nothing. Under the OLD
+    // shared ledger A's drains would cancel the appends and the counter would
+    // pin at ~0, never pausing. Under per-client ledgers B's sub-ledger climbs
+    // past high-water and pauses on B. The crossing append clamps B to
+    // HIGH_WATER (FC-4, tc-2ztp: the overshoot is gate-dropped), so B's max
+    // backlog settles at 1000, not the raw 1100 appended.
     for (let i = 0; i < 11; i++) {
       fc.onPaneBytes(P3, 100);
       fc.noteDrained(P3, 100, clientA); // A is the fast client
     }
 
     assert.equal(fc.isPanePaused(P3), true, "pause must engage on the slow client (B), not pin at 0");
-    assert.equal(fc.bufferedBytes(P3), 1_100, "max backlog is the slow client B's 1100 bytes");
+    assert.equal(fc.bufferedBytes(P3), 1_000, "max backlog is the slow client B's backlog, clamped at high-water");
     const cmds = commands(writes);
     assert.ok(cmds.some((c) => c.includes("%3:pause")), `expected a %3:pause command, got: ${cmds}`);
   });
@@ -759,9 +764,19 @@ describe("createFlowController — metrics hooks (tc-d7i)", () => {
     assert.equal(fc.isPanePaused(P3), true);
     assert.deepEqual(seen, [], "the crossing call itself is not while-paused");
 
+    // The crossing call clamped buffered to HIGH_WATER (FC-4, tc-2ztp): 1100
+    // appended, overshoot gate-dropped → buffered == 1000.
+    assert.equal(fc.bufferedBytes(P3), 1_000, "crossing overshoot is gate-dropped, buffered clamps to high-water");
+
     fc.onPaneBytes(P3, 300); // in-flight window
     fc.onPaneBytes(P3, 50);
-    assert.deepEqual(seen, [300, 50], "post-pause arrivals are counted, per arrival");
+    assert.deepEqual(seen, [300, 50], "post-pause arrivals are witnessed, per arrival");
+    // FC-4 (tc-2ztp): while-paused bytes are gate-dropped, NOT retained — the
+    // demux never fans them out, so noteDrained never credits them. Retaining
+    // them is exactly the wedge: the resume MAX would never clear once the
+    // producer stops. bufferedBytes must stay clamped at HIGH_WATER, not
+    // climb to 1000+300+50.
+    assert.equal(fc.bufferedBytes(P3), 1_000, "while-paused bytes are not retained in the resume-gating ledger");
 
     // Drain to resume; subsequent bytes are no longer counted.
     fc.noteDrained(P3, fc.bufferedBytes(P3));

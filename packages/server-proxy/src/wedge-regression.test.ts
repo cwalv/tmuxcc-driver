@@ -288,3 +288,147 @@ describe("tc-7xv.24 wedge regression — real-socket backpressure engages tmux p
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Suite: tc-2ztp — Ctrl-C-after-firehose drain-path wedge
+// ---------------------------------------------------------------------------
+//
+// Distinct from tc-7xv.24 (which fixed the PAUSE side: real backpressure now
+// engages tmux pause). tc-2ztp is a RESUME-side wedge surfaced by ioTorture:
+// after a high-throughput firehose pauses the pane, the user hits Ctrl-C and
+// the producer stops — but the prompt never returns and a follow-up
+// `echo DRAIN_OK` never appears: the pane is wedged permanently.
+//
+// Mechanism: once the pane is paused, every subsequent %output append is
+// DROPPED by the demux gate (output-demux's append returns early for a paused
+// pane — no fan-out, no resume-time flush). The production accounting wrapper
+// (session-proxy.ts) calls fc.onPaneBytes for those bytes (FC-4), but because
+// they never reach any transport's sendData, the draining wrapper never
+// credits fc.noteDrained for them. They permanently inflate the resume-gating
+// MAX above LOW_WATER. After Ctrl-C the genuinely-buffered bytes drain and
+// credit, but the phantom gate-dropped bytes pin the MAX → fc never crosses
+// the resume edge → tmux is never told to continue → frozen terminal.
+//
+// The crucial difference from the tc-7xv.24 suite above: those tests append
+// straight through baseStore (bypassing the demux gate), so while-paused bytes
+// are still fanned out and still credited — the gate-drop divergence never
+// shows. This suite drives the FULL production path: account-then-gate via
+// demux.store.append, so paused appends are actually dropped. It then stops
+// the producer (SIGINT) and asserts the pane still resumes.
+//
+// The fix (tc-2ztp, flow-control.ts): onPaneBytes does not retain bytes that
+// arrive while already paused, and clamps the crossing chunk's overshoot back
+// to HIGH_WATER — so "buffered" only ever counts bytes actually owed to a
+// transport, the only quantity the resume edge can clear.
+// ---------------------------------------------------------------------------
+
+describe("tc-2ztp Ctrl-C-after-firehose — drain path resumes after producer stops", () => {
+  it("a firehose that pauses, then a producer stop, still resumes on consumer drain", async () => {
+    const sockPath = tmpSocketPath("ctrlc");
+    const heldSockets: net.Socket[] = [];
+
+    // Slow consumer: accept but pause reads, so the firehose forces tmux pause.
+    const server = net.createServer((sock) => {
+      sock.pause();
+      heldSockets.push(sock);
+    });
+    await new Promise<void>((resolve) => server.listen(sockPath, resolve));
+    after(async () => {
+      for (const s of heldSockets) { try { s.destroy(); } catch { /* ignore */ } }
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      try { fs.unlinkSync(sockPath); } catch { /* ignore */ }
+    });
+
+    const clientTransport = await connectSocketTransport(sockPath);
+    after(() => clientTransport.close());
+
+    const { writes, send } = makeFakeSend();
+    const demux = createOutputDemux();
+    const fc = createFlowController(send, demux);
+    // Register the client so per-client accounting matches production (tc-0wtb).
+    fc.addClient(clientTransport);
+
+    // Production-shaped accounting store (session-proxy.ts step 4): COUNT then
+    // APPEND, where APPEND goes through demux.store — whose gate DROPS bytes for
+    // a paused pane. This is the path the tc-7xv.24 suite above does NOT model.
+    const accountingStore = {
+      append(pid: PaneId, bytes: Uint8Array): void {
+        if (bytes.length > 0) fc.onPaneBytes(pid, bytes.length);
+        demux.store.append(pid, bytes);
+      },
+      getContents: demux.store.getContents.bind(demux.store),
+      size: demux.store.size.bind(demux.store),
+      drop: demux.store.drop.bind(demux.store),
+      clear: demux.store.clear.bind(demux.store),
+    };
+
+    // Attach the draining transport (credits THIS client's sub-ledger).
+    const drainingTransport: Transport = {
+      ...clientTransport,
+      sendData(pid: PaneId, bytes: Uint8Array): void | Promise<void> {
+        const result = clientTransport.sendData(pid, bytes);
+        if (bytes.length === 0) return result;
+        if (result !== undefined && typeof (result as Promise<void>).then === "function") {
+          return (result as Promise<void>).then(() => {
+            fc.noteDrained(pid, bytes.length, clientTransport);
+          });
+        }
+        fc.noteDrained(pid, bytes.length, clientTransport);
+        return undefined;
+      },
+    };
+    demux.attachTransport(drainingTransport);
+
+    const paneId = mintPaneId("p1");
+    demux.notifyPaneBound(paneId);
+    const chunk = new Uint8Array(64 * 1024); // 64 KiB
+
+    // 1. FIREHOSE: pump until the pane pauses, then a few more chunks to model
+    //    the FC-5 in-flight window (output tmux flushed before honoring pause).
+    //    These post-pause appends are gate-dropped by the demux.
+    let paused = false;
+    for (let i = 0; i < 200; i++) {
+      accountingStore.append(paneId, chunk);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      if (fc.isPanePaused(paneId)) { paused = true; break; }
+    }
+    assert.equal(paused, true, "firehose must pause the pane");
+    // A handful of in-flight appends AFTER the pause — these are the bytes the
+    // demux drops; pre-fix they accumulated as un-creditable phantom backlog.
+    for (let i = 0; i < 8; i++) {
+      accountingStore.append(paneId, chunk);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+
+    // 2. CTRL-C: the producer stops. No further appends. (In ioTorture this is
+    //    the SIGINT that kills `seq`.)
+
+    // 3. The consumer recovers (VS Code starts reading again).
+    for (const s of heldSockets) {
+      s.on("data", () => { /* discard */ });
+      s.resume();
+    }
+
+    // 4. The pane MUST resume within a bounded time — the buffered bytes that
+    //    were actually sent drain and credit, and (post-fix) no phantom
+    //    gate-dropped bytes pin the MAX above low-water.
+    const start = Date.now();
+    while (fc.isPanePaused(paneId) && (Date.now() - start) < 5_000) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(
+      fc.isPanePaused(paneId),
+      false,
+      `pane must resume after Ctrl-C + consumer drain — a permanent pause here is ` +
+      `the tc-2ztp wedge (bufferedBytes=${fc.bufferedBytes(paneId)}). The gate-dropped ` +
+      `in-flight bytes must NOT pin the resume edge.`,
+    );
+
+    // tmux must have been told to continue (the prompt-returns / DRAIN_OK path).
+    const continueCmd = writes.find((w) => w.includes(":continue"));
+    assert.ok(
+      continueCmd !== undefined,
+      `fake host must receive a continue command after Ctrl-C drain (got writes: ${JSON.stringify(writes)})`,
+    );
+  });
+});

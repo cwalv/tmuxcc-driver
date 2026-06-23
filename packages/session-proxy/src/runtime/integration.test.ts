@@ -1308,14 +1308,16 @@ describe("tc-7ml.1: flow-control resume wiring — notification routing + noteDr
     const P7 = paneId("p7");
 
     // Flood BEFORE attaching the client — bytes go to store but no transport
-    // to call sendData, so noteDrained is never called.
-    // The full HIGH+1 bytes accumulate in the counter.
+    // to call sendData, so noteDrained is never called. The crossing chunk's
+    // overshoot is gate-dropped (FC-4, tc-2ztp), so the counter clamps to
+    // exactly HIGH while paused (not HIGH+1).
     accountingW3.append(P7, new Uint8Array(HIGH + 1).fill(0xBB));
     assert.equal(fcW3.isPanePaused(P7), true, "W3: pane must be paused after flood");
     const pausedCounter = fcW3.bufferedBytes(P7);
-    assert.ok(
-      pausedCounter > HIGH,
-      `W3: bufferedBytes (${pausedCounter}) must exceed HIGH (${HIGH}) while paused`,
+    assert.equal(
+      pausedCounter,
+      HIGH,
+      `W3: bufferedBytes (${pausedCounter}) clamps to HIGH (${HIGH}) at the pause edge`,
     );
 
     // Now attach a client via the drainingTransport pattern (createSessionProxy's fix).

@@ -219,12 +219,16 @@ describe(
             "demux must be gated (isPanePaused) while flow-controller is paused",
           );
 
-          // Buffered byte count must exceed the high-water mark at time of
-          // pause (verifies FC-2: pause on strict-> crossing).
+          // Buffered byte count settles at the high-water mark while paused
+          // (verifies FC-2: pause on strict-> crossing; FC-4 tc-2ztp: the
+          // crossing chunk's overshoot is gate-dropped and the in-flight window
+          // is not retained, so buffered clamps to exactly highWater rather
+          // than rising above it).
           const buffered = fc.bufferedBytes(paneId);
-          assert.ok(
-            buffered > DEFAULT_HIGH_WATER_BYTES,
-            `bufferedBytes (${buffered}) must exceed highWater (${DEFAULT_HIGH_WATER_BYTES}) when paused`,
+          assert.equal(
+            buffered,
+            DEFAULT_HIGH_WATER_BYTES,
+            `bufferedBytes (${buffered}) must clamp to highWater (${DEFAULT_HIGH_WATER_BYTES}) when paused`,
           );
 
           // Stop the firehose before teardown (send Ctrl-C).
@@ -281,8 +285,10 @@ describe(
 
           // Stop the firehose (Ctrl-C), then wait for the in-flight window to
           // settle. delay() is not synchronization: bytes tmux flushed before
-          // honoring the pause still arrive and are counted (FC-4/FC-5), so we
-          // observe the quiesced state instead of guessing a timeout.
+          // honoring the pause still arrive after the pause command. Per FC-4
+          // (tc-2ztp) those gate-dropped bytes are NOT retained, so the counter
+          // settles AT high-water; we wait for it to stop moving rather than
+          // guessing a timeout.
           controller.sendInput(paneId, "\x03");
           await waitForQuiescent(
             () => fc.bufferedBytes(paneId),
@@ -290,12 +296,14 @@ describe(
             "producer did not quiesce after Ctrl-C; bufferedBytes still moving",
           );
 
-          // Precondition for the drain arithmetic: still paused, counter above
-          // high-water (pause fired on a strict-> crossing and only grew since).
+          // Precondition for the drain arithmetic: still paused, counter clamped
+          // at high-water (pause fired on a strict-> crossing; FC-4 tc-2ztp:
+          // the in-flight overshoot is gate-dropped, not retained).
           const buffered = fc.bufferedBytes(paneId);
-          assert.ok(
-            buffered > DEFAULT_HIGH_WATER_BYTES,
-            `quiesced bufferedBytes (${buffered}) must exceed highWater (${DEFAULT_HIGH_WATER_BYTES})`,
+          assert.equal(
+            buffered,
+            DEFAULT_HIGH_WATER_BYTES,
+            `quiesced bufferedBytes (${buffered}) must clamp to highWater (${DEFAULT_HIGH_WATER_BYTES})`,
           );
 
           // Drain to exactly one byte below low-water.  Read and drain are in

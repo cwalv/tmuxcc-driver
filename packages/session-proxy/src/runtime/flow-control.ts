@@ -43,15 +43,27 @@
  *         the transition before noteDrained returns. removeClient re-evaluates
  *         the max: detaching the slowest client may itself drop the max to or
  *         below low-water and trigger a resume.
- *   FC-4  Accounting never pauses. onPaneBytes counts regardless of pause
- *         state — buffered means "held", and held bytes keep arriving while
- *         the gate is closed.
- *   FC-5  In-flight delivery. The pause command is asynchronous w.r.t. tmux:
- *         bytes tmux flushed before honoring the pause still arrive and are
- *         counted (FC-4). bufferedBytes may therefore legitimately RISE after
- *         isPanePaused() flips true. The overshoot is bounded by tmux's
- *         pipelining depth, not promised to be zero — tests must not assume
- *         a frozen counter at the pause instant (root cause of tc-cbh).
+ *   FC-4  Gate-dropped bytes are not retained (tc-2ztp). "Buffered" counts
+ *         only bytes actually owed to a transport — the quantity the resume
+ *         edge can clear. The demux DROPS bytes that arrive while a pane is
+ *         paused (output-demux's append returns early for a paused pane: no
+ *         fan-out, no resume-time flush), so those bytes never reach any
+ *         transport's sendData and are never credited via noteDrained.
+ *         Retaining them would pin the resume MAX above LOW_WATER forever once
+ *         the producer stops. So onPaneBytes does NOT retain bytes that arrive
+ *         while already paused (it still witnesses them via onBytesWhilePaused
+ *         for the FC-5 tripwire), and the pausing call clamps each client's
+ *         sub-ledger back to HIGH_WATER (the crossing chunk's overshoot is
+ *         gate-dropped too — production pauses the demux before fanning it out).
+ *   FC-5  In-flight observability. The pause command is asynchronous w.r.t.
+ *         tmux: bytes tmux flushed before honoring the pause still ARRIVE at
+ *         the session-proxy after isPanePaused() flips true. They are witnessed
+ *         via onBytesWhilePaused (a small bounded burst at each pause edge;
+ *         sustained growth = tmux is not honoring the pause), but per FC-4 they
+ *         do NOT raise bufferedBytes — the demux drops them, so they are not
+ *         owed to any transport. bufferedBytes is therefore frozen at the pause
+ *         instant (capped at HIGH_WATER) until a drain credit or further append
+ *         after resume moves it.
  *
  * # Design
  *
@@ -204,10 +216,12 @@ export interface FlowControllerMetricsHooks {
    */
   onDrainClamped?(paneId: PaneId, excessBytes: number): void;
   /**
-   * Bytes were accounted while the pane was already paused — the FC-5
-   * in-flight window. Expected: a small bounded burst right after each
-   * pause edge (output tmux flushed before honoring the pause); sustained
-   * growth = tmux is not honoring the pause command.
+   * Bytes arrived while the pane was already paused — the FC-5 in-flight
+   * window. These are gate-dropped by the demux and NOT retained in the
+   * ledger (FC-4, tc-2ztp); this hook is pure observability. Expected: a
+   * small bounded burst right after each pause edge (output tmux flushed
+   * before honoring the pause); sustained growth = tmux is not honoring the
+   * pause command.
    */
   onBytesWhilePaused?(paneId: PaneId, byteCount: number): void;
   /**
@@ -422,8 +436,23 @@ class FlowControllerImpl implements FlowController {
   onPaneBytes(paneId: PaneId, byteCount: number): void {
     if (byteCount <= 0) return;
     if (this._paused.has(paneId)) {
-      // FC-5 in-flight window — expected small bursts at each pause edge.
+      // FC-5 in-flight window — bytes that arrive while the demux gate is
+      // already closed. The demux DROPS these at the gate (output-demux's
+      // `append` returns early for a paused pane: no fan-out, no resume-time
+      // flush — the bytes live only in the scrollback store). Because they
+      // never reach any transport's `sendData`, the draining wrapper never
+      // credits `noteDrained` for them. Retaining them in the sub-ledgers
+      // would therefore inflate the resume-gating MAX permanently: once the
+      // producer stops (Ctrl-C after a firehose), nothing ever debits these
+      // phantom bytes, the MAX stays above LOW_WATER, and the pane is never
+      // resumed — the tc-2ztp wedge.
+      //
+      // So account them for the tripwire (observability) but do NOT retain
+      // them: a gate-dropped byte is delivered-to-nowhere, not held. This
+      // keeps the ledger's "buffered" meaning honest — bytes actually owed to
+      // a transport, the only quantity the resume edge can ever clear.
       this._metrics.onBytesWhilePaused?.(paneId, byteCount);
+      return;
     }
     // Fan the bytes into EVERY registered client's sub-ledger — the demux fans
     // one append out to all attached transports, so each client independently
@@ -436,7 +465,18 @@ class FlowControllerImpl implements FlowController {
     // Trigger pause if the MAX over clients just crossed high-water (avoid
     // re-pausing). The pause is shared/global per pane — see FC-2.
     if (!this._paused.has(paneId) && this._maxBuffered(paneId) > this._highWater) {
+      // The crossing chunk's overshoot past HIGH_WATER is itself gate-dropped
+      // by the demux: production wiring (session-proxy.ts accountingStore)
+      // calls `_pause` → `demux.pausePane` synchronously inside this call,
+      // BEFORE it fans the crossing chunk out, so that chunk is gated too and
+      // is never credited via noteDrained. Clamp each client's sub-ledger back
+      // to HIGH_WATER so the un-deliverable overshoot doesn't pin the resume
+      // edge (same reasoning as the while-paused early-return above).
       this._pause(paneId);
+      for (const clientKey of this._effectiveClients()) {
+        const cur = inner.get(clientKey) ?? 0;
+        if (cur > this._highWater) inner.set(clientKey, this._highWater);
+      }
     }
   }
 
