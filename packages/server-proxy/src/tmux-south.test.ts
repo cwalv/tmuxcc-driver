@@ -474,9 +474,12 @@ describe("tmux-south probeTmuxLiveness (tc-vw10)", () => {
   });
 
   it("probeTmuxAlive stays a true/false alias (true iff liveness === alive)", { skip: !TMUX_AVAILABLE }, async () => {
-    // The legacy boolean contract is preserved for the broker's watcher-EOF
-    // disambiguation: only a positive "alive" verdict yields `true`; "gone" and
-    // "inconclusive" both yield `false` ("presume gone").
+    // The boolean alias collapses both non-alive verdicts: only a positive
+    // "alive" yields `true`; "gone" and "inconclusive" both yield `false`.
+    // (Since tc-hfxb.22 the broker's watcher-EOF disambiguation uses the
+    // three-valued `probeTmuxLiveness` directly — never presume-gone on an
+    // inconclusive probe — so this alias is no longer on that path; the test
+    // pins the collapsing contract for any remaining boolean caller.)
     const goneSocket = `tmuxcc-test-south-alias-gone-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     assert.equal(await probeTmuxAlive(goneSocket, 5_000), false, "no server ⇒ false");
 

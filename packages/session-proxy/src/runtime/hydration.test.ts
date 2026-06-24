@@ -104,7 +104,6 @@ function makeRecordingTransport(): {
     onData(_handler: (pid: PaneId, bytes: Uint8Array) => void): void { /* not exercised */ },
     onClose(_handler: (err?: Error) => void): () => void { return () => {}; },
     close(_err?: Error): void { /* not exercised */ },
-    closeGracefully(_err?: Error): Promise<void> { return Promise.resolve(); },
   };
   return { transport, frames };
 }

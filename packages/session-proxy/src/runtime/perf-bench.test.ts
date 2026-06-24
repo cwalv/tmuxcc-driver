@@ -258,7 +258,6 @@ describe("tc-4sg: hot-path throughput benchmark", () => {
       onData(_cb: (_pid: ReturnType<typeof paneId>, _bytes: Uint8Array) => void): () => void { return () => {}; },
       onClose(_cb: (_err?: Error) => void): () => void { return () => {}; },
       close(_err?: Error): void { /**/ },
-      closeGracefully(_err?: Error): Promise<void> { return Promise.resolve(); },
     };
 
     const demux = createOutputDemux();

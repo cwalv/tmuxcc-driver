@@ -23,8 +23,9 @@
  *   3. EOF: when the attached `-CC` process exits for ANY reason, invoke
  *      `onEof` exactly once and go inert.  The watcher does NOT reconnect
  *      on its own — the owner (the serverProxy) disambiguates via
- *      `probeTmuxAlive` and either re-spawns a fresh watcher (watcher died,
- *      tmux alive) or self-exits (tmux genuinely gone).
+ *      `probeTmuxLiveness` and either re-spawns a fresh watcher (watcher died
+ *      with tmux alive, OR the probe was inconclusive — conservative retry) or
+ *      self-exits (tmux probed CONCLUSIVELY gone).
  *
  * `onEof` is never invoked after `stop()` (e.g. for the SIGTERM that
  * `stop()` itself delivers to the `-CC` child).

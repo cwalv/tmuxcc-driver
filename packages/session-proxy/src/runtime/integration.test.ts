@@ -451,7 +451,6 @@ function createRecordingPair(): RecordingPair {
     onData(handler) { rawSessionProxy.onData(handler); },
     onClose(handler) { return rawSessionProxy.onClose(handler); },
     close(err) { rawSessionProxy.close(err); },
-    closeGracefully(err) { return rawSessionProxy.closeGracefully(err); },
   };
 
   // Tap the client endpoint's sendData so data-plane frames are recorded.
@@ -468,7 +467,6 @@ function createRecordingPair(): RecordingPair {
     onData(handler) { rawClient.onData(handler); },
     onClose(handler) { return rawClient.onClose(handler); },
     close(err) { rawClient.close(err); },
-    closeGracefully(err) { return rawClient.closeGracefully(err); },
   };
 
   // Also tap the session-proxy's sendData so data plane frames are captured.

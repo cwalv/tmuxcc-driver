@@ -76,7 +76,7 @@ import { createSocketServer, createSocketTransport } from "./socket-transport.js
 import { serverProxySocketPath, sessionProxySocketPath, removeSocket, restrictSocket } from "./runtime-dir.js";
 import { createServerProxyMetrics } from "./metrics.js";
 import type { ServerProxyMetrics } from "./metrics.js";
-import { listSessions, createSession, killSession, checkSessionPresence, createTmuxWatcher, probeTmuxAlive, setWindowSynchronizePanes, setWindowMonitorActivity, setWindowMonitorSilence, setSessionMarker, getTmuxServerPid, countTmuxccClientsBySession, listSessionTopology } from "./tmux-south.js";
+import { listSessions, createSession, killSession, checkSessionPresence, createTmuxWatcher, probeTmuxLiveness, setWindowSynchronizePanes, setWindowMonitorActivity, setWindowMonitorSilence, setSessionMarker, getTmuxServerPid, countTmuxccClientsBySession, listSessionTopology } from "./tmux-south.js";
 import type { TmuxWatcher, TmuxAvailabilityOut } from "./tmux-south.js";
 import { createSessionProxySupervisor } from "./session-proxy-supervisor.js";
 import type { SessionProxySupervisor, SessionProxyExitInfo } from "./session-proxy-supervisor.js";
@@ -341,24 +341,6 @@ class ServerProxyImpl implements ServerProxyHandle {
   private _clients = new Map<Transport, ClientState>();
   /** Session table: sessionId → SessionEntry */
   private _sessions = new Map<SessionId, SessionEntry>();
-  /**
-   * The session ids known at the last point `_sessions` was non-empty
-   * (tc-hfxb.20).
-   *
-   * On a whole-server `tmux-gone` death the broker's `-CC` watcher can emit a
-   * final `%sessions-changed` whose `_refreshSessions` confirms every session
-   * absent ("no server running" → "absent", tc-hfxb.19) and EMPTIES `_sessions`
-   * — and that data-callback can win the race against the watcher EOF that
-   * drives `_selfExit("tmux-gone")`.  Reading the live (now-empty) map at
-   * self-exit would then name ZERO lost sessions.  This mirror holds the
-   * last-known ids so the exiting announcement can still name exactly the
-   * sessions the user lost.  Kept in sync at the end of every refresh; an
-   * empty refresh does NOT clear it (the whole point is to survive the
-   * empty-out), so a genuine drain-to-zero leaves the prior set — acceptable
-   * because the only consumer is the tmux-gone self-exit (a brand-new broker
-   * that never saw a session has an empty set, which is correct).
-   */
-  private _lastKnownSessionIds: SessionId[] = [];
   /** Name index: session name → SessionEntry (for fast lookups) */
   private _byName = new Map<string, SessionEntry>();
 
@@ -406,13 +388,14 @@ class ServerProxyImpl implements ServerProxyHandle {
   /** Set once a self-exit has been initiated; suppresses re-entry. */
   private _selfExited = false;
   /**
-   * The in-flight `shutdown()` promise, or null when not shutting down
-   * (tc-hfxb.20).  `shutdown()` now AWAITS the bounded graceful close of every
-   * client transport, which widens the window in which a concurrent caller can
-   * enter — e.g. a `tmux-gone` `_selfExit` running shutdown while the
-   * entry-point / a test's `finally` independently calls it.  Without a guard,
-   * both would race `net.Server.close()` and the second throws
-   * `ERR_SERVER_NOT_RUNNING`.  Sharing one in-flight promise makes shutdown
+   * The in-flight `shutdown()` promise, or null when not shutting down.
+   *
+   * `shutdown()` `await`s `_server.close()` and only nulls `_server`
+   * AFTERWARDS, so a concurrent caller entering during that await still sees a
+   * non-null `_server` and races a second `net.Server.close()` — the second
+   * throws `ERR_SERVER_NOT_RUNNING`.  This happens for real: a `tmux-gone`
+   * `_selfExit` runs shutdown while the entry-point / a test's `finally`
+   * independently calls it.  Sharing ONE in-flight promise makes shutdown
    * re-entrancy-safe.
    */
   private _shutdownPromise: Promise<void> | null = null;
@@ -595,30 +578,11 @@ class ServerProxyImpl implements ServerProxyHandle {
     this._watcher?.stop();
     this._watcher = null;
 
-    // Disconnect all clients.
-    //
-    // tc-hfxb.20: close GRACEFULLY (flush-then-FIN) rather than abruptly
-    // (destroy, which discards the unflushed userspace write buffer).  This is
-    // what makes the broker's pre-self-exit `server-proxy.exiting` frame —
-    // broadcast by `_broadcastExiting` immediately before `_selfExit` calls
-    // shutdown() — reliably reach the client instead of being discarded with
-    // the socket.  Each graceful close is BOUNDED (a wedged peer cannot hang
-    // shutdown); we await all of them together so the flush completes before
-    // the socket file is removed below.  Harmless on the SIGTERM/explicit
-    // shutdown path (no exiting frame queued → end() flushes nothing and
-    // FINs immediately).
-    const closes: Array<Promise<void>> = [];
+    // Disconnect all clients
     for (const [transport] of this._clients) {
-      try {
-        closes.push(transport.closeGracefully());
-      } catch {
-        // Graceful close threw synchronously — fall back to abrupt close so
-        // shutdown still tears the transport down.
-        try { transport.close(); } catch { /* ignore */ }
-      }
+      try { transport.close(); } catch { /* ignore */ }
     }
     this._clients.clear();
-    await Promise.all(closes);
 
     // Reap all session-proxies
     this._supervisor.reapAll();
@@ -656,43 +620,74 @@ class ServerProxyImpl implements ServerProxyHandle {
   }
 
   /**
-   * The thin `-CC` watcher EOFed.  Disambiguate via a `tmux ls` probe (1 s
-   * timeout): probe fails → tmux genuinely gone → self-exit immediately;
-   * probe succeeds → the watcher process itself died (signal/OOM) while tmux
-   * lives → re-spawn the watcher and keep serving.
+   * The thin `-CC` watcher EOFed.  Disambiguate via a three-valued `tmux ls`
+   * probe (1 s timeout, `probeTmuxLiveness`) and act ONLY on conclusive
+   * evidence (tc-hfxb.22):
+   *
+   *   - `"alive"` (probe exited 0) → the watcher process itself died
+   *     (signal/OOM) while tmux lives → re-spawn the watcher and keep serving.
+   *   - `"inconclusive"` (spawn failure / probe timeout — under host load the
+   *     `tmux ls` spawn can lose its budget; the probe comment is explicit that
+   *     a timeout "is INCONCLUSIVE, never gone") → treat as NOT-gone → re-spawn
+   *     and retry, NEVER self-exit.  A self-exit is irreversible, so we refuse
+   *     to take it on non-terminal evidence; the respawned watcher + its forced
+   *     refresh re-confirm, and a genuine death will re-EOF and eventually probe
+   *     `"gone"`.
+   *   - `"gone"` (probe exited non-zero — POSITIVE "no server running") → the
+   *     terminal path: a `--persist-through-tmux-gone` broker re-enters poll
+   *     mode (test-harness affordance) and a normal broker self-exits.
+   *
+   * PRINCIPLE (tc-hfxb.22): every consumer of a death EOF — both this broker
+   * self-exit and the per-session reap (`_refreshSessions` removes only on a
+   * conclusive `checkSessionPresence === "absent"`, tc-hfxb.18.4/.19) — acts
+   * only on CONCLUSIVE/terminal evidence and is conservative on ambiguity.  So
+   * the racing EOFs of the watcher `-CC` and the per-session `-CC` clients are
+   * HARMLESS: each kicks its own confirmed check, they converge on the same
+   * terminal truth, and no actor takes a destructive action on a racy signal.
+   * Previously this path used `probeTmuxAlive`, which collapsed "inconclusive"
+   * into presume-gone — the one consumer that acted destructively on a guess.
    */
   private _onWatcherEof(): void {
     if (!this._started || this._selfExited || this._probeInFlight) return;
     this._probeInFlight = true;
 
-    void probeTmuxAlive(this._opts.socketName, TMUX_PROBE_TIMEOUT_MS).then((alive) => {
+    void probeTmuxLiveness(this._opts.socketName, TMUX_PROBE_TIMEOUT_MS).then((liveness) => {
       this._probeInFlight = false;
       // The server-proxy may have been shut down (or self-exited) during the probe.
       if (!this._started || this._selfExited) return;
 
-      if (alive) {
-        // Watcher died but tmux lives — re-spawn, with backoff if the watcher
-        // keeps dying young (see WATCHER_HEALTHY_MS).
-        const aliveMs = Date.now() - this._watcherSpawnedAt;
-        if (aliveMs >= WATCHER_HEALTHY_MS) {
-          this._watcherRespawnDelayMs = 0;
+      if (liveness === "gone") {
+        // POSITIVE evidence the tmux server is gone — the only terminal case.
+        if (this._persistThroughTmuxGone) {
+          // tc-295a.41 (test-harness affordance): the tmux server is gone, but a
+          // long-lived embedded broker must NOT exit — re-enter watcher poll mode
+          // so it adopts the next session/server that appears.  The watcher's own
+          // pre-attach poll handles "no server yet" (listSessions → null/empty →
+          // schedulePoll), and each poll tick re-drives a full refresh.
+          this._scheduleWatcherRespawn(WATCHER_RESPAWN_BACKOFF_INIT_MS);
         } else {
-          this._watcherRespawnDelayMs = Math.min(
-            Math.max(this._watcherRespawnDelayMs * 2, WATCHER_RESPAWN_BACKOFF_INIT_MS),
-            WATCHER_RESPAWN_BACKOFF_MAX_MS,
-          );
+          void this._selfExit("tmux-gone");
         }
-        this._scheduleWatcherRespawn(this._watcherRespawnDelayMs);
-      } else if (this._persistThroughTmuxGone) {
-        // tc-295a.41 (test-harness affordance): the tmux server is gone, but a
-        // long-lived embedded broker must NOT exit — re-enter watcher poll mode
-        // so it adopts the next session/server that appears.  The watcher's own
-        // pre-attach poll handles "no server yet" (listSessions → null/empty →
-        // schedulePoll), and each poll tick re-drives a full refresh.
-        this._scheduleWatcherRespawn(WATCHER_RESPAWN_BACKOFF_INIT_MS);
-      } else {
-        void this._selfExit("tmux-gone");
+        return;
       }
+
+      // `"alive"` (watcher died but tmux lives) OR `"inconclusive"` (the probe
+      // could not get a verdict — spawn failure / timeout).  Both are NOT-gone:
+      // re-spawn the watcher with backoff if it keeps dying young (see
+      // WATCHER_HEALTHY_MS) and keep serving.  On `"inconclusive"` this is the
+      // conservative retry — never a self-exit on a guess; the respawn's forced
+      // refresh re-confirms, and a genuine death re-EOFs to eventually probe
+      // `"gone"`.
+      const aliveMs = Date.now() - this._watcherSpawnedAt;
+      if (aliveMs >= WATCHER_HEALTHY_MS) {
+        this._watcherRespawnDelayMs = 0;
+      } else {
+        this._watcherRespawnDelayMs = Math.min(
+          Math.max(this._watcherRespawnDelayMs * 2, WATCHER_RESPAWN_BACKOFF_INIT_MS),
+          WATCHER_RESPAWN_BACKOFF_MAX_MS,
+        );
+      }
+      this._scheduleWatcherRespawn(this._watcherRespawnDelayMs);
     });
   }
 
@@ -785,25 +780,7 @@ class ServerProxyImpl implements ServerProxyHandle {
     // tc-xnay / tc-ymxe: announce designed exit BEFORE shutdown closes
     // transports.  Mirrors `_broadcastToAll` shape; inlined here so the
     // shutdown path doesn't have to know about the announcement seq.
-    //
-    // tc-hfxb.20: name the sessions being lost so the client can scope a
-    // precise per-session "session ended" reaction.  A whole-server
-    // `tmux-gone` death loses EVERY tracked session (the broker is exiting,
-    // so no per-session `sessions.removed` will reach the client); an
-    // `idle` exit loses none (the broker had no sessions).
-    //
-    // Source: prefer the LIVE `_sessions`, but fall back to the
-    // last-known-ids mirror — a racing final `%sessions-changed` refresh can
-    // empty `_sessions` before this self-exit runs (the whole-server death
-    // confirms every session absent), and reading the now-empty map would name
-    // zero lost sessions.  `_lastKnownSessionIds` survives that empty-out.
-    let goneSessionIds: SessionId[] = [];
-    if (reason === "tmux-gone") {
-      goneSessionIds = this._sessions.size > 0
-        ? Array.from(this._sessions.keys())
-        : this._lastKnownSessionIds;
-    }
-    this._broadcastExiting(reason, goneSessionIds);
+    this._broadcastExiting(reason);
 
     try {
       await this.shutdown();
@@ -830,18 +807,12 @@ class ServerProxyImpl implements ServerProxyHandle {
    * whose write fails) is silently skipped — the connection-count change
    * listener will reap it during shutdown's transport.close() loop.
    */
-  private _broadcastExiting(
-    reason: ServerProxySelfExitReason,
-    goneSessionIds: readonly SessionId[],
-  ): void {
+  private _broadcastExiting(reason: ServerProxySelfExitReason): void {
     for (const [transport, state] of this._clients) {
       const msg: ServerProxyExitingMessage = {
         type: "server-proxy.exiting",
         seq: state.nextSeq,
         reason,
-        // tc-hfxb.20: name the lost sessions (omit the field entirely when
-        // none, so the frame matches the pre-tc-hfxb.20 shape for `idle`).
-        ...(goneSessionIds.length > 0 ? { goneSessionIds } : {}),
       };
       state.nextSeq++;
       try {
@@ -1028,15 +999,6 @@ class ServerProxyImpl implements ServerProxyHandle {
 
     // tc-x6l: update the sessions-active gauge after each refresh.
     this._metrics.setSessionsActive(this._sessions.size);
-
-    // tc-hfxb.20: keep the last-known-session-ids mirror current so a
-    // tmux-gone self-exit can name the lost sessions even if a racing
-    // empty-out refresh just cleared `_sessions`.  Only snapshot when
-    // non-empty — an empty refresh must NOT clobber the prior set (that race
-    // is exactly what this mirror exists to survive).
-    if (this._sessions.size > 0) {
-      this._lastKnownSessionIds = Array.from(this._sessions.keys());
-    }
   }
 
   // ---------------------------------------------------------------------------

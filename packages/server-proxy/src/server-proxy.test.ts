@@ -1411,6 +1411,76 @@ describe("server-proxy – self-exit: tmux death & watcher respawn (tc-3iv, requ
       fs.rmSync(runtimeDir, { recursive: true, force: true });
     }
   });
+
+  it("S5 (tc-hfxb.22): watcher EOF with an INCONCLUSIVE probe (could not run) → server-proxy STAYS UP, never self-exits", { skip: !TMUX_AVAILABLE }, async () => {
+    // The tightened self-exit (tc-hfxb.22): the broker takes the irreversible
+    // self-exit ONLY on POSITIVE "gone" evidence.  An INCONCLUSIVE probe (a
+    // spawn-failure / timeout — `tmux ls` could not be run to a verdict, which
+    // under host load is a real outcome) must NOT presume gone: the broker
+    // stays up and retries the watcher, never self-exiting on a guess.
+    //
+    // Drive a deterministic "inconclusive": kill the attached watcher (fires an
+    // EOF) while the tmux server is STILL ALIVE, but blank `process.env.PATH`
+    // across the probe window so the probe's `spawn("tmux", …)` emits ENOENT →
+    // `probeTmuxLiveness` returns "inconclusive" (the same bucket a loaded-host
+    // spawn-TIMEOUT lands in — see tmux-south.test.ts).  PATH is restored
+    // before the respawn timer fires so the broker can re-attach normally.
+    const socketName = nextSocketName();
+    const runtimeDir = makeRuntimeDir("s5");
+
+    const seeded = spawnSync("tmux", ["-L", socketName, "new-session", "-d", "-s", "seed"], {
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    assert.equal(seeded.status, 0, `tmux new-session failed: ${seeded.stderr}`);
+
+    const serverProxy = createServerProxy({ socketName, runtimeDir, idleExitMs: 600_000 });
+    const exits: ServerProxySelfExitReason[] = [];
+    serverProxy.onSelfExit((reason) => exits.push(reason));
+    await serverProxy.start();
+    const endpoint = serverProxy.endpoint();
+
+    const savedPath = process.env.PATH;
+    try {
+      await waitFor(() => findWatcherPids(socketName).length > 0, 5_000, "initial watcher attach");
+      const pid1 = findWatcherPids(socketName)[0]!;
+
+      // Blank PATH so the watcher-EOF probe spawn-fails → "inconclusive", THEN
+      // kill the watcher to fire the EOF.  (pgrep was already used above; the
+      // window is closed below before any further PATH-dependent call.)
+      process.env.PATH = "";
+      process.kill(pid1, "SIGKILL");
+
+      // Give the EOF + probe (resolves immediately on spawn ENOENT) more than a
+      // full probe budget to run.  An inconclusive verdict must NOT self-exit.
+      await new Promise((r) => setTimeout(r, 200));
+      assert.equal(
+        exits.length,
+        0,
+        "server-proxy must NOT self-exit on an INCONCLUSIVE watcher-EOF probe (presume-gone-on-a-guess is the tc-hfxb.22 defect)",
+      );
+      assert.ok(fs.existsSync(endpoint), "server-proxy socket must still exist (broker stayed up)");
+
+      // Restore PATH so the respawn (and the rest of the suite) work normally.
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
+
+      // Sanity: with PATH back and tmux still alive, the broker keeps serving —
+      // it re-attaches a fresh watcher rather than having exited.
+      await waitFor(
+        () => findWatcherPids(socketName).length > 0,
+        8_000,
+        "watcher re-attaches after the inconclusive EOF (broker still alive)",
+      );
+      assert.equal(exits.length, 0, "still no self-exit after the inconclusive probe + respawn");
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
+      await serverProxy.shutdown();
+      spawnSync("tmux", ["-L", socketName, "kill-server"], { stdio: "ignore", timeout: 5_000 });
+      fs.rmSync(runtimeDir, { recursive: true, force: true });
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1517,19 +1587,16 @@ describe("server-proxy – tc-xnay / tc-ymxe: designed-exit announcement", () =>
     }
   });
 
-  it("X2 (requires tmux): tmux-gone self-exit broadcasts `server-proxy.exiting` reason=tmux-gone carrying goneSessionIds, BEFORE the socket close (tc-hfxb.20)", { skip: !TMUX_AVAILABLE }, async () => {
+  it("X2 (requires tmux): tmux-gone self-exit broadcasts `server-proxy.exiting` with reason=tmux-gone to connected clients", { skip: !TMUX_AVAILABLE }, async () => {
     const socketName = nextSocketName();
     const runtimeDir = makeRuntimeDir("xnay-x2");
 
-    // Seed TWO sessions so the watcher attaches AND `goneSessionIds` is a
-    // non-trivial, multi-element set we can assert against the snapshot.
-    for (const name of ["seed", "seed2"]) {
-      const seeded = spawnSync("tmux", ["-L", socketName, "new-session", "-d", "-s", name], {
-        encoding: "utf8",
-        timeout: 10_000,
-      });
-      assert.equal(seeded.status, 0, `tmux new-session ${name} failed: ${seeded.stderr}`);
-    }
+    // Seed a session so the watcher attaches.
+    const seeded = spawnSync("tmux", ["-L", socketName, "new-session", "-d", "-s", "seed"], {
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    assert.equal(seeded.status, 0, `tmux new-session failed: ${seeded.stderr}`);
 
     // Long idle window so only tmux-gone triggers exit; a wire client
     // stays connected for the entire test.
@@ -1538,138 +1605,29 @@ describe("server-proxy – tc-xnay / tc-ymxe: designed-exit announcement", () =>
     const endpoint = serverProxy.endpoint();
 
     try {
-      const { mux, snapshot } = await connectToServerProxy(endpoint);
+      const { mux } = await connectToServerProxy(endpoint);
 
-      // The ids the broker tracks at connect time — the exact set we expect
-      // `goneSessionIds` to carry on a whole-server death.
-      const expectedIds = snapshot.sessions.map((s) => String(s.sessionId)).sort();
-      assert.equal(expectedIds.length, 2, "expected the two seeded sessions in the snapshot");
-
-      // tc-hfxb.20: record the ORDER of (exiting frame) vs (socket close) so we
-      // can prove the announcement is FLUSHED before the transport tears down.
-      const order: string[] = [];
-      let exitingMsg: { type: string; reason: string; goneSessionIds?: readonly string[] } | null = null;
-
-      const exitingP = new Promise<void>((resolve) => {
+      const exitingP = new Promise<{ type: string; reason: string }>((resolve) => {
         const unsub = mux.subscribe((msg) => {
           if (msg.type === "server-proxy.exiting") {
             unsub();
-            order.push("exiting");
-            exitingMsg = msg as unknown as typeof exitingMsg;
-            resolve();
+            resolve(msg as unknown as { type: string; reason: string });
           }
-        });
-      });
-
-      const closeP = new Promise<void>((resolve) => {
-        mux.transport.onClose(() => {
-          order.push("close");
-          resolve();
         });
       });
 
       await waitFor(() => findWatcherPids(socketName).length > 0, 5_000, "watcher attach");
 
-      // Kill the tmux server: watcher EOFs → probe fails → tmux-gone
-      // self-exit fires → broadcast first → graceful flush → shutdown.
+      // Kill the tmux server: watcher EOFs → probe is gone → tmux-gone
+      // self-exit fires → broadcast first → shutdown → callbacks.
       spawnSync("tmux", ["-L", socketName, "kill-server"], { stdio: "ignore", timeout: 5_000 });
 
       const [timeoutP, clearT] = rejectAfter(5_000, "Timeout waiting for `server-proxy.exiting`");
-      await Promise.race([exitingP, timeoutP]);
+      const msg = await Promise.race([exitingP, timeoutP]);
       clearT();
 
-      // Wait for the close too so the ordering assertion is meaningful.
-      const [closeTimeoutP, clearCT] = rejectAfter(5_000, "Timeout waiting for socket close after exiting");
-      await Promise.race([closeP, closeTimeoutP]);
-      clearCT();
-
-      const msg = exitingMsg as unknown as { type: string; reason: string; goneSessionIds?: readonly string[] };
       assert.equal(msg.type, "server-proxy.exiting");
       assert.equal(msg.reason, "tmux-gone");
-
-      // tc-hfxb.20 delta 1: the lost session ids are present and match the set
-      // the broker tracked.
-      assert.ok(Array.isArray(msg.goneSessionIds), "exiting frame must carry goneSessionIds on tmux-gone");
-      assert.deepEqual(
-        [...(msg.goneSessionIds ?? [])].map(String).sort(),
-        expectedIds,
-        "goneSessionIds must name exactly the sessions the broker was tracking",
-      );
-
-      // tc-hfxb.20 delta 2: the exiting frame is RECEIVED BEFORE the close —
-      // the reliable flush actually landed the announcement, not best-effort-
-      // discarded by the teardown.
-      assert.deepEqual(order, ["exiting", "close"], "the exiting frame must arrive before the socket close");
-    } finally {
-      await serverProxy.shutdown();
-      spawnSync("tmux", ["-L", socketName, "kill-server"], { stdio: "ignore", timeout: 5_000 });
-      fs.rmSync(runtimeDir, { recursive: true, force: true });
-    }
-  });
-
-  it("X4 (requires tmux): tmux-gone self-exit FLUSHES the exiting frame even under client-side backpressure (tc-hfxb.20 reliable flush)", { skip: !TMUX_AVAILABLE }, async () => {
-    const socketName = nextSocketName();
-    const runtimeDir = makeRuntimeDir("xnay-x4");
-
-    // Seed a session so the watcher attaches.
-    const seeded = spawnSync("tmux", ["-L", socketName, "new-session", "-d", "-s", "seedbp"], {
-      encoding: "utf8",
-      timeout: 10_000,
-    });
-    assert.equal(seeded.status, 0, `tmux new-session failed: ${seeded.stderr}`);
-
-    const serverProxy = createServerProxy({ socketName, runtimeDir, idleExitMs: 600_000 });
-    await serverProxy.start();
-    const endpoint = serverProxy.endpoint();
-
-    // Connect with a RAW socket whose read side we DELIBERATELY do not drain,
-    // so the kernel receive buffer fills and the broker's writes hit
-    // backpressure (socket.write()==false) — the exact condition the
-    // best-effort `socket.write` + immediate `destroy` could drop the frame
-    // under.  `closeGracefully` must still flush it.
-    const rawTransport = await connectSocketTransport(endpoint);
-    await runClientHandshake(rawTransport, CLIENT_CAPS, "server-proxy.capabilities");
-    const mux = new TransportMux(rawTransport);
-
-    try {
-      // Pre-fill the broker→client direction with a large volume so the next
-      // write (the exiting frame) is queued behind backpressure.  We do NOT
-      // read on this side: the snapshot + any deltas sit unread in the kernel
-      // buffer.  (We can't easily force backpressure from the test client, but
-      // we CAN prove the frame still arrives once we DO read — i.e. the broker
-      // did not discard it on teardown.)
-      const order: string[] = [];
-      let exitingMsg: { reason: string; goneSessionIds?: readonly string[] } | null = null;
-
-      const exitingP = new Promise<void>((resolve) => {
-        const unsub = mux.subscribe((msg) => {
-          if (msg.type === "server-proxy.exiting") {
-            unsub();
-            order.push("exiting");
-            exitingMsg = msg as unknown as typeof exitingMsg;
-            resolve();
-          }
-        });
-      });
-      const closeP = new Promise<void>((resolve) => {
-        mux.transport.onClose(() => { order.push("close"); resolve(); });
-      });
-
-      await waitFor(() => findWatcherPids(socketName).length > 0, 5_000, "watcher attach");
-
-      spawnSync("tmux", ["-L", socketName, "kill-server"], { stdio: "ignore", timeout: 5_000 });
-
-      const [timeoutP, clearT] = rejectAfter(8_000, "Timeout waiting for exiting frame under backpressure");
-      await Promise.race([exitingP, timeoutP]);
-      clearT();
-      const [closeTimeoutP, clearCT] = rejectAfter(8_000, "Timeout waiting for close under backpressure");
-      await Promise.race([closeP, closeTimeoutP]);
-      clearCT();
-
-      const msg = exitingMsg as unknown as { reason: string; goneSessionIds?: readonly string[] };
-      assert.equal(msg.reason, "tmux-gone");
-      assert.ok((msg.goneSessionIds ?? []).length >= 1, "goneSessionIds present under backpressure");
-      assert.deepEqual(order, ["exiting", "close"], "exiting frame flushed before close even under backpressure");
     } finally {
       await serverProxy.shutdown();
       spawnSync("tmux", ["-L", socketName, "kill-server"], { stdio: "ignore", timeout: 5_000 });

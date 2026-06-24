@@ -157,30 +157,6 @@ export interface Transport {
    * @param err - Optional error to propagate to close handlers.
    */
   close(err?: Error): void;
-
-  /**
-   * Close the transport GRACEFULLY, flushing any already-queued outbound bytes
-   * before tearing down (tc-hfxb.20).
-   *
-   * `close()` is abrupt: a socket-backed transport discards its unflushed
-   * userspace write buffer.  That is fine for the common teardown, but the
-   * broker's pre-self-exit `server-proxy.exiting` announcement is a frame the
-   * client MUST receive — an abrupt close can drop it under backpressure or a
-   * split write, leaving the client to fall back to inference.
-   *
-   * `closeGracefully()` flushes the queued bytes first (e.g. a socket FIN that
-   * drains the write buffer), then tears down.  It returns a promise that
-   * resolves when the flush has completed OR a BOUNDED timeout elapsed — a
-   * wedged remote MUST NOT hang shutdown indefinitely (fail-loud, not block).
-   * After it resolves the transport is fully closed (onClose has fired); a
-   * subsequent `close()` is a no-op.
-   *
-   * In-memory paired transports deliver synchronously, so there is no buffer to
-   * flush — they simply delegate to `close()`.
-   *
-   * @param err - Optional error to propagate to close handlers.
-   */
-  closeGracefully(err?: Error): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -256,12 +232,6 @@ export function createInMemoryTransportPair(): InMemoryTransportPair {
       for (const h of clientCloseHandlers) h(err);
       for (const h of sessionProxyCloseHandlers) h(err);
     },
-    closeGracefully(err) {
-      // In-memory delivery is synchronous — nothing is buffered, so a graceful
-      // close is just a close.
-      this.close(err);
-      return Promise.resolve();
-    },
   };
 
   const client: Transport = {
@@ -289,12 +259,6 @@ export function createInMemoryTransportPair(): InMemoryTransportPair {
       // Notify the remote (sessionProxy) side first, then self.
       for (const h of sessionProxyCloseHandlers) h(err);
       for (const h of clientCloseHandlers) h(err);
-    },
-    closeGracefully(err) {
-      // In-memory delivery is synchronous — nothing is buffered, so a graceful
-      // close is just a close.
-      this.close(err);
-      return Promise.resolve();
     },
   };
 
