@@ -523,6 +523,8 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
     originLookup: (id) => verbOrigins.lookup(id),
     // tc-u7cu.6: pane.closed tagging consults the close-cause registry (consume).
     closeCauseLookup: (id) => closeCauses.consume(id),
+    // tc-is5w: tag the dev-gated first-snapshot timing line with the session.
+    sessionName: opts.host.sessionName,
   });
 
   // 6a. Patch the late-binding reference so the switch-client callback

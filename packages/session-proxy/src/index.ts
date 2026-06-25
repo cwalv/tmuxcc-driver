@@ -116,6 +116,12 @@ export type {
 } from "./runtime/serve.js";
 export type { RuntimePipeline } from "./runtime/pipeline.js";
 
+// tc-is5w: dev-gated phase-split activation timing. Shared so the broker
+// (server-proxy._doClaimSession) and the session-proxy legs emit a uniform
+// `[tc-is5w]` line under TMUXCC_PHASE_TIMING. Inert when the var is unset.
+export { phaseLog, phaseNow, PHASE_TIMING_ENABLED } from "./runtime/phase-timing.js";
+export type { PhaseFields } from "./runtime/phase-timing.js";
+
 // tc-x6l: metrics + storm alarm — re-exported so consumers can import
 // from "@tmuxcc/session-proxy" without reaching into internal sub-paths.
 export { createSessionProxyRegistry, createStormAlarm } from "./metrics/index.js";

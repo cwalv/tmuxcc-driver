@@ -112,6 +112,7 @@ import { decodeOutputPayload } from "../parser/output-codec.js";
 import { OscTitleSniffer } from "../parser/osc-title-sniffer.js";
 import { paneId as mintPaneId } from "../wire/ids.js";
 import type { TmuxHost } from "./tmux-host.js";
+import { phaseLog, phaseNow } from "./phase-timing.js";
 import { diffModel } from "../state/projection.js";
 import type { SessionProxyMessage } from "../wire/session-proxy-control.js";
 import {
@@ -965,78 +966,108 @@ class RuntimePipelineImpl implements RuntimePipeline {
   private async _bootstrapRequeryWithRetry(
     engine: RequeryEngine,
   ): Promise<RequeryResult> {
-    const timeoutMs = this._opts.bootstrapRequeryTimeoutMs;
-    if (timeoutMs <= 0) {
-      // Bounded retry disabled — original single unbounded round-trip.
-      return engine.requery();
-    }
-
-    // Each bootstrap cycle issues exactly two `list-*` commands (windows,
-    // panes); on a stall both slots are still pending. Cancel both.
-    const BOOTSTRAP_SLOT_COUNT = 2;
-    const MAX_BOUNDED_ATTEMPTS = 3;
-    const clock = this._opts.clock;
-
-    for (let attempt = 1; attempt <= MAX_BOUNDED_ATTEMPTS; attempt++) {
-      if (this._stopped) return engine.requery();
-
-      const cyclePromise = engine.requery();
-      let timedOut = false;
-      const timeoutResult = await new Promise<"done" | "timeout">((resolve) => {
-        const handle = clock.setTimeout(() => {
-          timedOut = true;
-          resolve("timeout");
-        }, timeoutMs);
-        cyclePromise.then(
-          () => {
-            clock.clearTimeout(handle);
-            resolve("done");
-          },
-          () => {
-            // The cycle settled (rejected) on its own — e.g. a prior cancel's
-            // %error, or a correlator protocol anomaly. Treat as "done" and
-            // let the await below surface the result/rejection uniformly.
-            clock.clearTimeout(handle);
-            resolve("done");
-          },
-        );
-      });
-
-      if (timeoutResult === "done" || !timedOut) {
-        // The cycle resolved before the deadline. Await it for the value
-        // (or to re-throw a genuine rejection — the bounded-retry only
-        // recovers from STALLS, not from real protocol failures).
-        return await cyclePromise;
+    // tc-is5w: phase-split activation timing — the bootstrap-requery leg. This
+    // span runs inside `await sessionProxy.start()`, which is inside the broker's
+    // ensure leg, so it nests under the `phase=claim` line's ensure_ms. The
+    // freshly-forked tmux bootstrap-requery is the prime suspect for the tc-jlyi
+    // residual; this line names the attempt count + outcome on every activation.
+    // Emitted in a finally so all return paths are covered. Inert unless gated.
+    const _phaseT0 = phaseNow();
+    let _phaseAttempts = 0;
+    let _phaseOutcome = "ok";
+    try {
+      const timeoutMs = this._opts.bootstrapRequeryTimeoutMs;
+      if (timeoutMs <= 0) {
+        // Bounded retry disabled — original single unbounded round-trip.
+        _phaseAttempts = 1;
+        return await engine.requery();
       }
 
-      // Stall: the deadline fired first. Cancel the stalled cycle's two
-      // `list-*` slots so a late reply can't mis-bind, then let the abandoned
-      // `engine.requery()` settle (the cancel rejects its submit Promises ⇒
-      // its `Promise.all` rejects ⇒ the engine clears its in-flight latch) so
-      // the next loop's `engine.requery()` issues a FRESH cycle rather than
-      // re-latching the dead one.
-      const cancelled = this._correlator.cancelOldest(
-        BOOTSTRAP_SLOT_COUNT,
-        new Error(
-          `bootstrap requery attempt ${attempt} stalled past ${timeoutMs} ms — ` +
-            `cancelling slots and re-issuing (tc-hfxb.15)`,
-        ),
-      );
-      process.stderr.write(
-        `[pipeline] bootstrap requery STALLED (attempt ${attempt}/${MAX_BOUNDED_ATTEMPTS}, ` +
-          `> ${timeoutMs} ms); cancelled ${cancelled} correlator slot(s) and re-issuing. ` +
-          `The freshly-forked tmux server's first list-* round-trip lost the CPU race under ` +
-          `host load (tc-hfxb.15 / tc-crnt.17 class).\n`,
-      );
-      await cyclePromise.then(
-        () => {},
-        () => {},
-      );
-    }
+      // Each bootstrap cycle issues exactly two `list-*` commands (windows,
+      // panes); on a stall both slots are still pending. Cancel both.
+      const BOOTSTRAP_SLOT_COUNT = 2;
+      const MAX_BOUNDED_ATTEMPTS = 3;
+      const clock = this._opts.clock;
 
-    // Bounded attempts exhausted: fall back to one final UNBOUNDED requery so a
-    // slow-but-live tmux still bootstraps against the caller's outer budget.
-    return engine.requery();
+      for (let attempt = 1; attempt <= MAX_BOUNDED_ATTEMPTS; attempt++) {
+        _phaseAttempts = attempt;
+        if (this._stopped) {
+          _phaseOutcome = "stopped";
+          return await engine.requery();
+        }
+
+        const cyclePromise = engine.requery();
+        let timedOut = false;
+        const timeoutResult = await new Promise<"done" | "timeout">((resolve) => {
+          const handle = clock.setTimeout(() => {
+            timedOut = true;
+            resolve("timeout");
+          }, timeoutMs);
+          cyclePromise.then(
+            () => {
+              clock.clearTimeout(handle);
+              resolve("done");
+            },
+            () => {
+              // The cycle settled (rejected) on its own — e.g. a prior cancel's
+              // %error, or a correlator protocol anomaly. Treat as "done" and
+              // let the await below surface the result/rejection uniformly.
+              clock.clearTimeout(handle);
+              resolve("done");
+            },
+          );
+        });
+
+        if (timeoutResult === "done" || !timedOut) {
+          // The cycle resolved before the deadline. Await it for the value
+          // (or to re-throw a genuine rejection — the bounded-retry only
+          // recovers from STALLS, not from real protocol failures).
+          // tc-is5w: outcome=ok; `attempts` (>1 if earlier attempts timed out)
+          // already carries the retry envelope.
+          return await cyclePromise;
+        }
+
+        // Stall: the deadline fired first. Cancel the stalled cycle's two
+        // `list-*` slots so a late reply can't mis-bind, then let the abandoned
+        // `engine.requery()` settle (the cancel rejects its submit Promises ⇒
+        // its `Promise.all` rejects ⇒ the engine clears its in-flight latch) so
+        // the next loop's `engine.requery()` issues a FRESH cycle rather than
+        // re-latching the dead one.
+        const cancelled = this._correlator.cancelOldest(
+          BOOTSTRAP_SLOT_COUNT,
+          new Error(
+            `bootstrap requery attempt ${attempt} stalled past ${timeoutMs} ms — ` +
+              `cancelling slots and re-issuing (tc-hfxb.15)`,
+          ),
+        );
+        process.stderr.write(
+          `[pipeline] bootstrap requery STALLED (attempt ${attempt}/${MAX_BOUNDED_ATTEMPTS}, ` +
+            `> ${timeoutMs} ms); cancelled ${cancelled} correlator slot(s) and re-issuing. ` +
+            `The freshly-forked tmux server's first list-* round-trip lost the CPU race under ` +
+            `host load (tc-hfxb.15 / tc-crnt.17 class).\n`,
+        );
+        await cyclePromise.then(
+          () => {},
+          () => {},
+        );
+      }
+
+      // Bounded attempts exhausted: fall back to one final UNBOUNDED requery so a
+      // slow-but-live tmux still bootstraps against the caller's outer budget.
+      _phaseOutcome = "exhausted";
+      return await engine.requery();
+    } catch (err) {
+      _phaseOutcome = "error";
+      throw err;
+    } finally {
+      phaseLog({
+        phase: "bootstrap",
+        session: this._opts.sessionName,
+        bootstrap_ms: phaseNow() - _phaseT0,
+        attempts: _phaseAttempts,
+        outcome: _phaseOutcome,
+      });
+    }
   }
 
   /**

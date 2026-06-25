@@ -49,6 +49,8 @@ import {
   runServerHandshake,
   WIRE_PROTOCOL_VERSION,
   sessionId as mintSessionId,
+  phaseLog,
+  phaseNow,
 } from "@tmuxcc/session-proxy";
 import type {
   Transport,
@@ -1311,6 +1313,12 @@ class ServerProxyImpl implements ServerProxyHandle {
   private async _doClaimSession(
     name: string,
   ): Promise<{ sessionId: SessionId; endpoint: string; created: boolean; name?: string }> {
+    // tc-is5w: phase-split activation timing — t0 at claim entry. The claim leg
+    // is everything up to (but not including) the ensureSessionProxy await; the
+    // ensure leg wraps that await (which itself contains the bootstrap leg,
+    // emitted separately by the pipeline). Inert unless TMUXCC_PHASE_TIMING set.
+    const _phaseT0 = phaseNow();
+
     // Refresh session list from tmux
     this._refreshSessions();
 
@@ -1394,12 +1402,29 @@ class ServerProxyImpl implements ServerProxyHandle {
       this._runtimeDirOpts,
     );
 
+    // tc-is5w: claim leg ends here (pre-ensure work); the ensure leg is the
+    // ensureSessionProxy await. On a fresh-fork claim the ensure span is
+    // dominated by `await sessionProxy.start()` → bootstrap-requery (emitted as
+    // a separate `phase=bootstrap` line, nested inside ensure_ms).
+    const _phaseClaimEnd = phaseNow();
+
     const endpoint = await this._supervisor.ensureSessionProxy(
       entry.sessionId,
       entry.name,
       this._opts.socketName,
       sessionProxySockPath,
     );
+
+    const _phaseEnd = phaseNow();
+    phaseLog({
+      phase: "claim",
+      session: entry.name,
+      sessionId: entry.sessionId,
+      created,
+      claim_ms: _phaseClaimEnd - _phaseT0,
+      ensure_ms: _phaseEnd - _phaseClaimEnd,
+      total_ms: _phaseEnd - _phaseT0,
+    });
 
     return { sessionId: entry.sessionId, endpoint, created };
   }

@@ -87,6 +87,7 @@ import type { OriginLookup, CloseCauseLookup } from "../state/projection.js";
 import type { ConnectionId } from "../wire/ids.js";
 import { connectionId as mintConnectionId } from "../wire/ids.js";
 import type { SessionProxyRegistry } from "../metrics/registry.js";
+import { phaseLog, phaseNow } from "./phase-timing.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -134,6 +135,13 @@ export interface ControlServerOptions {
    * factory wires this to the shared CloseCauseRegistry's `consume`.
    */
   closeCauseLookup?: CloseCauseLookup;
+
+  /**
+   * tc-is5w: session name, used only to tag the dev-gated `[tc-is5w]
+   * phase=snapshot` activation-timing line (the first-snapshot leg). Inert
+   * unless TMUXCC_PHASE_TIMING is set; omit in callers that don't care.
+   */
+  sessionName?: string;
 }
 
 /**
@@ -419,6 +427,8 @@ class ControlServerImpl implements ControlServer {
   private readonly _originLookup: OriginLookup | undefined;
   /** tc-u7cu.6: close-cause lookup passed to per-client diffModel. */
   private readonly _closeCauseLookup: CloseCauseLookup | undefined;
+  /** tc-is5w: session name for the dev-gated first-snapshot timing line. */
+  private readonly _sessionName: string | undefined;
 
   /**
    * Active clients keyed by transport reference. Using the Transport object as
@@ -464,9 +474,17 @@ class ControlServerImpl implements ControlServer {
     this._metrics = opts.metrics;
     this._originLookup = opts.originLookup;
     this._closeCauseLookup = opts.closeCauseLookup;
+    this._sessionName = opts.sessionName;
   }
 
   async addClient(transport: Transport): Promise<NegotiatedSession> {
+    // tc-is5w: phase-split activation timing — the first-snapshot leg. t0 at
+    // addClient entry; the span covers the capability handshake + microtask
+    // yield + first snapshot send. This leg fires on the CLIENT-connect event
+    // (decoupled from the broker claim), so it is its own `[tc-is5w]
+    // phase=snapshot` line keyed by session, not folded into the claim line.
+    const _phaseSnapT0 = phaseNow();
+
     // Run the session-proxy-side capability handshake. This will:
     //   • Send session-proxy.capabilities (seq=1, handled internally by runSessionProxyHandshake)
     //   • Wait for the client to send client.capabilities
@@ -590,6 +608,14 @@ class ControlServerImpl implements ControlServer {
       // via the snapshot's `attachedClientCount` field, so re-sending it would
       // be redundant — and would shift its delta seq from the expected lastSeq+1.
       this.broadcastClientCountTo({ exclude: transport });
+
+      // tc-is5w: first-snapshot leg complete (handshake → snapshot sent). Inert
+      // unless TMUXCC_PHASE_TIMING is set.
+      phaseLog({
+        phase: "snapshot",
+        session: this._sessionName,
+        snapshot_ms: phaseNow() - _phaseSnapT0,
+      });
     }
 
     return session;
