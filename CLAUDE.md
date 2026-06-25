@@ -73,6 +73,33 @@ healthy steady-state shape, deviation diagnosis, and alert wiring — lives in
 `docs/observability.md`. This section is a working reference; defer to that doc
 for full detail.
 
+### Reading driver internals — the stderr mirror (`server-proxy.log`)
+
+There is no logger abstraction: diagnostics are raw `process.stderr.write` /
+`console.warn` at each call site (the expected-zero tripwires above, and the
+unconditional `[pipeline] bootstrap requery STALLED …` line in
+`session-proxy/src/runtime/pipeline.ts`). Post-tc-2x3 the session-proxy runs
+in-process in the server-proxy event loop, so **every** such line is the
+server-proxy process's own stderr.
+
+`server-proxy-entry.ts` `main()` installs a stderr→file **mirror** at startup
+(`openServerProxyLog(serverProxyLogPath(socketName, …))` +
+`installStderrMirror(log)`, both in `packages/server-proxy/src/`): it
+monkey-patches `process.stderr.write` to tee every write — ISO-timestamped —
+into an append-only, mode-0600 file, then forwards to the original fd. The path
+is well-known and derivable by clients: `<runtime>/<socket>/server-proxy.log`
+(`<runtime>` = `$XDG_RUNTIME_DIR/tmuxcc` or `/tmp/tmuxcc-<uid>`;
+`serverProxyLogPath` in `runtime-dir.ts`). On the VS Code side
+**`tmuxcc.showServerProxyLogs`** tails this file into the "tmuxcc server-proxy
+log" channel (`server-proxy-debug.ts`).
+
+So this file — **not** the metrics text — is the canonical place to read driver
+internals after the fact (a stall, a tripwire, a crash). It captures the bytes
+even when no metrics reader was attached, and it is the only place the
+bootstrap-stall line is durably recorded. In the tmuxcc-vscode e2e harness the
+per-worker copy is collected to `test/e2e/trace/<cid>-server-proxy.log` so it
+survives the test reaper (tc-mbu3.1, cross-ref tc-jlyi).
+
 ### Existing metrics — LATENCY
 
 | Metric | Registry | What it measures |
