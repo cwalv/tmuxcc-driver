@@ -18,6 +18,9 @@
  *   - Guard field parsing: timestamp, commandNumber, flags.
  *   - Empty body block.
  *   - Malformed guard line fallback.
+ *   - Block-aware ST suppression (tc-44u4): raw ESC `\` (and other ST-bearing
+ *     escapes) inside a %begin…%end body stay opaque and never close the DCS;
+ *     real top-level closing ST still recognised; chunk-boundary resumability.
  */
 
 import { describe, it } from "node:test";
@@ -599,6 +602,320 @@ describe("tokenizeBuffer", () => {
     assert.strictEqual(fromHelper.length, fromPush.length);
     for (let i = 0; i < fromHelper.length; i++) {
       assert.strictEqual(fromHelper[i]!.kind, fromPush[i]!.kind);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 12. Block-aware ST suppression (tc-44u4)
+//
+// Regression matrix for the permanent-wedge bug: the tokenizer used to scan
+// EVERY INSIDE-state byte for the DCS String Terminator (ESC `\`), including
+// block-body bytes. `capture-pane -e` preserves raw escapes and tmux does NOT
+// octal-escape command-block bodies (only %output, control.c:639), so a raw
+// ESC `\` landing in a %begin…%end body was misread as the envelope-closing
+// ST: the tokenizer emitted dcs-close, entered AFTER_DCS, and silently
+// discarded the entire rest of the control stream forever.
+//
+// Invariant (oracle): block bodies are OPAQUE. iTerm2's TmuxGateway.m reads the
+// stream line-by-line, tracks %begin/%end (currentCommand_), and appends body
+// data with `[currentCommandData_ appendData:data]` (TmuxGateway.m:798) — it
+// never byte-scans block-body content for the ST. tmux's real closing ST only
+// ever arrives at top level (block depth 0) after all control lines, never
+// mid-block, so suppressing ST detection inside a block is safe and complete.
+// ---------------------------------------------------------------------------
+
+const ESC = new Uint8Array([0x1b]);
+const ESC_BACKSLASH = new Uint8Array([0x1b, 0x5c]); // raw DCS ST in a body
+const LF_BYTE = 0x0a;
+
+/** Assert no token in the stream is a dcs-close (the wedge signature). */
+function assertNoDcsClose(tokens: ControlToken[], label: string): void {
+  for (let i = 0; i < tokens.length; i++) {
+    assert.notStrictEqual(
+      tokens[i]!.kind,
+      "dcs-close",
+      `${label}: unexpected dcs-close at token[${i}] (premature ST → wedge)`,
+    );
+  }
+}
+
+// --- A. Core regression: the live wedge ---
+
+describe("tc-44u4 A: raw ESC-backslash in block body must not close the DCS", () => {
+  it("A1. body-with-raw-ESC-backslash recovers; block-end + trailing %output survive", () => {
+    const input = concat(
+      bytes("%begin 100 1 0\n"),
+      bytes("before"),
+      ESC_BACKSLASH,
+      bytes("after\n"),
+      bytes("%end 100 1 0\n"),
+      bytes("%output %1 hello\n"),
+    );
+    const tokens = tokenizeBuffer(input);
+    assertNoDcsClose(tokens, "A1");
+    assert.strictEqual(tokens.length, 4, `A1: expected 4 tokens, got ${tokens.length}`);
+    assertBlockBegin(tokens[0], 100, 1, 0, "A1.begin");
+    assertBlockBody(tokens[1], concat(bytes("before"), ESC_BACKSLASH, bytes("after")), "A1.body");
+    assertBlockEnd(tokens[2], 100, 1, 0, "A1.end");
+    assertNotification(tokens[3], "output", "A1.trailing");
+  });
+
+  it("A2. ESC-backslash as the LAST bytes of the body still recovers", () => {
+    const input = concat(
+      bytes("%begin 100 1 0\n"),
+      bytes("trailing"),
+      ESC_BACKSLASH,
+      bytes("\n"),
+      bytes("%end 100 1 0\n"),
+      bytes("%output %1 x\n"),
+    );
+    const tokens = tokenizeBuffer(input);
+    assertNoDcsClose(tokens, "A2");
+    assert.strictEqual(tokens.length, 4);
+    assertBlockBody(tokens[1], concat(bytes("trailing"), ESC_BACKSLASH), "A2.body");
+    assertBlockEnd(tokens[2], 100, 1, 0, "A2.end");
+    assertNotification(tokens[3], "output", "A2.trailing");
+  });
+
+  it("A3. ESC-backslash as the FIRST bytes of the body still recovers", () => {
+    const input = concat(
+      bytes("%begin 100 1 0\n"),
+      ESC_BACKSLASH,
+      bytes("leading\n"),
+      bytes("%end 100 1 0\n"),
+      bytes("%output %1 x\n"),
+    );
+    const tokens = tokenizeBuffer(input);
+    assertNoDcsClose(tokens, "A3");
+    assert.strictEqual(tokens.length, 4);
+    assertBlockBody(tokens[1], concat(ESC_BACKSLASH, bytes("leading")), "A3.body");
+    assertBlockEnd(tokens[2], 100, 1, 0, "A3.end");
+    assertNotification(tokens[3], "output", "A3.trailing");
+  });
+});
+
+// --- B. Adversarial block-body payloads (each opaque; block-end emitted) ---
+
+describe("tc-44u4 B: adversarial block-body payloads stay opaque", () => {
+  /** Run a body payload through a full block and assert exact body + recovery. */
+  function runBody(label: string, body: Uint8Array): ControlToken[] {
+    const input = concat(
+      bytes("%begin 7 1 0\n"),
+      body,
+      bytes("\n"),
+      bytes("%end 7 1 0\n"),
+      bytes("%output %1 ok\n"),
+    );
+    const tokens = tokenizeBuffer(input);
+    assertNoDcsClose(tokens, label);
+    assert.strictEqual(tokens.length, 4, `${label}: expected 4 tokens, got ${tokens.length}`);
+    assertBlockBegin(tokens[0], 7, 1, 0, `${label}.begin`);
+    assertBlockBody(tokens[1], body, `${label}.body`);
+    assertBlockEnd(tokens[2], 7, 1, 0, `${label}.end`);
+    assertNotification(tokens[3], "output", `${label}.trailing`);
+    return tokens;
+  }
+
+  it("B4. bare ESC with no following backslash, then arbitrary bytes", () => {
+    runBody("B4", concat(ESC, bytes("Xnot-an-st")));
+  });
+
+  it("B5. ESC followed by a non-backslash byte (a CSI: ESC [ 0 m)", () => {
+    runBody("B5", concat(ESC, bytes("[0m")));
+  });
+
+  it("B6. a full nested DCS-looking sequence in the body (ESC P … ESC \\)", () => {
+    runBody("B6", concat(bytes("\x1bP1000pcaptured"), ESC_BACKSLASH));
+  });
+
+  it("B7. an OSC with ST terminator in the body (ESC ] 0 ; title ESC \\)", () => {
+    runBody("B7", concat(bytes("\x1b]0;title"), ESC_BACKSLASH));
+  });
+
+  it("B8. an OSC with BEL terminator (ESC ] 0 ; title BEL)", () => {
+    runBody("B8", concat(bytes("\x1b]0;title"), new Uint8Array([0x07])));
+  });
+
+  it("B9. kitty-protocol leak in the body (ESC [ 99;5u)", () => {
+    runBody("B9", bytes("\x1b[99;5u"));
+  });
+
+  it("B10. multiple ESC-backslash occurrences in one body → all opaque, single block-end", () => {
+    runBody("B10", concat(ESC_BACKSLASH, bytes("a"), ESC_BACKSLASH, bytes("b"), ESC_BACKSLASH));
+  });
+
+  it("B11. literal %end/%begin/%output text mid-line is not misparsed", () => {
+    // Not at line start → block-body, never a notification/guard. (%-guards are
+    // only recognised when % is the FIRST byte of a line.)
+    runBody("B11", bytes("see %end and %begin and %output inline"));
+  });
+
+  it("B12. body containing 0xCC (data-frame disambiguator) and 0x00", () => {
+    runBody("B12", new Uint8Array([0x61, 0xcc, 0x00, 0x62]));
+  });
+});
+
+// --- C. Chunk-boundary / streaming robustness ---
+
+describe("tc-44u4 C: chunk-boundary robustness (state machine resumable)", () => {
+  it("C13. ESC and backslash split across two writes INSIDE a block body → opaque", () => {
+    const tok = new ControlTokenizer();
+    const tokens: ControlToken[] = [];
+    tokens.push(...tok.push(bytes("%begin 1 1 0\nbody")));
+    tokens.push(...tok.push(ESC)); // ESC arrives alone
+    tokens.push(...tok.push(concat(new Uint8Array([0x5c]), bytes("more\n")))); // backslash + rest
+    tokens.push(...tok.push(bytes("%end 1 1 0\n")));
+    tokens.push(...tok.push(bytes("%output %1 ok\n")));
+    assertNoDcsClose(tokens, "C13");
+    assert.strictEqual(tokens.length, 4);
+    assertBlockBody(tokens[1], concat(bytes("body"), ESC_BACKSLASH, bytes("more")), "C13.body");
+    assertBlockEnd(tokens[2], 1, 1, 0, "C13.end");
+    assertNotification(tokens[3], "output", "C13.trailing");
+  });
+
+  it("C14. ESC and backslash split across two writes at TOP LEVEL → real dcs-close", () => {
+    const tok = new ControlTokenizer();
+    const tokens: ControlToken[] = [];
+    tokens.push(...tok.push(concat(DCS_INTRO, bytes("%pause\n"))));
+    tokens.push(...tok.push(ESC)); // ESC of the closing ST, alone
+    tokens.push(...tok.push(new Uint8Array([0x5c]))); // backslash completes ST
+    assert.strictEqual(tokens.length, 3);
+    assert.strictEqual(tokens[0]!.kind, "dcs-open");
+    assertNotification(tokens[1], "pause", "C14");
+    assert.strictEqual(tokens[2]!.kind, "dcs-close", "C14: top-level ST split across writes closes");
+  });
+
+  it("C15. %begin / %end markers split across writes → block still bounded", () => {
+    const tok = new ControlTokenizer();
+    const tokens: ControlToken[] = [];
+    tokens.push(...tok.push(bytes("%beg")));
+    tokens.push(...tok.push(bytes("in 1 1 0\n")));
+    tokens.push(...tok.push(concat(bytes("x"), ESC_BACKSLASH, bytes("y\n"))));
+    tokens.push(...tok.push(bytes("%en")));
+    tokens.push(...tok.push(bytes("d 1 1 0\n")));
+    tokens.push(...tok.push(bytes("%output %1 ok\n")));
+    assertNoDcsClose(tokens, "C15");
+    assert.strictEqual(tokens.length, 4);
+    assertBlockBegin(tokens[0], 1, 1, 0, "C15.begin");
+    assertBlockBody(tokens[1], concat(bytes("x"), ESC_BACKSLASH, bytes("y")), "C15.body");
+    assertBlockEnd(tokens[2], 1, 1, 0, "C15.end");
+    assertNotification(tokens[3], "output", "C15.trailing");
+  });
+
+  it("C16. DCS intro split byte-by-byte across writes → still opens", () => {
+    const tok = new ControlTokenizer();
+    const tokens = feedByteByByte(tok, concat(DCS_INTRO, bytes("%pause\n")));
+    assert.strictEqual(tokens[0]!.kind, "dcs-open", "C16: byte-split DCS intro opens");
+    assertNotification(tokens[1], "pause", "C16");
+  });
+});
+
+// --- D. Real DCS close still works (no over-suppression) ---
+
+describe("tc-44u4 D: real top-level DCS close still recognised", () => {
+  it("D17. top-level clean closing ST → dcs-close + trailing bytes discarded", () => {
+    const input = concat(DCS_INTRO, bytes("%pause\n"), ST, bytes("garbage\n"));
+    const tokens = tokenizeBuffer(input);
+    assert.strictEqual(tokens.length, 3);
+    assert.strictEqual(tokens[0]!.kind, "dcs-open");
+    assertNotification(tokens[1], "pause", "D17");
+    assert.strictEqual(tokens[2]!.kind, "dcs-close");
+  });
+
+  it("D18. full session: DCS + several blocks + %output + top-level closing ST", () => {
+    const input = concat(
+      DCS_INTRO,
+      bytes("%begin 1 1 0\n"),
+      bytes("a"),
+      ESC_BACKSLASH, // raw ST in body 1 — must stay opaque
+      bytes("\n"),
+      bytes("%end 1 1 0\n"),
+      bytes("%output %1 mid\n"),
+      bytes("%begin 2 2 0\nplain\n%end 2 2 0\n"),
+      bytes("%sessions-changed\n"),
+      ST,
+    );
+    const tokens = tokenizeBuffer(input);
+    assert.strictEqual(tokens.length, 10, `D18: expected 10 tokens, got ${tokens.length}`);
+    assert.strictEqual(tokens[0]!.kind, "dcs-open", "D18[0]");
+    assertBlockBegin(tokens[1], 1, 1, 0, "D18.begin1");
+    assertBlockBody(tokens[2], concat(bytes("a"), ESC_BACKSLASH), "D18.body1");
+    assertBlockEnd(tokens[3], 1, 1, 0, "D18.end1");
+    assertNotification(tokens[4], "output", "D18.output");
+    assertBlockBegin(tokens[5], 2, 2, 0, "D18.begin2");
+    assertBlockBody(tokens[6], bytes("plain"), "D18.body2");
+    assertBlockEnd(tokens[7], 2, 2, 0, "D18.end2");
+    assertNotification(tokens[8], "sessions-changed", "D18.sessions-changed");
+    assert.strictEqual(tokens[9]!.kind, "dcs-close", "D18: closing ST after all control lines");
+  });
+
+  it("D19. block opened then closed, THEN a top-level ESC-backslash → real close", () => {
+    // Proves suppression is scoped to inside-block only; block state returns to
+    // OUTSIDE after %end so the subsequent top-level ST is recognised.
+    const input = concat(
+      DCS_INTRO,
+      bytes("%begin 1 1 0\n"),
+      ESC_BACKSLASH, // opaque (inside block)
+      bytes("\n"),
+      bytes("%end 1 1 0\n"),
+      ST, // top-level → real close
+    );
+    const tokens = tokenizeBuffer(input);
+    assert.strictEqual(tokens.length, 5);
+    assert.strictEqual(tokens[0]!.kind, "dcs-open");
+    assertBlockBegin(tokens[1], 1, 1, 0, "D19.begin");
+    assertBlockBody(tokens[2], ESC_BACKSLASH, "D19.body");
+    assertBlockEnd(tokens[3], 1, 1, 0, "D19.end");
+    assert.strictEqual(tokens[4]!.kind, "dcs-close", "D19: top-level ST after block closes DCS");
+  });
+});
+
+// --- E. Property / fuzz: random bodies opaque + recovery preserved ---
+
+describe("tc-44u4 E: fuzz — random block bodies stay opaque + recovery preserved", () => {
+  // Deterministic LCG so failures are reproducible without a seed dependency.
+  function makeRng(seed: number): () => number {
+    let s = seed >>> 0;
+    return () => {
+      s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+      return s;
+    };
+  }
+
+  it("200 random bodies of arbitrary bytes: opaque body, block-end, trailing %output", () => {
+    const rng = makeRng(0xc0ffee);
+    for (let iter = 0; iter < 200; iter++) {
+      // Random body length 0..63; bytes biased to include ESC, 0x5c, % and NUL.
+      const len = rng() % 64;
+      const body = new Uint8Array(len);
+      for (let j = 0; j < len; j++) {
+        const r = rng() % 16;
+        body[j] =
+          r === 0 ? 0x1b : // ESC (to provoke MAYBE_ST)
+          r === 1 ? 0x5c : // backslash (to provoke ST completion)
+          r === 2 ? 0x25 : // '%'
+          r === 3 ? 0x00 : // NUL
+          r === 4 ? 0xcc : // data-frame disambiguator
+          (rng() % 256);
+      }
+      // A body line may not itself contain LF (LF terminates the line); strip
+      // any to keep this a single-line body, matching the invariant under test.
+      const oneLine = body.filter((b) => b !== LF_BYTE);
+      const input = concat(
+        bytes("%begin 1 1 0\n"),
+        oneLine,
+        bytes("\n"),
+        bytes("%end 1 1 0\n"),
+        bytes("%output %1 ok\n"),
+      );
+      const tokens = tokenizeBuffer(input);
+      assertNoDcsClose(tokens, `E.fuzz[${iter}]`);
+      assert.strictEqual(tokens.length, 4, `E.fuzz[${iter}]: expected 4 tokens, got ${tokens.length}`);
+      assertBlockBegin(tokens[0], 1, 1, 0, `E.fuzz[${iter}].begin`);
+      assertBlockBody(tokens[1], oneLine, `E.fuzz[${iter}].body`);
+      assertBlockEnd(tokens[2], 1, 1, 0, `E.fuzz[${iter}].end`);
+      assertNotification(tokens[3], "output", `E.fuzz[${iter}].trailing`);
     }
   });
 });

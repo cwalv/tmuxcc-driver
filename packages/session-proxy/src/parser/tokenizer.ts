@@ -23,7 +23,16 @@
  *   %error <timestamp> <cmdnum> <flags> ← end of block (failure)
  *
  * Critical: body lines inside a %begin…%end block are NEVER interpreted as
- * notifications, even if they start with `%`.
+ * notifications, even if they start with `%`. The same opaqueness applies to
+ * the DCS String Terminator (ESC `\`): block bodies carry arbitrary raw bytes
+ * (e.g. `capture-pane -e` preserves raw escape sequences; tmux does NOT
+ * octal-escape command-block bodies, only %output — control.c:639), so an
+ * ESC `\` landing in a body must NOT be mistaken for the envelope-closing ST.
+ * The real closing ST only ever arrives at top level (block depth 0) after all
+ * control lines, never mid-block, so suppressing ST detection inside a block is
+ * safe. (Cross-checked against iTerm2's TmuxGateway.m: it reads line-by-line,
+ * tracks %begin/%end, and appends block bodies as opaque bytes — it never
+ * byte-scans block-body content for the ST. tc-44u4.)
  *
  * # Token types
  *
@@ -340,11 +349,24 @@ export class ControlTokenizer {
   }
 
   /**
-   * INSIDE: normal line parsing. Scan for LF (line terminator) or ESC (potential ST).
+   * INSIDE: normal line parsing. Scan for LF (line terminator), and — only when
+   * we are NOT inside a %begin…%end block — ESC (potential closing ST).
+   *
+   * Block bodies are opaque: they carry arbitrary raw bytes (including ESC `\`
+   * from `capture-pane -e`, nested DCS/OSC sequences, kitty-protocol escapes,
+   * etc.) and must only be terminated by LF, never by a byte-level ST scan.
+   * Suppressing ST detection inside a block is safe because tmux's real closing
+   * ST only ever arrives at top level (block depth 0) after all control lines.
+   * (Oracle: iTerm2 TmuxGateway.m treats block-body data as opaque bytes and
+   * never scans it for the ST. tc-44u4.)
+   *
    * Appends bytes to _lineBuf; on LF, processes the complete line.
    */
   private _processInside(chunk: Uint8Array, i: number, out: ControlToken[]): number {
-    // Fast scan: find next LF or ESC in the remaining slice.
+    // ST detection is suppressed while inside a block body (opaque bytes).
+    const scanForSt = this._blockState === BlockState.OUTSIDE;
+
+    // Fast scan: find next LF (always) or ESC (only at top level) in the slice.
     const start = i;
     while (i < chunk.length) {
       const b = chunk[i]!;
@@ -359,7 +381,7 @@ export class ControlTokenizer {
         return i; // resume at next byte (will re-enter _processInside via loop)
       }
 
-      if (b === 0x1b) {
+      if (scanForSt && b === 0x1b) {
         // Potential ST (\x1b\). Append everything before this ESC to the line.
         if (i > start) {
           this._appendToLine(chunk.subarray(start, i));
