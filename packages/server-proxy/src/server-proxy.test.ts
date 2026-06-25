@@ -301,6 +301,48 @@ describe("server-proxy – unit (no tmux)", () => {
     }
   });
 
+  it("U3b (tc-bn7d): rpc_round_trip_seconds is observed in the live metricsText via _handleCommand", async () => {
+    const socketName = nextSocketName();
+    const serverProxy = createServerProxy({ socketName });
+    await serverProxy.start();
+
+    try {
+      const { mux } = await connectToServerProxy(serverProxy.endpoint());
+      const seq = { value: 1 };
+
+      // First command: observed in _handleCommand's finally AFTER its
+      // metricsText snapshot is built, so the SECOND read carries the sample.
+      await sendServerProxyCommand(mux, { kind: "server-proxy.info" }, seq);
+
+      const resp = await sendServerProxyCommand(mux, { kind: "server-proxy.info" }, seq);
+      assert.ok(resp.result.ok, `Expected ok=true, got: ${JSON.stringify(resp.result)}`);
+      const info = (resp.result as {
+        ok: true;
+        payload: { info: import("@tmuxcc/session-proxy").ServerProxyInfoPayload };
+      }).payload.info;
+
+      assert.ok(
+        info.metricsText !== null,
+        "server-proxy.info must carry the metricsText exposition",
+      );
+      const text = info.metricsText as string;
+      assert.ok(
+        text.includes("rpc_round_trip_seconds"),
+        `metricsText must contain rpc_round_trip_seconds (tc-bn7d); got:\n${text}`,
+      );
+      // The application-leg RTT is attributed to the command kind that drove it.
+      assert.ok(
+        text.includes('kind="server-proxy.info"') &&
+          /rpc_round_trip_seconds_count\{kind="server-proxy\.info"\}/.test(text),
+        `rpc_round_trip_seconds must be labelled by command kind; got:\n${text}`,
+      );
+
+      mux.transport.close();
+    } finally {
+      await serverProxy.shutdown();
+    }
+  });
+
   it("U4 (tc-k6v): server-proxy.info reports logPath verbatim when configured", async () => {
     const socketName = nextSocketName();
     const serverProxy = createServerProxy({ socketName, logPath: "/tmp/some-server-proxy.log" });

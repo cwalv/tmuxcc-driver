@@ -529,6 +529,33 @@ describe("SessionProxyRegistry", () => {
     reg.stop();
   });
 
+  it("incBoundaryQuarantine increments the expected-zero tripwire (tc-m2y8)", async () => {
+    const reg = createSessionProxyRegistry();
+
+    // The companion to incBoundaryTrip: the supervisor's circuit breaker fired
+    // (N rapid trips crossed the quarantine threshold).
+    reg.incBoundaryTrip();
+    reg.incBoundaryTrip();
+    reg.incBoundaryQuarantine();
+
+    const text = await reg.metrics();
+    assert.ok(
+      text.includes("session_boundary_quarantined_total"),
+      "text should contain session_boundary_quarantined_total",
+    );
+    assert.ok(
+      text.match(/session_boundary_quarantined_total 1/),
+      `quarantine count should be 1; got:\n${text}`,
+    );
+    // Companion counter is present and independent.
+    assert.ok(
+      text.match(/session_boundary_trips_total 2/),
+      `trips should be 2 (independent of quarantine); got:\n${text}`,
+    );
+
+    reg.stop();
+  });
+
   it("multiple registries are isolated (no cross-contamination)", async () => {
     const reg1 = createSessionProxyRegistry();
     const reg2 = createSessionProxyRegistry();

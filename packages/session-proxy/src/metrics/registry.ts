@@ -559,6 +559,25 @@ export interface SessionProxyRegistry {
   incBoundaryTrip(): void;
 
   /**
+   * Increment `session_boundary_quarantined_total` (tc-m2y8).
+   *
+   * Called by the supervisor's circuit breaker when a session crosses the
+   * repeated-trip quarantine threshold (`CIRCUIT_BREAKER_TRIP_THRESHOLD`
+   * boundary trips within `CIRCUIT_BREAKER_WINDOW_MS`) and is blocked from
+   * re-spawning until `clearQuarantine()` is called. The companion of
+   * `incBoundaryTrip`: trips is the per-session accumulator, quarantined is the
+   * broker-level alarm (N rapid trips crossed the threshold — the session is
+   * now in quarantine).
+   *
+   * Surfaced via `session-proxy.info` in the same `metricsText` block.
+   *
+   * **Expected-zero tripwire**: any non-zero value means a repeated
+   * parser/reducer bug reached the quarantine threshold; the caller ALSO
+   * loud-logs the `CIRCUIT BREAKER OPEN` line to stderr.
+   */
+  incBoundaryQuarantine(): void;
+
+  /**
    * Render the full registry as Prometheus text exposition format.
    * Returns a Promise<string> to match prom-client's async API.
    */
@@ -926,6 +945,22 @@ export function createSessionProxyRegistry(): SessionProxyRegistry {
     registers: [reg],
   });
 
+  // tc-m2y8: circuit-breaker quarantine counter — the companion to
+  // session_boundary_trips_total. trips is the per-session accumulator;
+  // quarantined is the broker-level alarm (the supervisor's circuit breaker
+  // saw CIRCUIT_BREAKER_TRIP_THRESHOLD rapid trips and now blocks re-spawn
+  // until clearQuarantine()). Expected-zero tripwire; the caller loud-logs
+  // the CIRCUIT BREAKER OPEN line.
+  const sessionBoundaryQuarantinedTotal = new Counter({
+    name: "session_boundary_quarantined_total",
+    help:
+      "Per-session circuit-breaker quarantine events (tc-m2y8). " +
+      "Each increment = the session crossed the repeated-boundary-trip threshold and was quarantined " +
+      "(ensureSessionProxy rejects until clearQuarantine). " +
+      "Expected-zero tripwire — companion of session_boundary_trips_total.",
+    registers: [reg],
+  });
+
   // tc-3si.5: per-cycle delta-count distribution. Complements
   // deltas_emitted_total (rate) by showing the SHAPE — small steady
   // (1–5) vs. bootstrap spikes vs. flapping diffs (alternating 0/N).
@@ -1076,6 +1111,10 @@ export function createSessionProxyRegistry(): SessionProxyRegistry {
 
     incBoundaryTrip(): void {
       sessionBoundaryTripsTotal.inc();
+    },
+
+    incBoundaryQuarantine(): void {
+      sessionBoundaryQuarantinedTotal.inc();
     },
 
     observeDeltasPerCycle(count: number): void {

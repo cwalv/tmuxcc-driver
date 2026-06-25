@@ -346,7 +346,10 @@ class ServerProxyImpl implements ServerProxyHandle {
   /** Name index: session name → SessionEntry (for fast lookups) */
   private _byName = new Map<string, SessionEntry>();
 
-  private _supervisor: SessionProxySupervisor = createSessionProxySupervisor();
+  // Assigned in the constructor (after `_metrics`) so the supervisor's
+  // per-session transports can report backpressure onto the server-proxy
+  // registry (tc-edf8).
+  private readonly _supervisor: SessionProxySupervisor;
   private _watcher: TmuxWatcher | null = null;
   private _server: { close(): Promise<void> } | null = null;
   private _socketPath: string = "";
@@ -431,6 +434,13 @@ class ServerProxyImpl implements ServerProxyHandle {
     this._runtimeDirOpts = opts.runtimeDir !== undefined ? { runtimeDir: opts.runtimeDir } : {};
     this._idleExitMs = opts.idleExitMs ?? DEFAULT_IDLE_EXIT_MS;
     this._persistThroughTmuxGone = opts.persistThroughTmuxGone ?? false;
+    // tc-edf8: hand the broker's metrics registry to the supervisor so each
+    // per-session client transport's drain path is observable (the firehose
+    // backpressure path). `_metrics` is a field initializer above, so it is
+    // already assigned here.
+    this._supervisor = createSessionProxySupervisor({
+      socketTransportMetrics: this._metrics,
+    });
   }
 
   endpoint(): string {
@@ -527,6 +537,9 @@ class ServerProxyImpl implements ServerProxyHandle {
         onConnectionCountChange: (count) => {
           this._onConnectionCountChange(count);
         },
+        // tc-edf8: report the broker IPC socket's backpressure (drain) depth
+        // and per-send time-in-queue onto the server-proxy registry.
+        metrics: this._metrics,
       },
     );
 
@@ -658,6 +671,12 @@ class ServerProxyImpl implements ServerProxyHandle {
       // The server-proxy may have been shut down (or self-exited) during the probe.
       if (!this._started || this._selfExited) return;
 
+      // tc-m2y8: count each acted-on watcher EOF by its probe verdict. Placed
+      // after the shutdown-during-probe guard so a teardown mid-probe is not
+      // counted; the verdict distribution (alive | inconclusive | gone) is the
+      // promoted-from-log signal for watcher health.
+      this._metrics.incWatcherEof(liveness);
+
       if (liveness === "gone") {
         // POSITIVE evidence the tmux server is gone — the only terminal case.
         if (this._persistThroughTmuxGone) {
@@ -698,6 +717,10 @@ class ServerProxyImpl implements ServerProxyHandle {
     const timer = setTimeout(() => {
       this._respawnTimer = null;
       if (!this._started || this._selfExited) return;
+      // tc-m2y8: count the respawn at the point the timer fires and we actually
+      // spawn a replacement watcher (not at schedule time — a broker that shuts
+      // down inside the backoff window never respawns and must not be counted).
+      this._metrics.incWatcherRespawn();
       // Replace the (inert, already-EOFed) watcher and force a refresh:
       // sessions may have changed during the watcher gap.
       this._watcher?.stop();
@@ -778,6 +801,11 @@ class ServerProxyImpl implements ServerProxyHandle {
   private async _selfExit(reason: ServerProxySelfExitReason): Promise<void> {
     if (this._selfExited || !this._started) return;
     this._selfExited = true;
+
+    // tc-m2y8: count the designed self-exit by reason before shutdown runs.
+    // Promotes the previously on-wire-only / logged reason into a counter that
+    // survives in metricsText (read via a sibling broker / a late server-proxy.info).
+    this._metrics.incSelfExit(reason);
 
     // tc-xnay / tc-ymxe: announce designed exit BEFORE shutdown closes
     // transports.  Mirrors `_broadcastToAll` shape; inlined here so the
@@ -1157,6 +1185,14 @@ class ServerProxyImpl implements ServerProxyHandle {
     // tc-x6l: increment command counter before dispatch.
     this._metrics.incCommand(command.kind);
 
+    // tc-bn7d: time the full application-leg RPC round-trip (the whole handler
+    // await chain) and attribute it to the command kind. Observed in the
+    // `finally` so every exit path — success, unknown-command, and the error
+    // catch — records exactly one sample. This is the application-leg companion
+    // to the tmux-leg `command_round_trip_seconds`: a slow `ensureSessionProxy`
+    // / tmux spawn shows here while the tmux leg stays ~1 ms (tc-jlyi).
+    const rpcStartMs = Date.now();
+
     try {
       let payload: { sessionId?: SessionId; endpoint?: string; paneId?: PaneId; created?: boolean; ok?: true; info?: ServerProxyInfoPayload; topology?: SessionTopologyPayload; name?: string };
 
@@ -1215,6 +1251,9 @@ class ServerProxyImpl implements ServerProxyHandle {
         correlationId,
         result: { ok: false, code, message: msg },
       });
+    } finally {
+      // tc-bn7d: one observation per command, across every exit path.
+      this._metrics.observeRpcRoundTrip((Date.now() - rpcStartMs) / 1000, command.kind);
     }
   }
 

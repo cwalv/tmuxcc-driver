@@ -272,5 +272,80 @@ describe("socket-transport", () => {
       ]);
       assert.equal(resolved, true, "close() must resolve pending drain Promises");
     });
+
+    // -----------------------------------------------------------------------
+    // tc-edf8: backpressure metrics (socketfeed_sendcontrol_queue_depth +
+    // socketfeed_time_in_queue_seconds) fire through the real drain path.
+    // -----------------------------------------------------------------------
+    it("reports queue depth on backpressure and settles it + time-in-queue on drain (tc-edf8)", async () => {
+      const sockPath = tmpSocketPath();
+      const heldSockets: net.Socket[] = [];
+      const server = net.createServer((sock) => {
+        sock.pause();
+        heldSockets.push(sock);
+      });
+      await new Promise<void>((resolve) => server.listen(sockPath, resolve));
+      after(async () => {
+        for (const s of heldSockets) { try { s.destroy(); } catch { /* ignore */ } }
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        try { fs.unlinkSync(sockPath); } catch { /* ignore */ }
+      });
+
+      // A fake metrics hook records the drain-path callbacks so we can assert
+      // the depth nets to zero after drain and at least one time-in-queue
+      // sample is observed.
+      let depth = 0;
+      let maxDepth = 0;
+      const timeInQueueSamples: number[] = [];
+      const metrics = {
+        addSocketFeedQueueDepth(delta: number): void {
+          depth += delta;
+          if (depth > maxDepth) maxDepth = depth;
+        },
+        observeSocketFeedTimeInQueue(seconds: number): void {
+          timeInQueueSamples.push(seconds);
+        },
+      };
+
+      const clientTransport = await connectSocketTransport(sockPath, metrics);
+      after(() => clientTransport.close());
+
+      // Fill the send buffer until backpressure engages (sendData returns a
+      // Promise). Each write()==false enqueues onto the drain wait → depth++.
+      const paneIdStr = "p1" as unknown as Parameters<typeof clientTransport.sendData>[0];
+      const chunk = new Uint8Array(64 * 1024);
+      let pending: Promise<void> | null = null;
+      for (let i = 0; i < 256 && pending === null; i++) {
+        const result = clientTransport.sendData(paneIdStr, chunk);
+        if (result !== undefined && typeof (result as Promise<void>).then === "function") {
+          pending = result as Promise<void>;
+        }
+      }
+      assert.ok(pending !== null, "backpressure must engage");
+      assert.ok(maxDepth >= 1, `queue depth must rise above 0 under backpressure; got ${maxDepth}`);
+      assert.ok(depth >= 1, `depth must be standing while backpressured; got ${depth}`);
+
+      // Resume the reader so the client's 'drain' event fires.
+      for (const s of heldSockets) {
+        s.on("data", () => { /* discard */ });
+        s.resume();
+      }
+      await Promise.race([
+        (pending as Promise<void>),
+        new Promise<void>((_, reject) => setTimeout(() => reject(new Error("drain timeout")), 5_000)),
+      ]);
+      // Give the 'drain' handler a tick to run _noteDrainResolved().
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      assert.equal(depth, 0, `queue depth must return to 0 after drain; got ${depth}`);
+      assert.ok(
+        timeInQueueSamples.length >= 1,
+        `at least one time-in-queue sample must be observed at drain; got ${timeInQueueSamples.length}`,
+      );
+      assert.ok(
+        timeInQueueSamples.every((s) => s >= 0),
+        "time-in-queue samples must be non-negative",
+      );
+    });
   });
 });

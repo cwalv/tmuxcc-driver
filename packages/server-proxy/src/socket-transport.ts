@@ -65,6 +65,26 @@ const CTRL_LEN_SIZE = 4;
 const MAX_U32 = 0xffffffff;
 
 // ---------------------------------------------------------------------------
+// Backpressure metrics hook (tc-edf8)
+// ---------------------------------------------------------------------------
+
+/**
+ * The slice of `ServerProxyMetrics` the socket transport needs to report its
+ * backpressure (drain) path. Kept as a narrow structural type so the transport
+ * does not import the server-proxy metrics module (boundary discipline) — the
+ * broker passes a handle that already satisfies it.
+ *
+ * - `addSocketFeedQueueDepth(delta)`: `+1` when a send is enqueued onto the
+ *   drain wait (write()==false), `-n` when a drain resolves n waiting sends.
+ * - `observeSocketFeedTimeInQueue(seconds)`: per-send wait time, observed once
+ *   per enqueued send at the drain that releases it.
+ */
+export interface SocketTransportMetrics {
+  addSocketFeedQueueDepth(delta: number): void;
+  observeSocketFeedTimeInQueue(seconds: number): void;
+}
+
+// ---------------------------------------------------------------------------
 // SocketTransport
 // ---------------------------------------------------------------------------
 
@@ -93,8 +113,20 @@ class SocketTransport implements Transport {
   private _drainPromise: Promise<void> | null = null;
   private _drainResolve: (() => void) | null = null;
 
-  constructor(socket: net.Socket) {
+  // tc-edf8: backpressure (drain) observability. One "window" spans from the
+  // first write()==false (which allocates `_drainPromise`) to the 'drain' event
+  // that resolves it. `_drainWaiters` counts the sends enqueued onto the
+  // current window (each contributes +1 to the queue-depth gauge); they all
+  // share one promise, so the gauge reads concurrent backpressured senders.
+  // `_drainWindowOpenedAt` is the window-open timestamp (ms) used to observe
+  // per-send time-in-queue at drain. No-op when no metrics hook is wired.
+  private readonly _metrics: SocketTransportMetrics | null;
+  private _drainWaiters = 0;
+  private _drainWindowOpenedAt = 0;
+
+  constructor(socket: net.Socket, metrics?: SocketTransportMetrics) {
     this._socket = socket;
+    this._metrics = metrics ?? null;
     socket.on("data", (chunk: Buffer) => { this._onData(chunk); });
     socket.on("close", () => { this._onClose(); });
     socket.on("error", (err) => { this._onClose(err); });
@@ -105,8 +137,33 @@ class SocketTransport implements Transport {
       const r = this._drainResolve;
       this._drainPromise = null;
       this._drainResolve = null;
+      // tc-edf8: the window closed — observe each waiting send's queue time and
+      // drop the gauge back to 0 for this transport.
+      this._noteDrainResolved();
       if (r !== null) r();
     });
+  }
+
+  /**
+   * tc-edf8: settle the current backpressure window's metrics.
+   *
+   * Called when the window closes (a 'drain' event, or close()/_onClose()
+   * releasing awaiters). For each send that waited on this window, observe the
+   * wall time it spent queued (window-open → now) and decrement the aggregate
+   * queue-depth gauge so it returns to 0 for this transport. Idempotent: a
+   * no-op when no window is open (`_drainWaiters === 0`).
+   */
+  private _noteDrainResolved(): void {
+    if (this._drainWaiters === 0) return;
+    const waiters = this._drainWaiters;
+    this._drainWaiters = 0;
+    if (this._metrics !== null) {
+      const waitedSeconds = (Date.now() - this._drainWindowOpenedAt) / 1000;
+      this._metrics.addSocketFeedQueueDepth(-waiters);
+      for (let i = 0; i < waiters; i++) {
+        this._metrics.observeSocketFeedTimeInQueue(waitedSeconds);
+      }
+    }
   }
 
   // ── Control plane ──────────────────────────────────────────────────────────
@@ -161,8 +218,19 @@ class SocketTransport implements Transport {
    * stored resolve so the next backpressure window starts fresh.
    */
   private _ensureDrainPromise(): Promise<void> {
-    if (this._drainPromise !== null) return this._drainPromise;
+    // tc-edf8: every caller that reaches here is a send that hit write()==false
+    // and is now enqueued onto the drain wait — count it. The first waiter
+    // opens the window (records the open timestamp); concurrent waiters join
+    // the same shared promise, so the queue-depth gauge reads concurrent
+    // backpressured senders. The matching decrements + time-in-queue
+    // observations fire in _noteDrainResolved() when the window closes.
     if (this._closed || this._socket.destroyed) return Promise.resolve();
+    if (this._drainWaiters === 0) {
+      this._drainWindowOpenedAt = Date.now();
+    }
+    this._drainWaiters++;
+    this._metrics?.addSocketFeedQueueDepth(1);
+    if (this._drainPromise !== null) return this._drainPromise;
     this._drainPromise = new Promise<void>((resolve) => {
       this._drainResolve = resolve;
     });
@@ -188,6 +256,9 @@ class SocketTransport implements Transport {
     const r = this._drainResolve;
     this._drainPromise = null;
     this._drainResolve = null;
+    // tc-edf8: the window is being torn down — settle its metrics so the
+    // aggregate queue-depth gauge does not leak a standing depth on disconnect.
+    this._noteDrainResolved();
     if (r !== null) r();
     this._socket.destroy(err);
     for (const h of this._closeHandlers) h(err);
@@ -350,6 +421,8 @@ class SocketTransport implements Transport {
     const r = this._drainResolve;
     this._drainPromise = null;
     this._drainResolve = null;
+    // tc-edf8: settle the open window's metrics so the gauge returns to 0.
+    this._noteDrainResolved();
     if (r !== null) r();
     for (const h of this._closeHandlers) h(err);
     this._closeHandlers.clear();
@@ -362,21 +435,32 @@ class SocketTransport implements Transport {
 
 /**
  * Wrap an existing net.Socket as a two-plane Transport.
+ *
+ * @param metrics - Optional backpressure metrics hook (tc-edf8). When supplied,
+ *   the transport reports its drain-path queue depth and per-send time-in-queue.
  */
-export function createSocketTransport(socket: net.Socket): Transport {
-  return new SocketTransport(socket);
+export function createSocketTransport(
+  socket: net.Socket,
+  metrics?: SocketTransportMetrics,
+): Transport {
+  return new SocketTransport(socket, metrics);
 }
 
 /**
  * Dial a unix socket and return a Transport.
  * Resolves once the connection is established.
+ *
+ * @param metrics - Optional backpressure metrics hook (tc-edf8).
  */
-export function connectSocketTransport(socketPath: string): Promise<Transport> {
+export function connectSocketTransport(
+  socketPath: string,
+  metrics?: SocketTransportMetrics,
+): Promise<Transport> {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath);
     socket.once("connect", () => {
       socket.off("error", reject);
-      resolve(new SocketTransport(socket));
+      resolve(new SocketTransport(socket, metrics));
     });
     socket.once("error", reject);
   });
@@ -396,6 +480,14 @@ export interface SocketServerOptions {
    * connection, no matter how the connection ends.
    */
   onConnectionCountChange?: (count: number) => void;
+
+  /**
+   * Optional backpressure metrics hook (tc-edf8). When supplied, every accepted
+   * connection's transport reports its drain-path queue depth and per-send
+   * time-in-queue, AGGREGATE across all connections on the registry behind the
+   * hook (the broker's `ServerProxyMetrics`).
+   */
+  metrics?: SocketTransportMetrics;
 }
 
 /**
@@ -418,7 +510,7 @@ export function createSocketServer(
         connectionCount--;
         opts.onConnectionCountChange?.(connectionCount);
       });
-      onConnection(new SocketTransport(socket));
+      onConnection(new SocketTransport(socket, opts.metrics));
     });
 
     server.once("error", reject);

@@ -103,6 +103,7 @@ import * as fs from "node:fs";
 import { createSessionProxy } from "@tmuxcc/session-proxy";
 import type { SessionProxy } from "@tmuxcc/session-proxy";
 import { createSocketTransport } from "./socket-transport.js";
+import type { SocketTransportMetrics } from "./socket-transport.js";
 import { removeSocket, restrictSocket } from "./runtime-dir.js";
 
 // ---------------------------------------------------------------------------
@@ -726,6 +727,10 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
         // is the durable signal now.
         this._quarantinedSessions.add(sessionId);
         this._boundaryTripLog.delete(sessionId);
+        // tc-m2y8: count the quarantine event on THIS session's metrics
+        // registry (companion to incBoundaryTrip), alongside the loud-log
+        // below — an expected-zero tripwire surfaced via session-proxy.info.
+        entry.sessionProxy.metrics.incBoundaryQuarantine();
         process.stderr.write(
           `[session-proxy-supervisor] CIRCUIT BREAKER OPEN: session "${sessionName}" ` +
             `(id: ${sessionId}) has tripped the error boundary ` +
@@ -770,7 +775,9 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
 
     // Create the per-session unix socket server.
     const server = net.createServer((socket) => {
-      const transport = createSocketTransport(socket);
+      // tc-edf8: thread the broker's backpressure metrics hook into each
+      // per-session client transport so its drain path is observable.
+      const transport = createSocketTransport(socket, this._opts.socketTransportMetrics);
       // tc-295a.21: catch per-connection rejections (e.g. raw/unhandshaked
       // connections).  Without this catch, a HandshakeError from a malformed
       // connection becomes an unhandled promise rejection → Node ≥ 22 exits.
@@ -1027,6 +1034,15 @@ export interface SessionProxySupervisorOptions {
    * breaker tests.
    */
   onTopologyNotify?: (kind: string) => void;
+
+  /**
+   * Optional backpressure metrics hook (tc-edf8) passed to each per-session
+   * client transport. The broker supplies its `ServerProxyMetrics` so the
+   * per-session data/control sockets — the firehose path that actually
+   * backpressures (the `find /` wedge) — report drain-queue depth and
+   * time-in-queue onto the server-proxy registry, aggregate across sessions.
+   */
+  socketTransportMetrics?: SocketTransportMetrics;
 }
 
 export function createSessionProxySupervisor(
