@@ -1,0 +1,42 @@
+{
+  "name": "@tmuxcc/driver-admin",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./src/*": "./src/*"
+  },
+  "main": "./dist/index.js",
+  "bin": {
+    "tmuxcc-info": "./dist/bin/tmuxcc-info.js"
+  },
+  "scripts": {
+    "preinstall": "node ../../scripts/npm-root-guard.mjs",
+    "prebuild": "node ../../scripts/npm-root-guard.mjs",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test \"src/**/*.test.ts\"",
+    "lint:boundaries": "depcruise src/ --config .dependency-cruiser.cjs --output-type err",
+    "ci": "npm run build && npm run typecheck && npm run test && npm run lint:boundaries",
+    "format": "prettier --write src"
+  },
+  "dependencies": {
+    "@tmuxcc/client": "*",
+    "@tmuxcc/server-proxy": "*",
+    "@tmuxcc/session-proxy": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.19",
+    "dependency-cruiser": "^17.4.3",
+    "tsx": "^4.19.2",
+    "typescript": "^5.8.3"
+  }
+}

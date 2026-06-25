@@ -115,6 +115,9 @@ export type {
   // SessionProxy → Client (command response + error)
   SessionProxyCommandOkPayload,
   SessionProxyCommandResponseMessage,
+  // SessionProxy diagnostics (session-proxy.info — tc-x6l)
+  SessionProxyInfoCommand,
+  SessionProxyInfoPayload,
   WireErrorCode,
   ErrorMessage,
   // SessionProxy union
