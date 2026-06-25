@@ -61,6 +61,9 @@ export type {
   ServerProxyInfoCommand,
   ServerProxyInfoSession,
   ServerProxyInfoPayload,
+  // tc-44u4.4: runtime metrics-HTTP toggle
+  ServerProxySetMetricsHttpCommand,
+  MetricsHttpStatePayload,
   // tc-7aqb.2: spawn-info provenance stamp
   SpawnInfo,
   // tc-i9aq.2: one-shot session topology query

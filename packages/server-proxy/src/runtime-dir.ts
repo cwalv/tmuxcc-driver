@@ -83,6 +83,28 @@ export function serverProxyLogPath(
 }
 
 /**
+ * Resolve the metrics-HTTP unix socket path:
+ * `<runtimeDir>/<socketName>/metrics-http.sock` (tc-44u4.4).
+ *
+ * The SECURE DEFAULT bind for the `/metrics` (+ `/info`) HTTP exposition.
+ * Creates the socket-name sub-directory at mode 0700 (same as
+ * `serverProxySocketPath`); the caller chmods the socket node itself to 0600
+ * via `restrictSocket` after `listen()`.  Living under the same 0700
+ * runtime-dir chain as the control socket, it inherits the existing per-user
+ * isolation — no hand-rolled permission logic, and a TCP bind (which is NOT
+ * per-user isolated) is never the default.
+ */
+export function metricsHttpSocketPath(
+  socketName: string,
+  opts: RuntimeDirOptions = {},
+): string {
+  const base = resolveBaseRuntimeDir(opts);
+  const dir = path.join(base, socketName);
+  ensureDir(dir, 0o700);
+  return path.join(dir, "metrics-http.sock");
+}
+
+/**
  * Resolve a session-proxy socket path:
  * `<runtimeDir>/<socketName>/<sessionId>.sock`.
  * Re-uses the already-created socket-name sub-directory.

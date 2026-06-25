@@ -108,6 +108,7 @@ export type WireFeature =
   | "session-claim"    // server-proxy wire: client may obtain a session-proxy endpoint by session
   | "pane-attach"      // server-proxy wire: client may attach to a specific pane (tc-7xv.36)
   | "server-proxy-info"      // server-proxy wire: client may request a diagnostics snapshot (tc-k6v)
+  | "server-proxy-metrics-http" // server-proxy wire: client may toggle the /metrics HTTP exposition (tc-44u4.4)
   | (string & Record<never, never>); // open-ended for future features
 
 // ---------------------------------------------------------------------------

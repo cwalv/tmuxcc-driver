@@ -176,4 +176,39 @@ describe("server-proxy-entry – _parseEntryConfig (tc-eqgp)", () => {
     );
     assert.equal(cfg.spawnInfo, undefined);
   });
+
+  // tc-44u4.4: --metrics-addr / TMUXCC_METRICS_ADDR (mirrors the idle-exit
+  // precedence — CLI wins; absent ⇒ OFF, the secure default).
+  it("metricsAddr is undefined by default (OFF — no listener bound)", () => {
+    const cfg = _parseEntryConfig(["--socket-name", "x"], {});
+    assert.equal(cfg.metricsAddr, undefined);
+  });
+
+  it("returns metricsAddr from --metrics-addr", () => {
+    const cfg = _parseEntryConfig(["--socket-name", "x", "--metrics-addr", "unix"], {});
+    assert.equal(cfg.metricsAddr, "unix");
+  });
+
+  it("returns metricsAddr from --metrics-addr with a 127.0.0.1:PORT value", () => {
+    const cfg = _parseEntryConfig(["--socket-name", "x", "--metrics-addr", "127.0.0.1:9099"], {});
+    assert.equal(cfg.metricsAddr, "127.0.0.1:9099");
+  });
+
+  it("reads TMUXCC_METRICS_ADDR from env when --metrics-addr is absent", () => {
+    const cfg = _parseEntryConfig(["--socket-name", "x"], { TMUXCC_METRICS_ADDR: "unix:/tmp/m.sock" });
+    assert.equal(cfg.metricsAddr, "unix:/tmp/m.sock");
+  });
+
+  it("--metrics-addr wins over TMUXCC_METRICS_ADDR (explicit CLI is more local intent)", () => {
+    const cfg = _parseEntryConfig(
+      ["--socket-name", "x", "--metrics-addr", "unix"],
+      { TMUXCC_METRICS_ADDR: "127.0.0.1:9099" },
+    );
+    assert.equal(cfg.metricsAddr, "unix");
+  });
+
+  it("treats an empty TMUXCC_METRICS_ADDR as not supplied (OFF)", () => {
+    const cfg = _parseEntryConfig(["--socket-name", "x"], { TMUXCC_METRICS_ADDR: "" });
+    assert.equal(cfg.metricsAddr, undefined);
+  });
 });

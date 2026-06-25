@@ -66,6 +66,7 @@ import type {
   ServerProxyCommandResponseMessage,
   ServerProxyInfoPayload,
   ServerProxyInfoSession,
+  MetricsHttpStatePayload,
   SpawnInfo,
   SessionTopologyPayload,
   ErrorMessage,
@@ -78,6 +79,9 @@ import { createSocketServer, createSocketTransport } from "./socket-transport.js
 import { serverProxySocketPath, sessionProxySocketPath, removeSocket, restrictSocket } from "./runtime-dir.js";
 import { createServerProxyMetrics } from "./metrics.js";
 import type { ServerProxyMetrics } from "./metrics.js";
+import { mergeMetricsText } from "./metrics-exposition.js";
+import { parseMetricsHttpBind, bindMetricsHttp } from "./metrics-http.js";
+import type { MetricsHttpListener } from "./metrics-http.js";
 import { listSessions, createSession, killSession, checkSessionPresence, createTmuxWatcher, probeTmuxLiveness, setWindowSynchronizePanes, setWindowMonitorActivity, setWindowMonitorSilence, setSessionMarker, getTmuxServerPid, countTmuxccClientsBySession, listSessionTopology } from "./tmux-south.js";
 import type { TmuxWatcher, TmuxAvailabilityOut } from "./tmux-south.js";
 import { createSessionProxySupervisor } from "./session-proxy-supervisor.js";
@@ -145,6 +149,21 @@ export interface ServerProxyOptions {
    * production entry point never sets this.
    */
   persistThroughTmuxGone?: boolean;
+
+  /**
+   * tc-44u4.4: bind the `/metrics` (+ `/info`) HTTP exposition at startup.
+   *
+   * OFF BY DEFAULT (undefined ⇒ no listener bound).  Set by the entry point
+   * from `--metrics-addr` / `TMUXCC_METRICS_ADDR` for monitored / always-on
+   * deployments.  Accepts the same vocabulary as the wire toggle's `bind`:
+   * `"unix"` / `"unix:/abs/path.sock"` (secure default — unix socket 0600) or
+   * `"127.0.0.1:<port>"` (loopback TCP, single-user/trusted-host tradeoff —
+   * never the implicit default).  An invalid/non-loopback spec fails startup.
+   *
+   * The runtime `server-proxy.set-metrics-http` toggle and SIGUSR2 can flip it
+   * on/off later regardless of this start-time value.
+   */
+  metricsAddr?: string;
 }
 
 /**
@@ -202,6 +221,39 @@ export interface ServerProxyHandle {
    * NOT exit.
    */
   onSelfExit(cb: (reason: ServerProxySelfExitReason) => void): void;
+
+  // ── tc-44u4.4 metrics-HTTP exposition ──────────────────────────────────────
+
+  /**
+   * Enable (bind) or disable (unbind) the `/metrics` (+ `/info`) HTTP
+   * exposition at runtime, returning the resulting listener state (tc-44u4.4).
+   *
+   * The PRIMARY no-restart enablement path — the wire
+   * `server-proxy.set-metrics-http` command and the SIGUSR2 handler both route
+   * here.  Idempotent: enabling when already bound at the SAME address is a
+   * no-op; enabling at a DIFFERENT address rebinds; disabling when not bound
+   * returns the unbound state.
+   *
+   * `bind` selects the address when `enabled` is true (`undefined` ⇒ the
+   * secure unix-socket default).  Rejects with code `"metrics.bind-invalid"`
+   * on a non-loopback TCP host or unparseable spec, and propagates a bind
+   * failure (`EADDRINUSE`, permission) — callers map these to a wire error.
+   */
+  setMetricsHttp(enabled: boolean, bind?: string): Promise<MetricsHttpStatePayload>;
+
+  /**
+   * Toggle the metrics-HTTP exposition: bind the secure unix-socket default if
+   * currently unbound, unbind if currently bound (tc-44u4.4).
+   *
+   * The SIGUSR2 fallback semantics — a no-client/no-tooling diagnostic switch
+   * (`kill -USR2 <serverProxyPid>`).  When enabling, it always uses the secure
+   * unix-socket default (never TCP — a signal carries no address).  Returns
+   * the resulting state.
+   */
+  toggleMetricsHttp(): Promise<MetricsHttpStatePayload>;
+
+  /** Current metrics-HTTP listener state (tc-44u4.4). */
+  metricsHttpState(): MetricsHttpStatePayload;
 
   /**
    * Toggle `synchronize-panes` for a tmux window (tc-7xv.12).
@@ -301,6 +353,7 @@ const SERVER_PROXY_CAPABILITIES: Capabilities = {
     "session-destroy",
     "pane-attach", // tc-7xv.36
     "server-proxy-info", // tc-k6v
+    "server-proxy-metrics-http", // tc-44u4.4
   ],
 };
 
@@ -428,6 +481,21 @@ class ServerProxyImpl implements ServerProxyHandle {
   // ── tc-x6l server-proxy metrics ───────────────────────────────────────────────
   private readonly _metrics: ServerProxyMetrics = createServerProxyMetrics();
 
+  // ── tc-44u4.4 metrics-HTTP exposition ──────────────────────────────────────
+  /**
+   * The live metrics-HTTP listener, or null when the exposition is OFF (the
+   * default).  Bound via `setMetricsHttp(true, …)` (startup flag / wire toggle)
+   * or `toggleMetricsHttp()` (SIGUSR2); unbound by the off paths and by
+   * shutdown.
+   */
+  private _metricsHttp: MetricsHttpListener | null = null;
+  /**
+   * Serialises concurrent metrics-HTTP toggles so a wire command, a SIGUSR2,
+   * and the startup bind cannot race `bind`/`close` on the listener.  Each
+   * toggle chains off the previous one.
+   */
+  private _metricsHttpOp: Promise<void> = Promise.resolve();
+
   constructor(opts: ServerProxyOptions) {
     this._opts = opts;
     this._socketDirName = opts.socketName;
@@ -454,6 +522,90 @@ class ServerProxyImpl implements ServerProxyHandle {
 
   onSelfExit(cb: (reason: ServerProxySelfExitReason) => void): void {
     this._selfExitHandlers.push(cb);
+  }
+
+  // ---------------------------------------------------------------------------
+  // tc-44u4.4: metrics-HTTP exposition (/metrics + /info)
+  // ---------------------------------------------------------------------------
+
+  metricsHttpState(): MetricsHttpStatePayload {
+    return this._metricsHttp !== null
+      ? { enabled: true, address: this._metricsHttp.address }
+      : { enabled: false, address: null };
+  }
+
+  setMetricsHttp(enabled: boolean, bind?: string): Promise<MetricsHttpStatePayload> {
+    // Chain off the previous op so concurrent toggles (wire + SIGUSR2 + start)
+    // serialise — bind/close on the listener must never interleave.
+    const run = this._metricsHttpOp.then(() => this._applyMetricsHttp(enabled, bind));
+    // Keep the chain alive even if THIS op throws (so a failed bind doesn't
+    // wedge every later toggle); the returned promise still rejects.
+    this._metricsHttpOp = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  toggleMetricsHttp(): Promise<MetricsHttpStatePayload> {
+    // SIGUSR2 semantics: flip state.  When enabling, always use the secure
+    // unix-socket default (a signal carries no bind address — never TCP).
+    const enable = this._metricsHttp === null;
+    return this.setMetricsHttp(enable);
+  }
+
+  /**
+   * Apply one metrics-HTTP toggle.  Runs serialised via `_metricsHttpOp`.
+   *
+   * Enabling: parse+bind the listener (the merged-exposition provider closes
+   * over `this`).  An already-bound listener at the SAME address is a no-op; a
+   * DIFFERENT address rebinds (close old, bind new).  Disabling: close the
+   * listener (managed unix socket file removed by `close()`).
+   */
+  private async _applyMetricsHttp(enabled: boolean, bind?: string): Promise<MetricsHttpStatePayload> {
+    if (!enabled) {
+      if (this._metricsHttp !== null) {
+        const l = this._metricsHttp;
+        this._metricsHttp = null;
+        await l.close();
+      }
+      return { enabled: false, address: null };
+    }
+
+    const target = parseMetricsHttpBind(bind, this._opts.socketName, this._runtimeDirOpts);
+    const targetAddress = target.kind === "unix" ? target.path : `${target.host}:${target.port}`;
+
+    if (this._metricsHttp !== null) {
+      if (this._metricsHttp.address === targetAddress) {
+        // Already bound at the requested address — idempotent no-op.
+        return { enabled: true, address: this._metricsHttp.address };
+      }
+      // Rebind at a new address.
+      const old = this._metricsHttp;
+      this._metricsHttp = null;
+      await old.close();
+    }
+
+    const listener = await bindMetricsHttp(target, {
+      metricsText: () => this._mergedMetricsText(),
+      infoJson: () => this._buildInfoAsync(),
+    });
+    this._metricsHttp = listener;
+    return { enabled: true, address: listener.address };
+  }
+
+  /**
+   * Render the merged Prometheus exposition: the server-proxy registry plus
+   * every live session-proxy registry, namespaced by a `session="<id>"` label
+   * (tc-44u4.4).  Backs `GET /metrics`.
+   */
+  private async _mergedMetricsText(): Promise<string> {
+    // Refresh the session table so the server-proxy's own session gauge is
+    // current before we render (matches the `server-proxy.info` discipline).
+    this._metrics.setSessionsActive(this._sessions.size);
+    const serverText = await this._metrics.metricsText();
+    const sessionTexts = await this._supervisor.sessionMetricsTexts();
+    return mergeMetricsText(serverText, sessionTexts);
   }
 
   /**
@@ -568,6 +720,14 @@ class ServerProxyImpl implements ServerProxyHandle {
     // Arm the idle-exit hysteresis: the server-proxy starts with zero clients, and
     // a launcher that crashes before connecting must not leak a server-proxy.
     this._startIdleTimer();
+
+    // tc-44u4.4: startup metrics-HTTP bind (OFF unless --metrics-addr /
+    // TMUXCC_METRICS_ADDR was supplied).  A bad spec or a bind failure here is
+    // a startup error — the deployment asked for an always-on scrape surface
+    // and silently swallowing the failure would hide a misconfiguration.
+    if (this._opts.metricsAddr !== undefined) {
+      await this.setMetricsHttp(true, this._opts.metricsAddr);
+    }
   }
 
   shutdown(): Promise<void> {
@@ -592,6 +752,14 @@ class ServerProxyImpl implements ServerProxyHandle {
 
     this._watcher?.stop();
     this._watcher = null;
+
+    // tc-44u4.4: unbind the metrics-HTTP listener (removes its managed unix
+    // socket file) so a shut-down server-proxy leaves no stale scrape surface.
+    if (this._metricsHttp !== null) {
+      const l = this._metricsHttp;
+      this._metricsHttp = null;
+      try { await l.close(); } catch { /* best-effort */ }
+    }
 
     // Disconnect all clients
     for (const [transport] of this._clients) {
@@ -1194,7 +1362,7 @@ class ServerProxyImpl implements ServerProxyHandle {
     const rpcStartMs = Date.now();
 
     try {
-      let payload: { sessionId?: SessionId; endpoint?: string; paneId?: PaneId; created?: boolean; ok?: true; info?: ServerProxyInfoPayload; topology?: SessionTopologyPayload; name?: string };
+      let payload: { sessionId?: SessionId; endpoint?: string; paneId?: PaneId; created?: boolean; ok?: true; info?: ServerProxyInfoPayload; topology?: SessionTopologyPayload; name?: string; metricsHttp?: MetricsHttpStatePayload };
 
       switch (command.kind) {
         case "session.claim":
@@ -1212,6 +1380,16 @@ class ServerProxyImpl implements ServerProxyHandle {
         case "server-proxy.info":
           // tc-k6v + tc-x6l: read-only diagnostics snapshot with metrics.
           payload = { info: await this._buildInfoAsync() };
+          break;
+        case "server-proxy.set-metrics-http":
+          // tc-44u4.4: runtime toggle of the /metrics (+ /info) HTTP surface —
+          // the PRIMARY no-restart enablement path.  Inherits the control
+          // socket's 0600 + handshake posture.  A bad bind spec / bind failure
+          // surfaces as result.ok=false via the catch below (code
+          // "metrics.bind-invalid" or the underlying bind errno).
+          payload = {
+            metricsHttp: await this.setMetricsHttp(command.enabled, command.bind),
+          };
           break;
         case "pane.attach":
           // tc-7xv.36: attach intent for a specific pane.  The server-proxy doesn't

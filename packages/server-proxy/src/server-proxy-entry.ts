@@ -81,6 +81,16 @@ export interface ParsedEntryConfig {
    * holds it opaquely and echoes it via `server-proxy.info`.
    */
   spawnInfo?: SpawnInfo;
+  /**
+   * tc-44u4.4: bind the `/metrics` (+ `/info`) HTTP exposition at startup.
+   *
+   * Parsed from `--metrics-addr <unix | unix:/path | 127.0.0.1:PORT>` or the
+   * `TMUXCC_METRICS_ADDR` env var (CLI wins, mirroring `--idle-exit-ms`).
+   * Absent ⇒ OFF (no listener bound — the secure default).  The runtime
+   * `server-proxy.set-metrics-http` toggle and SIGUSR2 can still enable it
+   * later without a restart.
+   */
+  metricsAddr?: string;
 }
 
 /**
@@ -122,6 +132,7 @@ export function _parseEntryConfig(
   let idleExitMs: number | undefined;
   let persistThroughTmuxGone = false;
   let spawnInfo: SpawnInfo | undefined;
+  let metricsAddr: string | undefined;
 
   for (let i = 0; i < argv.length; i++) {
     switch (argv[i]) {
@@ -138,6 +149,14 @@ export function _parseEntryConfig(
       case "--persist-through-tmux-gone":
         persistThroughTmuxGone = true;
         break;
+      case "--metrics-addr": {
+        // tc-44u4.4: empty/absent value is dropped (treated as not supplied);
+        // a bare `--metrics-addr` with no operand leaves metricsAddr undefined
+        // (OFF), not a silent unix-default — explicit intent only.
+        const raw = argv[++i];
+        if (raw !== undefined && raw.length > 0) metricsAddr = raw;
+        break;
+      }
       case "--spawn-info": {
         // tc-7aqb.2: parse the JSON provenance stamp from the spawner.
         // Malformed JSON or missing buildId is silently dropped — the driver
@@ -179,12 +198,22 @@ export function _parseEntryConfig(
     persistThroughTmuxGone = raw === "1" || raw === "true";
   }
 
+  // tc-44u4.4: TMUXCC_METRICS_ADDR env fallback — the CLI flag wins (an
+  // explicit `--metrics-addr` is more local intent than an inherited env var),
+  // mirroring the `--idle-exit-ms` precedence above.  An empty env value is
+  // treated as not supplied (OFF).
+  if (metricsAddr === undefined) {
+    const raw = env.TMUXCC_METRICS_ADDR;
+    if (raw !== undefined && raw.length > 0) metricsAddr = raw;
+  }
+
   return {
     socketName: socketName.length > 0 ? socketName : null,
     ...(runtimeDir !== undefined ? { runtimeDir } : {}),
     ...(idleExitMs !== undefined ? { idleExitMs } : {}),
     ...(persistThroughTmuxGone ? { persistThroughTmuxGone } : {}),
     ...(spawnInfo !== undefined ? { spawnInfo } : {}),
+    ...(metricsAddr !== undefined ? { metricsAddr } : {}),
   };
 }
 
@@ -194,13 +223,15 @@ function parseArgs(): {
   idleExitMs?: number;
   persistThroughTmuxGone?: boolean;
   spawnInfo?: SpawnInfo;
+  metricsAddr?: string;
 } {
   const cfg = _parseEntryConfig(process.argv.slice(2), process.env);
 
   if (cfg.socketName === null) {
     process.stderr.write(
       "Usage: server-proxy-entry --socket-name <name> [--runtime-dir <path>] " +
-        "[--idle-exit-ms <n>] [--persist-through-tmux-gone] [--spawn-info '<json>']\n",
+        "[--idle-exit-ms <n>] [--persist-through-tmux-gone] [--spawn-info '<json>'] " +
+        "[--metrics-addr <unix | unix:/path | 127.0.0.1:PORT>]\n",
     );
     process.exit(1);
   }
@@ -213,6 +244,7 @@ function parseArgs(): {
       ? { persistThroughTmuxGone: cfg.persistThroughTmuxGone }
       : {}),
     ...(cfg.spawnInfo !== undefined ? { spawnInfo: cfg.spawnInfo } : {}),
+    ...(cfg.metricsAddr !== undefined ? { metricsAddr: cfg.metricsAddr } : {}),
   };
 }
 
@@ -221,7 +253,7 @@ function parseArgs(): {
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-  const { socketName, runtimeDir, idleExitMs, persistThroughTmuxGone, spawnInfo } = parseArgs();
+  const { socketName, runtimeDir, idleExitMs, persistThroughTmuxGone, spawnInfo, metricsAddr } = parseArgs();
 
   // tc-k6v: mirror stderr into the append-only server-proxy log file.  Best-effort:
   // a failed open (unwritable runtime dir) leaves the server-proxy running without
@@ -253,6 +285,7 @@ async function main(): Promise<void> {
     ...(persistThroughTmuxGone !== undefined ? { persistThroughTmuxGone } : {}),
     ...(log !== null ? { logPath: log.path } : {}),
     ...(spawnInfo !== undefined ? { spawnInfo } : {}),
+    ...(metricsAddr !== undefined ? { metricsAddr } : {}),
   };
   const serverProxy = createServerProxy(serverProxyOpts);
 
@@ -276,6 +309,28 @@ async function main(): Promise<void> {
     void serverProxy.shutdown().finally(() => {
       process.exit(0);
     });
+  });
+
+  // tc-44u4.4: SIGUSR2 toggles the /metrics (+ /info) HTTP exposition — the
+  // no-client / no-tooling fallback enable path (`kill -USR2 <serverProxyPid>`).
+  // The canonical Unix diagnostic-toggle (mirrors Node's own SIGUSR1→inspector;
+  // SIGUSR2 is free here — only SIGTERM is otherwise handled, and Node reserves
+  // SIGUSR1 for the inspector).  Toggling ON always uses the SECURE unix-socket
+  // default (a signal carries no bind address — never TCP); toggling again
+  // unbinds.  Best-effort: a bind failure is logged, not fatal.
+  process.on("SIGUSR2", () => {
+    void serverProxy
+      .toggleMetricsHttp()
+      .then((state) => {
+        process.stderr.write(
+          state.enabled
+            ? `serverProxy: SIGUSR2 — metrics HTTP enabled at ${state.address}\n`
+            : "serverProxy: SIGUSR2 — metrics HTTP disabled\n",
+        );
+      })
+      .catch((err: unknown) => {
+        process.stderr.write(`serverProxy: SIGUSR2 metrics-http toggle failed: ${String(err)}\n`);
+      });
   });
 }
 

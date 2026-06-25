@@ -263,6 +263,18 @@ export interface SessionProxySupervisor {
   hasSessionProxy(sessionId: string): boolean;
 
   /**
+   * Collect the Prometheus text exposition of every READY session-proxy's
+   * metrics registry, paired with its session id (tc-44u4.4).
+   *
+   * Used by the `/metrics` HTTP surface (and the same merge path) to namespace
+   * each session's `topology_*` / `correlator_*` / `flow_*` families under a
+   * `session="<id>"` label.  In-flight creations (Promise entries) are skipped
+   * — they have no live registry yet.  Returns one entry per ready session, in
+   * registry order; an empty array when no session-proxies are running.
+   */
+  sessionMetricsTexts(): Promise<Array<{ sessionId: string; text: string }>>;
+
+  /**
    * Number of live session-proxies — both ready entries and in-flight
    * creations.  Used by the idle-exit policy (tc-eqgp): the server-proxy must
    * never idle-exit while it has live session-proxies, because those represent
@@ -575,6 +587,21 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
     // `ensureSessionProxy` before its first await), so this is true for the
     // entire claim/create window.
     return this._sessionProxies.has(sessionId);
+  }
+
+  async sessionMetricsTexts(): Promise<Array<{ sessionId: string; text: string }>> {
+    // tc-44u4.4: gather every READY session-proxy's prom-client exposition.
+    // In-flight creations (Promise entries) have no live registry yet — skip.
+    const out: Array<{ sessionId: string; text: string }> = [];
+    const ready: Array<{ sessionId: string; promise: Promise<string> }> = [];
+    for (const [sessionId, entry] of this._sessionProxies) {
+      if (entry instanceof Promise) continue;
+      ready.push({ sessionId, promise: entry.sessionProxy.metrics.metrics() });
+    }
+    for (const r of ready) {
+      out.push({ sessionId: r.sessionId, text: await r.promise });
+    }
+    return out;
   }
 
   reapSessionProxy(sessionId: string): void {

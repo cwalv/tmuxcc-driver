@@ -407,6 +407,62 @@ export interface ServerProxyInfoCommand {
 }
 
 /**
+ * Runtime toggle of the server-proxy's `/metrics` (+ `/info`) HTTP exposition
+ * (tc-44u4.4).
+ *
+ * The PRIMARY enablement path: flip the Prometheus scrape surface on or off
+ * WITHOUT restarting the server-proxy (a restart loses every live session).
+ * Proven viable during a wedge — in the tc-44u4 incident the event loop stayed
+ * healthy (`nodejs_eventloop_lag` ~4 ms) and the control plane answered
+ * `server-proxy.info`, so this toggle fires even when a session is wedged.
+ *
+ * The command inherits the control socket's existing 0600 + handshake posture
+ * (no separate, weaker auth).
+ *
+ * `bind` selects where the HTTP listener binds when `enabled` is true:
+ *   - `"unix"` (or omitted) — a unix-domain HTTP socket at
+ *     `<runtime>/<socketName>/metrics-http.sock`, mode 0600 under the existing
+ *     0700 runtime-dir chain.  The REQUIRED secure default: it inherits the
+ *     per-user isolation of the control socket.
+ *   - `"unix:/abs/path.sock"` — a unix-domain HTTP socket at an explicit path
+ *     (restricted to 0600 best-effort).
+ *   - `"127.0.0.1:<port>"` — a loopback TCP listener.  NOT per-user isolated
+ *     (any local process can connect) — a documented single-user / trusted-host
+ *     tradeoff, never the default.  A non-loopback host is rejected.
+ *
+ * When `enabled` is false the listener is unbound (and its unix socket file
+ * removed); `bind` is ignored.
+ *
+ * Additive — older server-proxies respond with `protocol.unknown-message`.
+ */
+export interface ServerProxySetMetricsHttpCommand {
+  readonly kind: "server-proxy.set-metrics-http";
+  /** Bind a listener (true) or unbind the current one (false). */
+  readonly enabled: boolean;
+  /**
+   * Bind address when `enabled` is true.  Omit for the secure unix-socket
+   * default.  Ignored when `enabled` is false.
+   */
+  readonly bind?: string;
+}
+
+/**
+ * Result payload for a `server-proxy.set-metrics-http` response (tc-44u4.4).
+ *
+ * Reports the listener state AFTER the toggle was applied so a client (the
+ * tc-44u4.3 introspection lib) can confirm and surface the live address.
+ */
+export interface MetricsHttpStatePayload {
+  /** Whether a metrics-HTTP listener is bound after the toggle. */
+  readonly enabled: boolean;
+  /**
+   * The bound address when `enabled` is true: an absolute unix socket path or
+   * a `host:port` string.  `null` when no listener is bound.
+   */
+  readonly address: string | null;
+}
+
+/**
  * One window row in a `session.topology` response (tc-i9aq.2).
  *
  * Wire-contract note: carries only session-level window METADATA — no pane
@@ -606,6 +662,7 @@ export type ServerProxyCommand =
   | SessionDestroyCommand
   | PaneAttachCommand
   | ServerProxyInfoCommand
+  | ServerProxySetMetricsHttpCommand
   | SessionTopologyCommand;
 
 /**
@@ -680,6 +737,12 @@ export interface ServerProxyCommandOkPayload {
    * Absent on all other command kinds.
    */
   readonly topology?: SessionTopologyPayload;
+  /**
+   * Post-toggle metrics-HTTP listener state for a
+   * `server-proxy.set-metrics-http` response (tc-44u4.4).
+   * Absent on all other command kinds.
+   */
+  readonly metricsHttp?: MetricsHttpStatePayload;
 }
 
 /**
