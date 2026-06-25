@@ -41,10 +41,12 @@
  */
 
 import { fileURLToPath } from "node:url";
+import { monitorEventLoopDelay } from "node:perf_hooks";
 
 import { createServerProxy } from "./server-proxy.js";
 import type { ServerProxyOptions } from "./server-proxy.js";
 import type { SpawnInfo } from "@tmuxcc/session-proxy";
+import { PHASE_TIMING_ENABLED } from "@tmuxcc/session-proxy";
 import { serverProxyLogPath, resolveBaseRuntimeDir, gcStaleRuntimeDirs } from "./runtime-dir.js";
 import { openServerProxyLog, installStderrMirror } from "./server-proxy-log.js";
 
@@ -264,6 +266,28 @@ async function main(): Promise<void> {
   if (log !== null) {
     installStderrMirror(log);
     process.stderr.write(`serverProxy: starting pid=${process.pid} socket=${socketName} log=${log.path}\n`);
+  }
+
+  // tc-jlyi.3: when TMUXCC_PHASE_TIMING=1, emit the Node.js event-loop lag
+  // (p99 over each 5 s window) to stderr so it reaches the detailed
+  // server-proxy.log via installStderrMirror (above).  Inert when phase
+  // timing is disabled (default) — the interval is never installed.
+  //
+  // CHANGED FROM: nothing (nodejs_eventloop_lag_seconds was prom-client HTTP
+  // only, never in the detailed log).
+  // CHANGED TO: [tc-is5w] metrics line every 5 s when TMUXCC_PHASE_TIMING=1,
+  // so the high-N repro captures the event-loop health alongside phase lines.
+  if (PHASE_TIMING_ENABLED) {
+    const lagHistogram = monitorEventLoopDelay({ resolution: 20 });
+    lagHistogram.enable();
+    const lagTimer = setInterval(() => {
+      const p99s = lagHistogram.percentile(99) / 1e9; // nanoseconds → seconds
+      process.stderr.write(
+        `[tc-is5w] metrics nodejs_eventloop_lag_seconds_p99=${p99s.toFixed(6)}\n`,
+      );
+      lagHistogram.reset();
+    }, 5_000);
+    lagTimer.unref(); // do not keep the process alive solely for this timer
   }
 
   // tc-s1sm: GC stale sibling runtime dirs before binding our own socket.
