@@ -105,6 +105,7 @@ import type { SessionProxy } from "@tmuxcc/session-proxy";
 import { createSocketTransport } from "./socket-transport.js";
 import type { SocketTransportMetrics } from "./socket-transport.js";
 import { removeSocket, restrictSocket } from "./runtime-dir.js";
+import { recordHostDeath } from "./death-instrument.js";
 
 // ---------------------------------------------------------------------------
 // Circuit breaker constants (tc-2x3.6 GAP 2)
@@ -909,7 +910,24 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
       }
     };
 
-    sessionProxy.host.onExit(onHostDeath);
+    // tc-jlyi.17: dev-gated instrument — record WHICH path drove the death
+    // (onExit here vs onError below) + host memory/liveness at the instant,
+    // BEFORE the idempotent onHostDeath teardown. `entry.tornDown` is read at
+    // this instant: false => unexpected (mid-flood) death = the io-torture
+    // anomaly; true => the death follows an intentional reap = orderly teardown.
+    // Inert unless TMUXCC_DEATH_INSTRUMENT is set.
+    sessionProxy.host.onExit((code, signal) => {
+      recordHostDeath({
+        path: "onExit",
+        code,
+        signal,
+        sessionId,
+        sessionName,
+        socketName,
+        tornDown: entry.tornDown,
+      });
+      onHostDeath();
+    });
 
     // tc-crnt.14: a host ERROR (a pty read-socket fault routed out of node-pty
     // by tmux-host's `'error'` listener — see tmux-host.ts) is a session-fatal
@@ -923,7 +941,19 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
     // THIS session; siblings and the broker survive (lazy respawn on next
     // claim, §6.2).  `onHostDeath` is idempotent (tornDown guard), so a host
     // error followed by the pty's exit event is handled exactly once.
-    sessionProxy.host.onError(onHostDeath);
+    sessionProxy.host.onError((err) => {
+      // tc-jlyi.17: the onError path is the (c)-product discriminator — a pty
+      // read-socket fault IN THE PRODUCT under the flood (tc-crnt.14 class).
+      recordHostDeath({
+        path: "onError",
+        error: err,
+        sessionId,
+        sessionName,
+        socketName,
+        tornDown: entry.tornDown,
+      });
+      onHostDeath();
+    });
 
     return entry;
   }
