@@ -83,6 +83,26 @@ export function serverProxyLogPath(
 }
 
 /**
+ * Resolve the EDH-side instrument trace log path:
+ * `<runtimeDir>/<socketName>/edh-trace.log` (tc-jlyi.9).
+ *
+ * Written by the VS Code extension host when TMUXCC_PHASE_TIMING=1; read by
+ * the reaper's secondary *.log sweep so the file lands in
+ * `test/e2e/trace/<cid>-detailed-edh-trace.log` alongside the broker log.
+ * Does NOT create the file — the extension host opens it append-only on
+ * first use. Fail-soft on the extension side.
+ */
+export function edhTraceLogPath(
+  socketName: string,
+  opts: RuntimeDirOptions = {},
+): string {
+  const base = resolveBaseRuntimeDir(opts);
+  const dir = path.join(base, socketName);
+  ensureDir(dir, 0o700);
+  return path.join(dir, "edh-trace.log");
+}
+
+/**
  * Resolve the metrics-HTTP unix socket path:
  * `<runtimeDir>/<socketName>/metrics-http.sock` (tc-44u4.4).
  *

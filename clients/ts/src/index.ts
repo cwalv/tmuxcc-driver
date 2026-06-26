@@ -68,3 +68,18 @@ export * from "./render-hook.js";
 
 export { connectClient } from "./client.js";
 export type { ConnectClientOptions, ClientHandle } from "./client.js";
+
+// ---------------------------------------------------------------------------
+// EDH trace file sink (tc-jlyi.9) — opt-in file preserve under PHASE_TIMING
+// ---------------------------------------------------------------------------
+//
+// The VS Code extension host calls `openEdhTraceLog(path)` once at activation
+// when TMUXCC_PHASE_TIMING=1.  Thereafter both the client-lib mirror hops
+// (edhTrace in mirror.ts) and the extension verb/tree hops (edhVerbTrace /
+// tree-fire / lag in session.ts / extension.ts) write to the file via
+// `edhFileAppend`.  `closeEdhTraceLog` is wired to `context.subscriptions`.
+//
+// When TMUXCC_PHASE_TIMING is unset none of these functions perform any file
+// I/O (openEdhTraceLog is a no-op, _edhTraceLogFd stays null).
+
+export { openEdhTraceLog, closeEdhTraceLog, edhFileAppend } from "./edh-trace.js";
