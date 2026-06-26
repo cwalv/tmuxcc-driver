@@ -85,6 +85,7 @@ import {
   resizePane as resizePaneCmd,
 } from "../parser/commands.js";
 import type { NotificationEvent } from "../parser/notifications.js";
+import { PHASE_TIMING_ENABLED, phaseLog } from "./phase-timing.js";
 import type { SessionModel } from "../state/model.js";
 import {
   TMUXCC_LABEL_OPTION,
@@ -636,6 +637,12 @@ export function createInputPath(
     cmd: string,
     emptyBodyFallback?: () => VerbResult | null,
   ): void {
+    // tc-jlyi.7: broker verb→tree hop trace — the tmux command leaving the
+    // broker for this creating verb. Inert unless TMUXCC_PHASE_TIMING (reuses
+    // the [tc-is5w] phaseLog stderr channel → server-proxy.log).
+    if (PHASE_TIMING_ENABLED) {
+      phaseLog({ inst: "tc-jlyi.7", hop: "tmux-cmd", correlationId, verb: verbKind, cmd });
+    }
     const resultPromise = sendCommand(cmd);
     if (respond === undefined) return; // no return path wired.
 
@@ -659,6 +666,11 @@ export function createInputPath(
               : "";
           const message = errorBody !== "" ? errorBody : `tmux rejected ${verbKind}`;
           console.warn(`[input-path] tmux rejected ${verbKind}: ${message} (correlationId=${correlationId})`);
+          // tc-jlyi.7: tmux refused the creating verb — broker egress of the
+          // failure (distinct from a stall: a stall emits no response-send).
+          if (PHASE_TIMING_ENABLED) {
+            phaseLog({ inst: "tc-jlyi.7", hop: "response-send", correlationId, verb: verbKind, ok: false, reason: message });
+          }
           respond(correlationId, { ok: false, code: "verb.failed", message });
           return;
         }
@@ -710,6 +722,20 @@ export function createInputPath(
           respond(correlationId, { ok: false, code: "verb.no-effect-ids", message });
           return;
         }
+        // tc-jlyi.7: tmux acked the creating verb with effect ids — the broker
+        // egress of the verb result (Sig2 localization: present here ⇒ the
+        // round-trip reached tmux and came back; absent ⇒ stalled at tmux).
+        if (PHASE_TIMING_ENABLED) {
+          phaseLog({
+            inst: "tc-jlyi.7",
+            hop: "response-send",
+            correlationId,
+            verb: verbKind,
+            ok: true,
+            paneId: "p" + ids.paneNum,
+            windowId: "w" + ids.windowNum,
+          });
+        }
         respond(correlationId, {
           ok: true,
           newPaneId: mkPaneId("p" + ids.paneNum),
@@ -748,6 +774,10 @@ export function createInputPath(
     verbKind: string,
     cmd: string,
   ): void {
+    // tc-jlyi.7: broker tmux command for a non-creating mutating verb.
+    if (PHASE_TIMING_ENABLED) {
+      phaseLog({ inst: "tc-jlyi.7", hop: "tmux-cmd", correlationId, verb: verbKind, cmd });
+    }
     const resultPromise = sendCommand(cmd);
     if (respond === undefined) return; // no return path wired — fire-and-forget.
 
@@ -760,11 +790,17 @@ export function createInputPath(
               : "";
           const message = errorBody !== "" ? errorBody : `tmux rejected ${verbKind}`;
           console.warn(`[input-path] tmux rejected ${verbKind}: ${message} (correlationId=${correlationId})`);
+          if (PHASE_TIMING_ENABLED) {
+            phaseLog({ inst: "tc-jlyi.7", hop: "response-send", correlationId, verb: verbKind, ok: false, reason: message });
+          }
           respond(correlationId, { ok: false, code: "verb.failed", message });
           return;
         }
         // %end: tmux accepted the command.  Respond with a simple ACK
         // (no pane/window ids — this is a non-creating verb).
+        if (PHASE_TIMING_ENABLED) {
+          phaseLog({ inst: "tc-jlyi.7", hop: "response-send", correlationId, verb: verbKind, ok: true });
+        }
         respond(correlationId, { ok: true });
       },
       (err) => {
@@ -838,6 +874,17 @@ export function createInputPath(
       // -----------------------------------------------------------------------
       case "command.request": {
         const { command, correlationId } = msg;
+        // tc-jlyi.7: broker received the verb off the wire — the first broker
+        // hop. A request-recv with no later tmux-cmd/response-send localizes a
+        // stall to the broker's command-dispatch; a missing request-recv means
+        // the wire send never arrived (Sig2 wire-drop). Inert unless gated.
+        if (PHASE_TIMING_ENABLED) {
+          const target =
+            (command as { paneId?: string }).paneId ??
+            (command as { windowId?: string }).windowId ??
+            (command as { name?: string }).name;
+          phaseLog({ inst: "tc-jlyi.7", hop: "request-recv", correlationId, verb: command.kind, target });
+        }
         switch (command.kind) {
           case "open-window": {
             // new-window with optional name, cwd, and shellCommand.

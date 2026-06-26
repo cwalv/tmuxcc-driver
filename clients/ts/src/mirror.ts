@@ -69,6 +69,7 @@ import type {
 } from "@tmuxcc/session-proxy";
 import type { SessionProxyConnection } from "./connection.js";
 import type { RenderHook, ByteSource } from "./render-hook.js";
+import { EDH_TRACE_ENABLED, edhTrace } from "./edh-trace.js";
 
 // ---------------------------------------------------------------------------
 // Client model types
@@ -1033,6 +1034,20 @@ export class Mirror {
     // below, which W2.2 already seq-tracks for the identical reason).
     const expected = this.#lastSeq + 1;
     if (msg.seq !== expected) {
+      // tc-jlyi.7: a per-connection control-seq gap on this mirror. A FORWARD
+      // gap (received > expected) means a control delta was dropped and a later
+      // one revealed it; the tc-295a.31 tail-drop (the LAST delta dropped) never
+      // gets here — it shows only as the mirror-delta `seq` ceiling staying
+      // below the broker's delta-emit ceiling. Inert unless TMUXCC_PHASE_TIMING.
+      if (EDH_TRACE_ENABLED) {
+        edhTrace({
+          hop: "mirror-gap",
+          conn: this.#model.ownConnectionId,
+          expected,
+          received: msg.seq,
+          type: msg.type,
+        });
+      }
       // Always fire the legacy onResyncNeeded handlers (backward-compat).
       this.#emitResync({ expected, received: msg.seq });
 
@@ -1044,6 +1059,14 @@ export class Mirror {
       if (this.#resyncDelivered) {
         // We already received a resync snapshot but STILL get a gap — persistent
         // gap.  Escalate: close the transport so the reconnect path takes over.
+        if (EDH_TRACE_ENABLED) {
+          edhTrace({
+            hop: "mirror-resync-escalate-close",
+            conn: this.#model.ownConnectionId,
+            expected,
+            received: msg.seq,
+          });
+        }
         this.#closeFn?.();
         return;
       }
@@ -1055,6 +1078,9 @@ export class Mirror {
           type: "resync.request",
           seq: ++this.#clientSeq,
         };
+        if (EDH_TRACE_ENABLED) {
+          edhTrace({ hop: "mirror-resync", conn: this.#model.ownConnectionId, clientSeq: msg.seq });
+        }
         this.#sendFn(msg);
       }
       return;
@@ -1071,6 +1097,12 @@ export class Mirror {
       msg.type === "session-proxy.capabilities"
     ) {
       this.#lastSeq = msg.seq;
+      // tc-jlyi.7: a non-state-bearing control message consumed a per-connection
+      // seq slot (applied=false — no topology change). Logged so the mirror's
+      // seq ceiling is visible against the broker delta-emit ceiling.
+      if (EDH_TRACE_ENABLED) {
+        edhTrace({ hop: "mirror-delta", conn: this.#model.ownConnectionId, seq: msg.seq, type: msg.type, applied: false });
+      }
       return;
     }
 
@@ -1084,6 +1116,10 @@ export class Mirror {
       msg.type === "pane.hydration.end"
     ) {
       this.#lastSeq = msg.seq;
+      // tc-jlyi.7: per-pane attach/hydration message consumed a seq slot.
+      if (EDH_TRACE_ENABLED) {
+        edhTrace({ hop: "mirror-delta", conn: this.#model.ownConnectionId, seq: msg.seq, type: msg.type, applied: false });
+      }
       if (msg.type === "pane.hydration.begin") {
         this.#emitHydration({ kind: "begin", paneId: msg.paneId });
       } else if (msg.type === "pane.hydration.end") {
@@ -1102,6 +1138,23 @@ export class Mirror {
     const newModel = applyDelta(this.#model, msg);
     this.#model = newModel;
     this.#lastSeq = msg.seq;
+    // tc-jlyi.7: a STATE-bearing topology delta applied to the mirror — the EDH
+    // arrival of a control delta (e.g. pane.opened / window.added). For Sig1
+    // (newWindow-not-in-tree) this is the model-apply leg on the feed side: the
+    // window.added/pane.opened seq present here but a missing onModelChange→tree
+    // refresh would localize the loss to the render leg, while its absence here
+    // (with the broker's delta-emit present) is the tc-295a.31 feed-apply loss.
+    if (EDH_TRACE_ENABLED) {
+      edhTrace({
+        hop: "mirror-delta",
+        conn: newModel.ownConnectionId,
+        seq: msg.seq,
+        type: msg.type,
+        applied: true,
+        paneId: (msg as { paneId?: string }).paneId,
+        windowId: (msg as { windowId?: string }).windowId,
+      });
+    }
     this.#emitChange(newModel);
   }
 

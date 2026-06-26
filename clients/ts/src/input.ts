@@ -71,6 +71,7 @@ import type {
   SessionProxyCommandResponseMessage,
   PaneAttachMessage,
 } from "@tmuxcc/session-proxy";
+import { EDH_TRACE_ENABLED, edhTrace } from "./edh-trace.js";
 
 // ---------------------------------------------------------------------------
 // VerbResult (tc-ozk.1)
@@ -466,6 +467,19 @@ export function createInputApi(
         correlationId,
         command: cmd,
       };
+      // tc-jlyi.7: EDH wire send — the verb leaving the extension host for the
+      // broker. The `correlationId` ties this to the broker's request-recv /
+      // response-send hops (server-proxy.log); a wire-send with no broker
+      // request-recv is a Sig2 wire-drop. Inert unless TMUXCC_PHASE_TIMING.
+      if (EDH_TRACE_ENABLED) {
+        edhTrace({
+          hop: "wire-send",
+          correlationId,
+          verb: cmd.kind,
+          paneId: (cmd as { paneId?: string }).paneId,
+          windowId: (cmd as { windowId?: string }).windowId,
+        });
+      }
       return new Promise<VerbResult>((resolve, reject) => {
         pendingVerbs.set(correlationId, { resolve, reject });
         try {
@@ -505,6 +519,22 @@ export function createInputApi(
       const deferred = pendingVerbs.get(msg.correlationId);
       if (deferred === undefined) return; // not an awaited verb (e.g. fire-and-forget)
       pendingVerbs.delete(msg.correlationId);
+      // tc-jlyi.7: EDH wire response — the verb's command.response arriving back
+      // at the extension host. The BRIDGE row of the trace: it carries BOTH the
+      // wire `correlationId` (ties the broker leg) AND the effect `paneId` (ties
+      // the EDH session.ts verb-result / model-apply / foreground hops). Absent
+      // after a broker response-send ⇒ the reply was lost on the return wire /
+      // mirror leg (Sig2 tail). Inert unless TMUXCC_PHASE_TIMING.
+      if (EDH_TRACE_ENABLED) {
+        edhTrace({
+          hop: "wire-response",
+          correlationId: msg.correlationId,
+          ok: msg.result.ok,
+          paneId: msg.result.ok ? msg.result.payload?.paneId : undefined,
+          windowId: msg.result.ok ? msg.result.payload?.windowId : undefined,
+          reason: msg.result.ok ? undefined : msg.result.message,
+        });
+      }
       if (msg.result.ok) {
         const payload = msg.result.payload;
         if (payload?.paneId !== undefined && payload?.windowId !== undefined) {

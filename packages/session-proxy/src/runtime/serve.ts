@@ -87,7 +87,7 @@ import type { OriginLookup, CloseCauseLookup } from "../state/projection.js";
 import type { ConnectionId } from "../wire/ids.js";
 import { connectionId as mintConnectionId } from "../wire/ids.js";
 import type { SessionProxyRegistry } from "../metrics/registry.js";
-import { phaseLog, phaseNow } from "./phase-timing.js";
+import { phaseLog, phaseNow, PHASE_TIMING_ENABLED } from "./phase-timing.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -545,6 +545,24 @@ class ControlServerImpl implements ControlServer {
         // Stamp seq on a new object (SessionProxyMessage fields are readonly; spread).
         const stamped = { ...delta, seq: state.nextSeq };
         state.nextSeq++;
+        // tc-jlyi.7: per-connection delta egress — the seq the BROKER sent on
+        // this connection. Paired with the EDH mirror's per-delta seq trace
+        // (clients/ts/mirror.ts), a control delta the broker emits (seq=N) that
+        // the mirror never applies (last applied < N) reveals the tc-295a.31
+        // tail-drop that a gap check can't (nothing follows to expose it). The
+        // PHASE_TIMING_ENABLED guard keeps this hot fan-out byte-identical when
+        // the flag is unset (no per-delta field allocation / write).
+        if (PHASE_TIMING_ENABLED) {
+          phaseLog({
+            inst: "tc-jlyi.7",
+            hop: "delta-emit",
+            conn: state.connectionId,
+            seq: stamped.seq,
+            type: delta.type,
+            paneId: (delta as { paneId?: string }).paneId,
+            windowId: (delta as { windowId?: string }).windowId,
+          });
+        }
         transport.sendControl(stamped as SessionProxyMessage);
         // tc-3si.6: count the fan-out. The denominator
         // (deltas_emitted_total) is incremented once per pipeline cycle in
