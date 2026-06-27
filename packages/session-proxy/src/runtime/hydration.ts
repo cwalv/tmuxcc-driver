@@ -18,8 +18,10 @@
  * # Sequence (per pane)
  *
  * 1. Build the canonical full-history command:
- *      `capture-pane -t %N -p -e -S - -E -`
- *    (`-S -` / `-E -` are tmux's "everything you've retained" sentinels.)
+ *      `capture-pane -t %N -p -e -J -S - -E -`
+ *    (`-S -` / `-E -` are tmux's "everything you've retained" sentinels;
+ *    `-J` joins soft-wrapped rows into logical lines so xterm.js can reflow
+ *    them on resize, and preserves trailing spaces — tc-0ghi.)
  * 2. Route through `pipeline.send` so the correlator slot is registered
  *    atomically with the host write (tc-3si.1).
  * 3. On success, build a single `Uint8Array` containing
@@ -161,11 +163,12 @@ export function hydratePane(
 /**
  * tc-295a.11 (W3.3): one-shot pane text capture, returned as a string.
  *
- * REUSES the same `capturePane` command the hydration path uses
- * (`capture-pane -t %N -p -e -S - -E -`), but delivers the raw UTF-8 text as
- * a string instead of piping it through the clear-then-replay data-plane path.
- * No transport.sendData, no clear escape, no LF→CRLF translation — the caller
- * receives the text exactly as tmux emits it (rows separated by bare LF `\n`).
+ * Issues `capture-pane -t %N -p -e -S - -E -` (WITHOUT `-J`) and delivers
+ * the raw UTF-8 text as a string.  Unlike the hydration replay path, this
+ * intentionally omits `-J` so callers receive display rows separated by bare
+ * LF `\n` rather than joined logical lines — suitable for text inspection or
+ * clipboard extraction where the caller wants to see the raw grid layout.
+ * No transport.sendData, no clear escape, no LF→CRLF translation.
  *
  * This is the foundation that kills C15's out-of-band `tmux capture-pane`
  * shell-out: instead of forking a tmux client from the extension, the extension
@@ -229,7 +232,10 @@ async function _hydrateOnePane(
   // the `end` in the finally below so a vanished pane never strands the queue.
   sentinels?.begin(pid);
   try {
-    const cmd = capturePane(tmuxN, { escapes: true, startLine: "-", endLine: "-" });
+    // tc-0ghi: -J joins soft-wrapped rows into logical lines so xterm.js can
+    // reflow them on resize, and preserves trailing spaces that tmux's
+    // GRID_STRING_TRIM_SPACES would otherwise strip (e.g. the `$ ` prompt).
+    const cmd = capturePane(tmuxN, { escapes: true, joinWrapped: true, startLine: "-", endLine: "-" });
     let result: CommandResult;
     try {
       result = await pipeline.send(cmd);

@@ -341,6 +341,25 @@ export interface CapturePaneOptions {
    */
   escapes?: boolean;
   /**
+   * Join soft-wrapped grid rows into logical lines (`-J` flag).
+   *
+   * Without `-J` tmux sets `GRID_STRING_TRIM_SPACES` and strips trailing
+   * spaces from every captured row (cmd-capture-pane.c:193-194).  With `-J`
+   * tmux joins rows that carry the `GRID_LINE_WRAPPED` flag into a single
+   * logical line AND preserves trailing spaces throughout.
+   *
+   * For the hydration replay path (tc-0ghi) this has two user-visible effects:
+   *   1. Trailing-space preservation — prompts like `$ ` hydrate correctly
+   *      instead of having the space silently stripped.
+   *   2. Reflow — xterm.js only reflows lines marked `isWrapped`; without
+   *      `-J` each display row becomes a hard line that xterm can never
+   *      reflow, so pre-attach scrollback is frozen at the capture width and
+   *      renders ragged after a later VS Code terminal resize.
+   *
+   * Default: false.
+   */
+  joinWrapped?: boolean;
+  /**
    * First line to capture (inclusive, may be negative for scrollback).
    * Passed as `-S <startLine>`.  Omitted when undefined.
    *
@@ -367,19 +386,26 @@ export interface CapturePaneOptions {
  * block).  Add `-e` for escape sequences, `-S` / `-E` for line ranges.
  *
  * Flags confirmed in cmd-capture-pane.c: `-p` (print), `-e` (escape
- * sequences), `-S <start-line>`, `-E <end-line>`, `-t <target-pane>`.
+ * sequences), `-J` (join wrapped rows + preserve trailing spaces), `-S
+ * <start-line>`, `-E <end-line>`, `-t <target-pane>`.
  *
- * For full-history rehydration (tc-5quo) the canonical form is
- * `capture-pane -t %N -p -e -S - -E -`.
+ * For full-history rehydration (tc-5quo, tc-0ghi) the canonical form is
+ * `capture-pane -t %N -p -e -J -S - -E -`.  `-J` joins soft-wrapped rows
+ * into logical lines so xterm.js can reflow them on resize, and preserves
+ * trailing spaces that tmux's `GRID_STRING_TRIM_SPACES` would otherwise strip.
  *
  * @param paneId  Numeric pane ID.
  * @param opts    Optional capture options.
  * @returns       e.g. `capture-pane -t %3 -p -e -S -100`
+ *                or   `capture-pane -t %3 -p -e -J -S - -E -` (hydration form)
  */
 export function capturePane(paneId: number, opts?: CapturePaneOptions): string {
   const parts: string[] = [`capture-pane -t %${paneId} -p`];
   if (opts?.escapes) {
     parts.push("-e");
+  }
+  if (opts?.joinWrapped) {
+    parts.push("-J");
   }
   if (opts?.startLine !== undefined) {
     parts.push(`-S ${opts.startLine}`);

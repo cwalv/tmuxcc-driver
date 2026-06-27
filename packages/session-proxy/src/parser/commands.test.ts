@@ -332,6 +332,18 @@ describe("capturePane", () => {
       "capture-pane -t %4 -p -e -S - -E -",
     );
   });
+
+  it("adds -J flag when joinWrapped=true (tc-0ghi: hydration form)", () => {
+    assert.equal(
+      capturePane(4, { escapes: true, joinWrapped: true, startLine: "-", endLine: "-" }),
+      "capture-pane -t %4 -p -e -J -S - -E -",
+    );
+  });
+
+  it("omits -J when joinWrapped is false/undefined", () => {
+    assert.equal(capturePane(4, { joinWrapped: false }), "capture-pane -t %4 -p");
+    assert.equal(capturePane(4, {}), "capture-pane -t %4 -p");
+  });
 });
 
 // ---------------------------------------------------------------------------

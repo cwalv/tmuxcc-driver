@@ -227,8 +227,8 @@ describe("tc-5quo hydrateTransport — single pane", () => {
     assert.equal(sentCommands.length, 1, "exactly one pipeline.send per pane");
     assert.equal(
       sentCommands[0],
-      "capture-pane -t %1 -p -e -S - -E -",
-      "must use -p -e -S - -E - for full-history rehydration",
+      "capture-pane -t %1 -p -e -J -S - -E -",
+      "must use -p -e -J -S - -E - for full-history rehydration (tc-0ghi: -J joins wrapped rows + preserves trailing spaces)",
     );
   });
 
@@ -451,7 +451,7 @@ describe("tc-5quo hydrateTransport — multi-pane + error handling", () => {
 
     // Only the well-formed pane should have produced a send + frame.
     assert.equal(sentCommands.length, 1);
-    assert.equal(sentCommands[0], "capture-pane -t %7 -p -e -S - -E -");
+    assert.equal(sentCommands[0], "capture-pane -t %7 -p -e -J -S - -E -");
     assert.equal(frames.length, 1);
     assert.equal(frames[0]!.paneId, P7);
   });
