@@ -13,30 +13,35 @@
  *
  *   - `resizePane(paneId, cols, rows)` — wraps dimensions in a wire
  *     `ResizeRequestMessage` (type: "resize.request").  With the default
- *     options, resize requests for the same pane are debounced within a
- *     single async tick (via `Promise.resolve()`) to avoid flooding the
- *     session-proxy during rapid viewport drags.  Only the LAST resize for a given
- *     pane within a tick is sent; the final value is never dropped.
+ *     options, resize requests for the same pane are coalesced over a short
+ *     wall-clock window (`RESIZE_COALESCE_MS`) to avoid flooding the
+ *     session-proxy during rapid viewport drags.  Only the LAST resize for a
+ *     given pane within the window is sent; the final value is never dropped;
+ *     and a coalesced value equal to the last one already sent is skipped.
  *
  * # Coalescing policy
  *
  * Resize events can fire at display-refresh rates when a user drags a pane
  * border.  Flooding the session-proxy with hundreds of resize messages per second
  * risks congesting the control plane.  The coalescer keeps only the most
- * recent `{cols, rows}` per pane and flushes after one microtask boundary:
+ * recent `{cols, rows}` per pane and flushes after a short wall-clock window:
  *
  *   resizePane("p1", 80, 24)  ─┐
  *   resizePane("p1", 81, 24)   ├─ only ResizeRequest{p1, 82, 24} is sent
  *   resizePane("p1", 82, 24)  ─┘
  *
+ * tc-y8t6: the window (not a microtask) is what lets a reconnect's open()-time
+ * placeholder resize and its later-macrotask correction collapse into ONE send,
+ * so the transient placeholder never reaches tmux as a separate `refresh-client
+ * -C` (a spurious SIGWINCH that strands a multi-line shell prompt in the grid).
+ *
  * Input messages are NOT coalesced; they pass through immediately.
  *
- * Ordering guarantee: because flush happens via `Promise.resolve()`, any
- * input call made in the same synchronous frame as resize calls will be
- * dispatched FIRST (input is synchronous; resize flush is a microtask),
- * preserving input-before-resize ordering for same-tick interleaving.
- * Callers that need a specific input→resize order across async boundaries
- * should `await` between the two.
+ * Ordering guarantee: a resize flush is asynchronous (a timer) while input is
+ * sent synchronously, so any input call made in the same synchronous frame as
+ * resize calls is dispatched FIRST, preserving input-before-resize ordering for
+ * same-tick interleaving.  Callers that need a specific input→resize order
+ * across async boundaries should `await` between the two.
  *
  * To disable coalescing, pass `{ coalesceResizes: false }` — each resize
  * will be forwarded immediately without buffering.
@@ -316,6 +321,36 @@ export interface InputSender {
 }
 
 // ---------------------------------------------------------------------------
+// Coalescing window (tc-y8t6)
+// ---------------------------------------------------------------------------
+
+/**
+ * Wall-clock window (ms) over which resize requests for a pane are coalesced
+ * before a single one is sent (tc-y8t6).
+ *
+ * The original coalescer flushed at the next MICROTASK boundary, which merges
+ * only resizes issued in the SAME synchronous frame.  On reconnect VS Code
+ * drives the pty's `open()` with a TRANSIENT placeholder size (its 80x30
+ * terminal default) before the renderer settles, then corrects it via a
+ * `setDimensions` in a LATER macrotask — so the two land in different microtask
+ * ticks and BOTH reach tmux as real `refresh-client -C` resizes.  Each is a
+ * SIGWINCH; a multi-line shell prompt re-renders and STRANDS a copy in the pane
+ * grid (tc-y8t6), and the per-reconnect strand count tracks the number of such
+ * steps.  A short wall-clock window coalesces the placeholder with its
+ * correction so only the FINAL size reaches tmux — and since that final equals
+ * the size tmux already holds (the reconnect did not really change the pane),
+ * tmux no-ops it: no spurious SIGWINCH, no strand.  A genuine size change still
+ * propagates (the final value is always the one sent).
+ *
+ * Chosen comfortably larger than a VS Code renderer layout pass (a couple of
+ * frames) so the open()→setDimensions pair reliably coalesces, yet small enough
+ * to be imperceptible for the only thing it delays — the final settled size of
+ * an interactive resize.  Sash drags still get live reflow at ~1000/this Hz
+ * (the window does not RESET per event; it flushes the latest value each tick).
+ */
+const RESIZE_COALESCE_MS = 100;
+
+// ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
 
@@ -369,21 +404,32 @@ export function createInputApi(
   // Pending resize buffer: paneId → {cols, rows}.  Only populated when
   // coalesceResizes is true and a flush is scheduled.
   const pending = new Map<PaneId, { cols: number; rows: number }>();
-  let flushScheduled = false;
+  // tc-y8t6: the last {cols,rows} actually SENT per pane.  A coalesced resize
+  // equal to it is SKIPPED — re-asserting an unchanged size is a redundant
+  // refresh-client -C that risks a no-op SIGWINCH (and the strand it causes).
+  // Per-InputApi-instance, so a reconnect's fresh InputApi re-asserts size once.
+  const lastSent = new Map<PaneId, { cols: number; rows: number }>();
+  let flushTimer: ReturnType<typeof setTimeout> | undefined;
 
   function nextSeq(): number {
     return seq++;
   }
 
   function flushResizes(): void {
-    flushScheduled = false;
-    for (const [paneId, { cols, rows }] of pending) {
+    flushTimer = undefined;
+    for (const [paneId, dims] of pending) {
+      const prev = lastSent.get(paneId);
+      if (prev !== undefined && prev.cols === dims.cols && prev.rows === dims.rows) {
+        // tc-y8t6: unchanged from the last size sent — drop the redundant resize.
+        continue;
+      }
+      lastSent.set(paneId, dims);
       const msg: ResizeRequestMessage = {
         type: "resize.request",
         seq: nextSeq(),
         paneId,
-        cols,
-        rows,
+        cols: dims.cols,
+        rows: dims.rows,
       };
       sender.send(msg);
     }
@@ -391,10 +437,12 @@ export function createInputApi(
   }
 
   function scheduleFlush(): void {
-    if (!flushScheduled) {
-      flushScheduled = true;
-      // eslint-disable-next-line @typescript-eslint/no-floating-promises
-      Promise.resolve().then(flushResizes);
+    // tc-y8t6: a short wall-clock window (not a microtask) so a placeholder
+    // resize and its later-macrotask correction coalesce into one send.  Does
+    // NOT reset per event, so the latest value is flushed each window (sash
+    // drags keep getting live reflow) while a transient excursion collapses.
+    if (flushTimer === undefined) {
+      flushTimer = setTimeout(flushResizes, RESIZE_COALESCE_MS);
     }
   }
 
@@ -431,6 +479,12 @@ export function createInputApi(
 
     flush(): void {
       if (coalesce && pending.size > 0) {
+        // Cancel the pending window so the timer cannot double-flush after this
+        // explicit drain (tc-y8t6).
+        if (flushTimer !== undefined) {
+          clearTimeout(flushTimer);
+          flushTimer = undefined;
+        }
         flushResizes();
       }
     },
@@ -438,14 +492,17 @@ export function createInputApi(
     markDisconnected(): void {
       // p8lh: the connection is closing — block further coalesced-resize sends.
       // 1. Drop the pending coalesced resize and disarm the scheduled flush so
-      //    the already-queued `flushResizes` microtask is a no-op (empty
-      //    `pending`) instead of calling send() on the closing connection.
+      //    the already-queued `flushResizes` timer is a no-op (cleared)
+      //    instead of calling send() on the closing connection.
       // 2. Set `disconnected` so any LATER resizePane() (VS Code fires
       //    pty.setDimensions asynchronously during teardown) is dropped at the
       //    door and never schedules a new deferred send.
       disconnected = true;
       pending.clear();
-      flushScheduled = false;
+      if (flushTimer !== undefined) {
+        clearTimeout(flushTimer);
+        flushTimer = undefined;
+      }
     },
 
     sendCommand(cmd: WireCommand): void {

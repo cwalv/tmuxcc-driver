@@ -207,6 +207,68 @@ describe("resizePane — coalescing (default enabled)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 4a. tc-y8t6 — reconnect placeholder resize is coalesced away (no transient
+//     reaches the wire) + a re-asserted unchanged size is dropped.
+// ---------------------------------------------------------------------------
+
+describe("resizePane — tc-y8t6 reconnect-placeholder coalescing", () => {
+  it("a placeholder resize and its LATER-MACROTASK correction coalesce to ONE send", async () => {
+    // Reproduces the bead's client-side cause: on reconnect VS Code drives the
+    // pty's open() with a TRANSIENT placeholder size (its 80x30 terminal default)
+    // and corrects it via a setDimensions in a LATER macrotask.  Pre-fix the
+    // microtask coalescer flushed the placeholder before the correction arrived,
+    // so BOTH reached tmux as separate refresh-client -C resizes (each a SIGWINCH
+    // that strands a multi-line prompt).  Post-fix the short wall-clock window
+    // coalesces them so ONLY the final, settled size is sent — the placeholder
+    // never reaches the wire.
+    const { sender, messages } = makeSender();
+    const api = createInputApi(sender); // coalesceResizes: true (default)
+
+    api.resizePane(P0, 80, 30); // open()-time placeholder
+    await new Promise((r) => setTimeout(r, 25)); // a LATER macrotask, within the window
+    api.resizePane(P0, 120, 40); // the renderer's settled correction
+    await new Promise((r) => setTimeout(r, 200)); // > the coalesce window — let it flush
+
+    const resizes = messages.filter((m): m is ResizeRequestMessage => m.type === "resize.request");
+    assert.equal(resizes.length, 1, "the placeholder must NOT reach the wire as a separate resize");
+    assert.equal(resizes[0]!.cols, 120);
+    assert.equal(resizes[0]!.rows, 40);
+  });
+
+  it("a coalesced resize equal to the last one sent is dropped (no redundant refresh-client)", async () => {
+    const { sender, messages } = makeSender();
+    const api = createInputApi(sender);
+
+    // First settled size reaches the wire.
+    api.resizePane(P0, 100, 40);
+    await new Promise((r) => setTimeout(r, 200));
+    // A reconnect re-asserts the SAME size in a later window — must be dropped.
+    api.resizePane(P0, 100, 40);
+    await new Promise((r) => setTimeout(r, 200));
+
+    const resizes = messages.filter((m): m is ResizeRequestMessage => m.type === "resize.request");
+    assert.equal(resizes.length, 1, "re-asserting an unchanged size must not send a second resize");
+    assert.equal(resizes[0]!.cols, 100);
+    assert.equal(resizes[0]!.rows, 40);
+  });
+
+  it("a GENUINE size change after the first still propagates", async () => {
+    const { sender, messages } = makeSender();
+    const api = createInputApi(sender);
+
+    api.resizePane(P0, 100, 40);
+    await new Promise((r) => setTimeout(r, 200));
+    api.resizePane(P0, 132, 50); // a real, different size
+    await new Promise((r) => setTimeout(r, 200));
+
+    const resizes = messages.filter((m): m is ResizeRequestMessage => m.type === "resize.request");
+    assert.equal(resizes.length, 2, "a genuine size change must still reach the wire");
+    assert.equal(resizes[1]!.cols, 132);
+    assert.equal(resizes[1]!.rows, 50);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 4b. markDisconnected — stop deferred resize sends on disconnect (p8lh)
 // ---------------------------------------------------------------------------
 
