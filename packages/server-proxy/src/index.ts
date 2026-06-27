@@ -26,14 +26,14 @@
  * re-attaches `-CC` to the surviving tmux sessions (tmux is the persistence layer).
  */
 
-export { createServerProxy } from "./server-proxy.js";
+export { createServerProxy, ServerProxyAlreadyRunningError } from "./server-proxy.js";
 export type { ServerProxyHandle, ServerProxyOptions, ServerProxySelfExitReason } from "./server-proxy.js";
 
 // Socket transport utilities (useful for clients / tests)
 export { createSocketTransport, connectSocketTransport, createSocketServer } from "./socket-transport.js";
 
 // Runtime directory helpers (useful for clients that need to compute socket paths)
-export { serverProxySocketPath, sessionProxySocketPath, serverProxyLogPath, edhTraceLogPath, resolveBaseRuntimeDir, gcStaleRuntimeDirs, probeLiveSocket } from "./runtime-dir.js";
+export { serverProxySocketPath, sessionProxySocketPath, serverProxyLogPath, edhTraceLogPath, resolveBaseRuntimeDir, gcStaleRuntimeDirs, probeLiveSocket, classifySocketOwner } from "./runtime-dir.js";
 
 // tmux-liveness probe (`tmux -L <socketName> ls`, hard-timeout).  The broker
 // uses `probeTmuxAlive` for watcher-EOF disambiguation; the extension's

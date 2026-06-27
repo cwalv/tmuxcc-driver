@@ -182,6 +182,68 @@ export function restrictSocket(socketPath: string): void {
   }
 }
 
+/**
+ * Three-valued classification of who, if anyone, owns the unix socket at
+ * `sockPath` (tc-kyq4.1).
+ *
+ * Unlike {@link probeLiveSocket} (which collapses timeout into "not alive"),
+ * this distinguishes a socket that is DEFINITIVELY ownerless (safe to remove +
+ * rebind) from one we simply could not get a verdict on (a live owner may be
+ * present but slow to accept — clobbering it is the dangerous action):
+ *
+ *   - `"alive"`:        a connection was accepted → a live broker owns it.
+ *   - `"stale"`:        ENOENT (file gone) or ECONNREFUSED (file exists, no
+ *                       listener) → no live owner; the file is a dead leftover.
+ *   - `"inconclusive"`: connection timed out or failed with any other errno —
+ *                       no terminal evidence of death.  Callers treat this
+ *                       conservatively (back off, never clobber), mirroring the
+ *                       watcher-EOF "inconclusive ≠ gone" principle (tc-hfxb.22):
+ *                       a self-clobber is irreversible, so it is never taken on
+ *                       non-terminal evidence.
+ *
+ * Used by the broker's single-flight socket bind (server-proxy.ts
+ * `_bindSocketAsOwner`) to decide, on EADDRINUSE, whether it lost a
+ * double-spawn race (back off) or is looking at a crash-leftover file (clean
+ * up + retry).
+ */
+export function classifySocketOwner(
+  sockPath: string,
+  timeoutMs = 500,
+): Promise<"alive" | "stale" | "inconclusive"> {
+  return new Promise((resolve) => {
+    const socket = new net.Socket();
+    let settled = false;
+
+    const done = (verdict: "alive" | "stale" | "inconclusive"): void => {
+      if (settled) return;
+      settled = true;
+      try { socket.destroy(); } catch { /* ignore */ }
+      resolve(verdict);
+    };
+
+    const timer = setTimeout(() => done("inconclusive"), timeoutMs);
+    if (typeof timer.unref === "function") timer.unref();
+
+    socket.once("connect", () => {
+      clearTimeout(timer);
+      done("alive");
+    });
+
+    socket.once("error", (err: NodeJS.ErrnoException) => {
+      clearTimeout(timer);
+      const code = err.code;
+      if (code === "ENOENT" || code === "ECONNREFUSED") {
+        done("stale");
+      } else {
+        // EACCES / EPERM / unexpected — no terminal proof the owner is dead.
+        done("inconclusive");
+      }
+    });
+
+    socket.connect(sockPath);
+  });
+}
+
 // ---------------------------------------------------------------------------
 // GC — stale runtime directory sweep (tc-s1sm)
 // ---------------------------------------------------------------------------

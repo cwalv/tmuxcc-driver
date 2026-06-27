@@ -43,7 +43,7 @@
 import { fileURLToPath } from "node:url";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 
-import { createServerProxy } from "./server-proxy.js";
+import { createServerProxy, ServerProxyAlreadyRunningError } from "./server-proxy.js";
 import type { ServerProxyOptions } from "./server-proxy.js";
 import type { SpawnInfo } from "@tmuxcc/session-proxy";
 import { PHASE_TIMING_ENABLED } from "@tmuxcc/session-proxy";
@@ -322,7 +322,27 @@ async function main(): Promise<void> {
     process.exit(0);
   });
 
-  await serverProxy.start();
+  try {
+    await serverProxy.start();
+  } catch (err: unknown) {
+    // tc-kyq4.1: a live broker already owns this socket — we raced a sibling
+    // spawn (another VS Code window) and LOST the bind.  Exit CLEANLY (0): we
+    // never bound or owned the socket, so there is nothing to unlink and the
+    // winner's socket is untouched.  The launcher re-probes and reuses the
+    // winner.  This is a designed outcome, not a crash — exit 0 (the watchdog
+    // must not surface it as a "server-proxy process crashed" notification).
+    if (
+      err instanceof ServerProxyAlreadyRunningError ||
+      (err as { code?: unknown } | null)?.code === "server-proxy.already-running"
+    ) {
+      process.stderr.write(
+        `serverProxy: socket ${socketName} already owned by a live broker — ` +
+          `exiting cleanly (double-spawn loser, pid=${process.pid})\n`,
+      );
+      process.exit(0);
+    }
+    throw err;
+  }
 
   // Signal readiness to the launcher
   process.stdout.write("READY\n");

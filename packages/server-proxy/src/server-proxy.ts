@@ -45,6 +45,7 @@
  */
 
 import * as path from "node:path";
+import * as fs from "node:fs";
 import {
   runServerHandshake,
   WIRE_PROTOCOL_VERSION,
@@ -76,7 +77,7 @@ import type {
 } from "@tmuxcc/session-proxy";
 
 import { createSocketServer, createSocketTransport } from "./socket-transport.js";
-import { serverProxySocketPath, sessionProxySocketPath, removeSocket, restrictSocket } from "./runtime-dir.js";
+import { serverProxySocketPath, sessionProxySocketPath, removeSocket, restrictSocket, classifySocketOwner } from "./runtime-dir.js";
 import { createServerProxyMetrics } from "./metrics.js";
 import type { ServerProxyMetrics } from "./metrics.js";
 import { mergeMetricsText } from "./metrics-exposition.js";
@@ -173,6 +174,32 @@ export interface ServerProxyOptions {
  *   - "idle": zero IPC clients for the full hysteresis window.
  */
 export type ServerProxySelfExitReason = "tmux-gone" | "idle";
+
+/**
+ * Thrown by `start()` when a LIVE broker already owns the server-proxy socket
+ * (tc-kyq4.1).
+ *
+ * The unix-socket bind is the cross-process single-flight lock: of two brokers
+ * racing to serve one socket name (e.g. two VS Code windows that both probed
+ * the socket as unreachable within the spawn latency), exactly one wins the
+ * `listen()` and the other gets EADDRINUSE on a still-live socket.  The loser
+ * raises this instead of clobbering the winner's socket file — the spawn-side
+ * root-cause fix for the tc-i0zk "broker alive but server-proxy.sock missing"
+ * wedge, where an orphaned double-spawn loser's later idle-exit unlinked the
+ * winner's socket.
+ *
+ * The entry point (`server-proxy-entry.ts`) maps this to a clean `exit(0)`: the
+ * loser never bound or owned the socket, so there is nothing to unlink and the
+ * winner is untouched.  The launcher re-probes and reuses the winner.
+ */
+export class ServerProxyAlreadyRunningError extends Error {
+  /** Stable discriminator for cross-module `instanceof`-free checks. */
+  readonly code = "server-proxy.already-running";
+  constructor(readonly socketPath: string) {
+    super(`server-proxy socket ${socketPath} is already owned by a live broker`);
+    this.name = "ServerProxyAlreadyRunningError";
+  }
+}
 
 /** The server-proxy handle returned by createServerProxy. */
 export interface ServerProxyHandle {
@@ -406,6 +433,14 @@ class ServerProxyImpl implements ServerProxyHandle {
   private _watcher: TmuxWatcher | null = null;
   private _server: { close(): Promise<void> } | null = null;
   private _socketPath: string = "";
+  /**
+   * Inode of the socket file this broker bound, or null when it never bound /
+   * has released ownership (tc-kyq4.1).  The exit-time unlink only ever removes
+   * the file matching this inode, so a broker can never unlink a socket it does
+   * not own (a double-spawn loser that never bound, or a replacement broker's
+   * fresh socket rebound at the same well-known path after this one exits).
+   */
+  private _boundSocketIno: number | null = null;
   private _started = false;
 
   // ── tc-k6v server-proxy.info state ────────────────────────────────────────────────
@@ -675,28 +710,23 @@ class ServerProxyImpl implements ServerProxyHandle {
 
     this._socketPath = serverProxySocketPath(this._socketDirName, this._runtimeDirOpts);
 
-    // Remove stale socket file if present
-    removeSocket(this._socketPath);
-
-    // Start the unix socket server.  Connection counting happens at the raw
-    // socket level (see SocketServerOptions.onConnectionCountChange).
-    this._server = await createSocketServer(
-      this._socketPath,
-      (transport) => {
-        void this._handleConnection(transport);
-      },
-      {
-        onConnectionCountChange: (count) => {
-          this._onConnectionCountChange(count);
-        },
-        // tc-edf8: report the broker IPC socket's backpressure (drain) depth
-        // and per-send time-in-queue onto the server-proxy registry.
-        metrics: this._metrics,
-      },
-    );
+    // tc-kyq4.1: the unix-socket bind is the CROSS-PROCESS single-flight lock.
+    // `_bindSocketAsOwner` listens WITHOUT pre-removing the socket file; on
+    // EADDRINUSE it classifies the occupant and either backs off (a live /
+    // inconclusive owner — this broker is a double-spawn loser, raising
+    // ServerProxyAlreadyRunningError) or removes a DEFINITIVELY-stale leftover
+    // and retries.  This replaces the old unconditional `removeSocket()` +
+    // `listen()`, which let a second broker clobber a live broker's socket and
+    // stranded an orphaned loser whose later idle self-exit unlinked the
+    // winner's socket — the tc-i0zk "alive but server-proxy.sock missing" wedge.
+    this._server = await this._bindSocketAsOwner();
 
     // Restrict socket permissions to 0600
     restrictSocket(this._socketPath);
+
+    // Record the bound socket's inode so the exit-time unlink only ever removes
+    // the file WE own (see `_removeOwnedSocket`).
+    this._boundSocketIno = this._statSocketIno(this._socketPath);
 
     // Initial session load
     this._refreshSessions();
@@ -728,6 +758,100 @@ class ServerProxyImpl implements ServerProxyHandle {
     if (this._opts.metricsAddr !== undefined) {
       await this.setMetricsHttp(true, this._opts.metricsAddr);
     }
+  }
+
+  /**
+   * Bind the broker's unix socket, using the bind itself as a cross-process
+   * single-flight lock (tc-kyq4.1).
+   *
+   * The kernel makes unix-socket bind atomic: of two brokers racing `listen()`
+   * on the same path, exactly one succeeds and the other gets EADDRINUSE.  We
+   * therefore listen WITHOUT pre-removing the file:
+   *   - `listen()` succeeds              → we are the sole owner; return.
+   *   - EADDRINUSE, occupant `"alive"` /
+   *     `"inconclusive"`                 → a live broker already owns the socket
+   *                                        (or we cannot prove otherwise); we are
+   *                                        the double-spawn loser — raise
+   *                                        ServerProxyAlreadyRunningError WITHOUT
+   *                                        touching the file.
+   *   - EADDRINUSE, occupant `"stale"`   → a dead broker's leftover file; remove
+   *                                        it and retry the bind (bounded).
+   *
+   * The bounded retry converges under contention: if a sibling binds the
+   * just-cleared stale path before our retry, the next `listen()` EADDRINUSEs
+   * and the now-`"alive"` classification routes us to the loser path.  Exhausting
+   * the retries also yields the loser path (we never clobber on ambiguity).
+   */
+  private async _bindSocketAsOwner(): Promise<{ close(): Promise<void> }> {
+    const MAX_BIND_ATTEMPTS = 3;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        // Connection counting happens at the raw socket level (see
+        // SocketServerOptions.onConnectionCountChange).
+        return await createSocketServer(
+          this._socketPath,
+          (transport) => {
+            void this._handleConnection(transport);
+          },
+          {
+            onConnectionCountChange: (count) => {
+              this._onConnectionCountChange(count);
+            },
+            // tc-edf8: report the broker IPC socket's backpressure (drain) depth
+            // and per-send time-in-queue onto the server-proxy registry.
+            metrics: this._metrics,
+          },
+        );
+      } catch (err: unknown) {
+        if ((err as NodeJS.ErrnoException).code !== "EADDRINUSE") throw err;
+        const owner = await classifySocketOwner(this._socketPath);
+        if (owner !== "stale" || attempt >= MAX_BIND_ATTEMPTS) {
+          // A live/inconclusive owner, or stale-cleanup retries exhausted —
+          // back off as the double-spawn loser WITHOUT clobbering the socket.
+          throw new ServerProxyAlreadyRunningError(this._socketPath);
+        }
+        // Definitively stale leftover (dead owner) — clear it and retry the bind.
+        removeSocket(this._socketPath);
+      }
+    }
+  }
+
+  /**
+   * Inode of the socket file at `p`, or null if it is absent / cannot be
+   * stat'd (tc-kyq4.1).  `stat.ino` is a JS number for the file sizes/inodes
+   * we deal with; `Number(...)` normalises the BigInt-on-some-platforms case.
+   */
+  private _statSocketIno(p: string): number | null {
+    try {
+      return Number(fs.statSync(p).ino);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Remove the broker socket file ONLY IF it is still the inode this broker
+   * bound (tc-kyq4.1).
+   *
+   * Guards the exit-time unlink so a broker can never unlink a socket it does
+   * not own:
+   *   - never bound (a double-spawn loser) → owns nothing → remove nothing;
+   *   - file already gone                  → no-op;
+   *   - path now points at a DIFFERENT inode (a replacement broker rebound the
+   *     well-known path after we exited) → leave the replacement's socket intact;
+   *   - inode matches ours                 → unlink it (the required cleanup so
+   *     the next launcher probe doesn't connect-then-reset on our dead socket).
+   */
+  private _removeOwnedSocket(): void {
+    if (this._boundSocketIno === null) return; // never bound — own nothing
+    const currentIno = this._statSocketIno(this._socketPath);
+    if (currentIno === null || currentIno !== this._boundSocketIno) {
+      // Already gone, or a replacement broker owns the path now — not ours.
+      this._boundSocketIno = null;
+      return;
+    }
+    removeSocket(this._socketPath);
+    this._boundSocketIno = null;
   }
 
   shutdown(): Promise<void> {
@@ -774,8 +898,10 @@ class ServerProxyImpl implements ServerProxyHandle {
     await this._server?.close();
     this._server = null;
 
-    // Remove socket file
-    removeSocket(this._socketPath);
+    // Remove the socket file — but only if it is still the one WE bound
+    // (tc-kyq4.1 ownership guard), so a delayed shutdown never unlinks a
+    // replacement broker's freshly-rebound socket at the same well-known path.
+    this._removeOwnedSocket();
 
     // tc-3si.6: stop the prom-client default-metrics sampler timer so a
     // shut-down server-proxy doesn't leak a setInterval handle keeping the
@@ -983,9 +1109,11 @@ class ServerProxyImpl implements ServerProxyHandle {
     try {
       await this.shutdown();
     } catch {
-      // Best-effort: even if shutdown failed midway, the socket file MUST be
-      // gone before we report self-exit, or the next spawn stalls.
-      removeSocket(this._socketPath);
+      // Best-effort: even if shutdown failed midway, OUR socket file MUST be
+      // gone before we report self-exit, or the next spawn stalls.  The
+      // ownership guard (tc-kyq4.1) still applies — if shutdown already removed
+      // it this is a no-op, and we never unlink a replacement's socket.
+      this._removeOwnedSocket();
     }
 
     for (const cb of this._selfExitHandlers.slice()) {

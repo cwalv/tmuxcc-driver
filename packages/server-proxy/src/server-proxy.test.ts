@@ -38,7 +38,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { createServerProxy, connectSocketTransport, serverProxySocketPath } from "./index.js";
+import { createServerProxy, connectSocketTransport, serverProxySocketPath, ServerProxyAlreadyRunningError } from "./index.js";
 import type { ServerProxyHandle, ServerProxySelfExitReason } from "./index.js";
 import type { Transport } from "@tmuxcc/session-proxy";
 
@@ -1288,6 +1288,120 @@ describe("server-proxy – self-exit: idle hysteresis (tc-3iv)", () => {
       await waitFor(() => serverProxy.connectedClientCount === 0, 2_000, "clientCount 1→0 on disconnect");
     } finally {
       await serverProxy.shutdown();
+      fs.rmSync(runtimeDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Single-flight socket bind: cross-process double-spawn (tc-kyq4.1)
+// ---------------------------------------------------------------------------
+//
+// RCA (tc-i0zk / tc-kyq4.1): the broker's old `start()` did an UNCONDITIONAL
+// `removeSocket()` before `listen()`.  Two brokers spawned for one socket name
+// (two VS Code windows that both probed the socket as unreachable within the
+// spawn latency — a CROSS-PROCESS race the launcher's per-host single-flight
+// cannot prevent) therefore BOTH bound: the second's `removeSocket()` unlinked
+// the first's live socket, then bound its own.  That stranded an orphaned loser
+// broker whose later idle self-exit unlinked the WINNER's socket — producing
+// the "broker alive but server-proxy.sock missing" wedge (process alive, only
+// the per-session s0.sock left, reconnect ENOENT loop).
+//
+// The fix makes the unix-socket bind the cross-process single-flight lock: the
+// loser raises ServerProxyAlreadyRunningError WITHOUT clobbering the winner's
+// socket, and the exit-time unlink is inode-guarded so no broker ever unlinks a
+// socket it does not own.
+describe("server-proxy – single-flight bind: double-spawn loser backs off (tc-kyq4.1)", () => {
+  it("D1: a second broker on a LIVE socket loses the bind; the winner's socket survives the loser's idle window", async () => {
+    const socketName = nextSocketName();
+    const runtimeDir = makeRuntimeDir("kyq4-1");
+
+    // Winner: long idle window so it stays up for the whole test.
+    const winner = createServerProxy({ socketName, runtimeDir, idleExitMs: 60_000 });
+    await winner.start();
+    const endpoint = winner.endpoint();
+
+    // Loser: starts while the winner is alive and owns the socket — the
+    // double-spawn loser.  SHORT idle window so that, with the OLD code (loser
+    // wrongly binds its own socket), the loser's idle self-exit would fire
+    // during the test and unlink the winner's socket (the exact tc-i0zk chain).
+    const loser = createServerProxy({ socketName, runtimeDir, idleExitMs: 300 });
+    const loserExits: ServerProxySelfExitReason[] = [];
+    loser.onSelfExit((r) => loserExits.push(r));
+
+    try {
+      assert.ok(fs.existsSync(endpoint), "winner's socket file must exist after start");
+
+      // FAIL-before: with the old unconditional removeSocket()+listen(), this
+      // start() RESOLVES (the loser clobbers + rebinds), so assert.rejects
+      // throws "Missing expected rejection".
+      // PASS-after: the loser detects the live owner and rejects WITHOUT binding.
+      await assert.rejects(
+        loser.start(),
+        (err: unknown) =>
+          err instanceof ServerProxyAlreadyRunningError &&
+          (err as ServerProxyAlreadyRunningError).code === "server-proxy.already-running",
+        "a second broker on a live socket must lose the bind (single-flight), not clobber it",
+      );
+
+      // The winner still owns a reachable socket immediately after the lost race.
+      assert.ok(fs.existsSync(endpoint), "winner's socket must still exist after the lost bind");
+      const probe1 = await connectSocketTransport(endpoint);
+      probe1.close();
+      await waitFor(() => winner.connectedClientCount === 0, 2_000, "winner clientCount back to 0");
+
+      // Wait well past the LOSER's short idle window.  With the old code the
+      // orphaned loser would idle-exit here and unlink the winner's socket; with
+      // the fix the loser never bound, so it never armed an idle timer and
+      // nothing unlinks the winner's socket.
+      await new Promise((r) => setTimeout(r, 800));
+
+      assert.deepEqual(loserExits, [], "the loser never bound, so it must NOT have idle-exited");
+      assert.equal(
+        fs.existsSync(endpoint),
+        true,
+        "winner's socket must STILL exist after the loser's idle window (no orphaned-loser unlink)",
+      );
+      const probe2 = await connectSocketTransport(endpoint);
+      await waitFor(() => winner.connectedClientCount === 1, 2_000, "winner still accepts clients");
+      probe2.close();
+    } finally {
+      await loser.shutdown().catch(() => { /* never bound — nothing to tear down */ });
+      await winner.shutdown().catch(() => { /* idempotent */ });
+      fs.rmSync(runtimeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("D2: a DEFINITIVELY-stale leftover socket file is cleaned up + rebound (legit respawn still works)", async () => {
+    const socketName = nextSocketName();
+    const runtimeDir = makeRuntimeDir("kyq4-2");
+    const endpoint = serverProxySocketPath(socketName, { runtimeDir });
+
+    // Plant a stale socket-file leftover: a unix server bound at the path, then
+    // closed WITHOUT unlinking (simulating a crashed broker — the file lingers
+    // but nothing is listening).  classifySocketOwner must read this as "stale"
+    // (ECONNREFUSED), and start() must remove + rebind rather than back off.
+    const ghost = await import("node:net").then((net) =>
+      new Promise<import("node:net").Server>((resolve, reject) => {
+        const s = net.createServer();
+        s.once("error", reject);
+        s.listen(endpoint, () => resolve(s));
+      }),
+    );
+    await new Promise<void>((resolve) => ghost.close(() => resolve()));
+    // Node leaves the socket FILE behind on server.close(); re-create it if the
+    // platform unlinked it, so the EADDRINUSE→stale path is exercised.
+    if (!fs.existsSync(endpoint)) fs.writeFileSync(endpoint, "");
+
+    const broker = createServerProxy({ socketName, runtimeDir, idleExitMs: 60_000 });
+    try {
+      await broker.start(); // must succeed: stale file cleaned up, fresh bind
+      assert.equal(broker.endpoint(), endpoint, "rebinds the same well-known path");
+      const t = await connectSocketTransport(endpoint);
+      await waitFor(() => broker.connectedClientCount === 1, 2_000, "rebound broker accepts clients");
+      t.close();
+    } finally {
+      await broker.shutdown().catch(() => {});
       fs.rmSync(runtimeDir, { recursive: true, force: true });
     }
   });
