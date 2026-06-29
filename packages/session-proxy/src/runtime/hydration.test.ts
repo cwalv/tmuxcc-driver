@@ -13,8 +13,9 @@
  *         2. Order: clear-prefix bytes precede the replayed body in the
  *            SAME sendData call (single combined frame).
  *         3. Multiple panes → multiple sendData calls, one per pane.
- *         4. `pipeline.send` is invoked exactly once per pane with the
- *            canonical capture-pane command.
+ *         4. `pipeline.send` is invoked twice per pane: the canonical
+ *            capture-pane command, then the display-message grid-facts read
+ *            (tc-w3ir.2 structured reconstruction).
  *         5. Per-pane error (rejected Promise / ok=false reply) is
  *            swallowed; sibling panes still hydrate.
  *         6. Empty pane list → no sendData calls, no pipeline.send calls.
@@ -42,7 +43,9 @@ import {
   CLEAR_AND_SCROLLBACK,
   hydrateTransport,
   lfToCrlf,
-  trimTrailingBlankLines,
+  stripOneTrailingLf,
+  parsePaneGridFacts,
+  cursorPositionEscape,
 } from "./hydration.js";
 import type { HydrationPipeline } from "./hydration.js";
 import { paneId } from "../wire/ids.js";
@@ -169,47 +172,77 @@ describe("tc-5quo lfToCrlf", () => {
 });
 
 // ---------------------------------------------------------------------------
-// (A') tc-pizl.2 — trimTrailingBlankLines (fresh-pane viewport-tail strip)
+// (A') tc-w3ir.2 — structured-reconstruction helpers
 // ---------------------------------------------------------------------------
 
-describe("tc-pizl.2 trimTrailingBlankLines", () => {
+describe("tc-w3ir.2 stripOneTrailingLf", () => {
   const enc = (s: string): Uint8Array => new TextEncoder().encode(s);
   const dec = (b: Uint8Array): string => new TextDecoder().decode(b);
 
-  it("strips a fresh pane's empty viewport tail down to the prompt row", () => {
-    // capture-pane -E - returns the prompt near the top then the empty viewport
-    // rows (one bare LF each).  Trimming the tail leaves the prompt as the last
-    // line with NO trailing LF, so the replayed cursor lands on the prompt row.
-    const body = enc("\ncwa at chost in ~\n$ \n\n\n\n\n");
-    assert.equal(dec(trimTrailingBlankLines(body)), "\ncwa at chost in ~\n$ ");
+  it("drops exactly one trailing LF (capture-pane terminates the last row)", () => {
+    assert.equal(dec(stripOneTrailingLf(enc("line1\nline2\n"))), "line1\nline2");
   });
 
-  it("leaves a scrollback body that ends on real content byte-unchanged (p2)", () => {
-    // A pane WITH scrollback fills the viewport down to the cursor: its last
-    // captured line is real content, so there is no trailing blank to strip.
-    const body = enc("python file1.py\npython file2.py\n^C\nreset\n$ ls -la");
-    const out = trimTrailingBlankLines(body);
-    assert.equal(out, body, "no trailing blank → returned same reference (unchanged)");
+  it("preserves the screen's legitimate blank tail — removes only ONE LF", () => {
+    // A short screen with a blank viewport tail: capture is prompt + blank rows,
+    // one LF each. Only the final terminator is dropped; the blank rows (now
+    // separated by LFs) survive to fill the viewport.
+    assert.equal(dec(stripOneTrailingLf(enc("$ \n\n\n\n"))), "$ \n\n\n");
   });
 
-  it("drops the single trailing LF when real content ends with one (cursor on its row)", () => {
-    const body = enc("line1\nline2\n$ ls\n");
-    assert.equal(dec(trimTrailingBlankLines(body)), "line1\nline2\n$ ls");
+  it("returns the same reference when there is no trailing LF", () => {
+    const body = enc("$ ls");
+    assert.equal(stripOneTrailingLf(body), body);
   });
 
-  it("preserves interior and leading blank lines — only the trailing run is stripped", () => {
-    const body = enc("\n\nabove\n\nbelow\n\n\n");
-    assert.equal(dec(trimTrailingBlankLines(body)), "\n\nabove\n\nbelow");
+  it("returns empty input unchanged", () => {
+    const body = new Uint8Array(0);
+    assert.equal(stripOneTrailingLf(body), body);
+  });
+});
+
+describe("tc-w3ir.2 parsePaneGridFacts", () => {
+  const enc = (s: string): Uint8Array => new TextEncoder().encode(s);
+
+  it("parses the cursor cell + scrollback/screen split", () => {
+    assert.deepEqual(parsePaneGridFacts(enc("2,3,0,10")), {
+      cursorX: 2,
+      cursorY: 3,
+      historySize: 0,
+      paneHeight: 10,
+    });
   });
 
-  it("treats space-only trailing rows as blank (belt-and-braces)", () => {
-    const body = enc("text\n   \n  \n");
-    assert.equal(dec(trimTrailingBlankLines(body)), "text");
+  it("tolerates a trailing newline and a leading blank line", () => {
+    assert.deepEqual(parsePaneGridFacts(enc("\n5,7,300,41\n")), {
+      cursorX: 5,
+      cursorY: 7,
+      historySize: 300,
+      paneHeight: 41,
+    });
   });
 
-  it("returns empty for an all-blank body and for an empty body", () => {
-    assert.equal(dec(trimTrailingBlankLines(enc("\n\n\n"))), "");
-    assert.equal(dec(trimTrailingBlankLines(new Uint8Array(0))), "");
+  it("returns null for an empty body (pane vanished mid-read)", () => {
+    assert.equal(parsePaneGridFacts(new Uint8Array(0)), null);
+  });
+
+  it("returns null for a malformed / short field list", () => {
+    assert.equal(parsePaneGridFacts(enc("2,3,0")), null);
+    assert.equal(parsePaneGridFacts(enc("2,3,x,10")), null);
+    assert.equal(parsePaneGridFacts(enc("2,3,-1,10")), null);
+  });
+});
+
+describe("tc-w3ir.2 cursorPositionEscape", () => {
+  const dec = (b: Uint8Array): string => new TextDecoder().decode(b);
+
+  it("converts 0-based cursor_x/cursor_y to a 1-based CUP escape", () => {
+    // tmux cursor_x=2 cursor_y=3 → ESC[4;3H (row=cursor_y+1, col=cursor_x+1).
+    assert.equal(dec(cursorPositionEscape(2, 3)), "\x1b[4;3H");
+  });
+
+  it("home cell (0,0) → ESC[1;1H", () => {
+    assert.equal(dec(cursorPositionEscape(0, 0)), "\x1b[1;1H");
   });
 });
 
@@ -218,17 +251,24 @@ describe("tc-pizl.2 trimTrailingBlankLines", () => {
 // ---------------------------------------------------------------------------
 
 describe("tc-5quo hydrateTransport — single pane", () => {
-  it("sends capture-pane via pipeline with the canonical full-history args", async () => {
+  it("sends capture-pane then display-message (grid facts) per pane", async () => {
     const { pipeline, sentCommands } = makeFakePipeline();
     const { transport } = makeRecordingTransport();
 
     await hydrateTransport(pipeline, transport, [P1]);
 
-    assert.equal(sentCommands.length, 1, "exactly one pipeline.send per pane");
+    // tc-w3ir.2: two round-trips per pane — the capture body, then the grid
+    // facts (cursor cell + scrollback/screen split) for the structured replay.
+    assert.equal(sentCommands.length, 2, "capture + display-message per pane");
     assert.equal(
       sentCommands[0],
       "capture-pane -t %1 -p -e -J -S - -E -",
       "must use -p -e -J -S - -E - for full-history rehydration (tc-0ghi: -J joins wrapped rows + preserves trailing spaces)",
+    );
+    assert.equal(
+      sentCommands[1],
+      "display-message -p -t %1 -F '#{cursor_x},#{cursor_y},#{history_size},#{pane_height}'",
+      "must read cursor_x/cursor_y/history_size/pane_height for the structured reconstruction (tc-w3ir.2)",
     );
   });
 
@@ -331,7 +371,8 @@ describe("tc-5quo hydrateTransport — multi-pane + error handling", () => {
 
     await hydrateTransport(pipeline, transport, [P1, P2]);
 
-    assert.equal(sentCommands.length, 2);
+    const captures = sentCommands.filter((c) => c.startsWith("capture-pane"));
+    assert.equal(captures.length, 2, "one capture-pane per pane");
     assert.ok(
       sentCommands.some((c) => c.startsWith("capture-pane -t %1")),
       "must capture pane 1",
@@ -410,6 +451,12 @@ describe("tc-5quo hydrateTransport — multi-pane + error handling", () => {
     const pipeline: HydrationPipeline = {
       send(command: string): Promise<CommandResult> {
         sentCommands.push(command);
+        // Defer only the capture round-trips (so we can prove both panes'
+        // captures dispatch before either reply). The follow-up grid-facts read
+        // resolves immediately — it is not part of the parallelism assertion.
+        if (command.startsWith("display-message")) {
+          return Promise.resolve(ok(new Uint8Array(0)));
+        }
         return new Promise<CommandResult>((resolve) => {
           inflight.push(resolve);
         });
@@ -419,16 +466,16 @@ describe("tc-5quo hydrateTransport — multi-pane + error handling", () => {
 
     const hydrationPromise = hydrateTransport(pipeline, transport, [P1, P2]);
 
-    // Give microtasks a chance to dispatch both sends.
+    // Give microtasks a chance to dispatch both capture sends.
     await new Promise<void>((r) => setImmediate(r));
 
     assert.equal(
-      sentCommands.length,
+      sentCommands.filter((c) => c.startsWith("capture-pane")).length,
       2,
       "both capture-pane sends must have been dispatched before any reply (parallel)",
     );
 
-    // Resolve both replies.
+    // Resolve both capture replies.
     inflight[0]!(ok(new TextEncoder().encode("p1")));
     inflight[1]!(ok(new TextEncoder().encode("p2")));
 
@@ -449,9 +496,12 @@ describe("tc-5quo hydrateTransport — multi-pane + error handling", () => {
 
     await hydrateTransport(pipeline, transport, [bad1, bad2, bad3, empty, P7]);
 
-    // Only the well-formed pane should have produced a send + frame.
-    assert.equal(sentCommands.length, 1);
-    assert.equal(sentCommands[0], "capture-pane -t %7 -p -e -J -S - -E -");
+    // Only the well-formed pane should have produced sends + a frame (capture
+    // then grid-facts read).
+    assert.deepEqual(sentCommands, [
+      "capture-pane -t %7 -p -e -J -S - -E -",
+      "display-message -p -t %7 -F '#{cursor_x},#{cursor_y},#{history_size},#{pane_height}'",
+    ]);
     assert.equal(frames.length, 1);
     assert.equal(frames[0]!.paneId, P7);
   });
@@ -537,95 +587,111 @@ describe("tc-5quo hydration — bind-path invariant", () => {
 });
 
 // ---------------------------------------------------------------------------
-// (E) tc-pizl.2 — fresh-pane top-anchor invariant (FUTURE E2E ORACLE, unit form)
+// (E) tc-w3ir.2 — structured grid reconstruction (full hydrateTransport frame)
 //
-// The oracle: a fresh no-history pane must NOT produce a full-pane-height block
-// of trailing blank lines in the replay (those newlines bottom-anchor the prompt
-// in xterm).  A pane WITH scrollback must STILL replay its real content ending on
-// the last real line (bottom-anchored), unregressed.  We exercise the full
-// hydrateTransport frame here so the assertion covers the delivered byte stream,
-// not just the trim helper.
+// The reconstruction writes the FULL captured grid (history_size scrollback rows
+// + pane_height screen rows, the screen's blank tail preserved, one trailing LF
+// dropped) then restores the cursor via ESC[<row>;<col>H. We exercise the full
+// hydrateTransport frame so the assertion covers the delivered byte stream.
 // ---------------------------------------------------------------------------
 
-describe("tc-pizl.2 fresh-pane top-anchor invariant", () => {
+describe("tc-w3ir.2 structured grid reconstruction frame", () => {
+  const dec = (b: Uint8Array): string => new TextDecoder().decode(b);
+
   /** The replay body (after CLEAR prefix) decoded as a string. */
   function replayString(frameBytes: Uint8Array): string {
-    return new TextDecoder().decode(frameBytes.subarray(CLEAR_AND_SCROLLBACK.length));
+    return dec(frameBytes.subarray(CLEAR_AND_SCROLLBACK.length));
   }
 
-  it("fresh pane: replay carries NO trailing pane-height block of blank lines", async () => {
-    // tmux capture-pane -E - of a fresh 50-row pane: prompt near the top, then
-    // ~47 empty viewport rows (one bare LF each).
-    const ROWS = 50;
-    const captureBody =
-      "\ncwa at chost in ~\n$ " + "\n".repeat(ROWS - 3);
+  it("fresh no-scrollback pane: full grid + cursor restore to the prompt row (top-anchored)", async () => {
+    // A fresh 10-row pane: prompt "$ " at row 0, then 9 empty viewport rows
+    // (one bare LF each, plus the row-0 terminator → 10 trailing LFs). Cursor at
+    // (cursor_x=2, cursor_y=0): just after the prompt, top of the screen.
+    const ROWS = 10;
+    const captureBody = "$ " + "\n".repeat(ROWS); // "$ \n" + 9 empty rows + final LF
 
     const { pipeline, setReply } = makeFakePipeline();
     const { transport, frames } = makeRecordingTransport();
     setReply("capture-pane", ok(new TextEncoder().encode(captureBody)));
+    setReply("display-message -p -t %1", ok(new TextEncoder().encode("2,0,0,10")));
 
     await hydrateTransport(pipeline, transport, [P1]);
 
     assert.equal(frames.length, 1);
     const replay = replayString(frames[0]!.bytes);
 
-    // The replay must END on the prompt (no trailing newline / blank block).
-    assert.ok(replay.endsWith("$ "), `replay must end on the prompt, got: ${JSON.stringify(replay)}`);
-    assert.ok(
-      !/\n\s*\n\s*$/.test(replay),
-      "replay must not end with a run of blank lines (would bottom-anchor the prompt)",
-    );
-    // The FIRST non-empty line must be near the TOP — within the first few rows,
-    // NOT preceded by a pane-height block of blanks.
-    const lines = replay.split(/\r?\n/);
-    const firstNonEmpty = lines.findIndex((l) => l.trim().length > 0);
-    assert.ok(firstNonEmpty >= 0, "replay must contain a non-empty line");
-    assert.ok(
-      firstNonEmpty < 5,
-      `first non-empty line must be near the top (got index ${firstNonEmpty})`,
-    );
-    // And the total line count must be a handful (prompt rows), not pane-height.
-    assert.ok(
-      lines.length < 10,
-      `fresh-pane replay must not span a pane-height block of lines (got ${lines.length})`,
+    // Frame = grid (one trailing LF dropped, LF→CRLF) + cursor restore.
+    const expectedGrid = "$ " + "\r\n".repeat(ROWS - 1);
+    const expectedCursor = "\x1b[1;3H"; // cursor_y=0 → row1, cursor_x=2 → col3
+    assert.equal(replay, expectedGrid + expectedCursor);
+
+    // The prompt is at the TOP (not preceded by blanks); the blank viewport tail
+    // is PRESERVED (fills the viewport); the cursor escape pins the prompt row.
+    assert.ok(replay.startsWith("$ "), "prompt must be top-anchored");
+    assert.ok(replay.endsWith(expectedCursor), "must end with the cursor restore");
+    assert.equal(
+      replay.split("\r\n").length,
+      ROWS,
+      "must write the full pane-height grid (blank tail preserved, not trimmed)",
     );
   });
 
-  it("scrollback pane: replay still ends bottom-anchored on real content (p2 non-regression)", async () => {
-    // A pane with real scrollback filling the viewport down to the cursor: the
-    // last captured line is real content (the live prompt), with no empty tail.
-    const realLines = [
-      "$ ls -la",
-      "total 8",
-      "drwxr-xr-x  2 cwa cwa 4096 Jun 15 file1.py",
-      "drwxr-xr-x  2 cwa cwa 4096 Jun 15 file2.py",
-      "^C",
-      "$ reset",
-      "$ ", // live prompt — the cursor row, bottom of the viewport
-    ];
-    const captureBody = realLines.join("\n"); // NO trailing blank rows
+  it("short screen WITH scrollback: full grid written + screen blank-tail preserved + cursor restored", async () => {
+    // 5-row screen with a blank tail (cursor above the bottom) and 8 scrollback
+    // rows. The OLD flat-replay+trim dropped the screen's blank tail, pulling
+    // scrollback into the viewport; the structured form writes the WHOLE grid so
+    // the screen fills the viewport with scrollback above the fold.
+    const scrollback = ["SB-1", "SB-2", "SB-3", "SB-4", "SB-5", "SB-6", "SB-7", "SB-8"];
+    const screen = ["LIVE-1", "LIVE-2", "", "", ""]; // 5 rows, blank tail
+    const captureBody = [...scrollback, ...screen].join("\n") + "\n"; // capture-pane trailing LF
+    // cursor on the 3rd screen row (the first blank row): cursor_x=0, cursor_y=2.
 
     const { pipeline, setReply } = makeFakePipeline();
     const { transport, frames } = makeRecordingTransport();
     setReply("capture-pane", ok(new TextEncoder().encode(captureBody)));
+    setReply("display-message -p -t %1", ok(new TextEncoder().encode("0,2,8,5")));
 
     await hydrateTransport(pipeline, transport, [P1]);
 
     assert.equal(frames.length, 1);
     const replay = replayString(frames[0]!.bytes);
 
-    // Every real line survives and the last line is the live prompt (bottom-
-    // anchored) — the trim must NOT have eaten real content.
-    for (const ln of realLines) {
-      assert.ok(replay.includes(ln), `scrollback line must survive hydration: ${JSON.stringify(ln)}`);
+    // All scrollback survives (it lands above the fold in xterm).
+    for (const sb of scrollback) {
+      assert.ok(replay.includes(sb), `scrollback line must survive: ${sb}`);
     }
-    assert.ok(replay.endsWith("$ "), "scrollback replay must end on the live prompt (bottom-anchored)");
-    // The trim is a no-op for a body with no trailing blanks: byte-identical to
-    // the plain LF→CRLF of the capture body.
-    assert.deepEqual(
-      frames[0]!.bytes.subarray(CLEAR_AND_SCROLLBACK.length),
-      lfToCrlf(new TextEncoder().encode(captureBody)),
-      "scrollback body must be byte-unchanged by the trailing-blank trim",
+    assert.ok(replay.includes("LIVE-1") && replay.includes("LIVE-2"), "screen content must survive");
+
+    // The cursor restore is the LAST thing in the frame…
+    const cursor = "\x1b[3;1H"; // cursor_y=2 → row3, cursor_x=0 → col1
+    assert.ok(replay.endsWith(cursor), `frame must end with cursor restore ${JSON.stringify(cursor)}`);
+
+    // …and the screen's blank tail is PRESERVED (the rows between LIVE-2 and the
+    // cursor restore are blank, NOT trimmed away). Strip the cursor escape and
+    // assert the grid ends with the blank rows.
+    const grid = replay.slice(0, replay.length - cursor.length);
+    assert.ok(
+      grid.endsWith("LIVE-2\r\n\r\n\r\n"),
+      `screen blank tail must be preserved, got grid tail: ${JSON.stringify(grid.slice(-20))}`,
     );
+  });
+
+  it("missing grid facts: delivers the body WITHOUT a cursor restore (best-effort)", async () => {
+    // display-message returns an empty/garbled body (pane raced away between the
+    // capture reply and the facts read) → no cursor escape; the body still
+    // delivers so the pane is not left blank.
+    const captureBody = "history-1\nhistory-2\n";
+    const { pipeline, setReply } = makeFakePipeline();
+    const { transport, frames } = makeRecordingTransport();
+    setReply("capture-pane", ok(new TextEncoder().encode(captureBody)));
+    // display-message falls through to the fake's default empty-body reply.
+
+    await hydrateTransport(pipeline, transport, [P1]);
+
+    assert.equal(frames.length, 1);
+    const replay = replayString(frames[0]!.bytes);
+    // No cursor escape; body delivered with one trailing LF dropped, LF→CRLF.
+    assert.equal(replay, "history-1\r\nhistory-2");
+    assert.ok(!replay.includes("\x1b["), "must NOT contain a cursor escape when facts are absent");
   });
 });

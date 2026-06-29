@@ -208,10 +208,15 @@ describe("tc-295a.9 live-bytes-during-hydration queueing", () => {
     h.demux.notifyPaneBound(P1);
 
     // A pipeline whose capture reply is deferred so we can inject a live byte
-    // INTO the hydration window (between begin and the reply).
+    // INTO the hydration window (between begin and the reply). The follow-up
+    // grid-facts read (display-message) resolves immediately — only the capture
+    // is held open (tc-w3ir.2).
     let resolveCapture!: (r: CommandResult) => void;
     const pipeline: HydrationPipeline = {
-      send(): Promise<CommandResult> {
+      send(command: string): Promise<CommandResult> {
+        if (command.startsWith("display-message")) {
+          return Promise.resolve(ok(new Uint8Array(0)));
+        }
         return new Promise<CommandResult>((res) => { resolveCapture = res; });
       },
     };
@@ -283,8 +288,7 @@ describe("tc-295a.9 live-bytes-during-hydration queueing", () => {
 // drain for bytes the FC-1 ledger never held → noteDrained's byteCount exceeded
 // buffered → the "DRAIN CLAMPED" tripwire fired (onDrainClamped). It fired only
 // on panes WITH scrollback history (big replay body) and not on clean fresh
-// creates (empty replay body after trimTrailingBlankLines) — exactly the
-// production trigger pinning.
+// creates (small replay body) — exactly the production trigger pinning.
 //
 // Fix: the replay frame is delivered on the RAW transport, never the draining
 // wrapper, so only counted live %output reaches fc.noteDrained. The harness

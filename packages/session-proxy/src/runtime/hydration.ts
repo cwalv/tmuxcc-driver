@@ -24,11 +24,29 @@
  *    them on resize, and preserves trailing spaces — tc-0ghi.)
  * 2. Route through `pipeline.send` so the correlator slot is registered
  *    atomically with the host write (tc-3si.1).
- * 3. On success, build a single `Uint8Array` containing
+ * 3. Read the pane's live grid facts in a second `pipeline.send`:
+ *      `display-message -p -t %N -F '#{cursor_x},#{cursor_y},#{history_size},#{pane_height}'`
+ *    `capture-pane` carries the grid CONTENT but not the cursor cell nor the
+ *    scrollback/screen split; `display-message` recovers them (tc-w3ir.2).
+ * 4. On success, build a single `Uint8Array` — the STRUCTURED reconstruction —
+ *    containing
  *      `\x1b[H\x1b[2J\x1b[3J`  (cursor home + erase screen + erase scrollback)
- *    followed by the capture body with `\n` translated to `\r\n` (tmux
- *    capture-pane uses bare LF; xterm-style terminals expect CRLF).
- * 4. Deliver via `transport.sendData(paneId, ...)`.
+ *    followed by the capture body (its single trailing newline dropped, `\n`
+ *    translated to `\r\n`), followed by `\x1b[<row>;<col>H` restoring the
+ *    cursor to (cursor_y, cursor_x).  Writing the full captured grid
+ *    (`history_size` + `pane_height` rows) into a viewport of `pane_height`
+ *    rows lands the `history_size` leading rows in xterm's scrollback region
+ *    and the screen in the viewport; the cursor escape pins the true cell.
+ * 5. Deliver via `transport.sendData(paneId, ...)`.
+ *
+ * Why structured (tc-w3ir.2 / tc-kyq4.5): a flat byte-stream replay discards
+ * the grid's structure — the scrollback/screen boundary and the cursor — and
+ * the old `trimTrailingBlankLines` heuristic compensated only for a fresh
+ * no-scrollback pane, breaking the has-scrollback short-screen case (scrollback
+ * landed IN the viewport, the "orphan"; the cursor landed at the stream end).
+ * Reconstructing from tmux's own data reproduces the pane faithfully regardless
+ * of screen height, and subsumes the fresh-pane top-anchor case via the cursor
+ * restore (no blank-line trimming needed).
  *
  * # Race trade-off
  *
@@ -54,7 +72,7 @@
 import type { PaneId } from "../wire/ids.js";
 import type { Transport } from "../wire/transport.js";
 import type { CommandResult } from "../parser/correlator.js";
-import { capturePane } from "../parser/commands.js";
+import { capturePane, displayMessagePane, PANE_GRID_FACTS_FORMAT } from "../parser/commands.js";
 
 /**
  * Cursor home + erase entire screen + erase scrollback.
@@ -251,7 +269,22 @@ async function _hydrateOnePane(
       return false;
     }
 
-    return await _deliverReplay(transport, pid, result.body);
+    // tc-w3ir.2: read the pane's cursor cell + scrollback/screen split so the
+    // replay can reconstruct tmux's grid faithfully (cursor restore + scrollback
+    // above the fold). Best-effort: a missing/garbled reply just skips the cursor
+    // restore — the captured body still delivers (the pane was found above). This
+    // is a SECOND round-trip after the capture; the no-interleave window stays
+    // open across both, so live bytes remain queued until `end`.
+    let facts: PaneGridFacts | null = null;
+    try {
+      const factsResult = await pipeline.send(displayMessagePane(tmuxN, PANE_GRID_FACTS_FORMAT));
+      if (factsResult.ok) facts = parsePaneGridFacts(factsResult.body);
+    } catch {
+      // Host dead between the capture reply and here — deliver without cursor
+      // restore; the live stream converges.
+    }
+
+    return await _deliverReplay(transport, pid, result.body, facts);
   } finally {
     // Always close the window: flush whatever live bytes were queued and emit
     // pane.hydration.end. On a found pane this lands after the clear+replay
@@ -264,21 +297,39 @@ async function _deliverReplay(
   transport: Transport,
   pid: PaneId,
   body: Uint8Array,
+  facts: PaneGridFacts | null,
 ): Promise<boolean> {
-  // tc-pizl.2: drop the empty viewport tail BEFORE the CRLF fixup. `-E -` makes
-  // tmux capture the whole pane-height grid down to the bottom visible row, so a
-  // FRESH pane (prompt near the top, the rest of the viewport blank) comes back
-  // with a pane-height block of trailing blank lines. Replayed verbatim those
-  // newlines drive xterm's cursor past the bottom of the viewport, scrolling the
-  // prompt up and leaving it bottom-anchored above a full-pane-height block of
-  // blanks (the bead's `bufferLines = 50 blanks + prompt-at-bottom`). Trimming
-  // the all-blank tail keeps a fresh pane top-anchored; a pane WITH scrollback
-  // has real content filling down to the cursor, so it has NO trailing blank
-  // lines and is byte-unchanged here (p2's 592-line hydration is untouched).
-  const replay = lfToCrlf(trimTrailingBlankLines(body));
-  const combined = new Uint8Array(CLEAR_AND_SCROLLBACK.length + replay.length);
+  // tc-w3ir.2: STRUCTURED grid reconstruction.
+  //
+  // `capture-pane -E -` returns the whole pane (history_size scrollback rows
+  // then pane_height screen rows, the screen padded down to the bottom visible
+  // row), each row terminated by a bare LF — so the body ends with ONE trailing
+  // LF. We drop that single terminator so the last screen row is the final byte
+  // written (a trailing newline would scroll the screen up one row, dropping the
+  // top screen row into scrollback). We do NOT trim blank lines: the screen's
+  // blank tail is legitimate viewport content and must be written to fill the
+  // viewport.
+  //
+  // Writing the full grid (history_size + pane_height rows) into an xterm
+  // viewport of pane_height rows scrolls the history_size leading rows into
+  // xterm's scrollback region and leaves the screen filling the viewport, with
+  // the screen's top row at viewport row 1. We then restore the cursor to its
+  // true cell via ESC[<cursor_y+1>;<cursor_x+1>H (CUP is 1-based; tmux's
+  // cursor_x/cursor_y are 0-based and screen-relative, and the screen top is
+  // viewport row 1). This reproduces tmux's grid faithfully regardless of screen
+  // height — scrollback above the fold, screen in the viewport, cursor at its
+  // cell — and subsumes the fresh no-scrollback pane's top-anchor (its prompt is
+  // written near the top and the cursor escape pins it there).
+  const replay = lfToCrlf(stripOneTrailingLf(body));
+  const cursor = facts !== null
+    ? cursorPositionEscape(facts.cursorX, facts.cursorY)
+    : EMPTY_BYTES;
+  const combined = new Uint8Array(
+    CLEAR_AND_SCROLLBACK.length + replay.length + cursor.length,
+  );
   combined.set(CLEAR_AND_SCROLLBACK, 0);
   combined.set(replay, CLEAR_AND_SCROLLBACK.length);
+  combined.set(cursor, CLEAR_AND_SCROLLBACK.length + replay.length);
   try {
     const sent = transport.sendData(pid, combined);
     if (sent !== undefined && typeof (sent as Promise<void>).then === "function") {
@@ -329,69 +380,95 @@ export function lfToCrlf(src: Uint8Array): Uint8Array {
   return out;
 }
 
+/** Shared empty byte run — the cursor-restore slot when grid facts are absent. */
+const EMPTY_BYTES: Uint8Array = new Uint8Array(0);
+
 /**
- * tc-pizl.2: strip a trailing run of blank lines from a capture body.
+ * tc-w3ir.2: the pane grid facts the structured replay reconstructs from.
  *
- * # Why
+ * Read in one `display-message` round-trip ({@link PANE_GRID_FACTS_FORMAT}).
+ * `cursorX` / `cursorY` are tmux's 0-based, screen-relative cursor cell;
+ * `historySize` is the number of scrollback rows above the screen; `paneHeight`
+ * is the screen height in rows.
+ */
+export interface PaneGridFacts {
+  readonly cursorX: number;
+  readonly cursorY: number;
+  readonly historySize: number;
+  readonly paneHeight: number;
+}
+
+/**
+ * Parse a {@link PANE_GRID_FACTS_FORMAT} reply body into {@link PaneGridFacts}.
  *
- * `capture-pane -t %N -p -e -S - -E -` captures down to the bottom row of the
- * VISIBLE viewport (`bottom = hsize + sy - 1`, cmd-capture-pane.c), so a fresh
- * pane whose prompt sits near the top returns the prompt followed by a
- * pane-height block of empty viewport rows — one `\n` per blank row.  Delivered
- * verbatim to xterm those newlines push the cursor past the bottom of the
- * viewport and scroll the prompt up, leaving it bottom-anchored under a
- * full-pane-height block of blanks (the artefact this fixes).
+ * The body is `#{cursor_x},#{cursor_y},#{history_size},#{pane_height}` expanded —
+ * four non-negative integers separated by commas, possibly with surrounding
+ * whitespace / a trailing newline.  Returns `null` when the body does not match
+ * that shape (e.g. the pane vanished and the reply is empty) so the caller can
+ * fall back to delivering the body WITHOUT a cursor restore — best-effort.
  *
- * Stripping the all-blank TAIL keeps a fresh pane top-anchored.  A pane WITH
- * scrollback has real content filling down to the cursor/prompt, so its last
- * captured line is non-blank and the body is returned byte-for-byte unchanged.
- *
- * # Definition of "blank line"
- *
- * Lines are split on bare LF (`\n`, 0x0a) — the separator tmux emits.  A line
- * is blank iff every byte is an ASCII space (0x20) or CR (0x0d), or it is
- * empty.  tmux's `GRID_STRING_TRIM_SPACES` already strips trailing spaces
- * within a row, so blank viewport rows arrive byte-empty; the space/CR
- * tolerance is belt-and-braces.  Only the contiguous trailing run of blank
- * lines is removed — interior and leading blanks (legitimate scrollback) are
- * preserved.  The separator newline BEFORE each stripped blank line is removed
- * with it, so the last surviving line carries NO trailing newline: the cursor
- * lands on the prompt row (where live input echoes), matching tmux's cursor_y.
- *
- * Operates on the RAW capture body (bare LF), BEFORE `lfToCrlf`.  Only the
- * data-plane hydration replay calls this — `captureText` (pane.capture) stays
- * raw and untrimmed.
+ * Robust to a leading blank line (some tmux builds prepend one before `-p`
+ * output): takes the first non-empty line.
  *
  * Exported for direct unit testing.
  */
-export function trimTrailingBlankLines(src: Uint8Array): Uint8Array {
-  // Walk back from the end, skipping over trailing blank lines.  `end` is the
-  // exclusive index of the last byte we keep.  We treat the body as a sequence
-  // of LF-separated lines; the segment after the final LF is the last line.
-  let end = src.length;
-  // Scan backwards line-by-line.  For each trailing line, if it is blank
-  // (only spaces / CRs, or empty), drop it along with its preceding LF.
-  while (end > 0) {
-    // Find the start of the current trailing line: the byte after the previous
-    // LF (or 0 if none).  lineStart..end is the line's content (no LF).
-    let lineStart = end;
-    while (lineStart > 0 && src[lineStart - 1] !== 0x0a) {
-      lineStart--;
-    }
-    // Is src[lineStart..end) blank?
-    let blank = true;
-    for (let k = lineStart; k < end; k++) {
-      const b = src[k]!;
-      if (b !== 0x20 /* space */ && b !== 0x0d /* CR */) {
-        blank = false;
-        break;
-      }
-    }
-    if (!blank) break;
-    // Blank trailing line: drop it AND the LF that separates it from the line
-    // above (if any), so the surviving body does not end with a dangling LF.
-    end = lineStart > 0 ? lineStart - 1 : 0;
+export function parsePaneGridFacts(body: Uint8Array): PaneGridFacts | null {
+  const text = new TextDecoder().decode(body);
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.trim();
+    if (line === "") continue;
+    const parts = line.split(",");
+    if (parts.length !== 4) return null;
+    const nums = parts.map((p) => Number.parseInt(p, 10));
+    if (nums.some((n) => !Number.isFinite(n) || n < 0)) return null;
+    return {
+      cursorX: nums[0]!,
+      cursorY: nums[1]!,
+      historySize: nums[2]!,
+      paneHeight: nums[3]!,
+    };
   }
-  if (end === src.length) return src;
-  return src.subarray(0, end);
+  return null;
+}
+
+/**
+ * Build a cursor-position escape `ESC [ <row> ; <col> H` (CUP) from tmux's
+ * 0-based, screen-relative `cursorX` / `cursorY`.
+ *
+ * CUP is 1-based, so row = `cursorY + 1` and col = `cursorX + 1`.  After the
+ * structured replay the screen fills the viewport with its top row at viewport
+ * row 1 (the leading `history_size` rows scrolled into scrollback), so the
+ * screen-relative `cursorY` maps directly to the absolute viewport row.
+ *
+ * Exported for direct unit testing.
+ */
+export function cursorPositionEscape(cursorX: number, cursorY: number): Uint8Array {
+  const row = cursorY + 1;
+  const col = cursorX + 1;
+  return new TextEncoder().encode(`\x1b[${row};${col}H`);
+}
+
+/**
+ * Drop a single trailing LF (`\n`, 0x0a) from a capture body.
+ *
+ * `capture-pane -E -` terminates EVERY captured row with a bare LF, including
+ * the last — so the body always ends with one `\n`.  Delivered verbatim that
+ * final newline would scroll the screen up one row (the top screen row falling
+ * into scrollback).  Removing exactly one trailing LF leaves the last screen row
+ * as the final bytes written; the cursor is then placed explicitly.  Removing
+ * only ONE (not a run) preserves the screen's legitimate blank tail, which fills
+ * the viewport.  A body with no trailing LF is returned unchanged (same
+ * reference).
+ *
+ * Operates on the RAW capture body (bare LF), BEFORE `lfToCrlf`.  Only the
+ * data-plane hydration replay calls this — `captureText` (pane.capture) stays
+ * raw.
+ *
+ * Exported for direct unit testing.
+ */
+export function stripOneTrailingLf(src: Uint8Array): Uint8Array {
+  if (src.length > 0 && src[src.length - 1] === 0x0a) {
+    return src.subarray(0, src.length - 1);
+  }
+  return src;
 }

@@ -417,6 +417,57 @@ export function capturePane(paneId: number, opts?: CapturePaneOptions): string {
 }
 
 // ---------------------------------------------------------------------------
+// display-message — read live grid facts (tc-w3ir.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Canonical `-F` format for the grid facts the structured hydration replay needs.
+ *
+ * Comma-separated (none of these tmux values ever contains a comma — they are
+ * all non-negative integers), so the parser splits on `,`:
+ *   #{cursor_x}      0-based column of the cursor within the screen
+ *   #{cursor_y}      0-based row of the cursor within the screen
+ *   #{history_size}  number of scrollback (off-screen) lines above the screen
+ *   #{pane_height}   screen height in rows
+ *
+ * The hydration replay (runtime/hydration.ts) reconstructs tmux's grid from the
+ * capture body + these facts: `history_size` leading lines scroll into xterm's
+ * scrollback region, `pane_height` rows fill the viewport, and the cursor is
+ * restored to (cursor_x, cursor_y) — so reattach reproduces the pane faithfully
+ * regardless of screen height.
+ */
+export const PANE_GRID_FACTS_FORMAT =
+  "#{cursor_x},#{cursor_y},#{history_size},#{pane_height}";
+
+/**
+ * Serialize a `display-message -p -t %<pane> -F '<format>'` command.
+ *
+ * `-p` prints the expanded format into the command-reply block (the
+ * `%begin … %end` body the correlator reads); `-F` selects the format string.
+ * tmux expands the format against the target pane's live state, so this is the
+ * read-only way to recover dynamic facts (cursor cell, scrollback size) that
+ * `capture-pane` does not carry.
+ *
+ * The `-F` form is verified in cmd-display-message.c (args_has(args, 'F')) and
+ * available across the supported tmux floor.
+ *
+ * The format is ALWAYS single-quoted (not via {@link quoteArg}, which would
+ * leave `#{…}` bare since its chars are in the "safe" set): an unquoted `#{…}`
+ * risks being parsed as a comment by tmux's command parser (a bare leading `#`
+ * starts a comment). Single-quoting passes the format literally to tmux, which
+ * then expands it — the canonical safe form (cf. refreshClientSubscribe*).
+ *
+ * @param paneId  Numeric pane ID (the N in `%N`).
+ * @param format  Format string (e.g. {@link PANE_GRID_FACTS_FORMAT}).
+ * @returns       e.g. `display-message -p -t %3 -F '#{cursor_x},#{cursor_y},#{history_size},#{pane_height}'`
+ */
+export function displayMessagePane(paneId: number, format: string): string {
+  // Single-quote the whole format; escape embedded single-quotes via `'\''`.
+  const quoted = `'${format.replace(/'/g, "'\\''")}'`;
+  return `display-message -p -t %${paneId} -F ${quoted}`;
+}
+
+// ---------------------------------------------------------------------------
 // new-window
 // ---------------------------------------------------------------------------
 

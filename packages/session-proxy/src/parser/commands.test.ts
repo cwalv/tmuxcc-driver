@@ -25,6 +25,8 @@ import {
   listWindows,
   listPanes,
   capturePane,
+  displayMessagePane,
+  PANE_GRID_FACTS_FORMAT,
   newWindow,
   splitWindow,
   breakPane,
@@ -343,6 +345,26 @@ describe("capturePane", () => {
   it("omits -J when joinWrapped is false/undefined", () => {
     assert.equal(capturePane(4, { joinWrapped: false }), "capture-pane -t %4 -p");
     assert.equal(capturePane(4, {}), "capture-pane -t %4 -p");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// display-message (tc-w3ir.2)
+// ---------------------------------------------------------------------------
+
+describe("displayMessagePane", () => {
+  it("emits display-message -p -t %N -F '<format>'", () => {
+    assert.equal(
+      displayMessagePane(3, "#{cursor_x}"),
+      "display-message -p -t %3 -F '#{cursor_x}'",
+    );
+  });
+
+  it("single-quotes the grid-facts format (contains #{ } and , )", () => {
+    assert.equal(
+      displayMessagePane(7, PANE_GRID_FACTS_FORMAT),
+      "display-message -p -t %7 -F '#{cursor_x},#{cursor_y},#{history_size},#{pane_height}'",
+    );
   });
 });
 
