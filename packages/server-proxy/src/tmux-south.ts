@@ -479,6 +479,16 @@ export function createSession(socketName: string, name: string): { tmuxId: strin
   // Set the @tmuxcc 1 marker so the Phase 2 probe can discover this session.
   setSessionMarker(socketName, name);
 
+  // tc-w3ir.1: apply the tmuxcc driver default `scroll-on-clear off` as a
+  // server-global window option at session/server birth. `new-session` above
+  // is the point at which the (dedicated `-L <socketName>`) tmux server is
+  // guaranteed to exist, and `-wg` makes every window — this session's and any
+  // later ones on the same server — inherit it. This stops tmux from scrolling
+  // cleared-screen content into history, which is what `capture-pane -S -`
+  // otherwise resurrects as the reattach phantom for our remote renderers
+  // (tc-kyq4.5). See setGlobalScrollOnClear for the full rationale.
+  setGlobalScrollOnClear(socketName, false);
+
   return { tmuxId };
 }
 
@@ -503,6 +513,41 @@ export function setSessionMarker(socketName: string, name: string): void {
   spawnSync(
     "tmux",
     ["-L", socketName, "set-option", "-t", name, "@tmuxcc", "1"],
+    { encoding: "utf8", timeout: 3_000 },
+  );
+}
+
+/**
+ * Set the server-global `scroll-on-clear` window option as a tmuxcc driver
+ * default (tc-w3ir.1).
+ *
+ * Runs `tmux -L <socketName> set-option -wg scroll-on-clear <on|off>`. The
+ * `-wg` form sets the *global* window option, which every window on this
+ * (dedicated `-L <socketName>`) server inherits unless it overrides it
+ * locally — so a single call at session/server birth covers every managed
+ * pane without per-pane re-application.
+ *
+ * Why `off` is the tmuxcc default: tmux's `scroll-on-clear` (default on)
+ * preserves the erased screen into scrollback on `clear`, so a tmux-NATIVE
+ * client can scroll up afterwards (screen-write.c
+ * `screen_write_clearscreen` → `grid_view_clear_history`). tmuxcc's clients
+ * are REMOTE RENDERERS (xterm.js etc.) that self-manage their own scrollback
+ * from the live `%output` stream and discard on clear; they never benefit
+ * from this preservation live. It only ever surfaces as the reattach phantom
+ * (tc-kyq4.5) when `capture-pane -S -` resurrects the cleared screen into the
+ * hydration snapshot. `off` is therefore correct for the entire
+ * proxied-renderer client model, not an xterm.js-specific quirk.
+ *
+ * Non-fatal (mirrors {@link setSessionMarker}): if `set-option` fails (e.g. a
+ * tmux too old to know the option, or the server was killed in the
+ * meantime), the error is silently ignored — the session still works; the
+ * only cost is the reattach phantom reappearing. The observable result is
+ * verified via `show-options -A -w scroll-on-clear` (inheritance-resolved).
+ */
+export function setGlobalScrollOnClear(socketName: string, on: boolean): void {
+  spawnSync(
+    "tmux",
+    ["-L", socketName, "set-option", "-wg", "scroll-on-clear", on ? "on" : "off"],
     { encoding: "utf8", timeout: 3_000 },
   );
 }

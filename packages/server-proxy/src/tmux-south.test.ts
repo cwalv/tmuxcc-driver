@@ -121,6 +121,56 @@ describe("tmux-south createSession (tc-zcqr)", { skip: !TMUX_AVAILABLE }, () => 
     }
   });
 
+  it("sets the server-global scroll-on-clear off default (tc-w3ir.1)", () => {
+    const socketName = nextSocketName();
+    try {
+      createSession(socketName, "soc");
+
+      // Global window option is off.
+      const showGlobal = spawnSync(
+        "tmux",
+        ["-L", socketName, "show-options", "-wg", "-v", "scroll-on-clear"],
+        { encoding: "utf8", timeout: 3_000 },
+      );
+      assert.equal(showGlobal.status, 0, "global scroll-on-clear must be readable");
+      assert.equal((showGlobal.stdout ?? "").trim(), "off");
+
+      // The session's window inherits it (no per-window override needed):
+      // `show-options -A -w` resolves inherited globals and tags them with `*`.
+      const showWindow = spawnSync(
+        "tmux",
+        ["-L", socketName, "show-options", "-A", "-w", "-t", "soc"],
+        { encoding: "utf8", timeout: 3_000 },
+      );
+      assert.equal(showWindow.status, 0, "window options must be readable");
+      assert.match(
+        showWindow.stdout ?? "",
+        /scroll-on-clear\*?\s+off/,
+        `managed window must inherit scroll-on-clear off, got:\n${showWindow.stdout}`,
+      );
+
+      // A second window created later on the same server also inherits it.
+      const nw = spawnSync(
+        "tmux",
+        ["-L", socketName, "new-window", "-t", "soc"],
+        { encoding: "utf8", timeout: 3_000 },
+      );
+      assert.equal(nw.status, 0, `new-window failed: ${nw.stderr}`);
+      const showWindow2 = spawnSync(
+        "tmux",
+        ["-L", socketName, "show-options", "-A", "-w", "-t", "soc"],
+        { encoding: "utf8", timeout: 3_000 },
+      );
+      assert.match(
+        showWindow2.stdout ?? "",
+        /scroll-on-clear\*?\s+off/,
+        `later windows must inherit scroll-on-clear off, got:\n${showWindow2.stdout}`,
+      );
+    } finally {
+      killServer(socketName);
+    }
+  });
+
   it("throws when the name is already taken (duplicate session)", () => {
     const socketName = nextSocketName();
     try {
