@@ -168,3 +168,101 @@ round-trip), diff against the previous model, emit deltas from the diff.
 Summary of the stance: **consult the authority at well-defined moments;
 don't shadow its every move.** The git model, not the filesystem-watcher
 model.
+
+## 7. Reattach fidelity: scroll-on-clear off + structured grid reconstruction (tc-w3ir)
+
+**Status: implemented 2026-06-29. Root-cause RCA: tc-kyq4.5.**
+
+### The problem
+
+Two independent factors combined to produce the "orphan" duplicate prompt on
+detach → attach:
+
+1. **scroll-on-clear (default on).** tmux's `scroll-on-clear` window option
+   (`screen_write_clearscreen` in `screen-write.c`) scrolls cleared-screen
+   content into scrollback so an attached tmux client can scroll up after
+   `clear`. The driver's clients are **remote renderers** (xterm.js) that
+   self-manage their own scrollback from the live `%output` stream and discard
+   on clear — they never benefit from this preservation. The phantom lives only
+   in tmux's grid and surfaces when `capture-pane -S -` resurrects it on
+   reattach.
+
+2. **Flat byte-stream replay + trim heuristic.** `_deliverReplay` (hydration.ts)
+   previously sent `CLEAR_AND_SCROLLBACK` + the full captured body with trailing
+   blank lines trimmed (`trimTrailingBlankLines`). The flat list discarded the
+   grid's structure — the scrollback/screen boundary (`history_size`) and the
+   cursor cell (`cursor_x`/`cursor_y`) — and the trim compensated only for a
+   fresh no-scrollback pane, breaking the has-scrollback short-screen case
+   (scrollback landed in the viewport as the "orphan").
+
+### Fix A — scroll-on-clear off (tc-w3ir.1)
+
+`setGlobalScrollOnClear(socketName, false)` is called inside `createSession()`
+in `packages/server-proxy/src/tmux-south.ts`, right after `new-session` succeeds.
+It issues `set-option -wg scroll-on-clear off` as a server-global window option
+on the dedicated tmux socket. Every managed pane inherits it; cleared-screen
+content is not scrolled into history.
+
+Key design decisions:
+
+- **Driver default, not a renderer mode.** `scroll-on-clear off` is correct for
+  the entire proxied-renderer client model, not an xterm.js-specific quirk. A
+  renderer-profile seam is deferred until a genuinely renderer-specific setting
+  appears (then scroll-on-clear would fold into the default renderer profile).
+- **Server-global** (`-wg`) on the dedicated socket. The dedicated socket only
+  ever hosts tmuxcc sessions, so a server-global is appropriate — no risk of
+  clobbering unrelated user sessions.
+- **Non-fatal on failure**: a too-old tmux build keeps the default-on behavior;
+  the session still works.
+- **Belt-and-suspenders at the attach seam** (tc-w3ir.5, P3) — setting
+  scroll-on-clear off again at `attachToSession` time — is not yet implemented.
+
+### Fix B — structured grid reconstruction (tc-w3ir.2)
+
+`_deliverReplay` (hydration.ts) now reconstructs tmux's grid from tmux's own
+data rather than relying on a flat byte stream + trim:
+
+1. Read grid facts in a `display-message` round-trip:
+   `#{cursor_x},#{cursor_y},#{history_size},#{pane_height}` (see
+   `PANE_GRID_FACTS_FORMAT` / `displayMessagePane` in
+   `packages/session-proxy/src/parser/commands.ts`).
+2. Deliver `CLEAR_AND_SCROLLBACK` + `lfToCrlf(stripOneTrailingLf(captureBody))`
+   + `ESC[<cursor_y+1>;<cursor_x+1>H` (CUP cursor restore, 1-based).
+3. Writing the full captured grid (`history_size` + `pane_height` rows) into an
+   xterm viewport of `pane_height` rows scrolls the `history_size` leading rows
+   into xterm's scrollback region and leaves the screen filling the viewport.
+4. `trimTrailingBlankLines` is **deleted**. The fresh no-scrollback pane is
+   top-anchored via the cursor escape (which subsumes the trim for every case).
+
+### Capture gate: pipeline correlator %end — not shell-settled
+
+Capture ordering is gated on the **pipeline correlator's `%end`** for each
+command. `capture-pane` and `display-message` are issued via `pipeline.send`,
+which resolves each command's promise when the correlator receives the matching
+`%end` on the control connection. Because tmux's control connection is
+FIFO-ordered, `%end` arrival confirms the command completed and the grid was
+consistent at that moment.
+
+**"Shell settled" is deliberately NOT waited on.** Shell redraw after SIGWINCH is
+async and unbounded; there is no reliable signal for "the shell has finished
+redrawing." The driver captures a coherent tmux-grid snapshot (as of `%end`);
+the shell's SIGWINCH redraw converges via the live `%output` stream after the
+client attaches.
+
+### Current fidelity: same-size vs. different-size reattach
+
+- **Same-size reattach**: fully faithful. The reconstructed grid is identical to
+  tmux's view: scrollback above the fold, screen in the viewport, cursor at its
+  true cell.
+- **Different-size reattach**: the capture runs at the current (captured) pane
+  size. The client's live `resize.request` (arriving async after attach, driven
+  by VS Code's `Pseudoterminal.setDimensions`) then reflows tmux and the client
+  converges via the live `%output` stream. No orphan; convergence is via the
+  existing hydration-queue path.
+
+**Future work (tc-w3ir.6):** thread the attach-time client viewport dimensions
+(`extension → supervisor → addClient → hydration`) so a different-size reattach
+can `refresh-client -C <w>x<h>` and gate the capture on the resulting `%end`,
+yielding a single-pass reflowed reconstruction. Currently `addClient` takes no
+size parameter; the client's dimensions arrive async via `resize.request` after
+attach, so the resize-gate is not achievable in `hydration.ts` alone.

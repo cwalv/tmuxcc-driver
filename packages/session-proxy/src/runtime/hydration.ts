@@ -28,6 +28,17 @@
  *      `display-message -p -t %N -F '#{cursor_x},#{cursor_y},#{history_size},#{pane_height}'`
  *    `capture-pane` carries the grid CONTENT but not the cursor cell nor the
  *    scrollback/screen split; `display-message` recovers them (tc-w3ir.2).
+ *
+ *    **Capture gate: pipeline correlator `%end`, NOT shell-settled.** Each
+ *    `pipeline.send` resolves when the correlator receives the matching `%end`
+ *    on the control connection; because the control connection is FIFO-ordered,
+ *    `%end` confirms the command completed and the grid is consistent at that
+ *    moment. "Shell settled" (i.e. the shell finished redrawing after SIGWINCH)
+ *    is deliberately NOT waited on — shell redraw is async and unbounded. The
+ *    driver captures a coherent tmux-grid snapshot as of `%end`; the shell's
+ *    SIGWINCH redraw converges via the live `%output` stream after the client
+ *    attaches.
+ *
  * 4. On success, build a single `Uint8Array` — the STRUCTURED reconstruction —
  *    containing
  *      `\x1b[H\x1b[2J\x1b[3J`  (cursor home + erase screen + erase scrollback)
