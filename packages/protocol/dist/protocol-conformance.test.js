@@ -889,6 +889,97 @@ describe("protocol schema conformance", () => {
             };
             assert.ok(validateSessionProxyMsg(msg), JSON.stringify(validateSessionProxyMsg.errors));
         });
+        // tc-2mn8 / tc-s6ov.4: live pane title delta — was missing from schema.
+        it("PaneTitleChangedMessage (non-empty title) — tc-2mn8", () => {
+            const msg = {
+                type: "pane.title-changed",
+                seq: 30,
+                paneId: P0,
+                title: "npm run build",
+            };
+            assert.ok(validateSessionProxyMsg(msg), JSON.stringify(validateSessionProxyMsg.errors));
+        });
+        it("PaneTitleChangedMessage (empty title — shell cleared) — tc-2mn8", () => {
+            const msg = {
+                type: "pane.title-changed",
+                seq: 31,
+                paneId: P0,
+                title: "",
+            };
+            assert.ok(validateSessionProxyMsg(msg), JSON.stringify(validateSessionProxyMsg.errors));
+        });
+        // tc-i9aq.1: durable pane-policy delta — was missing from schema.
+        it("PanePolicyChangedMessage (bound only) — tc-i9aq.1", () => {
+            const msg = {
+                type: "pane.policy-changed",
+                seq: 32,
+                paneId: P0,
+                bound: true,
+            };
+            assert.ok(validateSessionProxyMsg(msg), JSON.stringify(validateSessionProxyMsg.errors));
+        });
+        it("PanePolicyChangedMessage (bound + detach + icon) — tc-i9aq.1", () => {
+            const msg = {
+                type: "pane.policy-changed",
+                seq: 33,
+                paneId: P0,
+                bound: true,
+                detach: "detach",
+                icon: "$(terminal)",
+            };
+            assert.ok(validateSessionProxyMsg(msg), JSON.stringify(validateSessionProxyMsg.errors));
+        });
+        it("PanePolicyChangedMessage (bound:false, detach:kill) — tc-i9aq.1", () => {
+            const msg = {
+                type: "pane.policy-changed",
+                seq: 34,
+                paneId: P0,
+                bound: false,
+                detach: "kill",
+            };
+            assert.ok(validateSessionProxyMsg(msg), JSON.stringify(validateSessionProxyMsg.errors));
+        });
+        // SnapshotPane with durable policy + live title fields — were missing from schema.
+        it("SnapshotMessage (pane with bound/detach/icon/paneTitle) — tc-i9aq.1 / tc-2mn8", () => {
+            const msg = {
+                type: "snapshot",
+                seq: 2,
+                session: { sessionId: S0, name: "main" },
+                windows: [
+                    {
+                        windowId: W0,
+                        name: "editor",
+                        active: true,
+                        synchronizePanes: false,
+                        monitorActivity: true,
+                        monitorSilence: 0,
+                        layout: sampleLayout,
+                    },
+                ],
+                panes: [
+                    {
+                        paneId: P0,
+                        windowId: W0,
+                        cols: 40,
+                        rows: 24,
+                        bound: true,
+                        detach: "detach",
+                        icon: "$(terminal)",
+                        paneTitle: "vim",
+                    },
+                    {
+                        paneId: P1,
+                        windowId: W0,
+                        cols: 40,
+                        rows: 24,
+                        bound: false,
+                        detach: "kill",
+                    },
+                ],
+                focus: { paneId: P0, windowId: W0 },
+            };
+            assert.ok(validateSessionProxyMsg(msg), JSON.stringify(validateSessionProxyMsg.errors));
+        });
     });
     // -------------------------------------------------------------------------
     // 6. Client identity + client flags $defs — tc-4b6k.1 (D2 / D8)

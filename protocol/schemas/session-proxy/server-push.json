@@ -94,6 +94,22 @@
         "label": {
           "type": "string",
           "description": "Durable, driver-owned pane name (tc-1a8z) — the canonical user rename channel, stored in the per-pane @tmuxcc_label tmux user-option. Set ONLY via the rename-pane command (never a title escape), so the shell cannot clobber it; survives a driver restart (re-read from the option on every requery). DISTINCT from the live shell title pane_title (tc-2mn8). Additive optional field; absent/empty means no durable name. Render precedence (durable label > live title > paneId) is the consumer's concern (tc-asyq.6)."
+        },
+        "bound": {
+          "type": "boolean",
+          "description": "Durable binding intent (tc-i9aq.1, cold-start.md §4.A) from the per-pane @tmuxcc-bound user-option. True when the user wants a VS Code terminal recreated for this pane on attach. Additive optional field; absent/false means no intent."
+        },
+        "detach": {
+          "enum": ["detach", "kill"],
+          "description": "RESOLVED detach-on-close policy (tc-i9aq.1, cold-start.md §4.A) — the effective first-wins value of @tmuxcc-detach walked pane→window→session. \"detach\" keeps the tmux pane alive when the tab closes; \"kill\" exits it. Absent means no scope set a policy (the extension applies its default). Additive optional field."
+        },
+        "icon": {
+          "type": "string",
+          "description": "Durable icon policy (tc-i9aq.1, cold-start.md §4.A) from the per-pane @tmuxcc-icon user-option. Absent means no policy. Additive optional field."
+        },
+        "paneTitle": {
+          "type": "string",
+          "description": "Live shell window title for this pane — the canonical #{pane_title} value (tc-2mn8; canonical source reworked in tc-s6ov.4). Sourced from a control-mode %* #{pane_title} subscription; catches every title source (shell OSC-0/2, select-pane -T, automatic title from current command). Absent when no title has been observed yet (pane just opened, or shell has not set a title). Empty string means the title was explicitly cleared. Additive optional field."
         }
       },
       "additionalProperties": false
@@ -741,6 +757,52 @@
       "additionalProperties": false
     },
 
+    "PaneTitleChangedMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "The live shell window title of a pane has changed (tc-2mn8, canonical source reworked in tc-s6ov.4). The session-proxy sources the value from a control-mode %* #{pane_title} subscription, catching every title source — shell OSC-0/2, select-pane -T, automatic title from the current command. `title` is the new title string; empty string means the shell cleared it. Consumer precedence: @tmuxcc_label (durable) > pane.title-changed (live) > paneId (fallback). Non-breaking additive delta. direction: session-proxy→client.",
+      "required": ["type", "seq", "paneId", "title"],
+      "properties": {
+        "type": { "const": "pane.title-changed" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" },
+        "title": {
+          "type": "string",
+          "description": "The new live shell window title. Empty string means the shell cleared it."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "PanePolicyChangedMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "A pane's durable policy/intent (cold-start.md §4.A) changed (tc-i9aq.1). Carries the per-pane @tmuxcc-* user-options: `bound` (binding intent), `detach` (RESOLVED close policy — first-wins walk of pane→window→session), `icon` (durable icon policy string). Emitted either optimistically (input-path injects internal:set-pane-policy after set-object-policy) or when a requery re-reads new values. `bound` is always present; `detach` and `icon` absent means that option returned to unset. Non-breaking additive delta. direction: session-proxy→client.",
+      "required": ["type", "seq", "paneId", "bound"],
+      "properties": {
+        "type": { "const": "pane.policy-changed" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" },
+        "bound": {
+          "type": "boolean",
+          "description": "Binding intent: true when @tmuxcc-bound is set for this pane."
+        },
+        "detach": {
+          "enum": ["detach", "kill"],
+          "description": "RESOLVED detach-on-close policy (first-wins pane→window→session walk of @tmuxcc-detach). Absent when unset at every scope."
+        },
+        "icon": {
+          "type": "string",
+          "description": "Durable icon policy string from @tmuxcc-icon. Absent when unset."
+        }
+      },
+      "additionalProperties": false
+    },
+
     "SessionProxyMessage": {
       "oneOf": [
         { "$ref": "#/$defs/SessionProxyCapabilitiesMessage" },
@@ -752,6 +814,8 @@
         { "$ref": "#/$defs/PaneModeChangedMessage" },
         { "$ref": "#/$defs/PaneLabelChangedMessage" },
         { "$ref": "#/$defs/PaneDeadChangedMessage" },
+        { "$ref": "#/$defs/PaneTitleChangedMessage" },
+        { "$ref": "#/$defs/PanePolicyChangedMessage" },
         { "$ref": "#/$defs/PaneNotifyMessage" },
         { "$ref": "#/$defs/LayoutUpdatedMessage" },
         { "$ref": "#/$defs/FocusChangedMessage" },
