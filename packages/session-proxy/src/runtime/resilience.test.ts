@@ -431,13 +431,12 @@ describe(
     // Steps:
     //   1. Start session-proxy with real tmux (1 pane via setupE2E).
     //   2. Split to create 2nd pane via first client's controller.
-    //   3. Wait for session-proxy model to reflect >= 2 panes.
+    //   3. Wait for the first client's render hook to record >= 2 pane.opened
+    //      events — the wire-observable signal the topology is committed.
     //   4. Connect a SECOND client to the same running sessionProxy (server.addClient
-    //      directly, with concurrent handshakes — the proven pattern from
-    //      e2e-smoke.test.ts).
-    //   5. Project snapshot from the session-proxy model and assert >= 2 panes.
-    //      Also assert the snapshot the server sends (ct2.onControl, installed
-    //      AFTER the handshake resolves, per serve.ts timing contract) matches.
+    //      directly with concurrent handshakes + handler installed BEFORE
+    //      addClient resolves so the snapshot is captured from the wire).
+    //   5. Assert the captured wire snapshot has >= 2 panes.
     // -----------------------------------------------------------------------
 
     it(
@@ -459,67 +458,64 @@ describe(
             direction: "vertical",
           });
 
-          // Wait for the session-proxy's model to reflect >= 2 panes.
+          // Wait for the first client's render hook to record >= 2 pane.opened
+          // events (one from the initial snapshot, one from the split-pane delta
+          // delivered over the wire).  This is the wire-observable signal that
+          // the topology is committed AND delivered — no internal model needed.
+          const hookCalls = () =>
+            (session.hook.calls as Array<{ type: string }>);
           await waitFor(
-            () => sessionProxy.pipeline.getModel().panes.size >= 2 ? true : undefined,
+            () => hookCalls().filter(c => c.type === "paneOpened").length >= 2 ? true : undefined,
             15_000,
-            "session-proxy model must have >= 2 panes after split-pane",
+            "two pane.opened events must reach the first client after split-pane",
           );
-
-          const paneCountInModel = sessionProxy.pipeline.getModel().panes.size;
           assert.ok(
-            paneCountInModel >= 2,
-            `session-proxy model must have >= 2 panes; got ${paneCountInModel}`,
+            hookCalls().filter(c => c.type === "paneOpened").length >= 2,
+            "hook must have recorded >= 2 paneOpened events (initial + split)",
           );
 
-          // Connect a SECOND client using server.addClient directly (the proven
-          // pattern from e2e-smoke.test.ts): run both handshakes concurrently,
-          // then install the control handler AFTER the handshakes resolve so we
-          // don't get replaced by runClientHandshake's settle().
+          // Connect a SECOND client using server.addClient directly.  Install
+          // the onControl handler BEFORE awaiting addClient: the snapshot is sent
+          // in the microtask after addClient's internal Promise.resolve() gap
+          // (see serve.ts), so a handler installed synchronously here (after
+          // runClientHandshake resolves, before we await addPromise) receives it.
+          // This is the same timing contract as setupE2E — no internal state needed.
           const { sessionProxy: dt2, client: ct2 } = createInMemoryTransportPair();
 
           const addPromise = sessionProxy.server.addClient(dt2);
           await runClientHandshake(ct2, CLIENT_CAPS);
+          // Synchronously install (no await): snapshot arrives in the next microtask.
+          const wireMessages: Array<{ type: string; panes?: unknown[] }> = [];
+          ct2.onControl((msg) => {
+            wireMessages.push(msg as { type: string; panes?: unknown[] });
+          });
           await addPromise;
 
-          // After both handshakes settle, install the onControl handler.
-          // Per serve.ts timing: snapshot is sent after `await Promise.resolve()`
-          // inside addClient, so it has already been delivered to ct2's
-          // clientControlHandler (which was whatever was set at snapshot-send
-          // time — a no-op from settle).
-          //
-          // Therefore we can't catch the snapshot on ct2 after-the-fact for
-          // in-memory transports.  Instead, we verify the snapshot by projecting
-          // the current model directly, which is what serve.ts sends — this is
-          // the authoritative source of truth.
-          //
-          // Additionally we verify clientCount reflects the second client.
           assert.equal(
             sessionProxy.server.clientCount(),
             2, // the setupE2E client + our new one
             "session-proxy must track both clients",
           );
 
-          // Project the snapshot that the server would have sent.
-          const { projectSnapshot } = await import("../state/projection.js");
-          const projectedSnapshot = projectSnapshot(sessionProxy.pipeline.getModel(), { seq: 1 });
-
-          // The projected snapshot must reflect the CURRENT model (>= 2 panes).
+          // Assert on the snapshot captured directly from the wire — not projected
+          // from the internal model.  This verifies the actual bytes the second
+          // client received.
+          const snapMsg = wireMessages.find(m => m.type === "snapshot");
           assert.ok(
-            projectedSnapshot.panes.length >= 2,
-            `projected snapshot (= what second client received) must have >= 2 panes; ` +
-            `got ${projectedSnapshot.panes.length}`,
+            snapMsg !== undefined,
+            "second client must receive a snapshot over the wire",
+          );
+          assert.ok(
+            Array.isArray(snapMsg.panes) && snapMsg.panes.length >= 2,
+            `wire snapshot must contain >= 2 panes; ` +
+            `got ${Array.isArray(snapMsg.panes) ? snapMsg.panes.length : typeof snapMsg.panes}`,
           );
 
           // Clean up second client transport.
           ct2.close();
 
           // After cleanup, clientCount must drop back by 1.
-          // NOTE: serve.ts auto-cleans on transport.onClose — but only if the
-          // server installed its onClose handler.  When we use server.addClient
-          // directly (not sessionProxy.addClient), the auto-cleanup from serve.ts's
-          // addClient onClose registration still fires.
-          // The in-memory transport close is synchronous, so check immediately.
+          // The in-memory transport close is synchronous.
           const expectedCountAfterClose = sessionProxy.server.clientCount();
           assert.ok(
             expectedCountAfterClose >= 1,
