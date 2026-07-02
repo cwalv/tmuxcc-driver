@@ -1190,8 +1190,7 @@ class ServerProxyImpl implements ServerProxyHandle {
   private _onSessionProxyCrash(sessionId: SessionId, info: SessionProxyExitInfo): void {
     process.stderr.write(
       `serverProxy: session-proxy for session '${info.sessionName}' (${sessionId}) exited ` +
-      `unexpectedly (code=${info.code}, signal=${info.signal}); ` +
-      `fresh session-proxy on next session.claim\n`,
+      `unexpectedly (bound tmux host died); fresh session-proxy on next session.claim\n`,
     );
     if (!this._started || this._selfExited) return;
     this._refreshSessions();

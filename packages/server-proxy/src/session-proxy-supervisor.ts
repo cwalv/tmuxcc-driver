@@ -179,19 +179,13 @@ interface SessionProxyEntry {
 }
 
 /**
- * Exit details passed to the crash handler.  `code`/`signal` are retained for
- * wire/log compatibility with the pre-collapse shape; for an in-process
- * session-proxy that exits because its bound tmux died, both are null (there is
- * no child process exit code — the cause is a tmux host exit, surfaced via
- * `host.onExit`).
+ * Exit details passed to the crash handler.  The cause is always a bound tmux
+ * host death (via `host.onExit` or `host.onError`) — there is no child process
+ * exit code or signal.
  */
 export interface SessionProxyExitInfo {
   /** Session name the session-proxy was bound to (for logging). */
   sessionName: string;
-  /** Exit code — always null for an in-process session-proxy (no child process). */
-  code: number | null;
-  /** Terminating signal — always null for an in-process session-proxy. */
-  signal: NodeJS.Signals | null;
 }
 
 /**
@@ -906,7 +900,7 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
       if (current === entry) {
         this._sessionProxies.delete(sessionId);
         this._fireAliveCount();
-        this._crashHandler?.(sessionId, { sessionName, code: null, signal: null });
+        this._crashHandler?.(sessionId, { sessionName });
       }
     };
 
