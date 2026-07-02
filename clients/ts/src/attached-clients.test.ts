@@ -87,7 +87,7 @@ function buildBaseModel() {
     dead: false,
     exitCode: undefined,
     label: undefined,
-    bound: false,
+    boundClients: new Set(),
     detach: undefined,
     icon: undefined,
     // scrollbackHandle is optional — omit rather than passing undefined (exactOptionalPropertyTypes)
@@ -244,6 +244,7 @@ describe("tc-1elae: ControlServer stamps attachedClientCount in snapshots", () =
       },
       send() { return new Promise<never>(() => {}); },
       sendBatch(cmds: readonly string[]) { return cmds.map(() => new Promise<never>(() => {})); },
+      async applyClientBinding() {},
       refreshCorrelatorPendingGauge() {},
       get buffers(): never { throw new Error("no buffers"); },
     };
@@ -285,6 +286,7 @@ describe("tc-1elae: ControlServer stamps attachedClientCount in snapshots", () =
       },
       send() { return new Promise<never>(() => {}); },
       sendBatch(cmds: readonly string[]) { return cmds.map(() => new Promise<never>(() => {})); },
+      async applyClientBinding() {},
       refreshCorrelatorPendingGauge() {},
       get buffers(): never { throw new Error("no buffers"); },
     };
@@ -335,6 +337,7 @@ describe("tc-1elae: ControlServer stamps attachedClientCount in snapshots", () =
       },
       send() { return new Promise<never>(() => {}); },
       sendBatch(cmds: readonly string[]) { return cmds.map(() => new Promise<never>(() => {})); },
+      async applyClientBinding() {},
       refreshCorrelatorPendingGauge() {},
       get buffers(): never { throw new Error("no buffers"); },
     };
@@ -439,6 +442,7 @@ describe("tc-1elae: end-to-end via connectClient", () => {
       },
       send() { return new Promise<never>(() => {}); },
       sendBatch(cmds: readonly string[]) { return cmds.map(() => new Promise<never>(() => {})); },
+      async applyClientBinding() {},
       refreshCorrelatorPendingGauge() {},
       get buffers(): never { throw new Error("no buffers"); },
     };
@@ -519,6 +523,7 @@ function buildLivePipeline() {
       },
       send() { return new Promise<never>(() => {}); },
       sendBatch(cmds: readonly string[]) { return cmds.map(() => new Promise<never>(() => {})); },
+      async applyClientBinding() {},
       refreshCorrelatorPendingGauge() {},
       get buffers(): never { throw new Error("no buffers"); },
     },

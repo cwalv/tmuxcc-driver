@@ -89,6 +89,7 @@ import { createPaneBufferStore } from "../state/scrollback.js";
 import {
   checkInvariants,
   emptyModel,
+  setBoundClient,
   updatePane,
   updateWindow,
   windowId as mintWindowId,
@@ -111,12 +112,15 @@ import { classifyCommand } from "../metrics/registry.js";
 import { decodeOutputPayload } from "../parser/output-codec.js";
 import { OscTitleSniffer } from "../parser/osc-title-sniffer.js";
 import { paneId as mintPaneId } from "../wire/ids.js";
+import type { PaneId } from "../wire/ids.js";
+import { paneBoundOptionName } from "../state/bootstrap.js";
 import type { TmuxHost } from "./tmux-host.js";
 import { phaseLog, phaseNow } from "./phase-timing.js";
 import { diffModel } from "../state/projection.js";
 import type { SessionProxyMessage } from "../wire/session-proxy-control.js";
 import {
   setOption,
+  listPanes,
   refreshClientSubscribeWindows,
   refreshClientSubscribePanes,
 } from "../parser/commands.js";
@@ -411,6 +415,30 @@ export interface RuntimePipeline {
    * No-op before start() resolves (engine not yet wired).
    */
   patchModel(updater: (model: SessionModel) => SessionModel): void;
+
+  /**
+   * Reconstruct one client's durable per-pane binding intent from tmux and
+   * patch it into the model (D3, tc-4b6k.2).
+   *
+   * Binding intent is per (pane, client-identity), stored in the per-client
+   * `@tmuxcc-bound-<key>` user-options. The bulk session-scoped requery does
+   * NOT read these (it has no notion of the client set), so when a client
+   * connects — the cold-attach / VS Code-reload path — its slot must be read
+   * once and applied before its snapshot is projected, or a reconnecting client
+   * would briefly see `bound=false` for a pane it durably bound. This issues a
+   * single `list-panes -F #{@tmuxcc-bound-<key>}` for the bound session, then
+   * patches each pane's `boundClients` membership for `clientId` to match tmux
+   * (canonical). Steady-state changes ride the optimistic set-object-policy
+   * patch + the requery carry-forward; this is the reconstruction seam.
+   *
+   * No-op for an anonymous connection (undefined clientId — never bound) or
+   * before the pipeline is live / has a session. Best-effort: a `%error` reply
+   * leaves the model untouched (the carry-forward keeps any prior state).
+   *
+   * The returned Promise resolves once the read has been applied (or skipped),
+   * so the caller can await it before sending the snapshot.
+   */
+  applyClientBinding(clientId: string | undefined): Promise<void>;
 
   /**
    * The PaneBufferStore used by this pipeline for %output/%extended-output bytes.
@@ -1183,6 +1211,57 @@ class RuntimePipelineImpl implements RuntimePipeline {
     this._dispatchEvent(event);
   }
 
+  async applyClientBinding(clientId: string | undefined): Promise<void> {
+    // Anonymous connection: no per-client slot to read; bound resolves to false.
+    if (clientId === undefined) return;
+    const engine = this._engine;
+    if (engine === null || this._stopped) return;
+
+    // Scope the read to the bound session by its immutable id ($N). The model
+    // holds exactly one session (wire id "sN"); derive N.
+    const sess = engine.getModel().sessions.values().next().value;
+    if (sess === undefined) return; // no session yet (pre-bootstrap)
+    const tmuxSessionId = Number.parseInt(String(sess.sessionId).slice(1), 10);
+    if (Number.isNaN(tmuxSessionId)) return;
+
+    const optionName = paneBoundOptionName(clientId);
+    const cmd = listPanes({
+      sessionId: tmuxSessionId,
+      format: `#{pane_id}\t#{${optionName}}`,
+    });
+    const result = await this.send(cmd);
+    if (!result.ok) return; // best-effort — carry-forward keeps any prior state
+
+    // Parse "%N\t<1|empty>" rows into the set of panes this client has bound.
+    const boundPanes = new Set<PaneId>();
+    const text = new TextDecoder().decode(result.body);
+    for (const line of text.split("\n")) {
+      const trimmed = line.trim();
+      if (trimmed === "") continue;
+      const [paneRaw, boundRaw] = trimmed.split("\t");
+      if (paneRaw === undefined || !paneRaw.startsWith("%")) continue;
+      const n = paneRaw.slice(1);
+      if (!/^\d+$/.test(n)) continue;
+      if ((boundRaw ?? "").trim() === "1") boundPanes.add(mintPaneId("p" + n));
+    }
+
+    // Patch each pane's boundClients membership for this client to match tmux
+    // (canonical): a full per-client reconcile, so a slot cleared while the
+    // client was away is dropped too.
+    this.patchModel((model) => {
+      let changed = false;
+      const panes = new Map(model.panes);
+      for (const [id, pane] of model.panes) {
+        const nextSet = setBoundClient(pane.boundClients, clientId, boundPanes.has(id));
+        if (nextSet !== pane.boundClients) {
+          panes.set(id, { ...pane, boundClients: nextSet });
+          changed = true;
+        }
+      }
+      return changed ? { ...model, panes } : model;
+    });
+  }
+
   send(command: string): Promise<CommandResult> {
     return this._send(command);
   }
@@ -1390,12 +1469,16 @@ class RuntimePipelineImpl implements RuntimePipeline {
         const pane = model.panes.get(event.paneId);
         if (pane === undefined) return model;
         const patch: {
-          bound?: boolean;
+          boundClients?: ReadonlySet<string>;
           detach?: "detach" | "kill" | undefined;
           icon?: string | undefined;
         } = {};
-        if (event.bound !== undefined && pane.bound !== event.bound) {
-          patch.bound = event.bound;
+        // tc-4b6k.2 (D3): binding intent is per-client — the write touched the
+        // ISSUING client's slot only, so flip that client's membership in the
+        // pane's boundClients set (event.clientId names the issuer).
+        if (event.bound !== undefined && event.clientId !== undefined) {
+          const nextSet = setBoundClient(pane.boundClients, event.clientId, event.bound);
+          if (nextSet !== pane.boundClients) patch.boundClients = nextSet;
         }
         if (event.detach !== undefined) {
           const next = event.detach === null ? undefined : event.detach;

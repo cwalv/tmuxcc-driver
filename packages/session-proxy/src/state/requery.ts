@@ -249,10 +249,40 @@ export function requeryDiff(
   const windowRows = windowsResult.ok ? parseWindowsReply(windowsResult.body) : [];
   const paneRows = panesResult.ok ? parsePanesReply(panesResult.body) : [];
 
-  const next = buildInitialModel(windowRows, paneRows);
+  const next = carryForwardBoundClients(prev, buildInitialModel(windowRows, paneRows));
   const deltas = diffModel(prev, next);
 
   return { next, deltas };
+}
+
+/**
+ * Carry per-client binding intent forward across a requery cycle (D3,
+ * tc-4b6k.2).
+ *
+ * `buildInitialModel` rebuilds the model from the bulk `list-*` replies, which
+ * deliberately do NOT read the per-(pane,client) `@tmuxcc-bound-<key>` options
+ * (the bulk session-scoped requery has no notion of the client set). So a fresh
+ * candidate pane always has an EMPTY `boundClients`. This copies a surviving
+ * pane's set from `prev` into the candidate, so a requery cycle never clobbers
+ * binding intent that was reconstructed on connect (pipeline.applyClientBinding)
+ * or applied optimistically (input-path's set-object-policy). A brand-new pane
+ * (absent from `prev`) keeps its empty set; a pane whose `prev` set was already
+ * empty is left as-is (preserving reference-equality for the common case).
+ */
+function carryForwardBoundClients(
+  prev: SessionModel,
+  candidate: SessionModel,
+): SessionModel {
+  let changed = false;
+  const panes = new Map(candidate.panes);
+  for (const [id, pane] of candidate.panes) {
+    const prevPane = prev.panes.get(id);
+    if (prevPane !== undefined && prevPane.boundClients.size > 0) {
+      panes.set(id, { ...pane, boundClients: prevPane.boundClients });
+      changed = true;
+    }
+  }
+  return changed ? { ...candidate, panes } : candidate;
 }
 
 // ---------------------------------------------------------------------------
@@ -759,7 +789,14 @@ class RequeryEngineImpl implements RequeryEngine {
       // possibly-stale and must be discarded.
       const windowRows = parseWindowsReply(winResult.body);
       const paneRows = parsePanesReply(paneResult.body);
-      const candidate = buildInitialModel(windowRows, paneRows);
+      // tc-4b6k.2: carry per-client binding intent forward — the bulk requery
+      // does not read the per-client `@tmuxcc-bound-<key>` options, so a fresh
+      // candidate pane's boundClients is empty; adopt the pre-call model's set
+      // for surviving panes so a topology-only cycle never clobbers binding.
+      const candidate = carryForwardBoundClients(
+        startModel,
+        buildInitialModel(windowRows, paneRows),
+      );
 
       // tc-0v59: capture the IMMUTABLE session id from the first successful
       // reply, then target by `$<id>` on every subsequent cycle. The id is in

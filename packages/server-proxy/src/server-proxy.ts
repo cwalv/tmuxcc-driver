@@ -1558,7 +1558,9 @@ class ServerProxyImpl implements ServerProxyHandle {
         case "session.topology":
           // tc-i9aq.2: one-shot topology query for a discovered-but-unclaimed
           // session.  Read-only — no claim, no session-proxy spawn.
-          payload = { topology: await this._querySessionTopology(command.sessionId) };
+          // tc-4b6k.2 (D3): resolve per-client binding intent for the REQUESTING
+          // connection's identity so the picker's bind affordance is per-client.
+          payload = { topology: await this._querySessionTopology(command.sessionId, state.identity?.id) };
           break;
         default: {
           const _exhaustive: never = command;
@@ -1624,13 +1626,17 @@ class ServerProxyImpl implements ServerProxyHandle {
    *
    * Read-only: no claim, no session-proxy spawn, no mutation.
    */
-  private async _querySessionTopology(sessionId: SessionId): Promise<SessionTopologyPayload> {
+  private async _querySessionTopology(
+    sessionId: SessionId,
+    clientId: string | undefined,
+  ): Promise<SessionTopologyPayload> {
     const entry = this._sessions.get(sessionId);
     if (entry === undefined) {
       // Session not in registry; caller falls back to leaf rendering.
       return { windows: [], panes: [] };
     }
-    const result = await listSessionTopology(this._opts.socketName, entry.name);
+    // tc-4b6k.2 (D3): read the requesting client's own per-client binding slot.
+    const result = await listSessionTopology(this._opts.socketName, entry.name, clientId);
     if (result === null) {
       // tmux call failed; fall back to leaf rendering.
       return { windows: [], panes: [] };

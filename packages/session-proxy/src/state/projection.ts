@@ -63,6 +63,7 @@
  */
 
 import type { SessionModel } from "./model.js";
+import { paneBoundFor } from "./model.js";
 import type { PaneId, WindowId } from "../wire/ids.js";
 import type {
   SnapshotMessage,
@@ -161,6 +162,15 @@ export interface ProjectSnapshotOpts {
    * (callers without per-connection identity — tests).
    */
   readonly connectionId?: import("../wire/ids.js").ConnectionId;
+  /**
+   * tc-4b6k.2 (D3): the requesting client's durable identity id
+   * (`ClientIdentity.id`). Binding intent is per-client, so each pane's wire
+   * `bound` boolean is resolved for THIS client as
+   * `pane.boundClients.has(clientId)`. Omit (or undefined) for an anonymous
+   * connection — then no pane is bound. The serve layer passes the identity it
+   * captured at handshake.
+   */
+  readonly clientId?: string | undefined;
 }
 
 /**
@@ -230,7 +240,9 @@ export function projectSnapshot(
       ...(pane.label !== undefined ? { label: pane.label } : {}),
       // tc-i9aq.1 (cold-start.md §4.A): durable policy/intent. Kept off the wire
       // when unset; `bound` only when true.
-      ...(pane.bound ? { bound: true } : {}),
+      // tc-4b6k.2 (D3): `bound` is resolved for the REQUESTING client's identity
+      // — this snapshot's per-client view of the pane's binding intent.
+      ...(paneBoundFor(pane, opts.clientId) ? { bound: true } : {}),
       ...(pane.detach !== undefined ? { detach: pane.detach } : {}),
       ...(pane.icon !== undefined ? { icon: pane.icon } : {}),
       ...(pane.paneTitle !== undefined ? { paneTitle: pane.paneTitle } : {}),
@@ -290,14 +302,28 @@ export function projectSnapshot(
  * each disappearing pane has its id passed to the lookup (consume, one-shot);
  * a non-undefined result is stamped as the `cause` field on the emitted
  * `pane.closed` (verb-caused), and `undefined` leaves it untagged (unsolicited).
+ *
+ * `clientId` (tc-4b6k.2, D3): the requesting client's durable identity id.
+ * Binding intent is per-client, so `pane.opened.bound` and the
+ * `pane.policy-changed` binding delta are resolved for THIS client
+ * (`boundClients.has(clientId)`). Omit for the metrics-only / test diffs that
+ * have no client — then binding resolves to false and never produces a
+ * binding-only `pane.policy-changed` (the per-client stream in serve.ts is the
+ * one that carries binding deltas to a real client).
  */
+export interface DiffOptions {
+  readonly originLookup?: OriginLookup | undefined;
+  readonly closeCauseLookup?: CloseCauseLookup | undefined;
+  readonly clientId?: string | undefined;
+}
+
 export function diffModel(
   prev: SessionModel,
   next: SessionModel,
-  originLookup?: OriginLookup,
-  closeCauseLookup?: CloseCauseLookup,
+  opts: DiffOptions = {},
 ): SessionProxyMessage[] {
   const out: SessionProxyMessage[] = [];
+  const { originLookup, closeCauseLookup, clientId } = opts;
 
   // Placeholder seq — the E4 caller assigns real values before sending.
   const SEQ = 0;
@@ -350,7 +376,8 @@ export function diffModel(
         ...(pane.label !== undefined ? { label: pane.label } : {}),
         // tc-i9aq.1 (cold-start.md §4.A): born carrying durable policy/intent
         // (the cold-attach restore path reads these). Off when unset.
-        ...(pane.bound ? { bound: true } : {}),
+        // tc-4b6k.2 (D3): `bound` resolved for the requesting client's identity.
+        ...(paneBoundFor(pane, clientId) ? { bound: true } : {}),
         ...(pane.detach !== undefined ? { detach: pane.detach } : {}),
         ...(pane.icon !== undefined ? { icon: pane.icon } : {}),
         ...(origin !== undefined ? { origin } : {}),
@@ -466,17 +493,21 @@ export function diffModel(
   // -------------------------------------------------------------------------
   // 5a3. pane.policy-changed — durable policy/intent changes (tc-i9aq.1, §4.A)
   //
-  // The per-pane @tmuxcc-bound/-detach/-icon options change either optimistically
+  // The per-pane @tmuxcc-detach/-icon options change either optimistically
   // (input-path injects internal:set-pane-policy after a pane-scope
   // set-object-policy) or when a requery re-reads them (incl. the RESOLVED
-  // detach when a window/session default changed). A pane in BOTH prev and next
-  // whose policy fields differ gets a delta; absent fields = returned to unset.
+  // detach when a window/session default changed). Binding intent (tc-4b6k.2,
+  // D3) changes per-client and is RESOLVED for the requesting client here, so
+  // the delta reflects THIS client's view flipping. A pane in BOTH prev and
+  // next whose resolved-bound / detach / icon differ gets a delta; absent
+  // fields = returned to unset.
   // -------------------------------------------------------------------------
   for (const [id, pane] of next.panes) {
     const prevPane = prev.panes.get(id);
     if (!prevPane) continue; // new panes carry policy in pane.opened
+    const nextBound = paneBoundFor(pane, clientId);
     if (
-      prevPane.bound !== pane.bound ||
+      paneBoundFor(prevPane, clientId) !== nextBound ||
       prevPane.detach !== pane.detach ||
       prevPane.icon !== pane.icon
     ) {
@@ -484,7 +515,7 @@ export function diffModel(
         type: "pane.policy-changed",
         seq: SEQ,
         paneId: pane.paneId,
-        bound: pane.bound,
+        bound: nextBound,
         ...(pane.detach !== undefined ? { detach: pane.detach } : {}),
         ...(pane.icon !== undefined ? { icon: pane.icon } : {}),
       };

@@ -89,7 +89,7 @@ import { PHASE_TIMING_ENABLED, phaseLog } from "./phase-timing.js";
 import type { SessionModel } from "../state/model.js";
 import {
   TMUXCC_LABEL_OPTION,
-  TMUXCC_BOUND_OPTION,
+  paneBoundOptionName,
   TMUXCC_DETACH_OPTION,
   TMUXCC_ICON_OPTION,
 } from "../state/bootstrap.js";
@@ -166,15 +166,20 @@ function defaultWindowIdToTmux(id: WindowId): number {
  * Build the optimistic `internal:set-pane-policy` event for a PANE-scope
  * `set-object-policy` write.  Only the field the write touched is set; `null`
  * value means the option was cleared (returns to unset/inherit).
+ *
+ * tc-4b6k.2 (D3): binding intent is per-client, so a `bound` write carries the
+ * issuing connection's `clientId` — the pipeline patch flips only that client's
+ * membership in the pane's `boundClients` set.
  */
 function buildPanePolicyEvent(
   paneId: PaneId,
   option: "bound" | "detach" | "icon",
   value: string | null,
+  clientId: string | undefined,
 ): NotificationEvent {
   switch (option) {
     case "bound":
-      return { kind: "internal:set-pane-policy", paneId, bound: value !== null };
+      return { kind: "internal:set-pane-policy", paneId, bound: value !== null, clientId };
     case "detach":
       return {
         kind: "internal:set-pane-policy",
@@ -189,15 +194,24 @@ function buildPanePolicyEvent(
 /**
  * Build the compensating `internal:set-pane-policy` event that restores the
  * before-value of the touched field (tc-7xv.37 reversal) on tmux %error.
+ *
+ * tc-4b6k.2 (D3): the `bound` revert restores the issuing client's own prior
+ * membership (`prev.boundClients.has(clientId)`), not a shared scalar.
  */
 function buildPanePolicyRevert(
   paneId: PaneId,
   option: "bound" | "detach" | "icon",
-  prev: { readonly bound: boolean; readonly detach: "detach" | "kill" | undefined; readonly icon: string | undefined },
+  prev: { readonly boundClients: ReadonlySet<string>; readonly detach: "detach" | "kill" | undefined; readonly icon: string | undefined },
+  clientId: string | undefined,
 ): NotificationEvent {
   switch (option) {
     case "bound":
-      return { kind: "internal:set-pane-policy", paneId, bound: prev.bound };
+      return {
+        kind: "internal:set-pane-policy",
+        paneId,
+        bound: clientId !== undefined && prev.boundClients.has(clientId),
+        clientId,
+      };
     case "detach":
       return { kind: "internal:set-pane-policy", paneId, detach: prev.detach ?? null };
     case "icon":
@@ -383,8 +397,16 @@ export interface InputPath {
    * cannot convert (e.g. a tmux-format id like "%1" or "@9" passed where the
    * internal model format "p1" / "w9" is expected).  Callers should ensure they
    * pass model-format ids; catching the TypeError surfaces a programming error.
+   *
+   * `clientId` (tc-4b6k.2, D3) is the ISSUING connection's durable identity id.
+   * It keys per-client writes — a `set-object-policy` binding-intent write emits
+   * `set-option -pt %N @tmuxcc-bound-<key>` for THIS client's slot, and the
+   * optimistic model patch flips only this client's membership. Omit for
+   * anonymous / non-server callers: a binding write then targets the legacy
+   * shared `@tmuxcc-bound` slot (back-compat) and resolves to no per-client
+   * intent.
    */
-  handleClientMessage(msg: ClientMessage, respond?: VerbResponder): void;
+  handleClientMessage(msg: ClientMessage, respond?: VerbResponder, clientId?: string): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -811,7 +833,7 @@ export function createInputPath(
     );
   }
 
-  function handleClientMessage(msg: ClientMessage, respond?: VerbResponder): void {
+  function handleClientMessage(msg: ClientMessage, respond?: VerbResponder, clientId?: string): void {
     switch (msg.type) {
       // -----------------------------------------------------------------------
       // input → send-keys -H
@@ -1253,8 +1275,13 @@ export function createInputPath(
             // @tmuxcc-* user-option.  The driver is the SOLE tmux writer; the
             // extension issues this verb instead of shelling out.  The change
             // reappears in the next requery as canonical state.
+            //
+            // tc-4b6k.2 (D3): binding intent is per-client, so the `bound`
+            // option name carries the ISSUING connection's identity key
+            // (`@tmuxcc-bound-<key>`); two clients binding the same pane write
+            // distinct options and never collide. `detach`/`icon` stay shared.
             const optionName =
-              command.option === "bound" ? TMUXCC_BOUND_OPTION
+              command.option === "bound" ? paneBoundOptionName(clientId)
               : command.option === "detach" ? TMUXCC_DETACH_OPTION
               : TMUXCC_ICON_OPTION;
             const clear = command.value === null;
@@ -1277,14 +1304,14 @@ export function createInputPath(
               // only the field this write touched; capture the before-value so a
               // rejection restores it.  The next requery re-confirms (incl. the
               // RESOLVED detach).
-              const optimistic = buildPanePolicyEvent(pid, command.option, command.value);
+              const optimistic = buildPanePolicyEvent(pid, command.option, command.value, clientId);
               sendCommandWithReversal(
                 cmd,
                 optimistic,
                 (before) => {
                   const prev = before.panes.get(pid);
                   if (prev === undefined) return null; // pane gone — nothing to revert.
-                  return buildPanePolicyRevert(pid, command.option, prev);
+                  return buildPanePolicyRevert(pid, command.option, prev, clientId);
                 },
                 respond !== undefined ? { respond, correlationId, verbKind: "set-object-policy" } : undefined,
               );

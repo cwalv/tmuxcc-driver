@@ -1909,5 +1909,113 @@ describe(
       sessionProxy.kill();
       await new Promise<void>((r) => { sessionProxy.host.onExit(() => r()); });
     });
+
+    // -------------------------------------------------------------------------
+    // R8 (tc-4b6k.2, D3). LOAD-BEARING PROOF: per-client binding intent.
+    //
+    // Two clients presenting DIFFERENT durable identities attach to ONE real
+    // tmux session. One binds a pane; the AC is that the two clients see
+    // INDEPENDENT bound state for that pane, canonically, across reload:
+    //   - the binder's delta stream flips the pane to bound=true;
+    //   - the other client sees NO bound change (its slot is untouched);
+    //   - a FRESH connection presenting the binder's identity (a VS Code reload —
+    //     same workspace-derived id) re-reads bound=true from tmux;
+    //   - a fresh connection presenting the other identity re-reads bound=false.
+    //
+    // This is the S1 dissolution: "bound in window A, detached in window B" is a
+    // legal canonical state, not an illegal one reconciled after the fact.
+    // -------------------------------------------------------------------------
+
+    it("R8 (tc-4b6k.2): two identities see independent per-client bound state, canonical across reload", async () => {
+      const sock = realSockName("per-client-bind");
+      after(() => killRealServer(sock));
+
+      const sessionProxy = createSessionProxy({
+        host: { socketName: sock, sessionName: "r8session", cols: 80, rows: 24 },
+      });
+      sessionProxy.host.onError(() => {});
+      await sessionProxy.start();
+
+      // Connect a client presenting a durable identity; returns its recorder and
+      // the paneId of the first pane in its snapshot.
+      const connect = async (identityId: string) => {
+        const { sessionProxyTransport: dt, clientTransport: ct, controlMessages } = createRecordingPair();
+        sessionProxy.demux.attachTransport(dt);
+        // sessionProxy.addClient (full assembly) installs the verb responder AND
+        // runs the per-client binding connect-read (applyClientBinding).
+        const addPromise = sessionProxy.addClient(dt);
+        const clientPromise = runClientHandshake(ct, CLIENT_CAPS, "session-proxy.capabilities", { id: identityId });
+        await Promise.all([addPromise, clientPromise]);
+        const snapshot = controlMessages.find((m) => m.type === "snapshot") as SnapshotMessage | undefined;
+        assert.ok(snapshot !== undefined, `client ${identityId} must receive a snapshot`);
+        return { ct, controlMessages, snapshot: snapshot! };
+      };
+
+      const boundInSnapshot = (snapshot: SnapshotMessage, pid: PaneId): boolean =>
+        snapshot.panes.find((p) => p.paneId === pid)?.bound === true;
+
+      // --- Two clients with distinct identities attach to the same session. ---
+      const alpha = await connect("ws-alpha");
+      const beta = await connect("ws-beta");
+
+      const pane = alpha.snapshot.panes[0]!.paneId;
+      assert.equal(boundInSnapshot(alpha.snapshot, pane), false, "alpha starts unbound");
+      assert.equal(boundInSnapshot(beta.snapshot, pane), false, "beta starts unbound");
+
+      // --- alpha binds the pane (durable per-client write + optimistic delta). ---
+      const correlationId = "verb-bind-1";
+      alpha.ct.sendControl({
+        type: "command.request",
+        seq: 2,
+        correlationId,
+        command: { kind: "set-object-policy", scope: "pane", paneId: pane, option: "bound", value: "1" },
+      } as SessionProxyCommandRequestMessage);
+
+      const response = (await waitFor(
+        () =>
+          alpha.controlMessages.find(
+            (m) => m.type === "command.response" && (m as SessionProxyCommandResponseMessage).correlationId === correlationId,
+          ) as SessionProxyCommandResponseMessage | undefined,
+        8000,
+        "no command.response for the bind verb within 8s",
+      )) as SessionProxyCommandResponseMessage;
+      assert.equal(response.result.ok, true, `bind verb must succeed; got ${JSON.stringify(response.result)}`);
+
+      // alpha's delta stream flips the pane to bound=true for ITS identity.
+      const alphaBoundDelta = await waitFor(
+        () =>
+          alpha.controlMessages.find(
+            (m) => m.type === "pane.policy-changed" && (m as { paneId?: PaneId }).paneId === pane && (m as { bound?: boolean }).bound === true,
+          ),
+        8000,
+        "alpha never saw its pane.policy-changed bound=true",
+      );
+      assert.ok(alphaBoundDelta !== undefined, "alpha must see bound=true for the pane it bound");
+
+      // beta (a DIFFERENT identity, still connected) must NOT see a bound flip —
+      // its per-client slot is untouched. Give the delta pipeline time to run.
+      await new Promise((r) => setTimeout(r, 300));
+      const betaSawBound = beta.controlMessages.some(
+        (m) => m.type === "pane.policy-changed" && (m as { paneId?: PaneId }).paneId === pane && (m as { bound?: boolean }).bound === true,
+      );
+      assert.equal(betaSawBound, false, "beta must NOT see alpha's binding — independent per-client state");
+
+      // --- Canonical across reload: fresh connections re-read from tmux. ---
+      const alphaReload = await connect("ws-alpha");
+      assert.equal(
+        boundInSnapshot(alphaReload.snapshot, pane),
+        true,
+        "a reloaded alpha (same identity) re-reads bound=true canonically from tmux",
+      );
+      const betaReload = await connect("ws-beta");
+      assert.equal(
+        boundInSnapshot(betaReload.snapshot, pane),
+        false,
+        "a reloaded beta (different identity) sees bound=false — binding did not leak across identities",
+      );
+
+      sessionProxy.kill();
+      await new Promise<void>((r) => { sessionProxy.host.onExit(() => r()); });
+    });
   },
 );

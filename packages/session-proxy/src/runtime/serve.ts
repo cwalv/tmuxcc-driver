@@ -222,6 +222,17 @@ export interface ControlServer {
   connectionIdFor(transport: Transport): ConnectionId | undefined;
 
   /**
+   * The durable client identity `transport` presented at handshake (D2/D3), or
+   * `undefined` if the transport is not in the active set or advertised none.
+   *
+   * Used by the session-proxy's verb router to key a per-client write (binding
+   * intent, tc-4b6k.2) to the ISSUING connection's identity — the `set-option
+   * -pt %N @tmuxcc-bound-<key>` the `set-object-policy` verb emits must land in
+   * the caller's own slot.
+   */
+  clientIdentityFor(transport: Transport): ClientIdentity | undefined;
+
+  /**
    * The durable identity each currently-connected client presented at handshake
    * (D2, tc-4b6k.1). One entry per live client, in connection order; `identity`
    * is `undefined` for a client that advertised none. Consumed by the
@@ -555,6 +566,24 @@ class ControlServerImpl implements ControlServer {
         `${describeClientIdentity(session.clientIdentity)}\n`,
     );
 
+    // tc-4b6k.2 (D3): reconstruct THIS client's durable per-pane binding intent
+    // from tmux and patch it into the model BEFORE we subscribe this client to
+    // deltas and BEFORE its snapshot is projected. Binding is per-client and the
+    // bulk requery doesn't read it, so without this a reconnecting client (VS
+    // Code reload — same workspace-derived identity) would briefly see bound=false
+    // for a pane it durably bound. Done before onModelChange subscription so the
+    // patch's broadcast doesn't emit a pre-snapshot delta to this client (its
+    // handler isn't installed yet); other clients' resolved bound is unchanged by
+    // a foreign client's slot, so they see nothing. Best-effort (a %error leaves
+    // the model as-is); we don't fail the connection on it.
+    try {
+      await this._pipeline.applyClientBinding(session.clientIdentity?.id);
+    } catch {
+      // Reconstruction is best-effort; a live delta / next connect re-establishes.
+    }
+    // Guard: the client may have disconnected during the read round-trip.
+    if (!this._clients.has(transport)) return session;
+
     // Subscribe to model changes BEFORE sending the snapshot so that any model
     // changes that fire during the microtask gap below are not silently dropped.
     // Deltas queued before the snapshot is sent would have seq >= 2 (correct) and
@@ -567,7 +596,14 @@ class ControlServerImpl implements ControlServer {
       // sees carry their origin (incl. another client's verb — the multi-client
       // case: client B sees origin.connectionId=A and treats it as not-its-own).
       // tc-u7cu.6: pass the close-cause lookup so verb-caused closes carry cause.
-      const deltas: SessionProxyMessage[] = diffModel(prevModel, newModel, this._originLookup, this._closeCauseLookup);
+      // tc-4b6k.2 (D3): resolve per-client binding intent for THIS client's
+      // identity — the pane.opened/pane.policy-changed `bound` reflects this
+      // client's own view, so two clients see independent bound state.
+      const deltas: SessionProxyMessage[] = diffModel(prevModel, newModel, {
+        originLookup: this._originLookup,
+        closeCauseLookup: this._closeCauseLookup,
+        clientId: state.identity?.id,
+      });
       for (const delta of deltas) {
         // Stamp seq on a new object (SessionProxyMessage fields are readonly; spread).
         const stamped = { ...delta, seq: state.nextSeq };
@@ -644,6 +680,8 @@ class ControlServerImpl implements ControlServer {
         attachedClientCount: this._clients.size,
         // tc-ozk.2: tell this client its own connectionId.
         connectionId: state.connectionId,
+        // tc-4b6k.2 (D3): resolve pane.bound for this client's identity.
+        clientId: state.identity?.id,
       });
       state.nextSeq++;
       transport.sendControl(snapshot);
@@ -676,6 +714,10 @@ class ControlServerImpl implements ControlServer {
 
   connectionIdFor(transport: Transport): ConnectionId | undefined {
     return this._clients.get(transport)?.connectionId;
+  }
+
+  clientIdentityFor(transport: Transport): ClientIdentity | undefined {
+    return this._clients.get(transport)?.identity;
   }
 
   connectedClientIdentities(): ReadonlyArray<{ readonly identity?: ClientIdentity }> {
@@ -797,6 +839,8 @@ class ControlServerImpl implements ControlServer {
       attachedClientCount: this._clients.size,
       // tc-ozk.2: re-send the connectionId so a reconnecting client re-learns it.
       connectionId: state.connectionId,
+      // tc-4b6k.2 (D3): resolve pane.bound for this client's identity.
+      clientId: state.identity?.id,
     });
     state.nextSeq++;
     transport.sendControl(snapshot);

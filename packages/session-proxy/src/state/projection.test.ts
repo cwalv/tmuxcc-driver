@@ -110,7 +110,7 @@ function makePane(
     dead,
     exitCode,
     label: undefined,
-    bound: false,
+    boundClients: new Set(),
     detach: undefined,
     icon: undefined,
     // scrollbackHandle and paneTitle are optional — omit to avoid
@@ -867,9 +867,9 @@ describe("dead-pane projection (tc-4bv2 / tc-295a.10)", () => {
     const next = removePane(prev, P2);
     // Use a simple inline CloseCauseLookup that returns a cause for P2.
     const fakeOrigin = { connectionId: "conn1" as import("../wire/ids.js").ConnectionId, requestId: "req-42" };
-    const deltas = diffModel(prev, next, undefined, (id) =>
-      id === P2 ? fakeOrigin : undefined,
-    );
+    const deltas = diffModel(prev, next, {
+      closeCauseLookup: (id) => (id === P2 ? fakeOrigin : undefined),
+    });
     const closed = deltas.filter((d) => d.type === "pane.closed");
     assert.equal(closed.length, 1);
     const c0 = closed[0]!;
@@ -881,7 +881,7 @@ describe("dead-pane projection (tc-4bv2 / tc-295a.10)", () => {
   it("diffModel omits cause on pane.closed when closeCauseLookup returns undefined (unsolicited exit)", () => {
     const prev = baseModel();
     const next = removePane(prev, P2);
-    const deltas = diffModel(prev, next, undefined, (_id) => undefined);
+    const deltas = diffModel(prev, next, { closeCauseLookup: (_id) => undefined });
     const closed = deltas.filter((d) => d.type === "pane.closed");
     assert.equal(closed.length, 1);
     assert.ok(!("cause" in (closed[0] as object)), "no cause for an unsolicited close");

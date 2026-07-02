@@ -145,7 +145,7 @@ function buildBaseModel() {
     dead: false,
     exitCode: undefined,
     label: undefined,
-    bound: false,
+    boundClients: new Set(),
     detach: undefined,
     icon: undefined,
     // scrollbackHandle is optional — omit rather than passing undefined (exactOptionalPropertyTypes)
@@ -160,7 +160,7 @@ function buildBaseModel() {
     dead: false,
     exitCode: undefined,
     label: undefined,
-    bound: false,
+    boundClients: new Set(),
     detach: undefined,
     icon: undefined,
     // scrollbackHandle is optional — omit rather than passing undefined (exactOptionalPropertyTypes)

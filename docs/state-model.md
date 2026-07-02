@@ -96,16 +96,32 @@ transactional "snapshot + deltas from here" for any client at any moment,
 with sequence numbers it controls, because it owns the emission side.
 Late-joining clients get backfill from the replica, not from tmux.
 
-## 4. The common case is single-writer
+## 4. Single-writer *reconciliation pricing* survives; the ownership claim does not
+
+> Revised 2026-07-02 (tc-4b6k O4 withdrawal / D3, `ownership-seams-decisions.md`
+> §2). The original premise below — "multi-client is rare-to-never, so a fact
+> can have one shared slot" — is **withdrawn** as an ownership claim. Shared-vs-
+> per-client coherence is now a design *requirement*: a fact that differs per
+> client (binding intent, D3; per-client size, D4) must carry a client-identity
+> axis, and a per-client fact in a single shared slot is an illegal state made
+> unrepresentable, not a rarity to tolerate. What survives is the *reconciliation
+> pricing* argument: the machinery that serializes writers and requeries on
+> invalidation is still justified by persistence, whether writers are one client
+> or several. Concretely (D3, tc-4b6k.2): binding intent is stored per
+> (pane, client-identity) in `@tmuxcc-bound-<key>` user-options and served as a
+> per-client-resolved `pane.bound`; two windows can no longer diverge on one
+> pane's bound state (seam S1 dissolved) because each writes its own slot. The
+> geometry/layout carve-out stands: per-client geometry facilities are deferred,
+> not spec'd now.
 
 Product goal (see `ux-design-v2.md` §4.1, in the tmuxcc project design docs): native terminal UX for VS Code
-users. Multi-client simultaneous attachment is expected to be rare-to-never.
-Therefore in the common case **the only actor mutating tmux topology is the
-same VS Code user, through tmuxcc's own verbs** — which are request-scoped
-and self-correlated. A native VS Code terminal is single-plane,
-single-authority; the topology plane is *imported* by tmux integration, and
-its external mutations are rare. The reconciliation machinery is the price
-of admission for the one thing tmux adds: persistence.
+users. Even with multi-client now a first-class concern, in the common case
+**the only actor mutating tmux topology is the same VS Code user, through
+tmuxcc's own verbs** — which are request-scoped and self-correlated. A native
+VS Code terminal is single-plane, single-authority; the topology plane is
+*imported* by tmux integration, and its external mutations are rare. The
+reconciliation machinery is the price of admission for the one thing tmux
+adds: persistence.
 
 The irreducible exception: **pane death**. The programs inside panes are a
 second writer — the user types `exit` and expects the tab to react now. The

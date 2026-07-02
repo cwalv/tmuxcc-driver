@@ -46,7 +46,11 @@ export {
 } from "./state/index.js";
 // Projection functions for client round-trip tests:
 export { projectSnapshot, diffModel } from "./state/projection.js";
-export type { ProjectSnapshotOpts, OriginLookup, CloseCauseLookup } from "./state/projection.js";
+export type { ProjectSnapshotOpts, DiffOptions, OriginLookup, CloseCauseLookup } from "./state/projection.js";
+// tc-4b6k.2 (D3): per-(pane,client) binding-intent option-name derivation —
+// re-exported so @tmuxcc/server-proxy's observed-session topology read
+// (tmux-south.ts) resolves the requesting client's own binding slot.
+export { paneBoundOptionName, TMUXCC_BOUND_OPTION } from "./state/bootstrap.js";
 
 // Verb-origin registry (tc-ozk.2) — re-exported so the SDK test harness
 // (clients/ts, tc-ozk.4) can seed origin attribution when replaying conformance

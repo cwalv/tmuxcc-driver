@@ -37,6 +37,7 @@ import {
   windowId,
   setFocus,
   updateSession,
+  updatePane,
 } from "./model.js";
 import type {
   Pane,
@@ -111,8 +112,6 @@ function paneLine(args: {
   deadStatus?: number;
   /** tc-1a8z: @tmuxcc_label durable pane name. Empty string when unset. */
   label?: string;
-  /** tc-i9aq.1: @tmuxcc-bound binding intent ("1" when set). */
-  bound?: boolean;
   /** tc-i9aq.1: @tmuxcc-detach RESOLVED close policy. Empty string when unset. */
   detach?: "detach" | "kill";
   /** tc-i9aq.1: @tmuxcc-icon durable icon policy. Empty string when unset. */
@@ -133,8 +132,8 @@ function paneLine(args: {
     args.dead ? "1" : "0",
     args.deadStatus !== undefined ? String(args.deadStatus) : "",
     args.label ?? "",
-    // tc-i9aq.1 (cold-start.md §4.A): @tmuxcc-bound / -detach / -icon.
-    args.bound ? "1" : "",
+    // tc-i9aq.1 (cold-start.md §4.A): @tmuxcc-detach / -icon.
+    // tc-4b6k.2: @tmuxcc-bound is per-client and NOT read by the bulk requery.
     args.detach ?? "",
     args.icon ?? "",
   ].join("\t") + "\n";
@@ -461,15 +460,20 @@ describe("requeryDiff: durable pane-name (@tmuxcc_label, tc-1a8z)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Durable policy/intent re-read from @tmuxcc-bound / -detach / -icon (tc-i9aq.1)
+// Durable policy re-read from @tmuxcc-detach / -icon (tc-i9aq.1) + per-client
+// binding carry-forward (tc-4b6k.2)
 //
-// cold-start.md §4.A: the per-pane @tmuxcc-* options are re-read on every
-// requery, so binding intent / close policy / icon policy survive a driver
-// restart. unset → empty → undefined (false for bound). A changed value emits
-// exactly one pane.policy-changed delta (not a structural open/close).
+// cold-start.md §4.A: the per-pane @tmuxcc-detach / -icon options are re-read on
+// every requery, so close policy / icon policy survive a driver restart. unset →
+// empty → undefined. A changed value emits exactly one pane.policy-changed delta.
+//
+// tc-4b6k.2 (D3): binding intent is per-(pane,client), NOT read by the bulk
+// requery — a fresh candidate pane's boundClients is empty, and a surviving
+// pane's set is carried forward from the previous model so a topology-only cycle
+// never clobbers it (the per-client slot is (re)read on connect elsewhere).
 // ---------------------------------------------------------------------------
 
-describe("requeryDiff: durable policy/intent (@tmuxcc-bound/-detach/-icon, tc-i9aq.1)", () => {
+describe("requeryDiff: durable policy (@tmuxcc-detach/-icon, tc-i9aq.1) + binding carry-forward (tc-4b6k.2)", () => {
   const winSingle = winLine({
     sessNum: 0,
     sessName: "main",
@@ -479,42 +483,59 @@ describe("requeryDiff: durable policy/intent (@tmuxcc-bound/-detach/-icon, tc-i9
     active: true,
   });
 
-  it("bootstrap re-reads @tmuxcc-bound/-detach/-icon into the model", () => {
-    const line = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true, bound: true, detach: "kill", icon: "rocket" });
+  it("bootstrap re-reads @tmuxcc-detach/-icon; boundClients starts empty (per-client not bulk-read)", () => {
+    const line = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true, detach: "kill", icon: "rocket" });
     const { next, deltas } = requeryDiff(emptyModel(), okResult(winSingle), okResult(line));
     const p = next.panes.get(paneId("p1"))!;
-    assert.equal(p.bound, true, "binding intent re-read on bootstrap");
+    assert.equal(p.boundClients.size, 0, "binding is per-client, not read by the bulk requery");
     assert.equal(p.detach, "kill", "resolved detach re-read on bootstrap");
     assert.equal(p.icon, "rocket", "icon policy re-read on bootstrap");
-    // The bootstrap diff carries the policy on pane.opened (born-with-policy).
+    // The bootstrap diff carries the policy on pane.opened; bound resolves false
+    // (no client id in this metrics/test diff) so it is off.
     const opened = deltas.filter((d) => d.type === "pane.opened");
     assert.equal(opened.length, 1);
-    assert.equal((opened[0] as { bound?: boolean }).bound, true, "pane.opened carries bound");
+    assert.ok(!("bound" in (opened[0] as object)), "pane.opened bound off (no client id)");
     assert.equal((opened[0] as { detach?: string }).detach, "kill", "pane.opened carries detach");
     assert.equal((opened[0] as { icon?: string }).icon, "rocket", "pane.opened carries icon");
   });
 
-  it("unset @tmuxcc-* leaves bound=false, detach/icon undefined", () => {
+  it("unset @tmuxcc-* leaves boundClients empty, detach/icon undefined", () => {
     const bare = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true });
     const { next } = requeryDiff(emptyModel(), okResult(winSingle), okResult(bare));
     const p = next.panes.get(paneId("p1"))!;
-    assert.equal(p.bound, false);
+    assert.equal(p.boundClients.size, 0);
     assert.equal(p.detach, undefined);
     assert.equal(p.icon, undefined);
   });
 
-  it("a changed policy on a later requery emits exactly one pane.policy-changed", () => {
+  it("carries per-client binding forward across a topology-only requery cycle", () => {
+    // Bootstrap, then seed a per-client binding on the model (as the connect-read
+    // / optimistic write would). A subsequent requery whose reply carries NO
+    // per-client binding (the bulk read never does) must preserve it.
+    const bare = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true });
+    let prev = requeryDiff(emptyModel(), okResult(winSingle), okResult(bare)).next;
+    prev = updatePane(prev, paneId("p1"), { boundClients: new Set(["ws-alpha"]) });
+
+    const { next, deltas } = requeryDiff(prev, okResult(winSingle), okResult(bare));
+    assert.deepEqual(
+      [...next.panes.get(paneId("p1"))!.boundClients],
+      ["ws-alpha"],
+      "surviving pane keeps its per-client binding across the requery",
+    );
+    // Topology + binding unchanged → no deltas for the affected client.
+    assert.equal(deltas.length, 0, "carry-forward produces no spurious deltas");
+  });
+
+  it("a changed detach on a later requery emits exactly one pane.policy-changed", () => {
     const bare = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true });
     const prev = requeryDiff(emptyModel(), okResult(winSingle), okResult(bare)).next;
 
-    const marked = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true, bound: true, detach: "detach" });
+    const marked = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true, detach: "detach" });
     const { next, deltas } = requeryDiff(prev, okResult(winSingle), okResult(marked));
 
-    assert.equal(next.panes.get(paneId("p1"))!.bound, true);
     assert.equal(next.panes.get(paneId("p1"))!.detach, "detach");
     const pc = deltas.filter((d) => d.type === "pane.policy-changed");
     assert.equal(pc.length, 1, "exactly one pane.policy-changed");
-    assert.equal((pc[0] as { bound?: boolean }).bound, true);
     assert.equal((pc[0] as { detach?: string }).detach, "detach");
     // A policy change is NOT structural — no spurious open/close.
     assert.equal(deltas.filter((d) => d.type === "pane.closed").length, 0);
@@ -1385,7 +1406,9 @@ function applyDeltaToModel(m: MutableModel, delta: SessionProxyMessage): void {
         dead: delta.dead ?? false,
         exitCode: delta.dead ? delta.exitCode : undefined,
         label: delta.label,
-        bound: delta.bound ?? false,
+        // tc-4b6k.2: no-client diffs never resolve bound true, so the
+        // round-trip's per-client set stays empty.
+        boundClients: new Set<string>(),
         detach: delta.detach,
         icon: delta.icon,
         // scrollbackHandle and paneTitle are optional — omit to avoid
@@ -1591,7 +1614,7 @@ function randomModel(rng: () => number, opts: { minWindows?: number } = {}): Ses
         dead: false,
         exitCode: undefined,
         label: undefined,
-        bound: false,
+        boundClients: new Set<string>(),
         detach: undefined,
         icon: undefined,
         // scrollbackHandle and paneTitle are optional — omit to avoid

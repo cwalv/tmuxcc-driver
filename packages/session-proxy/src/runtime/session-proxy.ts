@@ -1138,6 +1138,10 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
               server.sendCommandError(transport, correlationId, result.code, result.message);
             }
           },
+          // tc-4b6k.2 (D3): key per-client writes (binding intent) to the
+          // ISSUING connection's durable identity, so `set-object-policy bound`
+          // lands in THIS client's own `@tmuxcc-bound-<key>` slot.
+          server.clientIdentityFor(transport)?.id,
         );
       });
 

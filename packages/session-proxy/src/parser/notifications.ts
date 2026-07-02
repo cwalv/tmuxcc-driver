@@ -377,8 +377,18 @@ export interface InternalPaneLabelSetNotification {
 export interface InternalPanePolicySetNotification {
   readonly kind: "internal:set-pane-policy";
   readonly paneId: PaneId;
-  /** New binding-intent value, when this write touched `@tmuxcc-bound`. */
+  /**
+   * New binding-intent value, when this write touched a `@tmuxcc-bound-<key>`
+   * option (D3, tc-4b6k.2). Binding is per-client, so `clientId` names WHOSE
+   * intent flipped — the pipeline patch updates that client's membership in the
+   * pane's `boundClients` set. Both are present together (or neither).
+   */
   readonly bound?: boolean;
+  /**
+   * The issuing connection's durable identity id, present iff `bound` is — the
+   * client whose per-client binding slot this write touched (D3, tc-4b6k.2).
+   */
+  readonly clientId?: string | undefined;
   /**
    * New detach policy, when this write touched `@tmuxcc-detach` at pane scope.
    * `null` means cleared (returned to inherit/unset).

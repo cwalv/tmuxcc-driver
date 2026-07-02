@@ -93,8 +93,9 @@ function makePane(
     dead,
     exitCode,
     label: undefined,
-    // tc-i9aq.1: durable policy/intent fields (required).
-    bound: false,
+    // tc-i9aq.1 / tc-4b6k.2: durable policy fields (required). Binding intent
+    // is per-client (boundClients).
+    boundClients: new Set(),
     detach: undefined,
     icon: undefined,
     // scrollbackHandle and paneTitle are optional — omit to avoid

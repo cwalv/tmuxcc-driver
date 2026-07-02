@@ -78,6 +78,7 @@
  *   sessionId("s" + N) for tmux `$N`
  */
 
+import { createHash } from "node:crypto";
 import { parseLayout } from "../parser/layout-string.js";
 import { listWindows, listPanes } from "../parser/commands.js";
 import type { SessionModel, Session, Window, Pane } from "./model.js";
@@ -120,15 +121,51 @@ export const TMUXCC_LABEL_OPTION = "@tmuxcc_label";
 // ---------------------------------------------------------------------------
 
 /**
- * Per-pane binding-intent marker (cold-start.md §4.A).  `1` means "the user
- * wants a VS Code terminal recreated for this pane on attach" (durable binding
- * intent); unset/empty means no intent.  Written by the `set-object-policy`
- * verb at PANE scope (`set-option -pt %N @tmuxcc-bound 1` / `-u` to clear) and
- * re-read on every requery.  Lives WITH the pane in tmux, so it survives a VS
- * Code restart and vanishes with the pane — staleness is structurally
+ * Per-(pane, client-identity) binding-intent marker (D3, tc-4b6k.2; supersedes
+ * the single-scalar `@tmuxcc-bound` of tc-i9aq.1).  `1` means "the client with
+ * this identity wants a VS Code terminal recreated for this pane on attach";
+ * unset/empty means no intent for that client.  Binding is per-client, so the
+ * durable option name carries the client-identity key: two workspaces binding
+ * the same pane write DISTINCT options and never collide (dissolves seam S1).
+ *
+ * Written by the `set-object-policy` verb at PANE scope keyed by the ISSUING
+ * connection's identity (`set-option -pt %N @tmuxcc-bound-<key> 1` / `-u` to
+ * clear); read per-client on connect and carried forward across requery cycles
+ * (see model.ts `boundClients`).  Lives WITH the pane in tmux, so it survives a
+ * VS Code restart and vanishes with the pane — staleness is structurally
  * impossible (it cannot outlive its referent).
+ *
+ * This bare prefix is also the LEGACY / anonymous-connection key: a connection
+ * that presents no `ClientIdentity` binds/reads here (see
+ * {@link paneBoundOptionName}).
  */
 export const TMUXCC_BOUND_OPTION = "@tmuxcc-bound";
+
+/**
+ * The per-client tmux user-option name that stores binding intent for one
+ * client identity (D3, tc-4b6k.2).
+ *
+ *   `paneBoundOptionName(id) = "@tmuxcc-bound-" + sha1hex(id).slice(0, 16)`
+ *
+ * `ClientIdentity.id` is OPAQUE to the driver (the wire contract forbids the
+ * driver assuming its charset), so the id is HASHED into the option-name suffix
+ * rather than embedded verbatim.  sha1-hex is:
+ *   - always format-safe — `#{@tmuxcc-bound-<hex>}` contains no format
+ *     metacharacters (verified against tmux next-3.7: user-option names accept
+ *     any characters except the `[` array sigil; options.c);
+ *   - bounded (~30-char name, no length concern);
+ *   - injective in practice for the handful of distinct workspaces attached to
+ *     one tmux server (16 hex = 64 bits).
+ *
+ * An `undefined` clientId (anonymous connection / legacy) falls back to the bare
+ * {@link TMUXCC_BOUND_OPTION} — a single shared slot for all anonymous clients,
+ * and the back-compat key.
+ */
+export function paneBoundOptionName(clientId: string | undefined): string {
+  if (clientId === undefined) return TMUXCC_BOUND_OPTION;
+  const enc = createHash("sha1").update(clientId, "utf8").digest("hex").slice(0, 16);
+  return `${TMUXCC_BOUND_OPTION}-${enc}`;
+}
 
 /**
  * Detach-on-close policy (cold-start.md §4.A).  Value is `detach` or `kill`;
@@ -178,14 +215,18 @@ export const BOOTSTRAP_PANES_FORMAT =
   "#{pane_width}\t#{pane_height}\t#{pane_top}\t#{pane_left}\t" +
   "#{?pane_active,1,0}\t#{pane_pid}\t#{pane_current_command}\t" +
   "#{?pane_dead,1,0}\t#{pane_dead_status}\t#{@tmuxcc_label}\t" +
-  // tc-i9aq.1 (cold-start.md §4.A): durable per-pane policy/intent.
-  //   [14] @tmuxcc-bound  — "1" if the pane carries binding intent, else empty.
-  //   [15] @tmuxcc-detach — RESOLVED close policy ("detach"|"kill"); empty =
+  // tc-i9aq.1 (cold-start.md §4.A): durable per-pane policy.
+  //   [14] @tmuxcc-detach — RESOLVED close policy ("detach"|"kill"); empty =
   //                         inherit. `#{@}` format walks pane→window→session,
   //                         so this is the effective first-wins cascade value.
-  //   [16] @tmuxcc-icon   — durable icon policy string, else empty.
+  //   [15] @tmuxcc-icon   — durable icon policy string, else empty.
   // Unset → empty string (no error; verified tmux 3.4, cold-start.md §9.3).
-  "#{@tmuxcc-bound}\t#{@tmuxcc-detach}\t#{@tmuxcc-icon}";
+  //
+  // tc-4b6k.2: binding intent is NO LONGER read here. It is per-(pane,client)
+  // (`@tmuxcc-bound-<key>`), and the bulk session-scoped requery has no notion
+  // of the client set — so each client's slot is read on connect and carried
+  // forward across requery cycles (model.ts `boundClients`), not rebuilt here.
+  "#{@tmuxcc-detach}\t#{@tmuxcc-icon}";
 
 // ---------------------------------------------------------------------------
 // Bootstrap command set
@@ -312,13 +353,6 @@ export interface PanesReplyRow {
    */
   readonly label: string | undefined;
   /**
-   * Durable binding intent from the `@tmuxcc-bound` pane user-option
-   * (tc-i9aq.1, cold-start.md §4.A).  True when the option is `1`; false when
-   * unset/empty.  Re-read on every requery so binding intent survives a VS
-   * Code restart for free.
-   */
-  readonly bound: boolean;
-  /**
    * RESOLVED detach-on-close policy from the `@tmuxcc-detach` user-option
    * (tc-i9aq.1, cold-start.md §4.A), read via a `#{@tmuxcc-detach}` format that
    * walks pane→window→session, so this is the effective first-wins cascade
@@ -429,17 +463,16 @@ export function parsePanesReply(body: Uint8Array): PanesReplyRow[] {
     const labelRaw = (parts[13] ?? "").trim();
     const label = labelRaw === "" ? undefined : labelRaw;
 
-    // Durable per-pane policy/intent (tc-i9aq.1, cold-start.md §4.A). Read
+    // Durable per-pane policy (tc-i9aq.1, cold-start.md §4.A). Read
     // defensively — legacy replies (or unset options) carry empty strings.
-    //   [14] @tmuxcc-bound  → binding intent ("1" = bound).
-    //   [15] @tmuxcc-detach → RESOLVED close policy (format walk gives the
+    //   [14] @tmuxcc-detach → RESOLVED close policy (format walk gives the
     //                         pane→window→session first-wins value).
-    //   [16] @tmuxcc-icon   → durable icon policy.
-    const bound = (parts[14] ?? "").trim() === "1";
-    const detachRaw = (parts[15] ?? "").trim();
+    //   [15] @tmuxcc-icon   → durable icon policy.
+    // tc-4b6k.2: binding intent is per-client and NOT in this bulk reply.
+    const detachRaw = (parts[14] ?? "").trim();
     const detach: "detach" | "kill" | undefined =
       detachRaw === "detach" || detachRaw === "kill" ? detachRaw : undefined;
-    const iconRaw = (parts[16] ?? "").trim();
+    const iconRaw = (parts[15] ?? "").trim();
     const icon = iconRaw === "" ? undefined : iconRaw;
 
     const tmuxPaneId = parseSigilId(paneIdStr, "%");
@@ -461,7 +494,6 @@ export function parsePanesReply(body: Uint8Array): PanesReplyRow[] {
       dead,
       exitCode,
       label,
-      bound,
       detach,
       icon,
     });
@@ -584,12 +616,16 @@ export function buildInitialModel(
       // Durable pane name from the @tmuxcc_label user-option (tc-1a8z).
       // Re-read on every requery → survives a driver restart for free.
       label: row.label,
-      // Durable binding-intent / close-policy / icon-policy from the
-      // @tmuxcc-* user-options (tc-i9aq.1, cold-start.md §4.A). Re-read on
-      // every requery → survive a VS Code restart, vanish with the pane.
-      bound: row.bound,
+      // Durable close-policy / icon-policy from the @tmuxcc-* user-options
+      // (tc-i9aq.1, cold-start.md §4.A). Re-read on every requery → survive a
+      // VS Code restart, vanish with the pane.
       detach: row.detach,
       icon: row.icon,
+      // tc-4b6k.2: binding intent is per-(pane,client) and is NOT in the bulk
+      // requery. A fresh pane starts with no bound clients; the requery
+      // carry-forward (requery.ts) preserves a surviving pane's set, and a
+      // client's slot is (re)read on connect (pipeline.applyClientBinding).
+      boundClients: new Set<string>(),
       // scrollbackHandle and paneTitle are absent (optional) — tc-fx2 and
       // tc-2mn8 populate them respectively via updatePane after creation.
     };

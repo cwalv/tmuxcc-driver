@@ -46,7 +46,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { createTmuxHost } from "@tmuxcc/session-proxy";
+import { createTmuxHost, paneBoundOptionName } from "@tmuxcc/session-proxy";
 import type { TmuxHost, TmuxCapabilityMap } from "@tmuxcc/session-proxy";
 
 // ---------------------------------------------------------------------------
@@ -424,8 +424,10 @@ export interface TmuxPaneRow {
   /** tmux window id this pane belongs to, e.g. "@1" */
   windowId: string;
   /**
-   * Durable binding intent (`@tmuxcc-bound`).  True when the pane has the
-   * option set to "1"; false otherwise.
+   * Durable binding intent RESOLVED for the requesting client (D3, tc-4b6k.2):
+   * true when this client's per-client option `@tmuxcc-bound-<key>` is "1".
+   * Binding is per-(pane,client), so the picker's bind affordance for an
+   * unclaimed session reflects THIS workspace's own intent, not a shared scalar.
    */
   bound: boolean;
   /**
@@ -463,11 +465,17 @@ export interface SessionTopologyResult {
  * cold-start.md §4 — same verified tmux 3.4 behaviour as the session-proxy's
  * BOOTSTRAP_PANES_FORMAT).
  *
+ * `clientId` (D3, tc-4b6k.2) is the requesting client's durable identity id.
+ * Binding intent is per-client, so the pane's `bound` is read from that client's
+ * own `@tmuxcc-bound-<key>` option (an undefined id — anonymous — falls back to
+ * the legacy shared `@tmuxcc-bound` slot; see `paneBoundOptionName`).
+ *
  * Returns `null` if the session cannot be found or the commands fail.
  */
 export async function listSessionTopology(
   socketName: string,
   sessionName: string,
+  clientId?: string,
 ): Promise<SessionTopologyResult | null> {
   // list-windows: window_id, window_name, window_active
   const WIN_FORMAT = "#{window_id}\t#{window_name}\t#{window_active}";
@@ -493,8 +501,9 @@ export async function listSessionTopology(
   // @tmuxcc-icon.  `-s -t <session>` lists every pane in the target session
   // (across its windows).  NOT `-a`, which would list all panes on the server
   // regardless of -t and leak other sessions' panes into this query.
+  // tc-4b6k.2 (D3): read the REQUESTING client's per-client binding slot.
   const PANE_FORMAT =
-    "#{pane_id}\t#{window_id}\t#{@tmuxcc-bound}\t#{@tmuxcc-detach}\t#{@tmuxcc-icon}";
+    `#{pane_id}\t#{window_id}\t#{${paneBoundOptionName(clientId)}}\t#{@tmuxcc-detach}\t#{@tmuxcc-icon}`;
   const paneResult = await runTmux(
     ["-L", socketName, "list-panes", "-s", "-t", sessionName, "-F", PANE_FORMAT],
     5_000,

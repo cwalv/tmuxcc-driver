@@ -75,6 +75,10 @@ export function createFakePipeline(initialModel?: SessionModel): FakePipeline {
     patchModel() {
       unsupported("patchModel");
     },
+    async applyClientBinding() {
+      // No-op: the conformance harness seeds boundClients via the model directly
+      // (there is no tmux to read per-client @tmuxcc-bound-<key> from).
+    },
     send() {
       return unsupported("send");
     },

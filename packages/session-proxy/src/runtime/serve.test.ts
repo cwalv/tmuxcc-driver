@@ -84,6 +84,10 @@ function createFakePipeline(initialModel?: SessionModel): FakePipeline {
     patchModel(_updater: (m: SessionModel) => SessionModel) {
       // FakePipeline: no-op — serve.test.ts drives model changes via fireChange.
     },
+    async applyClientBinding(_clientId: string | undefined) {
+      // FakePipeline: no-op — serve.test.ts does not exercise the per-client
+      // binding connect-read (tc-4b6k.2). The real pipeline reads @tmuxcc-bound-<key>.
+    },
     send(_command: string): Promise<import("../parser/correlator.js").CommandResult> {
       // FakePipeline: returns a never-resolving promise.  serve.test.ts does
       // not exercise the atomic-send seam (tc-3si.1).
@@ -183,7 +187,7 @@ const P2 = paneId("p2");
 function makePane(id: PaneId, winId: WindowId, sessId: SessionId, cols = 80, rows = 24): Pane {
   // exitCode and label are required (X | undefined); scrollbackHandle and
   // paneTitle are optional — omit to avoid exactOptionalPropertyTypes TS2375.
-  return { paneId: id, windowId: winId, sessionId: sessId, cols, rows, mode: "normal", dead: false, exitCode: undefined, label: undefined, bound: false, detach: undefined, icon: undefined };
+  return { paneId: id, windowId: winId, sessionId: sessId, cols, rows, mode: "normal", dead: false, exitCode: undefined, label: undefined, boundClients: new Set(), detach: undefined, icon: undefined };
 }
 
 function makeModel1(): SessionModel {

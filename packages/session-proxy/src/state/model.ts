@@ -183,16 +183,27 @@ export interface Pane {
    */
   readonly label: string | undefined;
   /**
-   * Durable binding intent (tc-i9aq.1, cold-start.md §4.A) from the per-pane
-   * `@tmuxcc-bound` user-option.  True when the user wants a VS Code terminal
-   * recreated for this pane on attach; false when no intent is recorded.
+   * Durable binding intent, PER (pane, client-identity) (D3, tc-4b6k.2).
    *
-   * Authoritative source: the `@tmuxcc-bound` pane user-option, re-read on
-   * every bootstrap requery, so binding intent survives a VS Code restart and
-   * vanishes with the pane.  Written ONLY via the `set-object-policy` command
-   * (the driver is the sole tmux writer); the extension never shells out.
+   * The set of durable client-identity ids (`ClientIdentity.id`) that want a VS
+   * Code terminal recreated for this pane on attach.  Binding is a per-client
+   * fact: "bound in workspace A, detached in workspace B" is a legal, canonical
+   * state (this dissolves seam S1 — two windows, two truths — by correcting the
+   * fact's cardinality instead of exempting it to per-window memory). Projection
+   * resolves the wire `pane.bound` boolean as `boundClients.has(reqClientId)`
+   * for the requesting client's identity.
+   *
+   * Authoritative source: per-client tmux user-options
+   * `@tmuxcc-bound-<enc(clientId)>` (see `paneBoundOptionName` in bootstrap.ts),
+   * written ONLY via the `set-object-policy` command keyed by the issuing
+   * connection's identity (the driver is the sole tmux writer).  Because the
+   * client axis is not available to the bulk session-scoped requery, this set is
+   * NOT rebuilt by the bulk read: a client's slot is reconstructed on connect (a
+   * one-shot per-client `list-panes` read) and carried forward across requery
+   * cycles for surviving panes.  It survives a VS Code restart (durable in tmux)
+   * and vanishes with the pane.
    */
-  readonly bound: boolean;
+  readonly boundClients: ReadonlySet<string>;
   /**
    * RESOLVED detach-on-close policy (tc-i9aq.1, cold-start.md §4.A) from the
    * `@tmuxcc-detach` user-option, read through a `#{@tmuxcc-detach}` FORMAT
@@ -866,7 +877,9 @@ export function updatePane(
       | "scrollbackHandle"
       | "paneTitle"
       // tc-i9aq.1: durable policy/intent optimistic-update fields.
-      | "bound"
+      // tc-4b6k.2: binding intent is per-client — the whole boundClients set is
+      // replaced on an optimistic patch (see setBoundClient).
+      | "boundClients"
       | "detach"
       | "icon"
     >
@@ -877,6 +890,33 @@ export function updatePane(
   const panes = new Map(model.panes);
   panes.set(paneId, { ...pane, ...patch });
   return { ...model, panes };
+}
+
+/**
+ * Resolve a pane's binding intent for a specific client identity (D3,
+ * tc-4b6k.2).  Returns true iff the client's durable id is in the pane's
+ * `boundClients`.  An undefined `clientId` (an anonymous connection) is never
+ * bound.
+ */
+export function paneBoundFor(pane: Pane, clientId: string | undefined): boolean {
+  return clientId !== undefined && pane.boundClients.has(clientId);
+}
+
+/**
+ * Return a `boundClients` set with `clientId`'s membership set to `bound`
+ * (D3, tc-4b6k.2).  Returns the same reference when already in the desired
+ * state (so a caller's reference-equality no-op check stays cheap).
+ */
+export function setBoundClient(
+  current: ReadonlySet<string>,
+  clientId: string,
+  bound: boolean,
+): ReadonlySet<string> {
+  if (bound === current.has(clientId)) return current;
+  const next = new Set(current);
+  if (bound) next.add(clientId);
+  else next.delete(clientId);
+  return next;
 }
 
 /** Replace a window's fields (e.g. rename, layout update, synchronize-panes toggle). */

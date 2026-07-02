@@ -58,7 +58,7 @@ function buildBaseModel(): SessionModel {
     dead: false,
     exitCode: undefined,
     label: undefined,
-    bound: false,
+    boundClients: new Set(),
     detach: undefined,
     icon: undefined,
     // paneTitle absent (undefined → no title seen yet)
@@ -190,7 +190,7 @@ describe("paneTitle – SnapshotPane carries paneTitle (tc-2mn8)", () => {
       dead: false,
       exitCode: undefined,
       label: undefined,
-      bound: false,
+      boundClients: new Set(),
       detach: undefined,
       icon: undefined,
       paneTitle: "born-with-title",

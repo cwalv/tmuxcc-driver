@@ -72,7 +72,7 @@ export function buildModel(init: TranscriptInitialModel): SessionModel {
       dead: false,
       exitCode: undefined,
       label: undefined,
-      bound: false,
+      boundClients: new Set(),
       detach: undefined,
       icon: undefined,
       // scrollbackHandle is optional — omit rather than passing undefined (exactOptionalPropertyTypes)
@@ -146,7 +146,7 @@ export function applyVerbCreate(
       dead: false,
       exitCode: undefined,
       label: undefined,
-      bound: false,
+      boundClients: new Set(),
       detach: undefined,
       icon: undefined,
       // scrollbackHandle is optional — omit rather than passing undefined (exactOptionalPropertyTypes)

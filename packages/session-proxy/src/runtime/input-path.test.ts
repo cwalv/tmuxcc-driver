@@ -25,6 +25,7 @@ import type {
   CommandRequestMessage,
 } from "../wire/index.js";
 import { paneId, windowId, sessionId, WIRE_PROTOCOL_VERSION } from "../wire/index.js";
+import { paneBoundOptionName } from "../state/bootstrap.js";
 
 // ---------------------------------------------------------------------------
 // FakeDeps — captures sent commands for assertion (tc-3si.1)
@@ -1048,7 +1049,7 @@ describe("createInputPath — break-pane empty -P body no-op (tc-0c30.20)", () =
       dead: false,
       exitCode: undefined,
       label: undefined,
-      bound: false,
+      boundClients: new Set(),
       detach: undefined,
       icon: undefined,
     };
@@ -1637,7 +1638,7 @@ function makeReversalModel(opts: {
     dead: false,
     exitCode: undefined,
     label: undefined,
-    bound: false,
+    boundClients: new Set(),
     detach: undefined,
     icon: undefined,
     // scrollbackHandle and paneTitle are optional — omit to avoid
@@ -2516,9 +2517,44 @@ describe("createInputPath — set-object-policy (tc-i9aq.1)", () => {
       command: { kind: "set-object-policy", scope: "pane", paneId: pid, option: "bound", value: "1" },
     });
 
+    // tc-4b6k.2: no clientId (anonymous) → legacy shared @tmuxcc-bound key; the
+    // optimistic event carries clientId: undefined.
     assert.equal(host.lastWrite, "set-option -pt %500 @tmuxcc-bound 1\n");
     assert.equal(dispatched.length, 1);
-    assert.deepEqual(dispatched[0], { kind: "internal:set-pane-policy", paneId: pid, bound: true });
+    assert.deepEqual(dispatched[0], { kind: "internal:set-pane-policy", paneId: pid, bound: true, clientId: undefined });
+  });
+
+  it("pane scope, set bound WITH a client identity → per-client @tmuxcc-bound-<key> + clientId in event (tc-4b6k.2)", () => {
+    const host = makeFakeDeps();
+    const dispatched: NotificationEvent[] = [];
+    const before = makeReversalModel({
+      windowSuffix: "5",
+      synchronizePanes: false,
+      monitorActivity: true,
+      monitorSilence: 0,
+    });
+    const path = createInputPath(host, {
+      dispatchSynthetic: (ev) => dispatched.push(ev),
+      getModel: () => before,
+    });
+    const pid = paneId("p500");
+    const clientId = "ws-alpha";
+
+    path.handleClientMessage(
+      {
+        type: "command.request",
+        seq: nextSeq(),
+        correlationId: "sop-bound-set-client",
+        command: { kind: "set-object-policy", scope: "pane", paneId: pid, option: "bound", value: "1" },
+      },
+      undefined,
+      clientId,
+    );
+
+    // The write targets THIS client's per-client slot, not the shared scalar.
+    assert.equal(host.lastWrite, `set-option -pt %500 ${paneBoundOptionName(clientId)} 1\n`);
+    assert.notEqual(paneBoundOptionName(clientId), "@tmuxcc-bound");
+    assert.deepEqual(dispatched[0], { kind: "internal:set-pane-policy", paneId: pid, bound: true, clientId });
   });
 
   it("pane scope, clear bound (value:null) → set-option -upt %N + optimistic clear", () => {
@@ -2544,7 +2580,7 @@ describe("createInputPath — set-object-policy (tc-i9aq.1)", () => {
     });
 
     assert.equal(host.lastWrite, "set-option -upt %500 @tmuxcc-bound\n");
-    assert.deepEqual(dispatched[0], { kind: "internal:set-pane-policy", paneId: pid, bound: false });
+    assert.deepEqual(dispatched[0], { kind: "internal:set-pane-policy", paneId: pid, bound: false, clientId: undefined });
   });
 
   it("pane scope, set detach=kill → set-option -pt %N @tmuxcc-detach kill", () => {
