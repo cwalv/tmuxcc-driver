@@ -51,8 +51,6 @@ import {
   WIRE_PROTOCOL_VERSION,
   sessionId as mintSessionId,
   describeClientIdentity,
-  phaseLog,
-  phaseNow,
 } from "@tmuxcc/session-proxy";
 import type {
   Transport,
@@ -87,13 +85,15 @@ import type { ServerProxyMetrics } from "./metrics.js";
 import { mergeMetricsText } from "./metrics-exposition.js";
 import { parseMetricsHttpBind, bindMetricsHttp } from "./metrics-http.js";
 import type { MetricsHttpListener } from "./metrics-http.js";
-import { listSessions, createSession, killSession, checkSessionPresence, createTmuxWatcher, probeTmuxLiveness, setSessionMarker, getTmuxServerPid, countTmuxccClientsBySession, listSessionTopology } from "./tmux-south.js";
+import { listSessions, killSession, checkSessionPresence, createTmuxWatcher, probeTmuxLiveness, getTmuxServerPid, countTmuxccClientsBySession, listSessionTopology } from "./tmux-south.js";
 import type { TmuxWatcher, TmuxAvailabilityOut } from "./tmux-south.js";
 import { probeTmuxCapabilities, MINIMUM_TMUX_VERSION } from "./tmux-capabilities.js";
 import type { TmuxCapabilityState } from "./tmux-capabilities.js";
 import { createSessionProxySupervisor } from "./session-proxy-supervisor.js";
 import type { SessionProxySupervisor, SessionProxyExitInfo } from "./session-proxy-supervisor.js";
 import type { RuntimeDirOptions } from "./runtime-dir.js";
+import { createSessionClaimer } from "./claim-session.js";
+import type { SessionClaimer } from "./claim-session.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -503,15 +503,13 @@ class ServerProxyImpl implements ServerProxyHandle {
   private _respawnTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
-   * Per-name claim locks: maps session name → in-flight claim promise.
-   * Concurrent claims for the same name share this promise.
+   * Session claim/activate manager (tc-4b6k.8).
    *
-   * tc-3y8.2: only the claim that INITIATED the shared promise reports the
-   * promise's `created` value; joiners are remapped to `created: false` in
-   * `_claimSession` so exactly one claimant observes `created: true` per
-   * session creation (the authority for create-time-only profile apply).
+   * Owns the per-name claim-lock table (tc-3y8.2) and executes the claim/
+   * activate path with phase-typed states.  Wired in the constructor via
+   * `createSessionClaimer`; lives for the server-proxy's lifetime.
    */
-  private _claimLocks = new Map<string, Promise<{ sessionId: SessionId; created: boolean; name?: string }>>();
+  private _claimer!: SessionClaimer;
 
   // ── tc-4b6k.6 session-refresh coalescing (D6) ──────────────────────────────
   /**
@@ -559,6 +557,24 @@ class ServerProxyImpl implements ServerProxyHandle {
     // reports its drain path onto `_metrics` (the tc-edf8 firehose
     // backpressure path is preserved on the broker's `createSocketServer`).
     this._supervisor = createSessionProxySupervisor();
+
+    // tc-4b6k.8: wire the claim/activate manager.  All context callbacks are
+    // closures over `this` — safe to build here because they are never invoked
+    // until start() runs and beyond (never during construction).
+    this._claimer = createSessionClaimer({
+      socketName: opts.socketName,
+      getCapabilities: () => this._tmuxCapabilityState?.capabilities,
+      refreshSessions: () => this._refreshSessions(),
+      lookupByName: (name) => this._byName.get(name),
+      registerSession: (tmuxId, name) => this._registerNewSession(tmuxId, name),
+      ensureSessionProxy: async (sessionId, name) => {
+        await this._supervisor.ensureSessionProxy(sessionId, name, this._opts.socketName);
+      },
+      onClaimComplete: (_timing) => {
+        // tc-is5w: histogram observation wires here when the per-phase
+        // sessionproxy_claim_to_snapshot_seconds instrument is implemented.
+      },
+    });
   }
 
   endpoint(): string {
@@ -1610,7 +1626,7 @@ class ServerProxyImpl implements ServerProxyHandle {
 
       switch (command.kind) {
         case "session.claim":
-          payload = await this._claimSession(command.name);
+          payload = await this._claimer.claim(command.name);
           break;
         case "session.create":
           payload = await this._createSession(command.name);
@@ -1742,154 +1758,39 @@ class ServerProxyImpl implements ServerProxyHandle {
   // ---------------------------------------------------------------------------
 
   /**
-   * Claim a named session and return its stable `sessionId` (D5, tc-4b6k.4).
-   * Ensures the session exists (creating it if needed) and its session-proxy is
-   * running, then returns the id — the client binds a connection to it with
-   * `session.attach`. Per-name serialization via _claimLocks.
+   * Register a just-created tmux session in the server-proxy session table
+   * (tc-4b6k.8 — extracted from the claim path into a named method).
    *
-   * tc-3y8.2: the returned `created` flag reports whether THIS claim minted
-   * the tmux session.  Joining an in-flight claim returns `created: false`
-   * regardless of the shared promise's outcome — the joiner did not initiate
-   * the creating claim, so exactly one claimant per session creation sees
-   * `created: true`.
+   * Called by the `ClaimSessionContext.registerSession` callback in response
+   * to a successful `createSession` where no concurrent refresh already added
+   * the entry.  Mints a stable sessionId, adds to both maps, broadcasts
+   * `sessions.added`, and updates the sessions-active gauge.
+   *
+   * Callers have already verified (via `_byName.get(name) === undefined`) that
+   * the entry is absent; this is the side-effecting publish step.
    */
-  private _claimSession(name: string): Promise<{ sessionId: SessionId; created: boolean }> {
-    const inFlight = this._claimLocks.get(name);
-    if (inFlight) {
-      // Joined claim: by the time this resolves the session exists; this
-      // caller did not create it.
-      return inFlight.then((r) => ({ ...r, created: false }));
-    }
-
-    const promise = this._doClaimSession(name).finally(() => {
-      // Only remove the lock if it's still THIS promise (not a newer one)
-      if (this._claimLocks.get(name) === promise) {
-        this._claimLocks.delete(name);
-      }
-    });
-
-    this._claimLocks.set(name, promise);
-    return promise;
-  }
-
-  private async _doClaimSession(
-    name: string,
-  ): Promise<{ sessionId: SessionId; created: boolean; name?: string }> {
-    // tc-is5w: phase-split activation timing — t0 at claim entry. The claim leg
-    // is everything up to (but not including) the ensureSessionProxy await; the
-    // ensure leg wraps that await (which itself contains the bootstrap leg,
-    // emitted separately by the pipeline). Inert unless TMUXCC_PHASE_TIMING set.
-    const _phaseT0 = phaseNow();
-
-    // Refresh session list from tmux
-    await this._refreshSessions();
-
-    let entry = this._byName.get(name);
-
-    // tc-3y8.2: whether THIS claim minted the tmux session (vs attaching to a
-    // pre-existing one).  Reported to the client as the authority for
-    // create-time-only behaviour (profile apply).
-    let created = false;
-
-    if (!entry) {
-      // Session doesn't exist — create it.
-      //
-      // tc-zcqr: `createSession` returns the new tmux session id directly via
-      // `new-session -P -F '#{session_id}'`.  We inject the new entry into
-      // _sessions/_byName synchronously rather than relying on a follow-up
-      // `tmux list-sessions` to learn the id — that round-trip can fail
-      // transiently (the watcher's -CC attach + supervisor's session-proxy spawn
-      // contend for the tmux server's response budget in this window) and
-      // silently produced "Session 'X' not found after creation".
-      try {
-        // tc-4b6k.12: pass capability state so createSession can gate
-        // version-sensitive operations (e.g. scroll-on-clear on tmux 3.3+).
-        const { tmuxId } = await createSession(
-          this._opts.socketName,
-          name,
-          this._tmuxCapabilityState?.capabilities,
-        );
-        created = true;
-        entry = this._byName.get(name);
-        if (!entry) {
-          // No race winner ahead of us — inject the just-created session
-          // authoritatively from the createSession return value.  Broadcast
-          // sessions.added so connected clients see it immediately (this is
-          // the same broadcast _refreshSessions would emit on the next tick).
-          const sessionId = mintSessionId(`s${tmuxId.replace("$", "")}`);
-          entry = {
-            sessionId,
-            tmuxId,
-            name,
-            windowCount: 1,
-            attachedClientCount: 0,
-            // tc-295a.4 (W1.3): newly-created sessions are always marked
-            // (createSession calls setSessionMarker internally), have 1 pane
-            // (tmux new-session creates a default window with one pane), and
-            // have current-epoch activity.  These are overwritten on the first
-            // _refreshSessions tick; the values here prevent a brief 0-gap.
-            tmuxccMarked: true,
-            paneCount: 1,
-            lastActivity: Math.floor(Date.now() / 1_000),
-          };
-          this._sessions.set(sessionId, entry);
-          this._byName.set(name, entry);
-          this._broadcastAdded(entry);
-          this._metrics.setSessionsActive(this._sessions.size);
-        }
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        if (msg.toLowerCase().includes("duplicate")) {
-          // Race: another process created it between our check and create —
-          // we attached to that process's session; `created` stays false.
-          await this._refreshSessions();
-          entry = this._byName.get(name);
-          if (!entry) {
-            throw Object.assign(new Error(`session.create race: ${msg}`), { code: "internal" });
-          }
-        } else {
-          throw Object.assign(new Error(`tmux.unavailable: ${msg}`), { code: "tmux.unavailable" });
-        }
-      }
-    }
-
-    // tc-w61: mark-on-attach — ensure the Phase 2 @tmuxcc 1 marker is set on
-    // the session before starting the session-proxy.  For sessions created by
-    // createSession() above, the marker was already set inside createSession();
-    // this call is effectively a no-op in that case (idempotent).  For
-    // pre-existing sessions that tmuxcc is claiming for the first time (e.g. a
-    // session the user manually created then attached via tmuxcc.attachToSession),
-    // this stamps them as tmuxcc-managed so they will appear in listTmuxccSessions
-    // on subsequent invocations.
-    await setSessionMarker(this._opts.socketName, entry.name);
-
-    // tc-is5w: claim leg ends here (pre-ensure work); the ensure leg is the
-    // ensureSessionProxy await. On a fresh-fork claim the ensure span is
-    // dominated by `await sessionProxy.start()` → bootstrap-requery (emitted as
-    // a separate `phase=bootstrap` line, nested inside ensure_ms).
-    const _phaseClaimEnd = phaseNow();
-
-    // D5 (tc-4b6k.4): ensure the session-proxy is running (warm before claim
-    // returns — the READY-before-claim contract). The client then binds a
-    // connection with `session.attach {sessionId}`; there is no endpoint.
-    await this._supervisor.ensureSessionProxy(
-      entry.sessionId,
-      entry.name,
-      this._opts.socketName,
-    );
-
-    const _phaseEnd = phaseNow();
-    phaseLog({
-      phase: "claim",
-      session: entry.name,
-      sessionId: entry.sessionId,
-      created,
-      claim_ms: _phaseClaimEnd - _phaseT0,
-      ensure_ms: _phaseEnd - _phaseClaimEnd,
-      total_ms: _phaseEnd - _phaseT0,
-    });
-
-    return { sessionId: entry.sessionId, created };
+  private _registerNewSession(tmuxId: string, name: string): SessionEntry {
+    const sessionId = mintSessionId(`s${tmuxId.replace("$", "")}`);
+    const entry: SessionEntry = {
+      sessionId,
+      tmuxId,
+      name,
+      windowCount: 1,
+      attachedClientCount: 0,
+      // tc-295a.4 (W1.3): newly-created sessions are always marked
+      // (createSession calls setSessionMarker internally), have 1 pane
+      // (tmux new-session creates a default window with one pane), and
+      // have current-epoch activity.  These are overwritten on the first
+      // _refreshSessions tick; the values here prevent a brief 0-gap.
+      tmuxccMarked: true,
+      paneCount: 1,
+      lastActivity: Math.floor(Date.now() / 1_000),
+    };
+    this._sessions.set(sessionId, entry);
+    this._byName.set(name, entry);
+    this._broadcastAdded(entry);
+    this._metrics.setSessionsActive(this._sessions.size);
+    return entry;
   }
 
   private async _createSession(
@@ -1898,10 +1799,10 @@ class ServerProxyImpl implements ServerProxyHandle {
     await this._refreshSessions();
 
     // tc-3y8.2: an in-flight claim counts as "name in use" — joining it via
-    // _claimSession would resolve with created=false, contradicting the
+    // _claimer.claim would resolve with created=false, contradicting the
     // session.create contract (a successful create always mints, so its
     // response always reports created=true; otherwise it fails name-taken).
-    if (this._byName.has(name) || this._claimLocks.has(name)) {
+    if (this._byName.has(name) || this._claimer.isInFlight(name)) {
       throw Object.assign(
         new Error(`Session name '${name}' is already in use`),
         { code: "session.name-taken" },
@@ -1909,7 +1810,7 @@ class ServerProxyImpl implements ServerProxyHandle {
     }
 
     // Use claim semantics — create then spawn session-proxy.
-    const result = await this._claimSession(name);
+    const result = await this._claimer.claim(name);
 
     // tc-3y8.2: enforce mint-or-fail.  The checks above close the in-process
     // races, but another tmux client (outside this serverProxy) can still mint the
@@ -1937,19 +1838,20 @@ class ServerProxyImpl implements ServerProxyHandle {
    *
    * Uniquification algorithm:
    *   1. Refresh the live session table from tmux.
-   *   2. If `baseName` is not in `_byName` AND not in `_claimLocks`, use it.
+   *   2. If `baseName` is not in `_byName` AND not in-flight (`_claimer.isInFlight`),
+   *      use it.
    *   3. Otherwise try `baseName-2`, `baseName-3`, … until a free slot is found.
-   *   4. Claim the chosen name via `_claimSession` (which creates the tmux
+   *   4. Claim the chosen name via `_claimer.claim` (which creates the tmux
    *      session and spawns the session-proxy atomically with the per-name lock).
    *
    * Atomicity guarantee: two concurrent `createUnique({baseName})` calls
    * cannot collide because:
-   *   - `_claimLocks` is checked and set synchronously before `_claimSession`
+   *   - `_claimer.isInFlight` is checked synchronously before `_claimer.claim`
    *     yields (single-threaded JS event loop).
-   *   - `_doClaimSession` uses `_claimLocks` as a per-name mutex — a second
-   *     caller who picks the same uniquified name will join the in-flight claim
-   *     and observe `created: false`, which this method treats as a collision
-   *     and re-tries with the next suffix.
+   *   - `_claimer` uses a per-name mutex internally — a second caller who picks
+   *     the same uniquified name will join the in-flight claim and observe
+   *     `created: false`, which this method treats as a collision and re-tries
+   *     with the next suffix.
    *
    * Returns `{ sessionId, name, created: true }` — `created` is always `true`
    * because this command never silently attaches.
@@ -1971,14 +1873,14 @@ class ServerProxyImpl implements ServerProxyHandle {
       const candidate = attempt === 0 ? base : `${base}-${attempt + 1}`;
 
       // Skip names already live in tmux or in-flight.
-      if (this._byName.has(candidate) || this._claimLocks.has(candidate)) {
+      if (this._byName.has(candidate) || this._claimer.isInFlight(candidate)) {
         continue;
       }
 
       // Attempt to claim the candidate.  If another concurrent caller beats
-      // us (race between the check above and _claimSession below), the claim
+      // us (race between the check above and _claimer.claim below), the claim
       // resolves with created=false — that means the name was taken; loop.
-      const result = await this._claimSession(candidate);
+      const result = await this._claimer.claim(candidate);
       if (result.created) {
         return { sessionId: result.sessionId, created: true, name: candidate };
       }
