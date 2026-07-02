@@ -58,6 +58,7 @@ import type {
   SessionProxyCommandRequestMessage,
   SessionProxyCommandResponseMessage,
   ResyncRequestMessage,
+  ClientFocusMessage,
   ErrorMessage,
   WindowLayout,
   PaneAttachMessage,
@@ -799,6 +800,15 @@ describe("protocol schema conformance", () => {
       const msg: ResyncRequestMessage = {
         type: "resync.request",
         seq: 3,
+      };
+      assert.ok(validateClientMsg(msg as ClientMessage), JSON.stringify(validateClientMsg.errors));
+    });
+
+    // tc-76m8.3 (S3): client-focus activity signal for size-ownership policy.
+    it("ClientFocusMessage", () => {
+      const msg: ClientFocusMessage = {
+        type: "client.focus",
+        seq: 4,
       };
       assert.ok(validateClientMsg(msg as ClientMessage), JSON.stringify(validateClientMsg.errors));
     });

@@ -48,6 +48,7 @@ import type { Transport } from "@tmuxcc/protocol";
 import type { PaneId } from "@tmuxcc/protocol";
 import type { SessionProxyRegistry, StormAlarmOptions } from "../metrics/index.js";
 import type { CommandResult } from "../parser/correlator.js";
+import type { Clock } from "../state/coalescer.js";
 /**
  * Read/event-only view of the underlying TmuxHost exposed on SessionProxy.host.
  *
@@ -103,6 +104,18 @@ export interface SessionProxyOptions {
      * Pass `{ threshold: Infinity }` to disable the alarm while keeping counters.
      */
     stormAlarm?: StormAlarmOptions;
+    /**
+     * Size-ownership policy (tc-76m8.3, S3 "Geometry among peers"). Ownership of
+     * the session size follows client activity (window-size-`latest` style);
+     * `debounceMs` is the owner-silence hold before a more-recently-active peer
+     * takes ownership (default {@link DEFAULT_SIZE_OWNERSHIP_DEBOUNCE_MS}). `clock`
+     * is injectable so tests advance the debounce deterministically. Omit to
+     * accept the defaults.
+     */
+    sizeOwnership?: {
+        readonly debounceMs?: number;
+        readonly clock?: Clock;
+    };
     /**
      * Called when the per-session pipeline catches an unhandled exception
      * (tc-2x3.4 per-session error boundary).

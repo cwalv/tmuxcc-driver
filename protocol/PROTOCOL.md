@@ -265,7 +265,8 @@ the axis so widening later is an implementation change, not a protocol change
 |---|---|---|
 | Durable client identity | (n/a — tmuxcc concept) | **Implemented** (tc-4b6k.1): `ClientIdentity` on `client.capabilities`, both wires |
 | Passive/observer attach | client flags `ignore-size`, `read-only` (`attach -r` = `read-only,ignore-size`) | **Slot typed** (tc-4b6k.1): `ClientFlags.{ignoreSize,readOnly}`. Carried by `session.attach` (tc-4b6k.4); driver behavior tc-4b6k.3 |
-| Per-client size | `refresh-client -C WxH`; `window-size latest\|largest\|smallest\|manual` | Reserved: per-client size fact on the identity; owner-drives first, arbitration modes later (tc-4b6k.3) |
+| Per-client size | `refresh-client -C WxH`; `window-size latest\|largest\|smallest\|manual` | **`latest` policy implemented** (tc-76m8.3, S3): the driver drives `refresh-client -C` for the size OWNER only; ownership follows client activity (window-size-`latest`), debounced. `smallest\|largest\|manual` arbitration still reserved. |
+| Client activity / focus | `input`; explicit foreground (`client.focus`) | **Implemented** (tc-76m8.3): `input` traffic + the `client.focus` message mark a client active; the most-recently-active client owns the session size. Mere connection is not activity. |
 | Independent active pane | client flag `active-pane` | Reserved: per-client focus fact (today focus is one model triple) |
 | Output pacing | client flag `pause-after=seconds` (control mode) | Reserved (note only; partially internalized by driver flow-control) |
 | Lifecycle behavior | client flags `no-detach-on-destroy`, `wait-exit` | Reserved (note only; revisit with detach policy) |

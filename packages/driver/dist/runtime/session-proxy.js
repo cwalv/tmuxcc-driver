@@ -48,6 +48,7 @@ import { createSessionProxyRegistry, createStormAlarm } from "../metrics/index.j
 import { hydrateTransport, hydratePane, captureText } from "./hydration.js";
 import { createVerbOriginRegistry } from "./verb-origin.js";
 import { createCloseCauseRegistry } from "./close-cause.js";
+import { createSizeOwnershipPolicy } from "./size-ownership.js";
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
@@ -303,6 +304,37 @@ export function createSessionProxy(opts) {
         dispatchSynthetic: (event) => pipeline.injectNotification(event),
         getModel: () => pipeline.getModel(),
     });
+    // 7a. Size-ownership policy (tc-76m8.3, S3 "Geometry among peers").
+    //
+    //     D4's MECHANISM is frozen: only the size OWNER's `resize.request` reaches
+    //     `refresh-client -C`; non-owners' are dropped. This POLICY decides WHO
+    //     owns — the most-recently-ACTIVE client (window-size-`latest`), debounced
+    //     so simultaneous typing across peers can't ping-pong reflows. Activity =
+    //     `input` traffic + explicit `client.focus`; mere connection is not.
+    //
+    //     `lastResizeByClient` remembers each client's latest desired viewport
+    //     (even non-owners: a non-owner's resize is dropped, but if it later wins
+    //     ownership its size must be applied so tmux reflows to it — otherwise the
+    //     newly-active window would be stuck at the previous owner's geometry). On
+    //     an ownership change we replay the new owner's last resize through the
+    //     input path (which bypasses the owner gate, being an internal re-apply).
+    const lastResizeByClient = new Map();
+    const sizeOwnership = createSizeOwnershipPolicy({
+        ...(opts.sizeOwnership?.debounceMs !== undefined
+            ? { debounceMs: opts.sizeOwnership.debounceMs }
+            : {}),
+        ...(opts.sizeOwnership?.clock !== undefined ? { clock: opts.sizeOwnership.clock } : {}),
+        onOwnerChange: (ownerKey) => {
+            if (ownerKey === null)
+                return;
+            const last = lastResizeByClient.get(ownerKey);
+            if (last === undefined)
+                return;
+            // Re-apply the new owner's viewport: D4 mechanism (refresh-client -C) via
+            // the input path, bypassing the per-transport owner gate in addClient.
+            inputPath.handleClientMessage(last);
+        },
+    });
     // 8. Route %pause / %continue notifications from the pipeline to the
     //    FlowController.  These are content-plane signals, not topology — they
     //    don't fire onTopologyNotify (and don't change the model), so we keep
@@ -534,6 +566,7 @@ export function createSessionProxy(opts) {
                 stormAlarm.stop();
                 metricsRegistry.stop();
                 pipeline.stop();
+                sizeOwnership.dispose();
                 // tc-zcqr / tc-1a9d: push session.unavailable AND close client
                 // transports.  The transport close is the wire-level signal the
                 // extension's `ServerProxySessionProxyHandle.onDisconnect` watches —
@@ -561,6 +594,16 @@ export function createSessionProxy(opts) {
                 ...(opts.preNegotiated !== undefined ? { preNegotiated: opts.preNegotiated } : {}),
                 ...(clientFlags !== undefined ? { flags: clientFlags } : {}),
             });
+            // 1a'. Size-ownership registration (tc-76m8.3). Key by the durable client
+            //      identity (D2) when present, else the connection id — both stable for
+            //      this transport's lifetime. A client is a size CANDIDATE unless it
+            //      attached with `ignore-size` or `read-only` (tmux `attach -r` parity:
+            //      those flags mean "never drive size"). The first candidate becomes
+            //      owner immediately; thereafter ownership follows activity.
+            const clientKey = server.clientIdentityFor(transport)?.id ??
+                server.connectionIdFor(transport);
+            const isSizeCandidate = clientFlags?.ignoreSize !== true && clientFlags?.readOnly !== true;
+            sizeOwnership.addClient(clientKey, isSizeCandidate);
             // 1a. Register this client's FC-1 sub-ledger (tc-0wtb). The demux fans one
             //     %output append out to EVERY attached transport, so each client owes
             //     those bytes independently until its own draining transport credits
@@ -699,16 +742,37 @@ export function createSessionProxy(opts) {
                     void attachAndHydratePane(transport, transport, makeSentinels(transport, drainingTransport), attach.paneId);
                     return;
                 }
-                // D4 (tc-4b6k.3): ignoreSize gate — non-owner clients must not drive
-                // `refresh-client -C`.  Drop resize.request silently before it reaches
-                // input-path.ts where the unconditional refresh-client call lives.
-                if (msg.type === "resize.request" && clientFlags?.ignoreSize === true) {
+                // tc-76m8.3 (S3): client.focus — explicit activity signal from the
+                // extension (this window came to the foreground). Never reaches tmux;
+                // it only marks this client most-recently-active for size ownership.
+                if (msg.type === "client.focus") {
+                    sizeOwnership.noteActivity(clientKey);
                     return;
+                }
+                // D4 mechanism (frozen) + tc-76m8.3 POLICY: the size OWNER's resize
+                // drives `refresh-client -C`; a non-owner's is dropped. WHO owns is no
+                // longer the static `ignore-size` flag — it follows activity
+                // (window-size-`latest`). Record this client's latest desired viewport
+                // regardless of ownership (a non-owner that later wins must have its
+                // size re-applied so tmux reflows to it), then gate on current owner.
+                if (msg.type === "resize.request") {
+                    lastResizeByClient.set(clientKey, msg);
+                    if (!sizeOwnership.isSizeOwner(clientKey)) {
+                        return;
+                    }
                 }
                 // D4 (tc-4b6k.3): readOnly gate — observer clients must not send input
                 // or issue mutating commands.  Drop input silently.
                 if (msg.type === "input" && clientFlags?.readOnly === true) {
                     return;
+                }
+                // tc-76m8.3 (S3): input is an activity signal — the human is typing
+                // here, so (after debounce) this client owns the session size. Noted
+                // AFTER the read-only drop: a read-only observer produces no input and
+                // is not a size candidate anyway, but keeping the order explicit means
+                // only delivered input counts. Falls through to handleClientMessage.
+                if (msg.type === "input") {
+                    sizeOwnership.noteActivity(clientKey);
                 }
                 // tc-295a.11: pane.capture — one-shot pane text snapshot.
                 // Handled here (not in input-path) because it:
@@ -882,6 +946,11 @@ export function createSessionProxy(opts) {
                 // paused pane's max. Detaching the slowest consumer can itself drop the
                 // max to/below low-water and resume the pane for the remaining clients.
                 fc.removeClient(transport);
+                // tc-76m8.3: drop this client from size-ownership. If it was the owner,
+                // ownership hands off immediately (no debounce) to the most-recently
+                // active remaining candidate, which re-applies that client's viewport.
+                sizeOwnership.removeClient(clientKey);
+                lastResizeByClient.delete(clientKey);
                 server.removeClient(transport);
             });
             return session;
@@ -907,12 +976,14 @@ export function createSessionProxy(opts) {
             stormAlarm.stop();
             metricsRegistry.stop();
             pipeline.stop();
+            sizeOwnership.dispose();
             return host.stop();
         },
         kill() {
             stormAlarm.stop();
             metricsRegistry.stop();
             pipeline.stop();
+            sizeOwnership.dispose();
             host.kill();
         },
     };

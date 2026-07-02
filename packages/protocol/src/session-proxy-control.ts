@@ -1664,6 +1664,31 @@ export interface ResyncRequestMessage extends MessageBase {
   readonly type: "resync.request";
 }
 
+/**
+ * Client tells the session-proxy that THIS client (window) became the active,
+ * foreground client — an explicit activity signal for size-ownership policy.
+ * direction: client→session-proxy
+ *
+ * S3 "Geometry among peers" / D4 policy layer (tc-76m8.3). Size ownership among
+ * peer clients follows activity, window-size-`latest` style: the most-recently
+ * ACTIVE client owns the session's size (drives `refresh-client -C`); the others
+ * ignore size. Two signals feed "active": `input` traffic (the human is typing
+ * here) and this message (the human focused this window without typing). Mere
+ * connection is NOT activity — a freshly-attached idle peer must not seize size
+ * from the client the human is using.
+ *
+ * No payload: the client identity is implicit in the transport (the same
+ * durable identity presented at handshake, D2). The extension sends this when
+ * its VS Code window gains focus. The session-proxy debounces reassignment so
+ * simultaneous typing across peers cannot ping-pong reflows.
+ *
+ * Additive, forward-compatible: a proxy that predates this type ignores it (no
+ * size-ownership behavior), exactly as it would any unknown client message.
+ */
+export interface ClientFocusMessage extends MessageBase {
+  readonly type: "client.focus";
+}
+
 // ---------------------------------------------------------------------------
 // Union types — the top-level discriminated unions
 // ---------------------------------------------------------------------------
@@ -1741,7 +1766,9 @@ export type ClientMessage =
   | SessionProxyCommandRequestMessage
   | ResyncRequestMessage
   // Per-pane attach (tc-295a.8)
-  | PaneAttachMessage;
+  | PaneAttachMessage
+  // Client-focus activity signal (tc-76m8.3, S3 size-ownership policy)
+  | ClientFocusMessage;
 
 /**
  * Any control-plane message (either direction) on the session-proxy wire.
@@ -1811,7 +1838,9 @@ export function isClientMessage(msg: ControlMessage): msg is ClientMessage {
     t === "command.request" ||
     t === "resync.request" ||
     // Per-pane attach (tc-295a.8)
-    t === "pane.attach"
+    t === "pane.attach" ||
+    // Client-focus activity signal (tc-76m8.3)
+    t === "client.focus"
   );
 }
 

@@ -1505,6 +1505,30 @@ export interface ResyncRequestMessage extends MessageBase {
     readonly type: "resync.request";
 }
 /**
+ * Client tells the session-proxy that THIS client (window) became the active,
+ * foreground client — an explicit activity signal for size-ownership policy.
+ * direction: client→session-proxy
+ *
+ * S3 "Geometry among peers" / D4 policy layer (tc-76m8.3). Size ownership among
+ * peer clients follows activity, window-size-`latest` style: the most-recently
+ * ACTIVE client owns the session's size (drives `refresh-client -C`); the others
+ * ignore size. Two signals feed "active": `input` traffic (the human is typing
+ * here) and this message (the human focused this window without typing). Mere
+ * connection is NOT activity — a freshly-attached idle peer must not seize size
+ * from the client the human is using.
+ *
+ * No payload: the client identity is implicit in the transport (the same
+ * durable identity presented at handshake, D2). The extension sends this when
+ * its VS Code window gains focus. The session-proxy debounces reassignment so
+ * simultaneous typing across peers cannot ping-pong reflows.
+ *
+ * Additive, forward-compatible: a proxy that predates this type ignores it (no
+ * size-ownership behavior), exactly as it would any unknown client message.
+ */
+export interface ClientFocusMessage extends MessageBase {
+    readonly type: "client.focus";
+}
+/**
  * All messages the session-proxy pushes to the client.
  * Narrow with `msg.type` to get the specific shape.
  *
@@ -1525,7 +1549,7 @@ export type SessionProxyMessage = SessionProxyCapabilitiesMessage | SnapshotMess
  * All messages the client sends to the session-proxy.
  * Narrow with `msg.type` to get the specific shape.
  */
-export type ClientMessage = InputMessage | ResizeRequestMessage | ClientCapabilitiesMessage | SessionProxyCommandRequestMessage | ResyncRequestMessage | PaneAttachMessage;
+export type ClientMessage = InputMessage | ResizeRequestMessage | ClientCapabilitiesMessage | SessionProxyCommandRequestMessage | ResyncRequestMessage | PaneAttachMessage | ClientFocusMessage;
 /**
  * Any control-plane message (either direction) on the session-proxy wire.
  * Useful for generic transport code that doesn't care about direction.

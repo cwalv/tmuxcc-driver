@@ -639,6 +639,14 @@ describe("protocol schema conformance", () => {
             };
             assert.ok(validateClientMsg(msg), JSON.stringify(validateClientMsg.errors));
         });
+        // tc-76m8.3 (S3): client-focus activity signal for size-ownership policy.
+        it("ClientFocusMessage", () => {
+            const msg = {
+                type: "client.focus",
+                seq: 4,
+            };
+            assert.ok(validateClientMsg(msg), JSON.stringify(validateClientMsg.errors));
+        });
         it("PaneAttachFailedMessage (pane.not-found)", () => {
             const msg = {
                 type: "pane.attach.failed",

@@ -1541,9 +1541,12 @@ describe("tc-93a: Real tmux 3.4 smoke test", { skip: !tmuxAvailable ? "tmux not 
         const roSnapshot = await waitFor(() => roMsgs.find((m) => m.type === "snapshot"), 6000, "read-only client must receive a snapshot");
         assert.ok(roSnapshot.panes.length >= 1, "snapshot must contain at least one pane");
         const sourcePane = roSnapshot.panes[0].paneId;
-        // ── AC: input is silently swallowed (no response of any kind) ─────────
-        // The gate in session-proxy.ts returns immediately; the client hears nothing.
-        const msgCountBeforeInput = roMsgs.length;
+        // ── AC: input is silently swallowed (no command.response or error) ──────
+        // The gate in session-proxy.ts returns immediately.  Other delta messages
+        // (pane.title-changed, focus.changed, etc.) may still arrive from the
+        // live tmux session — we only assert that NO `command.response` or
+        // `error` message is emitted in reaction to the input.
+        const rejectCountBefore = roMsgs.filter((m) => m.type === "command.response" || m.type === "error").length;
         roCt.sendControl({
             type: "input",
             seq: 2,
@@ -1551,8 +1554,8 @@ describe("tc-93a: Real tmux 3.4 smoke test", { skip: !tmuxAvailable ? "tmux not 
             data: "this keystroke must be swallowed",
         });
         await new Promise((r) => setTimeout(r, 300));
-        assert.equal(roMsgs.length, msgCountBeforeInput, `input to a read-only client must be silently dropped (no wire response); ` +
-            `${roMsgs.length - msgCountBeforeInput} unexpected message(s) arrived`);
+        const rejectCountAfter = roMsgs.filter((m) => m.type === "command.response" || m.type === "error").length;
+        assert.equal(rejectCountAfter, rejectCountBefore, "input to a read-only client must be silently dropped — no command.response or error may be emitted");
         // ── AC: mutating verb is rejected with typed error ────────────────────
         const roVerbCid = "ro-split-1";
         roCt.sendControl({

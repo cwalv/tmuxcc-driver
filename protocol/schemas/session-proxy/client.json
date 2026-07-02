@@ -89,6 +89,20 @@
       "additionalProperties": false
     },
 
+    "ClientFocusMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "Client tells the session-proxy that this window became the active/foreground client — an explicit activity signal for size-ownership policy (tc-76m8.3, S3 'Geometry among peers'). Size ownership among peer clients follows activity (window-size-`latest` style); this signal plus `input` traffic mark a client active, and the most-recently-active client owns the session size. No payload — the client identity is implicit in the transport (D2). Additive, forward-compatible: an older proxy ignores it. direction: client→session-proxy.",
+      "required": ["type", "seq"],
+      "properties": {
+        "type": { "const": "client.focus" },
+        "seq": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+
     "OpenWindowCommand": {
       "type": "object",
       "description": "Open a new window in the bound session. The session-proxy chooses the pane id(s); created window/pane ids arrive in the command response.",
@@ -422,7 +436,8 @@
         { "$ref": "#/$defs/ResizeRequestMessage" },
         { "$ref": "#/$defs/ResyncRequestMessage" },
         { "$ref": "#/$defs/SessionProxyCommandRequestMessage" },
-        { "$ref": "#/$defs/PaneAttachMessage" }
+        { "$ref": "#/$defs/PaneAttachMessage" },
+        { "$ref": "#/$defs/ClientFocusMessage" }
       ],
       "description": "Discriminated union of all messages the client sends to the session-proxy. Narrow on `type`."
     }

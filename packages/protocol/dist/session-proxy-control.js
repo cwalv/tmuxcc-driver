@@ -108,6 +108,8 @@ export function isClientMessage(msg) {
         t === "command.request" ||
         t === "resync.request" ||
         // Per-pane attach (tc-295a.8)
-        t === "pane.attach");
+        t === "pane.attach" ||
+        // Client-focus activity signal (tc-76m8.3)
+        t === "client.focus");
 }
 //# sourceMappingURL=session-proxy-control.js.map

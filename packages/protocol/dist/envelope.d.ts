@@ -162,7 +162,7 @@ export interface ClientFlags {
  * Valid values differ between the server-proxy wire and the session-proxy wire; this type
  * is the open union that admits both sets.
  */
-export type WireFeature = "pane-lifecycle" | "layout-updates" | "focus-events" | "input-forwarding" | "client-read-only" | "sessions-watch" | "session-create" | "session-destroy" | "session-claim" | "pane-attach" | "server-proxy-info" | "server-proxy-metrics-http" | "tmux-caps" | (string & Record<never, never>);
+export type WireFeature = "pane-lifecycle" | "layout-updates" | "focus-events" | "input-forwarding" | "client-read-only" | "size-ownership-activity" | "sessions-watch" | "session-create" | "session-destroy" | "session-claim" | "pane-attach" | "server-proxy-info" | "server-proxy-metrics-http" | "tmux-caps" | (string & Record<never, never>);
 /**
  * Checks whether a value looks like a ControlMessage at runtime (has a
  * string `type` and a numeric `seq`). Does NOT do deep field validation —
