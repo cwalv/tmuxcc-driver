@@ -538,6 +538,18 @@ export interface ClientController {
    * Fire-and-forget: the hydration sentinels (or the failure) are the response.
    */
   attachPane(paneId: PaneId): void;
+
+  /**
+   * Send a `client.focus` activity signal to the session-proxy (tc-76m8.15, S3).
+   *
+   * Called when the VS Code window gains focus.  The session-proxy treats this as
+   * an activity signal for size-ownership (window-size-latest policy, tc-76m8.3):
+   * the focused client seizes size ownership after the debounce hold expires.
+   *
+   * Fire-and-forget.  Callers MUST gate this on the session-proxy advertising
+   * `size-ownership-activity` in the negotiated features.
+   */
+  sendFocus(): void;
 }
 
 // ---------------------------------------------------------------------------

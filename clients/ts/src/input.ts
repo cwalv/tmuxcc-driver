@@ -61,7 +61,7 @@
  * # NO DOM, NO vscode, NO host API, NO Pseudoterminal
  */
 
-import type { PaneId, WindowId, InputMessage, ResizeRequestMessage, CommandRequestMessage, WireCommand, SessionProxyCommandResponseMessage, PaneAttachMessage } from "@tmuxcc/protocol";
+import type { PaneId, WindowId, InputMessage, ResizeRequestMessage, CommandRequestMessage, WireCommand, SessionProxyCommandResponseMessage, PaneAttachMessage, ClientFocusMessage } from "@tmuxcc/protocol";
 import { EDH_TRACE_ENABLED, edhTrace } from "./edh-trace.js";
 
 // ---------------------------------------------------------------------------
@@ -291,6 +291,21 @@ export interface InputApi {
    * @param paneId - The pane to capture.
    */
   sendPaneCapture(paneId: PaneId): Promise<string>;
+
+  /**
+   * Send a `client.focus` activity signal to the session-proxy (tc-76m8.15, S3).
+   *
+   * Signals that this VS Code window gained focus.  The session-proxy uses this
+   * as an activity signal for size-ownership (window-size-latest policy,
+   * tc-76m8.3): the focused client seizes size ownership after the debounce
+   * hold expires.  Not coalesced — focus-gain fires at human pace (once per
+   * window-switch) and each event maps 1-to-1 to a wire message.
+   *
+   * Callers MUST gate this on the session-proxy advertising
+   * `size-ownership-activity` in the negotiated features — no-op silently when
+   * the feature is absent (older session-proxy predating tc-76m8.3).
+   */
+  sendFocus(): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -303,7 +318,7 @@ export interface InputApi {
  * testable without a full handshake — a mock `{ send }` suffices.
  */
 export interface InputSender {
-  send(msg: InputMessage | ResizeRequestMessage | CommandRequestMessage | PaneAttachMessage): void;
+  send(msg: InputMessage | ResizeRequestMessage | CommandRequestMessage | PaneAttachMessage | ClientFocusMessage): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -578,6 +593,17 @@ export function createInputApi(
         type: "pane.attach",
         seq: nextSeq(),
         paneId,
+      };
+      sender.send(msg);
+    },
+
+    sendFocus(): void {
+      // tc-76m8.15 (S3): not coalesced — focus-gain fires at human pace
+      // (once per window-switch); each call maps 1-to-1 to a wire message.
+      // Callers gate on size-ownership-activity feature before calling.
+      const msg: ClientFocusMessage = {
+        type: "client.focus",
+        seq: nextSeq(),
       };
       sender.send(msg);
     },

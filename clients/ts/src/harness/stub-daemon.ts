@@ -136,6 +136,16 @@ export interface StubSessionProxyOptions {
    * to exercise replay.
    */
   initialModel?: SessionModel;
+
+  /**
+   * Features the stub session-proxy advertises during the handshake
+   * (tc-76m8.15). Defaults to `[]` (no optional features) to preserve existing
+   * test behaviour — the negotiated feature set is the intersection of these and
+   * the client's advertised features.
+   *
+   * Pass `["size-ownership-activity"]` to exercise the `client.focus` feature gate.
+   */
+  serverFeatures?: string[];
 }
 
 /**
@@ -153,7 +163,7 @@ export function createStubSessionProxyTransport(
     void (async () => {
       await runSessionProxyHandshake(sessionProxyTransport, {
         protocolVersion: WIRE_PROTOCOL_VERSION,
-        features: [] as string[],
+        features: opts.serverFeatures ?? [],
       });
       const model = opts.initialModel ?? emptyModel();
       // Defer the snapshot by one microtask so the client's post-handshake

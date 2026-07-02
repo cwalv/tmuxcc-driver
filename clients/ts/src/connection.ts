@@ -268,6 +268,10 @@ export class SessionProxyConnection {
       "layout-updates",
       "focus-events",
       "input-forwarding",
+      // tc-76m8.15 (S3): advertise activity-based size-ownership so the
+      // session-proxy can emit `client.focus` round-trips and coalesce
+      // ownership by last-focused client.
+      "size-ownership-activity",
     ];
     this.#identity = opts?.identity;
     // NOTE: we do NOT install onClose here.  runClientHandshake owns the
