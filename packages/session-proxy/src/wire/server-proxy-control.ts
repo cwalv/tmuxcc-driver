@@ -35,7 +35,7 @@
  * file layout matches the target shape described in SCHEMA.md.
  */
 
-import type { MessageBase, Capabilities } from "./envelope.js";
+import type { MessageBase, Capabilities, ClientIdentity } from "./envelope.js";
 import type { PaneId, SessionId } from "./ids.js";
 
 // ---------------------------------------------------------------------------
@@ -677,6 +677,13 @@ export interface ServerProxyInfoPayload {
    * `server-proxy.info` request.
    */
   readonly connectedClientCount: number;
+  /**
+   * Connected server-proxy-wire clients and the durable identity each presented
+   * at handshake (D2, tc-4b6k.1). One entry per live control connection;
+   * `identity` is absent for a connection that advertised none. Additive
+   * optional field — carried for observability only, no behavior depends on it.
+   */
+  readonly clients?: ReadonlyArray<{ readonly identity?: ClientIdentity }>;
   /**
    * Absolute path of the server-proxy's append-only log file
    * (`<runtime>/<socketName>/server-proxy.log`), or `null` when the server-proxy was

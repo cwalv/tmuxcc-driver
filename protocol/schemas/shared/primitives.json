@@ -94,6 +94,40 @@
           "description": "Feature flags this endpoint supports. Both sides advertise; the intersection is the effective feature set."
         }
       }
+    },
+
+    "ClientIdentity": {
+      "type": "object",
+      "description": "Durable identity a client presents at handshake (D2, tc-4b6k.1). The enabler for every per-client fact (binding intent D3, per-client size D4): today the wire has no notion of WHICH client is connected, so a per-client fact has no axis to hang on. The identity is presented on `client.capabilities` (both wires) and is otherwise inert in this protocol revision — carried and logged only, no behavior change. `id` is the load-bearing key downstream beads (D3/D4) use to store/serve per-(object, client) facts; the driver treats it as opaque.",
+      "required": ["id"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Durable client identity string, STABLE ACROSS the client's own reloads (a VS Code window reload presents the same id). Opaque to the driver. The VS Code client derives it from the workspace (extension helpers, §7.2 workspace-derived identity), but the derivation is a client-side detail: the wire deliberately does not encode host vocabulary (wire invariant: no renderer/host types). Two distinct durable clients MUST present distinct ids; the same durable client MUST present the same id across reconnects.",
+          "examples": ["ws-3a7f92b1", "tmuxcc"]
+        },
+        "label": {
+          "type": "string",
+          "description": "Optional human-readable label for logs and diagnostics (e.g. a workspace basename). NEVER load-bearing — the driver uses `id` for all per-client keying; `label` is display-only and may be absent, empty, or non-unique."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "ClientFlags": {
+      "type": "object",
+      "description": "Per-client tmux-parity attach flags (D4/D8, decisions §2.1). RESERVED-NOT-IMPLEMENTED in tc-4b6k.1: this $def defines the protocol SLOTS the two minimum flags will occupy on `session.attach` — the attach wire step is created by tc-4b6k.4, and the driver behavior (owner-drives-size / observer partition) is tc-4b6k.3. Nothing carries this object on the wire yet; it exists so later beads land on a defined shape, and conformance validates the shape directly. The vocabulary mirrors tmux(1) client flags; the wider parity map (per-client size, active-pane, pause-after, no-detach-on-destroy, session groups) is enumerated in PROTOCOL.md as reserved prose, not typed here.",
+      "properties": {
+        "ignoreSize": {
+          "type": "boolean",
+          "description": "tmux-parity `ignore-size` flag: this client does not contribute its viewport to the session's size arbitration (only the owning client drives `refresh-client -C`). Reserved slot; the driver does not act on it in tc-4b6k.1 (owner-only size authority is tc-4b6k.3)."
+        },
+        "readOnly": {
+          "type": "boolean",
+          "description": "tmux-parity `read-only` flag: the client attaches as an observer. CAVEAT (decisions §2.1, verified in tmux source): over control mode, `read-only` does NOT bind the `-CC` command channel — its authority semantics are DRIVER-ENFORCED, never delegated to tmux's flag. The protocol only CARRIES the flag; the driver owns what it means. Reserved slot; no behavior in tc-4b6k.1."
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

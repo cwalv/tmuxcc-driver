@@ -1039,6 +1039,9 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
                 stormWindowTotal: stormAlarm.windowTotal(),
                 stormWindowBreakdown: breakdownObj,
                 stormThreshold: stormAlarm.threshold,
+                // D2 (tc-4b6k.1): the durable identity each connected client
+                // presented at handshake. Observability only.
+                clients: server.connectedClientIdentities(),
               },
             });
           });

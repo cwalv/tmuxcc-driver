@@ -26,7 +26,7 @@
     {
       "direction": "client→session-proxy",
       "step": 2,
-      "label": "client responds with its own capabilities",
+      "label": "client responds with its own capabilities + durable identity (D2, tc-4b6k.1)",
       "message": {
         "type": "client.capabilities",
         "seq": 1,
@@ -38,6 +38,10 @@
             "focus-events",
             "input-forwarding"
           ]
+        },
+        "identity": {
+          "id": "ws-3a7f92b1",
+          "label": "myproject"
         }
       }
     },

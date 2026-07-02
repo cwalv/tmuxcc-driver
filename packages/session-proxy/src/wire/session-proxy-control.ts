@@ -53,7 +53,7 @@
 
 import type { PaneId, WindowId, ConnectionId } from "./ids.js";
 import type { WindowLayout } from "./layout.js";
-import type { MessageBase, Capabilities } from "./envelope.js";
+import type { MessageBase, Capabilities, ClientIdentity } from "./envelope.js";
 
 // ---------------------------------------------------------------------------
 // Causality tag for creation deltas (tc-ozk.2)
@@ -1146,6 +1146,13 @@ export interface SessionProxyInfoPayload {
    * alarm trips). Included for context when interpreting `stormWindowTotal`.
    */
   readonly stormThreshold: number;
+  /**
+   * Connected session-proxy-wire clients and the durable identity each presented
+   * at handshake (D2, tc-4b6k.1). One entry per live client connection to this
+   * bound session; `identity` is absent for a connection that did not advertise
+   * one. Additive optional field — carried for observability only.
+   */
+  readonly clients?: ReadonlyArray<{ readonly identity?: ClientIdentity }>;
 }
 
 /**
@@ -1615,6 +1622,14 @@ export interface ResizeRequestMessage extends MessageBase {
 export interface ClientCapabilitiesMessage extends MessageBase {
   readonly type: "client.capabilities";
   readonly capabilities: Capabilities;
+  /**
+   * Durable client identity presented at handshake (D2, tc-4b6k.1). Sibling of
+   * `capabilities` (NOT inside the shared {@link Capabilities} object, which the
+   * server also sends). Additive optional field — a client that omits it
+   * handshakes exactly as before; both proxies capture, log, and expose it in
+   * their `*.info` payloads. Carried and logged only — no behavior change yet.
+   */
+  readonly identity?: ClientIdentity;
 }
 
 /**

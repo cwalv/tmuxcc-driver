@@ -19,7 +19,7 @@
  * # NO DOM, NO vscode, NO host API, NO Pseudoterminal
  */
 
-import type { Transport, NegotiatedSession, PaneId, WireCommand } from "@tmuxcc/session-proxy";
+import type { Transport, NegotiatedSession, PaneId, WireCommand, ClientIdentity } from "@tmuxcc/session-proxy";
 import { SessionProxyConnection } from "./connection.js";
 import { Mirror } from "./mirror.js";
 import { PaneStreamConsumer, connectPaneStream } from "./pane-stream.js";
@@ -62,6 +62,13 @@ export interface ConnectClientOptions {
    * @see InputApiOptions
    */
   input?: InputApiOptions;
+  /**
+   * Durable client identity to present at handshake (D2, tc-4b6k.1). Forwarded
+   * to the underlying {@link SessionProxyConnection} so it is advertised on
+   * `client.capabilities` for the session-proxy wire. Omit for an anonymous
+   * connection. Carried and logged only — no behavior depends on it yet.
+   */
+  identity?: ClientIdentity;
 }
 
 // ---------------------------------------------------------------------------
@@ -167,7 +174,10 @@ export async function connectClient(
 ): Promise<ClientHandle> {
   // ── Construct modules ────────────────────────────────────────────────────────
 
-  const connection = new SessionProxyConnection(transport);
+  const connection = new SessionProxyConnection(
+    transport,
+    opts.identity !== undefined ? { identity: opts.identity } : undefined,
+  );
   const mirror = new Mirror();
   const paneConsumer = new PaneStreamConsumer();
   const inputApi = createInputApi(connection, opts.input);

@@ -64,6 +64,8 @@ import type {
   PaneAttachFailedMessage,
   PaneHydrationBeginMessage,
   PaneHydrationEndMessage,
+  ClientIdentity,
+  ClientFlags,
 } from "./index.js";
 
 // ---------------------------------------------------------------------------
@@ -769,6 +771,30 @@ describe("protocol schema conformance", () => {
       assert.ok(validateClientMsg(msg as ClientMessage), JSON.stringify(validateClientMsg.errors));
     });
 
+    // tc-4b6k.1 (D2): durable client identity on the handshake message.
+    it("ClientCapabilitiesMessage (with durable identity) — tc-4b6k.1", () => {
+      const msg: ClientCapabilitiesMessage = {
+        type: "client.capabilities",
+        seq: 1,
+        capabilities: {
+          protocolVersion: WIRE_PROTOCOL_VERSION,
+          features: ["pane-lifecycle", "input-forwarding"],
+        },
+        identity: { id: "ws-3a7f92b1", label: "myproject" },
+      };
+      assert.ok(validateClientMsg(msg as ClientMessage), JSON.stringify(validateClientMsg.errors));
+    });
+
+    it("ClientCapabilitiesMessage (identity id only, no label) — tc-4b6k.1", () => {
+      const msg: ClientCapabilitiesMessage = {
+        type: "client.capabilities",
+        seq: 1,
+        capabilities: { protocolVersion: WIRE_PROTOCOL_VERSION, features: [] },
+        identity: { id: "tmuxcc" },
+      };
+      assert.ok(validateClientMsg(msg as ClientMessage), JSON.stringify(validateClientMsg.errors));
+    });
+
     it("ResyncRequestMessage", () => {
       const msg: ResyncRequestMessage = {
         type: "resync.request",
@@ -964,6 +990,75 @@ describe("protocol schema conformance", () => {
         result: { ok: false, code: "pane.not-found", message: "Pane p0 is not present in the session model." },
       };
       assert.ok(validateSessionProxyMsg(msg as SessionProxyMessage), JSON.stringify(validateSessionProxyMsg.errors));
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 6. Client identity + client flags $defs — tc-4b6k.1 (D2 / D8)
+  // -------------------------------------------------------------------------
+
+  describe("client identity + flags $defs (tc-4b6k.1)", () => {
+    let validateIdentity: ValidateFunction;
+    let validateFlags: ValidateFunction;
+
+    before(() => {
+      validateIdentity = ajv.compile({
+        $ref: "tmuxcc:shared/primitives#/$defs/ClientIdentity",
+      });
+      validateFlags = ajv.compile({
+        $ref: "tmuxcc:shared/primitives#/$defs/ClientFlags",
+      });
+    });
+
+    it("accepts ClientIdentity with id + label", () => {
+      const id: ClientIdentity = { id: "ws-3a7f92b1", label: "myproject" };
+      assert.ok(validateIdentity(id), JSON.stringify(validateIdentity.errors));
+    });
+
+    it("accepts ClientIdentity with id only", () => {
+      const id: ClientIdentity = { id: "tmuxcc" };
+      assert.ok(validateIdentity(id), JSON.stringify(validateIdentity.errors));
+    });
+
+    it("rejects ClientIdentity missing id", () => {
+      assert.strictEqual(validateIdentity({ label: "no-id" }), false);
+    });
+
+    it("rejects ClientIdentity with an extra property", () => {
+      assert.strictEqual(
+        validateIdentity({ id: "x", workspaceUri: "file:///leak" }),
+        false,
+        "additionalProperties:false must reject host vocabulary on the wire",
+      );
+    });
+
+    it("rejects ClientIdentity with non-string id", () => {
+      assert.strictEqual(validateIdentity({ id: 42 }), false);
+    });
+
+    // ClientFlags is the reserved-not-implemented slot for session.attach
+    // (tc-4b6k.4). Nothing carries it on the wire yet, so we validate the $def
+    // shape directly — this is the conformance material for the two flags.
+    it("accepts ClientFlags {} (all reserved flags absent)", () => {
+      const flags: ClientFlags = {};
+      assert.ok(validateFlags(flags), JSON.stringify(validateFlags.errors));
+    });
+
+    it("accepts ClientFlags with ignoreSize + readOnly", () => {
+      const flags: ClientFlags = { ignoreSize: true, readOnly: false };
+      assert.ok(validateFlags(flags), JSON.stringify(validateFlags.errors));
+    });
+
+    it("rejects ClientFlags with a non-boolean flag", () => {
+      assert.strictEqual(validateFlags({ ignoreSize: "yes" }), false);
+    });
+
+    it("rejects ClientFlags with an unknown flag", () => {
+      assert.strictEqual(
+        validateFlags({ activePane: true }),
+        false,
+        "unknown parity-map flags stay reserved prose (§12), not typed slots yet",
+      );
     });
   });
 });

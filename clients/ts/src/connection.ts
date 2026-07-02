@@ -81,6 +81,7 @@ import type {
   ClientMessage,
   NegotiatedSession,
   WireFeature,
+  ClientIdentity,
   PaneId,
 } from "@tmuxcc/session-proxy";
 
@@ -111,6 +112,13 @@ export type ConnectionState = "connecting" | "ready" | "failed" | "closed";
  */
 export interface SessionProxyConnectionOptions {
   features?: WireFeature[];
+  /**
+   * Durable client identity to present at handshake (D2, tc-4b6k.1). When set,
+   * it is advertised on `client.capabilities` and the session-proxy captures +
+   * logs it. Omit for an anonymous connection (older behavior). Carried and
+   * logged only — no behavior depends on it yet.
+   */
+  identity?: ClientIdentity;
 }
 
 /**
@@ -165,6 +173,10 @@ export class SessionProxyConnection {
 
   readonly #features: readonly WireFeature[];
 
+  // Durable client identity to present at handshake (D2, tc-4b6k.1); undefined
+  // → anonymous connection.
+  readonly #identity: ClientIdentity | undefined;
+
   // ── Lifecycle state ───────────────────────────────────────────────────────
 
   #state: ConnectionState = "connecting";
@@ -214,6 +226,7 @@ export class SessionProxyConnection {
       "focus-events",
       "input-forwarding",
     ];
+    this.#identity = opts?.identity;
     // NOTE: we do NOT install onClose here.  runClientHandshake owns the
     // transport's onClose handler during the handshake and replaces it with a
     // no-op when it settles (see handshake.ts settle()).  We re-install our
@@ -276,7 +289,14 @@ export class SessionProxyConnection {
       // runClientHandshake owns the transport.onControl + transport.onClose
       // handlers while the handshake is in flight.  It replaces them with
       // no-ops when it settles (see handshake.ts settle()).
-      session = await runClientHandshake(this.#transport, clientCapabilities);
+      // D2 (tc-4b6k.1): advertise the durable client identity, if the caller
+      // supplied one, on the session-proxy wire.
+      session = await runClientHandshake(
+        this.#transport,
+        clientCapabilities,
+        "session-proxy.capabilities",
+        this.#identity,
+      );
     } catch (err) {
       // Handshake failed — transition to "failed" and propagate.
       this.#transition("failed");

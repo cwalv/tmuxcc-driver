@@ -37,8 +37,9 @@ export type {
 
 // Shared envelope types — protocol version, capabilities, base types
 export { WIRE_PROTOCOL_VERSION } from "./envelope.js";
-export type { Capabilities, WireFeature, MessageBase } from "./envelope.js";
-export { isControlMessage } from "./envelope.js";
+export type { Capabilities, WireFeature, MessageBase, ClientIdentity, ClientFlags } from "./envelope.js";
+// D2 (tc-4b6k.1): durable client identity + log formatter.
+export { isControlMessage, describeClientIdentity } from "./envelope.js";
 
 // ServerProxy wire control messages (placeholder — not yet wired, Stage 2)
 export type {

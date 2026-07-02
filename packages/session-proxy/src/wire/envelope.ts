@@ -91,6 +91,84 @@ export interface Capabilities {
 }
 
 /**
+ * Durable client identity presented at handshake (D2, tc-4b6k.1).
+ * direction: client→proxy (carried on `client.capabilities`, both wires).
+ *
+ * The enabler for every per-client fact (binding intent D3, per-client size D4):
+ * before D2 the wire had no notion of WHICH client is connected, so a per-client
+ * fact had no axis to hang on. In this revision the identity is CARRIED AND
+ * LOGGED ONLY — no behavior depends on it yet. Both proxies capture it, log it
+ * on connect, and surface connected identities in their `*.info` payloads.
+ *
+ * NOTE: this is a sibling of {@link Capabilities} on the client.capabilities
+ * MESSAGE, not a field inside `Capabilities` — the server also advertises
+ * `Capabilities` and has no identity.
+ */
+export interface ClientIdentity {
+  /**
+   * Durable client identity string, STABLE ACROSS the client's own reloads (a
+   * VS Code window reload presents the same id). OPAQUE to the driver — it is
+   * the key later beads (D3/D4) use to store/serve per-(object, client) facts.
+   * The VS Code client derives it from the workspace, but the wire does not
+   * encode host vocabulary (invariant): the derivation is a client-side detail.
+   * Distinct durable clients MUST present distinct ids; the same durable client
+   * MUST present the same id across reconnects.
+   */
+  readonly id: string;
+  /**
+   * Optional human-readable label for logs/diagnostics (e.g. a workspace
+   * basename). NEVER load-bearing — the driver keys on `id`; `label` is
+   * display-only and may be absent, empty, or non-unique.
+   */
+  readonly label?: string;
+}
+
+/**
+ * Format a {@link ClientIdentity} for a one-line log (D2, tc-4b6k.1).
+ *
+ * Both proxies log the connecting client's identity on connect ("carried and
+ * logged only"). Returns `"<anonymous>"` when no identity was advertised, and
+ * `id` (optionally with a `label` suffix) otherwise.
+ */
+export function describeClientIdentity(identity: ClientIdentity | undefined): string {
+  if (identity === undefined) return "<anonymous>";
+  return identity.label !== undefined && identity.label.length > 0
+    ? `${identity.id} (${identity.label})`
+    : identity.id;
+}
+
+/**
+ * Per-client tmux-parity attach flags (D4/D8, decisions §2.1).
+ *
+ * RESERVED-NOT-IMPLEMENTED in tc-4b6k.1: this type defines the protocol SLOTS
+ * the two minimum flags will occupy on the future `session.attach` step (the
+ * attach wire step is tc-4b6k.4; the driver behavior — owner-drives-size /
+ * observer partition — is tc-4b6k.3). Nothing carries this on the wire yet; it
+ * exists so later beads land on a defined shape.
+ *
+ * The vocabulary mirrors tmux(1) client flags. The wider parity map (per-client
+ * size, active-pane, pause-after, no-detach-on-destroy, session groups) is
+ * reserved prose in PROTOCOL.md §12, not typed here.
+ */
+export interface ClientFlags {
+  /**
+   * tmux-parity `ignore-size`: this client does not contribute its viewport to
+   * the session's size arbitration (only the owning client drives
+   * `refresh-client -C`). Reserved; the driver does not act on it yet
+   * (owner-only size authority is tc-4b6k.3).
+   */
+  readonly ignoreSize?: boolean;
+  /**
+   * tmux-parity `read-only`: the client attaches as an observer. CAVEAT
+   * (decisions §2.1, verified in tmux source): over control mode, `read-only`
+   * does NOT bind the `-CC` command channel — its authority semantics are
+   * DRIVER-ENFORCED, never delegated to tmux's flag. The protocol only CARRIES
+   * the flag; the driver owns what it means. Reserved; no behavior yet.
+   */
+  readonly readOnly?: boolean;
+}
+
+/**
  * Named feature flags. Extensible: unknown strings are ignored by older
  * implementations (forward-compatible).
  *

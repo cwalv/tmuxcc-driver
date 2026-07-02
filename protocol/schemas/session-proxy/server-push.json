@@ -572,6 +572,17 @@
               "type": "string",
               "description": "Prometheus text exposition of all per-session-proxy counters and histograms."
             },
+            "clients": {
+              "type": "array",
+              "description": "Connected session-proxy-wire clients and the durable identity each presented at handshake (tc-4b6k.1 / D2). One entry per live client connection to this bound session. `identity` is absent for a connection that did not advertise one. Additive optional field — carried for observability; no behavior depends on it in this revision.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "identity": { "$ref": "tmuxcc:shared/primitives#/$defs/ClientIdentity" }
+                },
+                "additionalProperties": false
+              }
+            },
             "stormWindowTotal": {
               "type": "integer",
               "minimum": 0,

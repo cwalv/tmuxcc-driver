@@ -79,6 +79,7 @@
 import { WIRE_PROTOCOL_VERSION } from "./envelope.js";
 import type {
   Capabilities,
+  ClientIdentity,
   WireFeature,
   MessageBase,
 } from "./envelope.js";
@@ -100,6 +101,15 @@ export interface NegotiatedSession {
    * this set are guaranteed to be understood by both endpoints.
    */
   readonly features: readonly WireFeature[];
+  /**
+   * The durable identity the CLIENT advertised on `client.capabilities`
+   * (D2, tc-4b6k.1). Symmetric: both sides know it after the handshake — on the
+   * client side it is the identity it advertised; on the server side it is the
+   * identity it received (and stores + logs). Absent when the client did not
+   * advertise one (older client, or a diagnostic connection). Carried and
+   * logged only in this revision — no behavior depends on it yet.
+   */
+  readonly clientIdentity?: ClientIdentity;
 }
 
 /** Error codes produced by the handshake. */
@@ -220,13 +230,23 @@ export function runServerHandshake(
         );
         return;
       }
-      const clientMsg = msg as MessageBase & { capabilities: Capabilities };
+      const clientMsg = msg as MessageBase & {
+        capabilities: Capabilities;
+        identity?: ClientIdentity;
+      };
       try {
         const session = negotiateCapabilities(
           serverCapabilities,
           clientMsg.capabilities,
         );
-        settle(() => resolve(session));
+        // D2 (tc-4b6k.1): surface the client's advertised identity to the caller
+        // (the proxy stores + logs it). Sibling of `capabilities` on the
+        // message, not part of the negotiated feature/version math.
+        const withIdentity: NegotiatedSession =
+          clientMsg.identity !== undefined
+            ? { ...session, clientIdentity: clientMsg.identity }
+            : session;
+        settle(() => resolve(withIdentity));
       } catch (err) {
         settle(() => reject(err));
       }
@@ -289,6 +309,7 @@ export function runClientHandshake(
   transport: Transport,
   clientCapabilities: Capabilities,
   serverCapabilitiesType: string = "session-proxy.capabilities",
+  clientIdentity?: ClientIdentity,
 ): Promise<NegotiatedSession> {
   return new Promise<NegotiatedSession>((resolve, reject) => {
     let settled = false;
@@ -320,11 +341,17 @@ export function runClientHandshake(
       }
       const serverMsg = msg as MessageBase & { capabilities: Capabilities };
 
-      // (2) Respond with client capabilities
-      const clientMsg: MessageBase & { capabilities: Capabilities } = {
+      // (2) Respond with client capabilities (+ durable identity, D2 tc-4b6k.1).
+      // `identity` is a sibling of `capabilities` on the message, omitted when
+      // the caller did not supply one (additive — older proxies ignore it).
+      const clientMsg: MessageBase & {
+        capabilities: Capabilities;
+        identity?: ClientIdentity;
+      } = {
         type: "client.capabilities",
         seq: HANDSHAKE_SEQ,
         capabilities: clientCapabilities,
+        ...(clientIdentity !== undefined ? { identity: clientIdentity } : {}),
       };
       transport.sendControl(clientMsg as Parameters<typeof transport.sendControl>[0]);
 
@@ -334,7 +361,13 @@ export function runClientHandshake(
           clientCapabilities,
           serverMsg.capabilities,
         );
-        settle(() => resolve(session));
+        // Echo our own advertised identity into the result so both sides of the
+        // handshake agree on the client's identity (symmetric NegotiatedSession).
+        const withIdentity: NegotiatedSession =
+          clientIdentity !== undefined
+            ? { ...session, clientIdentity }
+            : session;
+        settle(() => resolve(withIdentity));
       } catch (err) {
         settle(() => reject(err));
       }

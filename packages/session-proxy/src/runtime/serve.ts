@@ -73,8 +73,8 @@ import {
   runSessionProxyHandshake,
   type NegotiatedSession,
 } from "../wire/handshake.js";
-import { WIRE_PROTOCOL_VERSION } from "../wire/envelope.js";
-import type { Capabilities } from "../wire/envelope.js";
+import { WIRE_PROTOCOL_VERSION, describeClientIdentity } from "../wire/envelope.js";
+import type { Capabilities, ClientIdentity } from "../wire/envelope.js";
 import type {
   SessionProxyMessage,
   ControlMessage,
@@ -220,6 +220,15 @@ export interface ControlServer {
    * creation with the connection that issued the verb.
    */
   connectionIdFor(transport: Transport): ConnectionId | undefined;
+
+  /**
+   * The durable identity each currently-connected client presented at handshake
+   * (D2, tc-4b6k.1). One entry per live client, in connection order; `identity`
+   * is `undefined` for a client that advertised none. Consumed by the
+   * `session-proxy.info` handler to surface `info.clients[]`. Carried for
+   * observability only — no behavior depends on it.
+   */
+  connectedClientIdentities(): ReadonlyArray<{ readonly identity?: ClientIdentity }>;
 
   /**
    * Push an unsolicited `ErrorMessage` to ALL currently connected clients.
@@ -385,6 +394,13 @@ interface ClientState {
    */
   metricsClientLabel: string;
   /**
+   * Durable client identity this connection presented on `client.capabilities`
+   * (D2, tc-4b6k.1), or `undefined` if it advertised none. Captured from the
+   * handshake result; logged on connect and surfaced in the `session-proxy.info`
+   * payload. Carried and logged only — no behavior depends on it yet.
+   */
+  identity: ClientIdentity | undefined;
+  /**
    * tc-3si.5: wall-clock timestamp (ms, from `Date.now()`) of the most
    * recent `resync.request` from this client, or `null` if none has fired
    * yet. Used to attribute the next request as either a fresh `gap` (no
@@ -524,9 +540,20 @@ class ControlServerImpl implements ControlServer {
       connectionId: this._mintConnectionId(),
       unsubModelChange: null,
       metricsClientLabel: this._mintClientLabel(),
+      // D2 (tc-4b6k.1): capture the durable identity the client advertised on
+      // client.capabilities (undefined if none). Carried + logged only.
+      identity: session.clientIdentity,
       lastResyncAtMs: null,
     };
     this._clients.set(transport, state);
+
+    // D2 (tc-4b6k.1): log the connecting client's durable identity. No behavior
+    // depends on it yet — this is the "carried and logged only" surface, and
+    // the connected-identity list is also exposed via session-proxy.info.
+    process.stderr.write(
+      `session-proxy: client connected (${state.connectionId}) identity=` +
+        `${describeClientIdentity(session.clientIdentity)}\n`,
+    );
 
     // Subscribe to model changes BEFORE sending the snapshot so that any model
     // changes that fire during the microtask gap below are not silently dropped.
@@ -649,6 +676,14 @@ class ControlServerImpl implements ControlServer {
 
   connectionIdFor(transport: Transport): ConnectionId | undefined {
     return this._clients.get(transport)?.connectionId;
+  }
+
+  connectedClientIdentities(): ReadonlyArray<{ readonly identity?: ClientIdentity }> {
+    const out: Array<{ identity?: ClientIdentity }> = [];
+    for (const state of this._clients.values()) {
+      out.push(state.identity !== undefined ? { identity: state.identity } : {});
+    }
+    return out;
   }
 
   broadcastError(error: Omit<ErrorMessage, "seq">): void {

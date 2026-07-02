@@ -50,12 +50,14 @@ import {
   runServerHandshake,
   WIRE_PROTOCOL_VERSION,
   sessionId as mintSessionId,
+  describeClientIdentity,
   phaseLog,
   phaseNow,
 } from "@tmuxcc/session-proxy";
 import type {
   Transport,
   Capabilities,
+  ClientIdentity,
   ServerProxyCapabilitiesMessage,
   ServerProxySnapshotMessage,
   ServerProxySessionInfo,
@@ -366,6 +368,13 @@ interface ClientState {
   transport: Transport;
   /** Next outbound seq number for this client, starting at 1 */
   nextSeq: number;
+  /**
+   * Durable client identity this connection presented on `client.capabilities`
+   * (D2, tc-4b6k.1), or `undefined` if it advertised none. Captured from the
+   * handshake result; logged on connect and surfaced in the `server-proxy.info`
+   * payload (`info.clients[]`). Carried and logged only — no behavior yet.
+   */
+  identity: ClientIdentity | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -1374,12 +1383,19 @@ class ServerProxyImpl implements ServerProxyHandle {
       try { transport.close(); } catch { /* ignore */ }
       return;
     }
-    void session; // features not yet used in v3 alpha
+    // features not yet used in v3 alpha; the client's durable identity (D2,
+    // tc-4b6k.1) IS captured — stored on the connection, logged, and surfaced
+    // in server-proxy.info. Carried and logged only; no behavior depends on it.
 
     // nextSeq starts at 2: the handshake itself sent seq=1 (server-proxy.capabilities).
     // The snapshot is the second server-side message and therefore seq=2.
-    const state: ClientState = { transport, nextSeq: 2 };
+    const state: ClientState = { transport, nextSeq: 2, identity: session.clientIdentity };
     this._clients.set(transport, state);
+
+    process.stderr.write(
+      `serverProxy: client connected identity=` +
+        `${describeClientIdentity(session.clientIdentity)}\n`,
+    );
 
     transport.onClose(() => {
       this._clients.delete(transport);
@@ -1483,6 +1499,11 @@ class ServerProxyImpl implements ServerProxyHandle {
       tmuxServerPid: getTmuxServerPid(this._opts.socketName),
       adoptedExistingServer: this._adoptedExistingServer,
       connectedClientCount: this._ipcClientCount,
+      // D2 (tc-4b6k.1): the durable identity each connected wire client
+      // presented at handshake. Observability only — no behavior depends on it.
+      clients: Array.from(this._clients.values(), (c) =>
+        c.identity !== undefined ? { identity: c.identity } : {},
+      ),
       logPath: this._opts.logPath ?? null,
       sessions,
       // tc-x6l: metricsText deferred to async; populated in _buildInfoAsync.

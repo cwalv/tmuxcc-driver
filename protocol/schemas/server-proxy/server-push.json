@@ -183,6 +183,17 @@
             },
             "adoptedExistingServer": { "type": "boolean" },
             "connectedClientCount": { "type": "integer", "minimum": 0 },
+            "clients": {
+              "type": "array",
+              "description": "Connected server-proxy-wire clients and the durable identity each presented at handshake (tc-4b6k.1 / D2). One entry per live control connection. `identity` is absent for a connection that did not advertise one (an older client, or a short-lived diagnostic connection). Additive optional field — carried for observability; no behavior depends on it in this revision.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "identity": { "$ref": "tmuxcc:shared/primitives#/$defs/ClientIdentity" }
+                },
+                "additionalProperties": false
+              }
+            },
             "logPath": {
               "oneOf": [
                 { "type": "string" },

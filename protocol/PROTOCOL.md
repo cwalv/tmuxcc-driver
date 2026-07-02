@@ -89,6 +89,32 @@ ServerProxy                           Client
   |── sessions.snapshot ─────────────▶|  (session list)
 ```
 
+### 3.3 Client identity (D2)
+
+The `client.capabilities` message carries an **optional durable client
+identity** (`identity`, a `ClientIdentity`) on **both wires**. This is the
+enabler for every *per-client* fact (binding intent, per-client size — see
+§12): before D2 the wire had no notion of *which* client was connected, so a
+per-client fact had no axis to hang on.
+
+- `identity.id` — a durable string, **stable across the client's own reloads**
+  (a VS Code window reload presents the same id). It is **opaque to the
+  driver** and is the key later beads use to store/serve per-`(object, client)`
+  facts. The VS Code client derives it from the workspace, but the wire does
+  not encode host vocabulary (invariant §8.2): the derivation is a client-side
+  detail.
+- `identity.label` — optional, human-readable, **display-only** (never keyed on).
+
+`identity` is a sibling of `capabilities`, not a field inside the shared
+`Capabilities` object (the server also advertises `Capabilities` and has no
+identity). It is **additive and optional**: a client that omits it handshakes
+exactly as before, and an older proxy ignores it.
+
+In this protocol revision identity is **carried and logged only** — no behavior
+depends on it yet. Both proxies capture the connected client's identity, log it
+on connect, and surface connected identities in their `server-proxy.info` /
+`session-proxy.info` payloads (`info.clients[].identity`).
+
 ---
 
 ## 4. Sequencing and sync points
@@ -167,7 +193,7 @@ protocol/
   schemas/
     index.json                      — schema registry, protocol version
     shared/
-      primitives.json               — PaneId, WindowId, SessionId, MessageBase, Capabilities
+      primitives.json               — PaneId, WindowId, SessionId, MessageBase, Capabilities, ClientIdentity, ClientFlags
       layout.json                   — Rect, LayoutNode tree, WindowLayout
     session-proxy/
       server-push.json              — session-proxy→client messages (SessionProxyMessage union)
@@ -202,3 +228,38 @@ This package is structured for future beads to amend without breaking existing c
 - **New command kind** (W2.1): add a `$def` entry to `session-proxy/client.json` `$defs/WireCommand` `oneOf`.
 - **Causality tags** (W3.1): add field to `shared/primitives.json` `$defs/MessageBase`.
 - **SessionEntry enrichment** (W1.3): amend `ServerProxySessionInfo` in `server-proxy/server-push.json`.
+- **Per-client attach flags** (tc-4b6k.3/tc-4b6k.4): the `ClientFlags` `$def` in
+  `shared/primitives.json` is the reserved slot. When `session.attach` lands
+  (tc-4b6k.4) it references `ClientFlags`; the driver behavior lands in
+  tc-4b6k.3. Widen the typed set (from `ignoreSize`/`readOnly`) as the parity
+  map in §12 is implemented.
+
+---
+
+## 12. The per-client axis — parity map (D8, reserved)
+
+The driver deliberately narrows tmux's client axis today (one `-CC` control
+client stands in for N frontend clients), but the *protocol* must still carry
+the axis so widening later is an implementation change, not a protocol change
+(decisions `ownership-seams-decisions.md` §2.1). tc-4b6k.1 lands the **identity**
+(§3.3) and the two-flag **schema slot** (`ClientFlags`); the rest of this map is
+**reserved prose** — recorded here, not yet typed or carried.
+
+| tmux per-client capability | tmux mechanism | Protocol status |
+|---|---|---|
+| Durable client identity | (n/a — tmuxcc concept) | **Implemented** (tc-4b6k.1): `ClientIdentity` on `client.capabilities`, both wires |
+| Passive/observer attach | client flags `ignore-size`, `read-only` (`attach -r` = `read-only,ignore-size`) | **Slot typed** (tc-4b6k.1): `ClientFlags.{ignoreSize,readOnly}`. Carried by `session.attach` (tc-4b6k.4); driver behavior tc-4b6k.3 |
+| Per-client size | `refresh-client -C WxH`; `window-size latest\|largest\|smallest\|manual` | Reserved: per-client size fact on the identity; owner-drives first, arbitration modes later (tc-4b6k.3) |
+| Independent active pane | client flag `active-pane` | Reserved: per-client focus fact (today focus is one model triple) |
+| Output pacing | client flag `pause-after=seconds` (control mode) | Reserved (note only; partially internalized by driver flow-control) |
+| Lifecycle behavior | client flags `no-detach-on-destroy`, `wait-exit` | Reserved (note only; revisit with detach policy) |
+| Per-member view of shared windows | session groups (`new-session -t`) | Reserved: the heavyweight future option for full per-client geometry |
+
+**`read-only` control-mode caveat (load-bearing).** Verified in tmux source
+(decisions §2.1): over control mode, `read-only` does **not** bind the `-CC`
+command channel — a read-only control client is blocked from `send-keys` and
+input paths but can still run any other mutating command. tmux's read-only is an
+*input-authority* concept, not a *command-authority* one. Consequence: the D4
+partition and any future observer tier are **driver-enforced**. The protocol may
+carry a `readOnly` flag, but its authority semantics belong to the driver —
+**never delegate them to tmux's flag.**

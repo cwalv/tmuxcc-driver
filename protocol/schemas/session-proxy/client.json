@@ -15,7 +15,11 @@
       "properties": {
         "type": { "const": "client.capabilities" },
         "seq": { "type": "integer", "minimum": 1 },
-        "capabilities": { "$ref": "tmuxcc:shared/primitives#/$defs/Capabilities" }
+        "capabilities": { "$ref": "tmuxcc:shared/primitives#/$defs/Capabilities" },
+        "identity": {
+          "$ref": "tmuxcc:shared/primitives#/$defs/ClientIdentity",
+          "description": "Durable client identity presented at handshake (D2, tc-4b6k.1). Additive optional field — a client that does not advertise identity handshakes exactly as before, and an older proxy ignores it. Sibling of `capabilities` (NOT inside the shared Capabilities object, which the server also sends and which has no identity). Both proxies capture it, log it on connect, and surface connected identities in their `*.info` payloads. Carried and logged only in this revision — no behavior change."
+        }
       },
       "additionalProperties": false
     },
