@@ -147,20 +147,12 @@
 
     "ServerProxyCommandOkPayload": {
       "type": "object",
-      "description": "Successful server-proxy command result payload. Per-kind: session.claim/session.create → {sessionId, endpoint, created}; session.createUnique → {sessionId, name, endpoint, created:true}; session.destroy → {}; pane.attach → {sessionId, endpoint, paneId}; server-proxy.info → {info}.",
+      "description": "Successful server-proxy command result payload. Per-kind: session.claim/session.create → {sessionId, created}; session.createUnique → {sessionId, name, created:true}; session.destroy → {}; server-proxy.info → {info}. D5 (tc-4b6k.4): there is NO endpoint field — the client binds a connection to a session with session.attach, not by dialing a per-session socket path.",
       "properties": {
         "sessionId": { "$ref": "tmuxcc:shared/primitives#/$defs/SessionId" },
-        "endpoint": {
-          "type": "string",
-          "description": "Opaque connection string (unix socket path). Clients pass to createSessionProxyTransport(endpoint)."
-        },
-        "paneId": {
-          "$ref": "tmuxcc:shared/primitives#/$defs/PaneId",
-          "description": "Echoed target paneId for a pane.attach response. The server-proxy does not validate pane existence."
-        },
         "created": {
           "type": "boolean",
-          "description": "True if this claim/create minted the tmux session. False if attached to pre-existing. Absent on session.destroy / pane.attach responses. Always true on session.createUnique responses."
+          "description": "True if this claim/create minted the tmux session. False if attached to pre-existing. Absent on session.destroy responses. Always true on session.createUnique responses."
         },
         "name": {
           "type": "string",

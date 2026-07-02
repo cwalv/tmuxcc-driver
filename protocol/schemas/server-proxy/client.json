@@ -2,12 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "tmuxcc:server-proxy/client",
   "title": "tmuxcc client → server-proxy messages",
-  "description": "All control-plane messages sent by the client to the server-proxy. The client uses the server-proxy wire to discover sessions, claim session-proxy endpoints, and issue lifecycle commands.",
+  "description": "All control-plane messages sent by the client to the server-proxy. The client uses the single well-known broker socket to discover sessions, claim session ids, issue lifecycle commands, and — on a data connection — bind to a session with session.attach (D5, tc-4b6k.4).",
 
   "$defs": {
     "SessionClaimCommand": {
       "type": "object",
-      "description": "Claim or obtain the session-proxy endpoint for a named session. Creates the session if it does not exist. Per-name atomic: concurrent claims are serialized. The created flag in the response indicates whether this claim minted the tmux session.",
+      "description": "Claim a named session and return its stable sessionId (D5, tc-4b6k.4). Creates the session if it does not exist and ensures its session-proxy is running. Per-name atomic: concurrent claims are serialized. The response carries { sessionId, name, created } — NO endpoint; the client binds a connection to the session with session.attach. The created flag indicates whether this claim minted the tmux session.",
       "required": ["kind", "name"],
       "properties": {
         "kind": { "const": "session.claim" },
@@ -49,14 +49,16 @@
       "additionalProperties": false
     },
 
-    "PaneAttachCommand": {
+    "SessionAttachMessage": {
       "type": "object",
-      "description": "Attach a new client to a specific pane within a session (tc-7xv.36). Returns the same session-proxy endpoint as session.claim; paneId is echoed back as an attach intent hint. The server-proxy does NOT validate pane existence — that is a session-proxy concern.",
-      "required": ["kind", "sessionId", "paneId"],
+      "description": "Bind THIS connection to a session's stream (D5, tc-4b6k.4). Sent ONCE after the server-proxy.capabilities handshake on a connection the client wants to become a DATA connection. A top-level client→server-proxy message (NOT a command.request): it transitions the connection rather than returning a correlated response. The broker ensures the session-proxy is running, detaches the connection from the command plane, and hands the transport to the session-proxy — whose snapshot + deltas continue the SAME per-connection seq counter. No second handshake, no per-session socket. Success = the session snapshot arrives; an unknown sessionId yields an error + close. flags carries the reserved D4/D8 tmux-parity client flags (ignore-size/read-only; not acted on in tc-4b6k.4). primaryPaneId is the targeted-attach hint (formerly the pane.attach command, tc-7xv.36).",
+      "required": ["type", "seq", "sessionId"],
       "properties": {
-        "kind": { "const": "pane.attach" },
+        "type": { "const": "session.attach" },
+        "seq": { "type": "integer", "minimum": 1 },
         "sessionId": { "$ref": "tmuxcc:shared/primitives#/$defs/SessionId" },
-        "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" }
+        "flags": { "$ref": "tmuxcc:shared/primitives#/$defs/ClientFlags" },
+        "primaryPaneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" }
       },
       "additionalProperties": false
     },
@@ -77,10 +79,9 @@
         { "$ref": "#/$defs/SessionCreateCommand" },
         { "$ref": "#/$defs/SessionCreateUniqueCommand" },
         { "$ref": "#/$defs/SessionDestroyCommand" },
-        { "$ref": "#/$defs/PaneAttachCommand" },
         { "$ref": "#/$defs/ServerProxyInfoCommand" }
       ],
-      "description": "Discriminated union of all server-proxy commands a client may issue. Narrow on `kind`."
+      "description": "Discriminated union of all server-proxy commands a client may issue via command.request. Narrow on `kind`. (session.attach is a top-level message, not a command — see SessionAttachMessage.)"
     },
 
     "ServerProxyCommandRequestMessage": {
@@ -105,9 +106,10 @@
     "ServerProxyClientMessage": {
       "oneOf": [
         { "$ref": "tmuxcc:session-proxy/client#/$defs/ClientCapabilitiesMessage" },
-        { "$ref": "#/$defs/ServerProxyCommandRequestMessage" }
+        { "$ref": "#/$defs/ServerProxyCommandRequestMessage" },
+        { "$ref": "#/$defs/SessionAttachMessage" }
       ],
-      "description": "Discriminated union of all messages the client sends to the server-proxy. Note: ClientCapabilitiesMessage is shared between both wires."
+      "description": "Discriminated union of all messages the client sends to the server-proxy. Note: ClientCapabilitiesMessage is shared between both wires. session.attach (D5) transitions a data connection into the session-proxy stream."
     }
   }
 }

@@ -1,6 +1,6 @@
 {
   "$schema": "../schemas/server-proxy/server-push.json",
-  "description": "Golden transcript: server-proxy connect + capabilities handshake + session-list snapshot + session.claim flow. This is the typical first connection a client makes before attaching to a specific session.",
+  "description": "Golden transcript: server-proxy connect + capabilities handshake + session-list snapshot + session.claim (returns a sessionId, no endpoint) + session.attach (binds a data connection to the session). D5 (tc-4b6k.4): one well-known broker socket; the command connection claims, a data connection attaches — there is no per-session socket / endpoint.",
 
   "protocolVersion": 3,
 
@@ -67,7 +67,7 @@
     {
       "direction": "client→server-proxy",
       "step": 4,
-      "label": "client claims (or creates) session 'main' to obtain a session-proxy endpoint",
+      "label": "client claims (or creates) session 'main' to obtain its stable sessionId (D5: no endpoint)",
       "message": {
         "type": "command.request",
         "seq": 2,
@@ -81,7 +81,7 @@
     {
       "direction": "server-proxy→client",
       "step": 5,
-      "label": "server-proxy responds with the session-proxy endpoint",
+      "label": "server-proxy responds with the sessionId (no endpoint under D5, tc-4b6k.4)",
       "message": {
         "type": "command.response",
         "seq": 3,
@@ -90,10 +90,19 @@
           "ok": true,
           "payload": {
             "sessionId": "s0",
-            "endpoint": "/run/user/1000/tmuxcc/default/session-proxy.sock",
             "created": false
           }
         }
+      }
+    },
+    {
+      "direction": "client→server-proxy",
+      "step": 6,
+      "label": "on a SECOND connection to the SAME broker socket (after its own server-proxy.capabilities handshake), the client binds to the session with session.attach — this connection now IS the session-proxy data+control stream (D5, tc-4b6k.4)",
+      "message": {
+        "type": "session.attach",
+        "seq": 1,
+        "sessionId": "s0"
       }
     }
   ]

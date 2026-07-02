@@ -7,14 +7,30 @@ Current version: **3** (`WIRE_PROTOCOL_VERSION = 3`).
 
 ## 1. Overview
 
-tmuxcc has two wires, each with its own connection lifecycle:
+tmuxcc has two wire *dialects* that share ONE well-known broker socket
+(D5, tc-4b6k.4 — the single-socket wire collapse):
 
 | Wire | Participants | Purpose |
 |------|-------------|---------|
-| **server-proxy wire** | server-proxy ↔ client | Session discovery, lifecycle (create/claim/destroy), endpoint routing |
+| **server-proxy wire** | server-proxy ↔ client | Session discovery, lifecycle (create/claim/destroy), diagnostics |
 | **session-proxy wire** | session-proxy ↔ client | Terminal data and events for a single bound tmux session |
 
-A typical client connects to the server-proxy wire first, claims (or creates) a session, receives a `endpoint` string, then connects to that endpoint to open a session-proxy wire.
+Every connection lands on the single broker socket and runs ONE
+`server-proxy.capabilities` handshake. After the handshake a connection is in one
+of two modes:
+
+- **command connection** — issues `command.request`s (claim / create / destroy /
+  info) and receives the session-set snapshot + deltas + `server-proxy.exiting`.
+- **data connection** — sends one `session.attach {sessionId}` message, which
+  binds the connection to that session's session-proxy. From that point the
+  connection IS the session-proxy data+control stream (0xCC-muxed); its snapshot
+  and deltas continue the SAME per-connection seq counter (no second handshake).
+
+A typical client claims (or creates) a session on its command connection to learn
+the `sessionId` (there is **no endpoint** — the deployment topology never leaks
+onto the wire), then opens a data connection and sends `session.attach {sessionId}`.
+One connection per (client, session) preserves per-session kernel backpressure
+isolation.
 
 ---
 
