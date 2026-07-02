@@ -44,7 +44,7 @@ import type {
 } from "./render-hook.js";
 import { NoOpRenderHook, EchoRenderHook } from "./render-hook.js";
 import { Mirror } from "./mirror.js";
-import type { SnapshotMessage, SessionProxyMessage } from "@tmuxcc/session-proxy";
+import type { SnapshotMessage, SessionProxyMessage } from "@tmuxcc/protocol";
 
 // ---------------------------------------------------------------------------
 // Helpers — mint branded ids without importing session-proxy internals

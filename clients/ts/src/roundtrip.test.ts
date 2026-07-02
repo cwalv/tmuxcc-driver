@@ -1,7 +1,7 @@
 /**
  * Wire protocol round-trip test — cross-package proof.
  *
- * Imports everything from "@tmuxcc/session-proxy" by package name (workspace resolution).
+ * Imports wire types from "@tmuxcc/protocol" and state helpers from "@tmuxcc/driver" by package name (workspace resolution).
  * This is the monorepo ergonomics proof: the client imports all wire types and
  * utilities from the session-proxy package without a publish step.
  *
@@ -29,55 +29,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import {
-  // Ids
-  paneId,
-  windowId,
-  sessionId,
-  // Control guards
-  isControlMessage,
-  isSessionProxyMessage,
-  isClientMessage,
-  // Wire constant
-  WIRE_PROTOCOL_VERSION,
-  // Transport
-  createInMemoryTransportPair,
-  // Data plane
-  encodeFrame,
-  decodeFrame,
-  FrameDecoder,
-} from "@tmuxcc/session-proxy";
+import { paneId, windowId, sessionId, isControlMessage, isSessionProxyMessage, isClientMessage, WIRE_PROTOCOL_VERSION, createInMemoryTransportPair, encodeFrame, decodeFrame, FrameDecoder } from "@tmuxcc/protocol";
 
-import type {
-  PaneId,
-  WindowId,
-  SessionId,
-  ControlMessage,
-  SessionProxyMessage,
-  ClientMessage,
-  // All concrete message types — session-proxy→client
-  SessionProxyCapabilitiesMessage,
-  SnapshotMessage,
-  PaneOpenedMessage,
-  PaneClosedMessage,
-  PaneResizedMessage,
-  PaneModeChangedMessage,
-  WindowAddedMessage,
-  WindowClosedMessage,
-  WindowRenamedMessage,
-  LayoutUpdatedMessage,
-  FocusChangedMessage,
-  SessionProxySessionRenamedMessage,
-  CommandResponseMessage,
-  ErrorMessage,
-  // All concrete message types — client→session-proxy
-  InputMessage,
-  ResizeRequestMessage,
-  ClientCapabilitiesMessage,
-  CommandRequestMessage,
-  // Layout types (used in snapshot / layout.updated)
-  WindowLayout,
-} from "@tmuxcc/session-proxy";
+import type { PaneId, WindowId, SessionId, ControlMessage, SessionProxyMessage, ClientMessage, SessionProxyCapabilitiesMessage, SnapshotMessage, PaneOpenedMessage, PaneClosedMessage, PaneResizedMessage, PaneModeChangedMessage, WindowAddedMessage, WindowClosedMessage, WindowRenamedMessage, LayoutUpdatedMessage, FocusChangedMessage, SessionProxySessionRenamedMessage, CommandResponseMessage, ErrorMessage, InputMessage, ResizeRequestMessage, ClientCapabilitiesMessage, CommandRequestMessage, WindowLayout } from "@tmuxcc/protocol";
 
 // ---------------------------------------------------------------------------
 // Shared test fixtures

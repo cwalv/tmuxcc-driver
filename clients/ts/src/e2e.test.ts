@@ -53,33 +53,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import {
-  createInMemoryTransportPair,
-  runSessionProxyHandshake,
-  paneId,
-  windowId,
-  sessionId,
-  WIRE_PROTOCOL_VERSION,
-  // State model helpers for building realistic wire traffic
-  emptyModel,
-  addSession,
-  addWindow,
-  addPane,
-  setFocus,
-  // Projection helpers
-  projectSnapshot,
-  diffModel,
-} from "@tmuxcc/session-proxy";
+import { createInMemoryTransportPair, runSessionProxyHandshake, paneId, windowId, sessionId, WIRE_PROTOCOL_VERSION } from "@tmuxcc/protocol";
+import { emptyModel, addSession, addWindow, addPane, setFocus, projectSnapshot, diffModel } from "@tmuxcc/driver";
 
-import type {
-  PaneId,
-  WindowId,
-  SessionId,
-  SnapshotMessage,
-  SessionProxyMessage,
-  WindowLayout,
-  Capabilities,
-} from "@tmuxcc/session-proxy";
+import type { PaneId, WindowId, SessionId, SnapshotMessage, SessionProxyMessage, WindowLayout, Capabilities } from "@tmuxcc/protocol";
 
 import { EchoRenderHook } from "./render-hook.js";
 import { Mirror } from "./mirror.js";
@@ -188,11 +165,11 @@ function stampSeqs(deltas: SessionProxyMessage[], startSeq: number): SessionProx
  * a model-change event (same ordering as the old driver.start() flow).
  */
 async function connectAndSnapshot(
-  sessionProxyTransport: import("@tmuxcc/session-proxy").Transport,
-  clientTransport: import("@tmuxcc/session-proxy").Transport,
+  sessionProxyTransport: import("@tmuxcc/protocol").Transport,
+  clientTransport: import("@tmuxcc/protocol").Transport,
   hook: EchoRenderHook,
   snapshot: SnapshotMessage,
-): Promise<{ handle: ClientHandle; session: import("@tmuxcc/session-proxy").NegotiatedSession }> {
+): Promise<{ handle: ClientHandle; session: import("@tmuxcc/protocol").NegotiatedSession }> {
   // Start handshake on both sides concurrently (session-proxy doesn't need to await).
   const sessionProxyHandshake = runSessionProxyHandshake(sessionProxyTransport, SESSION_PROXY_CAPS);
 

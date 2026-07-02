@@ -92,7 +92,7 @@
  * @module pane-stream
  */
 
-import type { PaneId } from "@tmuxcc/session-proxy";
+import type { PaneId } from "@tmuxcc/protocol";
 import type { SessionProxyConnection } from "./connection.js";
 
 // ---------------------------------------------------------------------------

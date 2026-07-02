@@ -29,24 +29,9 @@
 
 import assert from "node:assert/strict";
 
-import {
-  createInMemoryTransportPair,
-  runClientHandshake,
-  createControlServer,
-  createVerbOriginRegistry,
-  WIRE_PROTOCOL_VERSION,
-} from "@tmuxcc/session-proxy";
-import type {
-  Transport,
-  ControlMessage,
-  SessionProxyMessage,
-  SessionProxyCommandRequestMessage,
-  SessionProxyCommandResponseMessage,
-  InputMessage,
-  ResizeRequestMessage,
-  WireCommand,
-  PaneId,
-} from "@tmuxcc/session-proxy";
+import { createInMemoryTransportPair, runClientHandshake, WIRE_PROTOCOL_VERSION } from "@tmuxcc/protocol";
+import { createControlServer, createVerbOriginRegistry } from "@tmuxcc/driver";
+import type { Transport, ControlMessage, SessionProxyMessage, SessionProxyCommandRequestMessage, SessionProxyCommandResponseMessage, InputMessage, ResizeRequestMessage, WireCommand, PaneId } from "@tmuxcc/protocol";
 
 import { connectClient } from "../client.js";
 import { applySnapshot, applyDelta } from "../mirror.js";

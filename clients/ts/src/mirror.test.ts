@@ -14,32 +14,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import {
-  // State model helpers — imported from @tmuxcc/session-proxy by package name.
-  paneId,
-  windowId,
-  sessionId,
-  emptyModel,
-  addWindow,
-  addPane,
-  removePane,
-  updatePane,
-  updateWindow,
-  updateSession,
-  setFocus,
-  projectSnapshot,
-  diffModel,
-} from "@tmuxcc/session-proxy";
+import { paneId, windowId, sessionId } from "@tmuxcc/protocol";
+import { emptyModel, addWindow, addPane, removePane, updatePane, updateWindow, updateSession, setFocus, projectSnapshot, diffModel } from "@tmuxcc/driver";
 
-import type {
-  SessionModel,
-  PaneId,
-  WindowId,
-  SessionId,
-  SnapshotMessage,
-  SessionProxyMessage,
-  WindowLayout,
-} from "@tmuxcc/session-proxy";
+import type { PaneId, WindowId, SessionId, SnapshotMessage, SessionProxyMessage, WindowLayout } from "@tmuxcc/protocol";
+import type { SessionModel } from "@tmuxcc/driver";
 
 import { Mirror, applySnapshot, applyDelta } from "./mirror.js";
 import type { ClientModel } from "./mirror.js";
@@ -109,7 +88,7 @@ function makeSession(
   windowIds: readonly WindowId[],
   activeWindowId: WindowId | null,
   name = "test-session",
-): import("@tmuxcc/session-proxy").Session {
+): import("@tmuxcc/driver").Session {
   return { sessionId: id, name, windowIds, activeWindowId };
 }
 
@@ -123,7 +102,7 @@ function makeWindow(
   synchronizePanes = false,
   monitorActivity = true,   // ── tc-7xv.15 ──
   monitorSilence = 0,       // ── tc-7xv.15 ──
-): import("@tmuxcc/session-proxy").Window {
+): import("@tmuxcc/driver").Window {
   return { windowId: id, sessionId: sessId, name, paneIds, activePaneId, layout, synchronizePanes, monitorActivity, monitorSilence }; // ── tc-7xv.15 ──
 }
 
@@ -133,7 +112,7 @@ function makePane(
   sessId: SessionId,
   cols = 80,
   rows = 24,
-): import("@tmuxcc/session-proxy").Pane {
+): import("@tmuxcc/driver").Pane {
   return {
     paneId: id,
     windowId: winId,
@@ -1278,14 +1257,14 @@ describe("seq-gap detection", () => {
  */
 function makeFakeConnection(): {
   connection: import("./connection.js").SessionProxyConnection;
-  sent: import("@tmuxcc/session-proxy").ClientMessage[];
+  sent: import("@tmuxcc/protocol").ClientMessage[];
   deliver: (msg: SessionProxyMessage) => void;
 } {
-  const sent: import("@tmuxcc/session-proxy").ClientMessage[] = [];
+  const sent: import("@tmuxcc/protocol").ClientMessage[] = [];
   let handler: ((msg: SessionProxyMessage) => void) | null = null;
   const fake = {
     onControl(h: (msg: SessionProxyMessage) => void): void { handler = h; },
-    send(msg: import("@tmuxcc/session-proxy").ClientMessage): void { sent.push(msg); },
+    send(msg: import("@tmuxcc/protocol").ClientMessage): void { sent.push(msg); },
     close(): void { /* no-op for the test */ },
   };
   return {

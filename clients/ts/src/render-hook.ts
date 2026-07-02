@@ -36,7 +36,7 @@
  * lives in tmuxcc-vscode, not here.
  */
 
-import type { PaneId, WindowId, SessionId, ConnectionId, WindowLayout, PaneMode, WireCommand, Origin } from "@tmuxcc/session-proxy";
+import type { PaneId, WindowId, SessionId, ConnectionId, WindowLayout, PaneMode, WireCommand, Origin } from "@tmuxcc/protocol";
 
 // ---------------------------------------------------------------------------
 // Re-export wire primitives that renderers reference (convenience)

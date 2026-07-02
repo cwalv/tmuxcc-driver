@@ -22,13 +22,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import {
-  createInMemoryTransportPair,
-  runSessionProxyHandshake,
-  WIRE_PROTOCOL_VERSION,
-  paneId,
-} from "@tmuxcc/session-proxy";
-import type { PaneId } from "@tmuxcc/session-proxy";
+import { createInMemoryTransportPair, runSessionProxyHandshake, WIRE_PROTOCOL_VERSION, paneId } from "@tmuxcc/protocol";
+import type { PaneId } from "@tmuxcc/protocol";
 
 import { SessionProxyConnection } from "./connection.js";
 import { PaneStreamConsumer, connectPaneStream } from "./pane-stream.js";

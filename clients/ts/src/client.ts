@@ -19,7 +19,7 @@
  * # NO DOM, NO vscode, NO host API, NO Pseudoterminal
  */
 
-import type { Transport, NegotiatedSession, PaneId, WireCommand, ClientIdentity } from "@tmuxcc/session-proxy";
+import type { Transport, NegotiatedSession, PaneId, WireCommand, ClientIdentity } from "@tmuxcc/protocol";
 import { SessionProxyConnection } from "./connection.js";
 import type { SessionProxyConnectionOptions } from "./connection.js";
 import { Mirror } from "./mirror.js";

@@ -30,8 +30,8 @@
   },
   "dependencies": {
     "@tmuxcc/client": "*",
-    "@tmuxcc/server-proxy": "*",
-    "@tmuxcc/session-proxy": "*"
+    "@tmuxcc/driver": "*",
+    "@tmuxcc/protocol": "*"
   },
   "devDependencies": {
     "@types/node": "^22.19.19",

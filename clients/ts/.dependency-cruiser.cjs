@@ -3,33 +3,33 @@
  *
  * Enforces the polyrepo boundary invariant:
  *
- *   client-no-session-proxy-runtime: client/src/ must not import @tmuxcc/session-proxy
- *   internal sub-paths (e.g. @tmuxcc/session-proxy/src/runtime/…).  Only the
- *   package barrel (@tmuxcc/session-proxy) is allowed.
+ *   client-no-driver-runtime: client/src/ must not import @tmuxcc/protocol or
+ *   @tmuxcc/driver internal sub-paths (e.g. @tmuxcc/driver/src/runtime/…). Only
+ *   the package barrels (@tmuxcc/protocol, @tmuxcc/driver) are allowed.
  *
- * Rationale: the @tmuxcc/session-proxy package barrel is the stable contract seam.
- * Importing internal sub-paths bypasses the package's exports map, creates
- * invisible coupling to session-proxy internals, and can pull in Node-only runtime
- * modules (child_process, pty, etc.) into the client bundle.
+ * Rationale: the package barrels are the stable contract seam. Importing
+ * internal sub-paths bypasses the package's exports map, creates invisible
+ * coupling to driver internals, and can pull in Node-only runtime modules
+ * (child_process, pty, etc.) into the client bundle.
  */
 /** @type {import('dependency-cruiser').IConfiguration} */
 module.exports = {
   forbidden: [
     {
-      name: "client-no-session-proxy-runtime",
+      name: "client-no-driver-runtime",
       comment:
-        "client/src/ must only import from the @tmuxcc/session-proxy barrel. " +
-        "Sub-path imports like @tmuxcc/session-proxy/src/runtime/… bypass the " +
-        "exports map and couple the client to session-proxy internals.",
+        "client/src/ must only import from the @tmuxcc/protocol and @tmuxcc/driver " +
+        "barrels. Sub-path imports like @tmuxcc/driver/src/runtime/… bypass the " +
+        "exports map and couple the client to driver internals.",
       severity: "error",
       from: { path: "^src/" },
       to: {
         // Match any import whose module specifier (or resolved path) contains
-        // "@tmuxcc/session-proxy/src/".  The session-proxy's package.json only exports ".";
-        // any sub-path import like "@tmuxcc/session-proxy/src/runtime/..." is NOT
-        // listed in the exports map, so depcruise leaves the resolved field as
-        // the raw module specifier — still matching this pattern.
-        path: "@tmuxcc/session-proxy/src/",
+        // "@tmuxcc/protocol/src/" or "@tmuxcc/driver/src/". The packages only
+        // export "."; any sub-path import like "@tmuxcc/driver/src/runtime/..."
+        // is NOT listed in the exports map, so depcruise leaves the resolved
+        // field as the raw module specifier — still matching this pattern.
+        path: "@tmuxcc/(protocol|driver)/src/",
       },
     },
   ],

@@ -36,27 +36,10 @@
  * @module harness/stub-daemon
  */
 
-import {
-  createInMemoryTransportPair,
-  runSessionProxyHandshake,
-  WIRE_PROTOCOL_VERSION,
-  projectSnapshot,
-  emptyModel,
-  addSession,
-  addWindow,
-  addPane,
-  setFocus,
-  paneId,
-  windowId,
-  sessionId,
-} from "@tmuxcc/session-proxy";
-import type {
-  SessionModel,
-  Transport,
-  ControlMessage,
-  SessionProxyCommandRequestMessage,
-  SessionProxyCommandResponseMessage,
-} from "@tmuxcc/session-proxy";
+import { createInMemoryTransportPair, runSessionProxyHandshake, WIRE_PROTOCOL_VERSION, paneId, windowId, sessionId } from "@tmuxcc/protocol";
+import { projectSnapshot, emptyModel, addSession, addWindow, addPane, setFocus } from "@tmuxcc/driver";
+import type { Transport, ControlMessage, SessionProxyCommandRequestMessage, SessionProxyCommandResponseMessage } from "@tmuxcc/protocol";
+import type { SessionModel } from "@tmuxcc/driver";
 
 import { TranscriptError } from "./transcript.js";
 import type { Transcript, ServerStep } from "./transcript.js";

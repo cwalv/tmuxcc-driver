@@ -16,11 +16,8 @@
  * @module harness/fake-pipeline
  */
 
-import type {
-  RuntimePipeline,
-  SessionModel,
-} from "@tmuxcc/session-proxy";
-import { emptyModel } from "@tmuxcc/session-proxy";
+import type { RuntimePipeline, SessionModel } from "@tmuxcc/driver";
+import { emptyModel } from "@tmuxcc/driver";
 
 /** A fake pipeline the harness drives directly. */
 export interface FakePipeline extends RuntimePipeline {

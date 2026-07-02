@@ -15,21 +15,9 @@
  * @module harness/model-builder
  */
 
-import {
-  emptyModel,
-  addSession,
-  addWindow,
-  addPane,
-  setFocus,
-  updateWindow,
-  updateSession,
-} from "@tmuxcc/session-proxy";
-import type {
-  SessionModel,
-  PaneId,
-  WindowId,
-  WindowLayout,
-} from "@tmuxcc/session-proxy";
+import { emptyModel, addSession, addWindow, addPane, setFocus, updateWindow, updateSession } from "@tmuxcc/driver";
+import type { PaneId, WindowId, WindowLayout } from "@tmuxcc/protocol";
+import type { SessionModel } from "@tmuxcc/driver";
 
 import type { TranscriptInitialModel, VerbCreates } from "./transcript.js";
 
@@ -103,7 +91,7 @@ export function buildModel(init: TranscriptInitialModel): SessionModel {
 export function applyVerbCreate(
   model: SessionModel,
   creates: VerbCreates,
-  defaults: { cols: number; rows: number; sessionId: import("@tmuxcc/session-proxy").SessionId },
+  defaults: { cols: number; rows: number; sessionId: import("@tmuxcc/protocol").SessionId },
 ): SessionModel {
   const cols = creates.cols ?? defaults.cols;
   const rows = creates.rows ?? defaults.rows;

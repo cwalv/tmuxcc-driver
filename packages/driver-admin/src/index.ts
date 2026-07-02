@@ -21,7 +21,4 @@ export {
 
 // Re-export the structured payload shapes so consumers get the typed surface
 // from one import path (they may also import them from @tmuxcc/session-proxy).
-export type {
-  ServerProxyInfoPayload,
-  SessionProxyInfoPayload,
-} from "@tmuxcc/session-proxy";
+export type { ServerProxyInfoPayload, SessionProxyInfoPayload } from "@tmuxcc/protocol";

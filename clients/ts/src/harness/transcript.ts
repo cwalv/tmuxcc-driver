@@ -34,17 +34,8 @@
 
 import { readFileSync } from "node:fs";
 
-import type {
-  SessionProxyMessage,
-  ClientMessage,
-  SessionProxyCommandResponseMessage,
-  PaneId,
-  WindowId,
-  SessionId,
-  ConnectionId,
-  WindowLayout,
-} from "@tmuxcc/session-proxy";
-import { WIRE_PROTOCOL_VERSION } from "@tmuxcc/session-proxy";
+import type { SessionProxyMessage, ClientMessage, SessionProxyCommandResponseMessage, PaneId, WindowId, SessionId, ConnectionId, WindowLayout } from "@tmuxcc/protocol";
+import { WIRE_PROTOCOL_VERSION } from "@tmuxcc/protocol";
 
 // ---------------------------------------------------------------------------
 // Errors

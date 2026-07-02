@@ -71,19 +71,8 @@
  * This file is headless by design.  Any renderer-specific code belongs in E6+.
  */
 
-import {
-  runClientHandshake,
-  WIRE_PROTOCOL_VERSION,
-} from "@tmuxcc/session-proxy";
-import type {
-  Transport,
-  SessionProxyMessage,
-  ClientMessage,
-  NegotiatedSession,
-  WireFeature,
-  ClientIdentity,
-  PaneId,
-} from "@tmuxcc/session-proxy";
+import { runClientHandshake, WIRE_PROTOCOL_VERSION } from "@tmuxcc/protocol";
+import type { Transport, SessionProxyMessage, ClientMessage, NegotiatedSession, WireFeature, ClientIdentity, PaneId } from "@tmuxcc/protocol";
 
 // ---------------------------------------------------------------------------
 // Pre-handshaken transport registry (D5, tc-4b6k.4)

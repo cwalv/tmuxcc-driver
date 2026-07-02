@@ -16,21 +16,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import {
-  paneId,
-  sessionId,
-  createInMemoryTransportPair,
-  runSessionProxyHandshake,
-  WIRE_PROTOCOL_VERSION,
-} from "@tmuxcc/session-proxy";
-import type {
-  CommandRequestMessage,
-  WireCommand,
-  ClientMessage,
-  SnapshotMessage,
-  SessionProxyCommandResponseMessage,
-} from "@tmuxcc/session-proxy";
-import { windowId } from "@tmuxcc/session-proxy";
+import { paneId, sessionId, createInMemoryTransportPair, runSessionProxyHandshake, WIRE_PROTOCOL_VERSION } from "@tmuxcc/protocol";
+import type { CommandRequestMessage, WireCommand, ClientMessage, SnapshotMessage, SessionProxyCommandResponseMessage } from "@tmuxcc/protocol";
+import { windowId } from "@tmuxcc/protocol";
 
 import { createInputApi } from "./input.js";
 import type { InputSender } from "./input.js";

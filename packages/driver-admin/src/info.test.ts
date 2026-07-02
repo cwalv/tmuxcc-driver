@@ -3,7 +3,7 @@
  * helper (tc-44u4.3).
  *
  * `fetchServerProxyInfo` / `fetchSessionProxyInfo` open REAL unix sockets via
- * `@tmuxcc/server-proxy`, so they need a live driver to exercise end-to-end —
+ * `@tmuxcc/driver`, so they need a live driver to exercise end-to-end —
  * that belongs to an integration/e2e layer, not a unit test (there is no mock
  * driver socket).  What IS unit-testable without a live driver is the
  * request/response correlation contract, which `runServerProxyCommand` owns and
@@ -15,11 +15,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { createInMemoryTransportPair } from "@tmuxcc/session-proxy";
-import type {
-  MessageBase,
-  ServerProxyCommandRequestMessage,
-} from "@tmuxcc/session-proxy";
+import { createInMemoryTransportPair } from "@tmuxcc/protocol";
+import type { MessageBase, ServerProxyCommandRequestMessage } from "@tmuxcc/protocol";
 
 import { runServerProxyCommand } from "./info.js";
 

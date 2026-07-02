@@ -61,16 +61,7 @@
  * # NO DOM, NO vscode, NO host API, NO Pseudoterminal
  */
 
-import type {
-  PaneId,
-  WindowId,
-  InputMessage,
-  ResizeRequestMessage,
-  CommandRequestMessage,
-  WireCommand,
-  SessionProxyCommandResponseMessage,
-  PaneAttachMessage,
-} from "@tmuxcc/session-proxy";
+import type { PaneId, WindowId, InputMessage, ResizeRequestMessage, CommandRequestMessage, WireCommand, SessionProxyCommandResponseMessage, PaneAttachMessage } from "@tmuxcc/protocol";
 import { EDH_TRACE_ENABLED, edhTrace } from "./edh-trace.js";
 
 // ---------------------------------------------------------------------------

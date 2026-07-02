@@ -53,20 +53,7 @@
  * # NO DOM, NO vscode, NO host API, NO Pseudoterminal
  */
 
-import type {
-  SnapshotMessage,
-  SessionProxyMessage,
-  SessionProxyCommandResponseMessage,
-  ClientMessage,
-  ResyncRequestMessage,
-  PaneId,
-  WindowId,
-  SessionId,
-  ConnectionId,
-  WindowLayout,
-  PaneMode,
-  Origin,
-} from "@tmuxcc/session-proxy";
+import type { SnapshotMessage, SessionProxyMessage, SessionProxyCommandResponseMessage, ClientMessage, ResyncRequestMessage, PaneId, WindowId, SessionId, ConnectionId, WindowLayout, PaneMode, Origin } from "@tmuxcc/protocol";
 import type { SessionProxyConnection } from "./connection.js";
 import type { RenderHook, ByteSource } from "./render-hook.js";
 import { EDH_TRACE_ENABLED, edhTrace } from "./edh-trace.js";

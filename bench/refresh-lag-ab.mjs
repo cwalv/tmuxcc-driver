@@ -28,8 +28,8 @@ import {
   createServerProxy,
   connectSocketTransport,
   serverProxySocketPath,
-} from "@tmuxcc/server-proxy";
-import { runClientHandshake, WIRE_PROTOCOL_VERSION } from "@tmuxcc/session-proxy";
+} from "@tmuxcc/driver";
+import { runClientHandshake, WIRE_PROTOCOL_VERSION } from "@tmuxcc/protocol";
 import { runServerProxyCommand } from "@tmuxcc/driver-admin";
 
 const N = Number(process.env.BENCH_N ?? "4");

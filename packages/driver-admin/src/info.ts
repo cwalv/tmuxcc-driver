@@ -50,22 +50,9 @@
 import {
   serverProxySocketPath,
   connectSocketTransport,
-} from "@tmuxcc/server-proxy";
-import {
-  runClientHandshake,
-  WIRE_PROTOCOL_VERSION,
-} from "@tmuxcc/session-proxy";
-import type {
-  Transport,
-  MessageBase,
-  Capabilities,
-  ServerProxyCommand,
-  ServerProxyCommandOkPayload,
-  ServerProxyCommandResponseMessage,
-  ServerProxyInfoPayload,
-  SessionProxyInfoPayload,
-  SessionProxyCommandResponseMessage,
-} from "@tmuxcc/session-proxy";
+} from "@tmuxcc/driver";
+import { runClientHandshake, WIRE_PROTOCOL_VERSION } from "@tmuxcc/protocol";
+import type { Transport, MessageBase, Capabilities, ServerProxyCommand, ServerProxyCommandOkPayload, ServerProxyCommandResponseMessage, ServerProxyInfoPayload, SessionProxyInfoPayload, SessionProxyCommandResponseMessage } from "@tmuxcc/protocol";
 import { SessionProxyConnection, markPreNegotiated } from "@tmuxcc/client";
 
 // ---------------------------------------------------------------------------
