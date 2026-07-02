@@ -66,7 +66,7 @@ import type {
   SessionProxyInfoPayload,
   SessionProxyCommandResponseMessage,
 } from "@tmuxcc/session-proxy";
-import { SessionProxyConnection } from "@tmuxcc/client";
+import { SessionProxyConnection, markPreNegotiated } from "@tmuxcc/client";
 
 // ---------------------------------------------------------------------------
 // Capabilities advertised by the introspection client
@@ -278,14 +278,19 @@ export async function fetchSessionProxyInfo(
   }
 
   // (3) Bind this connection to the session's stream, then run session-proxy.info
-  //     over the pre-handshaken transport.
-  transport.sendControl({
-    type: "session.attach",
-    seq: 1,
-    sessionId: claim.sessionId,
-  } as unknown as Parameters<typeof transport.sendControl>[0]);
+  //     over the pre-handshaken transport. session.attach is DEFERRED to
+  //     onRoutingReady (fired by conn.connect() AFTER its router is installed) so
+  //     the resulting snapshot lands on the live router, not the settle() no-op.
+  const attachSessionId = claim.sessionId;
+  markPreNegotiated(transport, negotiated, () => {
+    transport.sendControl({
+      type: "session.attach",
+      seq: 1,
+      sessionId: attachSessionId,
+    } as unknown as Parameters<typeof transport.sendControl>[0]);
+  });
 
-  const conn = new SessionProxyConnection(transport, { preNegotiated: negotiated });
+  const conn = new SessionProxyConnection(transport);
   try {
     await conn.connect();
     return await sendSessionProxyInfo(conn);

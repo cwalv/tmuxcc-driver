@@ -86,6 +86,60 @@ import type {
 } from "@tmuxcc/session-proxy";
 
 // ---------------------------------------------------------------------------
+// Pre-handshaken transport registry (D5, tc-4b6k.4)
+// ---------------------------------------------------------------------------
+
+/**
+ * "This transport already completed its handshake upstream" — a property OF the
+ * transport (D5, tc-4b6k.4). In the single-socket broker topology, a caller
+ * (the VS Code extension's server-proxy-connect) runs the ONE
+ * `server-proxy.capabilities` handshake and sends `session.attach` before handing
+ * the transport to `connectClient`. It records the NegotiatedSession here so
+ * `SessionProxyConnection.connect()` adopts it and skips a redundant second
+ * handshake — WITHOUT changing the `connectClient` / SessionManager / ConnectFn
+ * call shape (the transport carries its own marker).
+ *
+ * WeakMap: the entry is dropped when the transport is GC'd. A transport not in
+ * the map runs the normal handshake (the in-memory stub / test path).
+ */
+interface PreNegotiatedEntry {
+  readonly session: NegotiatedSession;
+  /**
+   * Fired ONCE by `connect()` AFTER the connection's post-handshake routing is
+   * installed (D5, tc-4b6k.4). This is where the caller sends the message that
+   * TRIGGERS the server's first push (the broker `session.attach`, which makes
+   * the session-proxy send its snapshot). Deferring it to here guarantees the
+   * transport's real router (not the handshake's settle() no-op) is in place
+   * before the snapshot can arrive — otherwise the snapshot is dropped and the
+   * mirror never initializes.
+   */
+  readonly onRoutingReady?: () => void;
+}
+
+const _preNegotiatedRegistry = new WeakMap<Transport, PreNegotiatedEntry>();
+
+/**
+ * Mark `transport` as already handshaken, recording the NegotiatedSession the
+ * upstream (broker) handshake produced (D5, tc-4b6k.4). Call BEFORE handing the
+ * transport to `connectClient` / `SessionProxyConnection`.
+ *
+ * `onRoutingReady` (optional) is fired once by `connect()` right after the
+ * post-handshake routing is installed — send the server-push-triggering message
+ * (e.g. `session.attach`) there, NOT before handing over the transport, so the
+ * resulting snapshot lands on the live router rather than the settle() no-op.
+ */
+export function markPreNegotiated(
+  transport: Transport,
+  session: NegotiatedSession,
+  onRoutingReady?: () => void,
+): void {
+  _preNegotiatedRegistry.set(
+    transport,
+    onRoutingReady !== undefined ? { session, onRoutingReady } : { session },
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Lifecycle state
 // ---------------------------------------------------------------------------
 
@@ -119,16 +173,6 @@ export interface SessionProxyConnectionOptions {
    * logged only — no behavior depends on it yet.
    */
   identity?: ClientIdentity;
-  /**
-   * Pre-negotiated session (D5, tc-4b6k.4). When set, `connect()` SKIPS
-   * `runClientHandshake` and adopts this session directly — the transport was
-   * already handshaken upstream (the single-socket broker `session.attach` path:
-   * the caller ran the `server-proxy.capabilities` handshake and sent
-   * `session.attach` before handing the transport here). The connection still
-   * installs its post-handshake routing and transitions to "ready". Omit for
-   * the standalone path (run the handshake).
-   */
-  preNegotiated?: NegotiatedSession;
 }
 
 /**
@@ -187,10 +231,6 @@ export class SessionProxyConnection {
   // → anonymous connection.
   readonly #identity: ClientIdentity | undefined;
 
-  // Pre-negotiated session (D5, tc-4b6k.4); when set, connect() skips the
-  // handshake and adopts it (the transport was handshaken upstream).
-  readonly #preNegotiated: NegotiatedSession | undefined;
-
   // ── Lifecycle state ───────────────────────────────────────────────────────
 
   #state: ConnectionState = "connecting";
@@ -241,7 +281,6 @@ export class SessionProxyConnection {
       "input-forwarding",
     ];
     this.#identity = opts?.identity;
-    this.#preNegotiated = opts?.preNegotiated;
     // NOTE: we do NOT install onClose here.  runClientHandshake owns the
     // transport's onClose handler during the handshake and replaces it with a
     // no-op when it settles (see handshake.ts settle()).  We re-install our
@@ -299,14 +338,16 @@ export class SessionProxyConnection {
       features: this.#features as WireFeature[],
     };
 
+    // D5 (tc-4b6k.4): consult the pre-handshaken registry — the caller (the
+    // extension's server-proxy-connect / driver-admin) already ran the ONE
+    // `server-proxy.capabilities` handshake, so skip the redundant second one
+    // (the S1 ceremony this bead deletes). The entry may also carry an
+    // `onRoutingReady` action fired AFTER routing is installed (below).
+    const preEntry = _preNegotiatedRegistry.get(this.#transport);
+
     let session: NegotiatedSession;
-    if (this.#preNegotiated !== undefined) {
-      // D5 (tc-4b6k.4): the transport was handshaken upstream (the broker
-      // single-socket `session.attach` path ran the `server-proxy.capabilities`
-      // handshake and sent `session.attach` before handing the transport here).
-      // Adopt that session and skip a second handshake — the S1 ceremony this
-      // bead deletes.
-      session = this.#preNegotiated;
+    if (preEntry !== undefined) {
+      session = preEntry.session;
     } else {
       try {
         // runClientHandshake owns the transport.onControl + transport.onClose
@@ -345,6 +386,13 @@ export class SessionProxyConnection {
     // Drain any messages that arrived between handshake settling and
     // now (e.g. snapshot arriving synchronously from in-memory transport).
     this.#drainBuffers();
+
+    // D5 (tc-4b6k.4): NOW that the transport's real router is installed, fire the
+    // deferred server-push trigger (the broker `session.attach`). Sending it here
+    // — rather than before handing over the transport — guarantees the resulting
+    // snapshot lands on the live router (buffered in #pendingControl until the
+    // caller installs its onControl), never on the handshake settle() no-op.
+    preEntry?.onRoutingReady?.();
 
     return session;
   }

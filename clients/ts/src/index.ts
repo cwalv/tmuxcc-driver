@@ -12,7 +12,7 @@ export const CLIENT_PLACEHOLDER = true;
 // Connection + handshake (tc-ahh — E5 serial head)
 // ---------------------------------------------------------------------------
 
-export { SessionProxyConnection } from "./connection.js";
+export { SessionProxyConnection, markPreNegotiated } from "./connection.js";
 export type {
   ConnectionState,
   SessionProxyConnectionOptions,

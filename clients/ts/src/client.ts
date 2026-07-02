@@ -70,13 +70,6 @@ export interface ConnectClientOptions {
    * connection. Carried and logged only — no behavior depends on it yet.
    */
   identity?: ClientIdentity;
-  /**
-   * Pre-negotiated session (D5, tc-4b6k.4). Forwarded to
-   * {@link SessionProxyConnection} so `connect()` skips its handshake — the
-   * transport was already handshaken upstream (the broker single-socket
-   * `session.attach` path). Omit for the standalone path.
-   */
-  preNegotiated?: NegotiatedSession;
 }
 
 // ---------------------------------------------------------------------------
@@ -182,10 +175,10 @@ export async function connectClient(
 ): Promise<ClientHandle> {
   // ── Construct modules ────────────────────────────────────────────────────────
 
-  const connectionOpts: SessionProxyConnectionOptions = {
-    ...(opts.identity !== undefined ? { identity: opts.identity } : {}),
-    ...(opts.preNegotiated !== undefined ? { preNegotiated: opts.preNegotiated } : {}),
-  };
+  // D5 (tc-4b6k.4): a pre-handshaken transport is detected via the markPreNegotiated
+  // registry inside SessionProxyConnection.connect() — no option to forward here.
+  const connectionOpts: SessionProxyConnectionOptions =
+    opts.identity !== undefined ? { identity: opts.identity } : {};
   const connection = new SessionProxyConnection(transport, connectionOpts);
   const mirror = new Mirror();
   const paneConsumer = new PaneStreamConsumer();
