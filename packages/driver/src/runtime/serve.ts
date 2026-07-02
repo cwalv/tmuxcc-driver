@@ -416,7 +416,10 @@ export type UnstampedSessionProxyMessage = SessionProxyMessage extends infer M
 
 const DEFAULT_CAPABILITIES: Capabilities = {
   protocolVersion: WIRE_PROTOCOL_VERSION,
-  features: ["pane-lifecycle", "layout-updates", "focus-events", "input-forwarding"],
+  // tc-76m8.2: "client-read-only" advertises that this driver enforces
+  // ClientFlags.readOnly (silent input swallow + loud verb rejection).
+  // Extension checks for this feature before offering "Attach read-only" (D9 pattern).
+  features: ["pane-lifecycle", "layout-updates", "focus-events", "input-forwarding", "client-read-only"],
 };
 
 // ---------------------------------------------------------------------------

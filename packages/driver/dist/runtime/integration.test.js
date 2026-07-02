@@ -1495,5 +1495,111 @@ describe("tc-93a: Real tmux 3.4 smoke test", { skip: !tmuxAvailable ? "tmux not 
         sessionProxy.kill();
         await new Promise((r) => { sessionProxy.host.onExit(() => r()); });
     });
+    // -------------------------------------------------------------------------
+    // R9 (tc-76m8.2). Read-only client behavioral transcript.
+    //
+    // A client that attaches with flags.readOnly = true is subject to two
+    // enforcement regimes installed by sessionProxy.addClient (D4, §2.1):
+    //
+    //   1. SILENT SWALLOW  — `input.*` messages are dropped; no response.
+    //   2. LOUD REJECTION  — mutating `command.request` verbs produce
+    //                        command.response { ok: false, code: "read-only" }.
+    //   3. READS PASS      — snapshot, `session-proxy.info`, `pane.capture` etc.
+    //                        flow normally (handled BEFORE the readOnly gate).
+    //
+    // A concurrent full-access client (no flags) must be completely unaffected.
+    //
+    // The D9 feature string "client-read-only" is advertised in the
+    // session-proxy's DEFAULT_CAPABILITIES so the extension can offer the mode
+    // only when the driver supports it.
+    // -------------------------------------------------------------------------
+    it("R9 (tc-76m8.2): read-only client behavioral transcript — input swallowed, verbs rejected, reads pass; full client unaffected", async () => {
+        const sock = realSockName("read-only");
+        after(() => killRealServer(sock));
+        const sessionProxy = createSessionProxy({
+            host: { socketName: sock, sessionName: "r9session", cols: 80, rows: 24 },
+        });
+        sessionProxy.host.onError(() => { });
+        await sessionProxy.start();
+        // ── read-only client ─────────────────────────────────────────────────
+        const { sessionProxyTransport: roDt, clientTransport: roCt, controlMessages: roMsgs, } = createRecordingPair();
+        sessionProxy.demux.attachTransport(roDt);
+        // flags.readOnly activates the two-regime enforcement in addClient's
+        // onControl handler.
+        const roAddPromise = sessionProxy.addClient(roDt, { flags: { readOnly: true } });
+        const roClientPromise = runClientHandshake(roCt, CLIENT_CAPS);
+        await Promise.all([roAddPromise, roClientPromise]);
+        // ── AC: D9 feature string in session-proxy capabilities ──────────────
+        // "client-read-only" is advertised by DEFAULT_CAPABILITIES so the
+        // extension knows this driver supports the flag before offering the mode.
+        // We check the raw session-proxy.capabilities message, not the negotiated
+        // intersection (which depends on the CLIENT also advertising the string).
+        const capMsg = roMsgs.find((m) => m.type === "session-proxy.capabilities");
+        assert.ok(capMsg !== undefined, "session-proxy.capabilities must be present in outbound messages");
+        assert.ok(capMsg.capabilities.features.includes("client-read-only"), `"client-read-only" must be in session-proxy.capabilities.features; got: ${capMsg.capabilities.features.join(", ")}`);
+        // ── AC: snapshot flows normally for the read-only client ─────────────
+        const roSnapshot = await waitFor(() => roMsgs.find((m) => m.type === "snapshot"), 6000, "read-only client must receive a snapshot");
+        assert.ok(roSnapshot.panes.length >= 1, "snapshot must contain at least one pane");
+        const sourcePane = roSnapshot.panes[0].paneId;
+        // ── AC: input is silently swallowed (no response of any kind) ─────────
+        // The gate in session-proxy.ts returns immediately; the client hears nothing.
+        const msgCountBeforeInput = roMsgs.length;
+        roCt.sendControl({
+            type: "input",
+            seq: 2,
+            paneId: sourcePane,
+            data: "this keystroke must be swallowed",
+        });
+        await new Promise((r) => setTimeout(r, 300));
+        assert.equal(roMsgs.length, msgCountBeforeInput, `input to a read-only client must be silently dropped (no wire response); ` +
+            `${roMsgs.length - msgCountBeforeInput} unexpected message(s) arrived`);
+        // ── AC: mutating verb is rejected with typed error ────────────────────
+        const roVerbCid = "ro-split-1";
+        roCt.sendControl({
+            type: "command.request",
+            seq: 3,
+            correlationId: roVerbCid,
+            command: { kind: "split-pane", paneId: sourcePane, direction: "horizontal" },
+        });
+        const roReject = (await waitFor(() => roMsgs.find((m) => m.type === "command.response" &&
+            m.correlationId === roVerbCid), 4000, "read-only client must receive command.response for its split verb"));
+        assert.equal(roReject.result.ok, false, "split-pane verb on read-only client must be rejected");
+        assert.equal(roReject.result.ok === false ? roReject.result.code : "", "read-only", `rejection code must be "read-only"; got: ${JSON.stringify(roReject.result)}`);
+        // ── AC: reads are exempt — session-proxy.info succeeds ───────────────
+        // session-proxy.info is handled BEFORE the readOnly gate in session-proxy.ts
+        // (it's a pure diagnostics read, no tmux mutation).
+        const roInfoCid = "ro-info-1";
+        roCt.sendControl({
+            type: "command.request",
+            seq: 4,
+            correlationId: roInfoCid,
+            command: { kind: "session-proxy.info" },
+        });
+        const roInfo = (await waitFor(() => roMsgs.find((m) => m.type === "command.response" &&
+            m.correlationId === roInfoCid), 4000, "session-proxy.info must succeed for a read-only client"));
+        assert.equal(roInfo.result.ok, true, `session-proxy.info must succeed for a read-only client; got: ${JSON.stringify(roInfo.result)}`);
+        // ── full client is unaffected ─────────────────────────────────────────
+        // A concurrent full-access client (no readOnly flag) must be able to send
+        // mutating verbs and have them succeed, proving the flag is per-client.
+        const { sessionProxyTransport: fullDt, clientTransport: fullCt, controlMessages: fullMsgs, } = createRecordingPair();
+        sessionProxy.demux.attachTransport(fullDt);
+        const fullAddPromise = sessionProxy.addClient(fullDt);
+        const fullClientPromise = runClientHandshake(fullCt, CLIENT_CAPS);
+        await Promise.all([fullAddPromise, fullClientPromise]);
+        // Wait for the full client's snapshot so we know the session is ready.
+        await waitFor(() => fullMsgs.find((m) => m.type === "snapshot"), 6000, "full client must receive a snapshot");
+        const fullVerbCid = "full-split-1";
+        fullCt.sendControl({
+            type: "command.request",
+            seq: 2,
+            correlationId: fullVerbCid,
+            command: { kind: "split-pane", paneId: sourcePane, direction: "horizontal" },
+        });
+        const fullResponse = (await waitFor(() => fullMsgs.find((m) => m.type === "command.response" &&
+            m.correlationId === fullVerbCid), 8000, "concurrent full client must receive command.response for its split verb"));
+        assert.equal(fullResponse.result.ok, true, `concurrent full client's split-pane must succeed; got: ${JSON.stringify(fullResponse.result)}`);
+        sessionProxy.kill();
+        await new Promise((r) => { sessionProxy.host.onExit(() => r()); });
+    });
 });
 //# sourceMappingURL=integration.test.js.map

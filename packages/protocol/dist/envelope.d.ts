@@ -139,8 +139,19 @@ export interface ClientFlags {
      * tmux-parity `read-only`: the client attaches as an observer. CAVEAT
      * (decisions §2.1, verified in tmux source): over control mode, `read-only`
      * does NOT bind the `-CC` command channel — its authority semantics are
-     * DRIVER-ENFORCED, never delegated to tmux's flag. The protocol only CARRIES
-     * the flag; the driver owns what it means. Reserved; no behavior yet.
+     * DRIVER-ENFORCED, never delegated to tmux's flag. The protocol CARRIES
+     * the flag; the driver owns what it means.
+     *
+     * Driver enforcement (tc-76m8.2): when `readOnly` is true the session-proxy
+     *   - SILENTLY SWALLOWS `input.*` messages (the extension owns the
+     *     user-facing "You are observing" toast — the driver stays quiet).
+     *   - REJECTS all other mutating `command.request` verbs with a typed
+     *     `command.response { ok: false, code: "read-only" }`.
+     *   - Passes ALL reads/snapshot/delta messages normally.
+     *
+     * Advertised in the session-proxy's handshake as the `"client-read-only"`
+     * feature string (D9 pattern) so the extension offers the mode only when
+     * the driver supports it.
      */
     readonly readOnly?: boolean;
 }
@@ -151,7 +162,7 @@ export interface ClientFlags {
  * Valid values differ between the server-proxy wire and the session-proxy wire; this type
  * is the open union that admits both sets.
  */
-export type WireFeature = "pane-lifecycle" | "layout-updates" | "focus-events" | "input-forwarding" | "sessions-watch" | "session-create" | "session-destroy" | "session-claim" | "pane-attach" | "server-proxy-info" | "server-proxy-metrics-http" | "tmux-caps" | (string & Record<never, never>);
+export type WireFeature = "pane-lifecycle" | "layout-updates" | "focus-events" | "input-forwarding" | "client-read-only" | "sessions-watch" | "session-create" | "session-destroy" | "session-claim" | "pane-attach" | "server-proxy-info" | "server-proxy-metrics-http" | "tmux-caps" | (string & Record<never, never>);
 /**
  * Checks whether a value looks like a ControlMessage at runtime (has a
  * string `type` and a numeric `seq`). Does NOT do deep field validation —
