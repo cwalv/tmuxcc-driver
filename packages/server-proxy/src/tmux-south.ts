@@ -45,9 +45,108 @@
  * @module tmux-south
  */
 
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createTmuxHost } from "@tmuxcc/session-proxy";
 import type { TmuxHost, TmuxCapabilityMap } from "@tmuxcc/session-proxy";
+
+// ---------------------------------------------------------------------------
+// Async one-shot spawn (D6 / tc-4b6k.6)
+// ---------------------------------------------------------------------------
+
+/**
+ * Result of an async {@link runTmux} spawn, shaped to match the subset of
+ * `SpawnSyncReturns` the south-side callers consult (`status` / `stdout` /
+ * `stderr` / `error`).  Every field is always populated so a caller branches on
+ * it exactly as it did on the former synchronous result.
+ */
+interface TmuxRunResult {
+  /** Process exit code, or `null` when the child was killed / never ran. */
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  /**
+   * Spawn-level failure — `ENOENT` (tmux not on PATH), `ETIMEDOUT` (exceeded
+   * the caller's budget), or any other spawn/stream error.  `null` when the
+   * command ran to completion (whatever its exit status).
+   */
+  error: NodeJS.ErrnoException | null;
+}
+
+/**
+ * Run a one-shot `tmux` command asynchronously and resolve its collected
+ * output — the async replacement for this module's former `spawnSync` calls
+ * (D6 / tc-4b6k.6).  Removing `spawnSync` from the broker's south side is the
+ * whole point: every reconcile / claim / info previously blocked the SHARED
+ * event loop (the broker plus every in-process session-proxy, tc-2x3.3) for the
+ * entire subprocess round-trip — up to `timeoutMs` under host load — stalling
+ * every session's delta pipeline.  With an async spawn the loop stays free
+ * while tmux runs.
+ *
+ * Never rejects: a spawn failure / timeout is reported via `error` (mirroring
+ * `spawnSync`'s `result.error`), so callers keep their existing
+ * `result.error` / `result.status` branching unchanged.  On timeout the child
+ * is SIGKILLed and `error.code` is `"ETIMEDOUT"` (matching `spawnSync`'s
+ * `timeout` contract).
+ *
+ * One-shot tmux commands (`list-sessions`, `has-session`, `set-option`, …) need
+ * no controlling TTY, so a plain pipe spawn suffices — unlike the `-CC attach`
+ * watcher, which requires the node-pty bridge (see the module doc).
+ */
+function runTmux(args: string[], timeoutMs: number): Promise<TmuxRunResult> {
+  return new Promise((resolve) => {
+    let proc: ChildProcess;
+    try {
+      proc = spawn("tmux", args, { stdio: ["ignore", "pipe", "pipe"] });
+    } catch (err) {
+      // Synchronous spawn throw (extremely rare) — report like an error result.
+      resolve({ status: null, stdout: "", stderr: "", error: err as NodeJS.ErrnoException });
+      return;
+    }
+
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const settle = (r: TmuxRunResult): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(r);
+    };
+
+    const timer = setTimeout(() => {
+      try {
+        proc.kill("SIGKILL");
+      } catch {
+        // already gone
+      }
+      settle({
+        status: null,
+        stdout,
+        stderr,
+        error: Object.assign(new Error(`tmux command timed out after ${timeoutMs}ms`), {
+          code: "ETIMEDOUT",
+        }),
+      });
+    }, timeoutMs);
+    timer.unref();
+
+    proc.stdout?.on("data", (d: Buffer) => {
+      stdout += d.toString("utf8");
+    });
+    proc.stderr?.on("data", (d: Buffer) => {
+      stderr += d.toString("utf8");
+    });
+    // Spawn-level failure (e.g. ENOENT: tmux not on PATH).  `close` does not
+    // fire in this case, so the once-guard `settle` is safe.
+    proc.on("error", (err: NodeJS.ErrnoException) => {
+      settle({ status: null, stdout, stderr, error: err });
+    });
+    // `close` (not `exit`) so stdout/stderr are fully drained before we read.
+    proc.on("close", (code) => {
+      settle({ status: code, stdout, stderr, error: null });
+    });
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -153,28 +252,26 @@ export interface TmuxAvailabilityOut {
  * {@link TmuxAvailabilityOut}.  Callers that don't pass `out` see no behaviour
  * change (the `null`/`[]` contract is unchanged).
  */
-export function listSessions(
+export async function listSessions(
   socketName: string,
   out?: TmuxAvailabilityOut,
-): TmuxSessionRow[] | null {
+): Promise<TmuxSessionRow[] | null> {
   // Fields: session_id  session_name  session_windows  session_attached
   //         @tmuxcc  session_activity
   // Delimiter: tab (\t) avoids accidental splits on spaces in session names.
   const FORMAT = "#{session_id}\t#{session_name}\t#{session_windows}\t#{session_attached}\t#{@tmuxcc}\t#{session_activity}";
-  const result = spawnSync(
-    "tmux",
+  const result = await runTmux(
     ["-L", socketName, "list-sessions", "-F", FORMAT],
-    { encoding: "utf8", timeout: 5_000 },
+    5_000,
   );
 
-  // tc-295a.35: classify the binary-missing case.  `spawnSync` sets
+  // tc-295a.35: classify the binary-missing case.  `runTmux` sets
   // `result.error.code === "ENOENT"` iff the `tmux` executable could not be
   // found on PATH.  Every other outcome (it ran, or failed for a different
   // reason) means the binary IS present.  Reported via the out-param only;
   // the session-table return value is unchanged.
   if (out) {
-    const code = (result.error as NodeJS.ErrnoException | undefined)?.code;
-    out.binaryMissing = code === "ENOENT";
+    out.binaryMissing = result.error?.code === "ENOENT";
   }
 
   // Spawn-level failure (timeout, ENOENT on tmux binary, etc.) — transient,
@@ -195,7 +292,7 @@ export function listSessions(
   }
 
   // Pane counts per session id, used to enrich each row.
-  const paneCounts = countPanesBySession(socketName);
+  const paneCounts = await countPanesBySession(socketName);
 
   return (result.stdout ?? "")
     .trim()
@@ -226,11 +323,10 @@ export function listSessions(
  * sessions effectively does not exist under the modern `exit-empty on`
  * default, so "no rows" ⇒ `null` is the right degradation.
  */
-export function getTmuxServerPid(socketName: string): number | null {
-  const result = spawnSync(
-    "tmux",
+export async function getTmuxServerPid(socketName: string): Promise<number | null> {
+  const result = await runTmux(
     ["-L", socketName, "list-sessions", "-F", "#{pid}"],
-    { encoding: "utf8", timeout: 5_000 },
+    5_000,
   );
   if (result.status !== 0 || result.error) return null;
   const first = (result.stdout ?? "").trim().split("\n")[0] ?? "";
@@ -245,12 +341,11 @@ export function getTmuxServerPid(socketName: string): number | null {
  * Runs `tmux -L <socketName> list-panes -a -F '#{session_id}'` and tallies
  * rows.  Returns an empty map when the server is not running.
  */
-export function countPanesBySession(socketName: string): Map<string, number> {
+export async function countPanesBySession(socketName: string): Promise<Map<string, number>> {
   const counts = new Map<string, number>();
-  const result = spawnSync(
-    "tmux",
+  const result = await runTmux(
     ["-L", socketName, "list-panes", "-a", "-F", "#{session_id}"],
-    { encoding: "utf8", timeout: 5_000 },
+    5_000,
   );
   if (result.status !== 0 || result.error) return counts;
   for (const line of (result.stdout ?? "").trim().split("\n")) {
@@ -282,12 +377,11 @@ export function countPanesBySession(socketName: string): Map<string, number> {
  * clients attached to that session.  An empty map is returned when the
  * server is not running or has no clients.
  */
-export function countTmuxccClientsBySession(socketName: string): Map<string, number> {
+export async function countTmuxccClientsBySession(socketName: string): Promise<Map<string, number>> {
   const counts = new Map<string, number>();
-  const result = spawnSync(
-    "tmux",
+  const result = await runTmux(
     ["-L", socketName, "list-clients", "-F", "#{client_flags} #{session_id}"],
-    { encoding: "utf8", timeout: 5_000 },
+    5_000,
   );
   if (result.status !== 0 || result.error) return counts;
   for (const line of (result.stdout ?? "").trim().split("\n")) {
@@ -371,16 +465,15 @@ export interface SessionTopologyResult {
  *
  * Returns `null` if the session cannot be found or the commands fail.
  */
-export function listSessionTopology(
+export async function listSessionTopology(
   socketName: string,
   sessionName: string,
-): SessionTopologyResult | null {
+): Promise<SessionTopologyResult | null> {
   // list-windows: window_id, window_name, window_active
   const WIN_FORMAT = "#{window_id}\t#{window_name}\t#{window_active}";
-  const winResult = spawnSync(
-    "tmux",
+  const winResult = await runTmux(
     ["-L", socketName, "list-windows", "-t", sessionName, "-F", WIN_FORMAT],
-    { encoding: "utf8", timeout: 5_000 },
+    5_000,
   );
   if (winResult.status !== 0 || winResult.error) return null;
 
@@ -402,10 +495,9 @@ export function listSessionTopology(
   // regardless of -t and leak other sessions' panes into this query.
   const PANE_FORMAT =
     "#{pane_id}\t#{window_id}\t#{@tmuxcc-bound}\t#{@tmuxcc-detach}\t#{@tmuxcc-icon}";
-  const paneResult = spawnSync(
-    "tmux",
+  const paneResult = await runTmux(
     ["-L", socketName, "list-panes", "-s", "-t", sessionName, "-F", PANE_FORMAT],
-    { encoding: "utf8", timeout: 5_000 },
+    5_000,
   );
   if (paneResult.status !== 0 || paneResult.error) return null;
 
@@ -454,15 +546,14 @@ export function listSessionTopology(
  * session-proxy will start; the session just won't appear in the attach-picker until
  * the marker is applied on the next claim.
  */
-export function createSession(
+export async function createSession(
   socketName: string,
   name: string,
   capabilities?: TmuxCapabilityMap,
-): { tmuxId: string } {
-  const result = spawnSync(
-    "tmux",
+): Promise<{ tmuxId: string }> {
+  const result = await runTmux(
     ["-L", socketName, "new-session", "-d", "-s", name, "-P", "-F", "#{session_id}"],
-    { encoding: "utf8", timeout: 10_000 },
+    10_000,
   );
   if (result.status !== 0 || result.error) {
     throw new Error(
@@ -481,7 +572,7 @@ export function createSession(
   }
 
   // Set the @tmuxcc 1 marker so the Phase 2 probe can discover this session.
-  setSessionMarker(socketName, name);
+  await setSessionMarker(socketName, name);
 
   // tc-w3ir.1: apply the tmuxcc driver default `scroll-on-clear off` as a
   // server-global window option at session/server birth. `new-session` above
@@ -494,7 +585,7 @@ export function createSession(
   // tc-4b6k.12: pass capabilities so the call is skipped on tmux < 3.3 where
   // scroll-on-clear is absent; when capabilities is undefined the old
   // best-effort behaviour (try and silently swallow) is preserved.
-  setGlobalScrollOnClear(socketName, false, capabilities);
+  await setGlobalScrollOnClear(socketName, false, capabilities);
 
   return { tmuxId };
 }
@@ -516,11 +607,10 @@ export function createSession(
  * workspace-derived (stable, unique per workspace) so ambiguity is not a
  * concern in practice.
  */
-export function setSessionMarker(socketName: string, name: string): void {
-  spawnSync(
-    "tmux",
+export async function setSessionMarker(socketName: string, name: string): Promise<void> {
+  await runTmux(
     ["-L", socketName, "set-option", "-t", name, "@tmuxcc", "1"],
-    { encoding: "utf8", timeout: 3_000 },
+    3_000,
   );
 }
 
@@ -552,108 +642,18 @@ export function setSessionMarker(socketName: string, name: string): void {
  * behaviour (try and silently discard any error) is preserved for callers that
  * do not yet have access to the capability state.
  */
-export function setGlobalScrollOnClear(
+export async function setGlobalScrollOnClear(
   socketName: string,
   on: boolean,
   capabilities?: TmuxCapabilityMap,
-): void {
+): Promise<void> {
   // scroll-on-clear was added in tmux 3.3 (CHANGES FROM 3.2a TO 3.3).
   // When the caller supplies capabilities, skip silently if the feature is absent.
   if (capabilities !== undefined && !capabilities.scrollOnClear) return;
-  spawnSync(
-    "tmux",
+  await runTmux(
     ["-L", socketName, "set-option", "-wg", "scroll-on-clear", on ? "on" : "off"],
-    { encoding: "utf8", timeout: 3_000 },
+    3_000,
   );
-}
-
-/**
- * Set `synchronize-panes` for a specific tmux window.
- *
- * Runs `tmux -L <socketName> set-option -wt @<windowNum> synchronize-panes on|off`.
- *
- * `windowNum` is the numeric tmux window id (the N in `@N`).
- * `on` specifies the desired state.
- *
- * Throws if the command fails (tmux server unavailable or invalid window target).
- *
- * tc-7xv.12: server-proxy-side surface for `setSynchronizePanes`.  Routes through
- * a connected session-proxy's `set-synchronize-panes` WireCommand when a session-proxy
- * is available; falls back to this direct-tmux path otherwise.
- */
-export function setWindowSynchronizePanes(
-  socketName: string,
-  windowNum: number,
-  on: boolean,
-): void {
-  const result = spawnSync(
-    "tmux",
-    ["-L", socketName, "set-option", "-wt", `@${windowNum}`, "synchronize-panes", on ? "on" : "off"],
-    { encoding: "utf8", timeout: 5_000 },
-  );
-  if (result.status !== 0 || result.error) {
-    throw new Error(
-      `tmux set-option synchronize-panes failed: ${result.stderr?.trim() ?? result.error?.message ?? "unknown error"}`,
-    );
-  }
-}
-
-/**
- * Set `monitor-activity` for a specific tmux window.
- *
- * Runs `tmux -L <socketName> set-option -wt @<windowNum> monitor-activity on|off`.
- *
- * `windowNum` is the numeric tmux window id (the N in `@N`).
- * `on` specifies the desired state.
- *
- * Throws if the command fails (tmux server unavailable or invalid window target).
- *
- * tc-7xv.15: server-proxy-side surface for `setMonitorActivity`.
- */
-export function setWindowMonitorActivity(
-  socketName: string,
-  windowNum: number,
-  on: boolean,
-): void {
-  const result = spawnSync(
-    "tmux",
-    ["-L", socketName, "set-option", "-wt", `@${windowNum}`, "monitor-activity", on ? "on" : "off"],
-    { encoding: "utf8", timeout: 5_000 },
-  );
-  if (result.status !== 0 || result.error) {
-    throw new Error(
-      `tmux set-option monitor-activity failed: ${result.stderr?.trim() ?? result.error?.message ?? "unknown error"}`,
-    );
-  }
-}
-
-/**
- * Set `monitor-silence` for a specific tmux window.
- *
- * Runs `tmux -L <socketName> set-option -wt @<windowNum> monitor-silence <seconds>`.
- * Pass `seconds = 0` to disable (tmux interprets `monitor-silence 0` as off).
- *
- * `windowNum` is the numeric tmux window id (the N in `@N`).
- *
- * Throws if the command fails (tmux server unavailable or invalid window target).
- *
- * tc-7xv.15: server-proxy-side surface for `setMonitorSilence`.
- */
-export function setWindowMonitorSilence(
-  socketName: string,
-  windowNum: number,
-  seconds: number,
-): void {
-  const result = spawnSync(
-    "tmux",
-    ["-L", socketName, "set-option", "-wt", `@${windowNum}`, "monitor-silence", String(seconds)],
-    { encoding: "utf8", timeout: 5_000 },
-  );
-  if (result.status !== 0 || result.error) {
-    throw new Error(
-      `tmux set-option monitor-silence failed: ${result.stderr?.trim() ?? result.error?.message ?? "unknown error"}`,
-    );
-  }
 }
 
 /**
@@ -661,11 +661,10 @@ export function setWindowMonitorSilence(
  * `id` can be a session name or tmux `$N` id.
  * Throws if the command fails.
  */
-export function killSession(socketName: string, id: string): void {
-  const result = spawnSync(
-    "tmux",
+export async function killSession(socketName: string, id: string): Promise<void> {
+  const result = await runTmux(
     ["-L", socketName, "kill-session", "-t", id],
-    { encoding: "utf8", timeout: 10_000 },
+    10_000,
   );
   if (result.status !== 0 || result.error) {
     throw new Error(
@@ -723,11 +722,10 @@ export function killSession(socketName: string, id: string): void {
  */
 export type TmuxSessionPresence = "present" | "absent" | "inconclusive";
 
-export function checkSessionPresence(socketName: string, id: string): TmuxSessionPresence {
-  const result = spawnSync(
-    "tmux",
+export async function checkSessionPresence(socketName: string, id: string): Promise<TmuxSessionPresence> {
+  const result = await runTmux(
     ["-L", socketName, "has-session", "-t", id],
-    { encoding: "utf8", timeout: 5_000 },
+    5_000,
   );
   if (result.error) {
     // Spawn-level failure (timeout, ENOENT) — no information about the session.
@@ -890,7 +888,7 @@ export function createTmuxWatcher(
   let pollMs = POLL_INIT_MS;
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
 
-  function connect(): void {
+  async function connect(): Promise<void> {
     if (stopped || done) return;
 
     // Check if the server is actually running before attaching.
@@ -899,7 +897,9 @@ export function createTmuxWatcher(
     //
     // tc-zcqr: listSessions returns null on transient failure; treat that
     // the same as "no sessions yet" — schedule a retry.
-    const rows = listSessions(socketName);
+    const rows = await listSessions(socketName);
+    // The watcher may have been stopped/EOFed while the async list ran.
+    if (stopped || done) return;
     if (rows === null || rows.length === 0) {
       // Nothing to attach to yet — schedule a retry
       schedulePoll();
@@ -966,7 +966,7 @@ export function createTmuxWatcher(
       pollTimer = null;
       // Notify on each poll tick so the server-proxy does a full refresh
       onChanged();
-      connect();
+      void connect();
       pollMs = Math.min(pollMs * POLL_FACTOR, POLL_MAX_MS);
     }, pollMs);
     // Don't let a pending pre-attach poll keep the event loop alive.
@@ -974,7 +974,7 @@ export function createTmuxWatcher(
   }
 
   // Start immediately
-  connect();
+  void connect();
 
   return {
     stop(): void {

@@ -85,7 +85,7 @@ import type { ServerProxyMetrics } from "./metrics.js";
 import { mergeMetricsText } from "./metrics-exposition.js";
 import { parseMetricsHttpBind, bindMetricsHttp } from "./metrics-http.js";
 import type { MetricsHttpListener } from "./metrics-http.js";
-import { listSessions, createSession, killSession, checkSessionPresence, createTmuxWatcher, probeTmuxLiveness, setWindowSynchronizePanes, setWindowMonitorActivity, setWindowMonitorSilence, setSessionMarker, getTmuxServerPid, countTmuxccClientsBySession, listSessionTopology } from "./tmux-south.js";
+import { listSessions, createSession, killSession, checkSessionPresence, createTmuxWatcher, probeTmuxLiveness, setSessionMarker, getTmuxServerPid, countTmuxccClientsBySession, listSessionTopology } from "./tmux-south.js";
 import type { TmuxWatcher, TmuxAvailabilityOut } from "./tmux-south.js";
 import { probeTmuxCapabilities, MINIMUM_TMUX_VERSION } from "./tmux-capabilities.js";
 import type { TmuxCapabilityState } from "./tmux-capabilities.js";
@@ -286,49 +286,11 @@ export interface ServerProxyHandle {
   /** Current metrics-HTTP listener state (tc-44u4.4). */
   metricsHttpState(): MetricsHttpStatePayload;
 
-  /**
-   * Toggle `synchronize-panes` for a tmux window (tc-7xv.12).
-   *
-   * `windowId` is the session-proxy wire WindowId (e.g. `"w3"` for tmux window `@3`).
-   * `on` controls the desired state.
-   *
-   * Issues `tmux set-option -wt @<N> synchronize-panes on|off` synchronously.
-   * The session-proxy connected to the session will detect the change via the
-   * `%window-option-changed` notification and push a `window.sync.changed`
-   * delta to all connected clients.
-   *
-   * Throws if tmux is unavailable or the window does not exist.
-   */
-  setSynchronizePanes(windowId: string, on: boolean): void;
-
-  // ── tc-7xv.15 ──────────────────────────────────────────────────────────────
-
-  /**
-   * Set `monitor-activity` for a tmux window (tc-7xv.15).
-   *
-   * `windowId` is the session-proxy wire WindowId (e.g. `"w3"` for tmux window `@3`).
-   * `on` controls the desired state.
-   *
-   * Issues `tmux set-option -wt @<N> monitor-activity on|off` synchronously.
-   *
-   * Throws if tmux is unavailable or the window does not exist.
-   */
-  setMonitorActivity(windowId: string, on: boolean): void;
-
-  /**
-   * Set `monitor-silence` for a tmux window (tc-7xv.15).
-   *
-   * `windowId` is the session-proxy wire WindowId (e.g. `"w3"` for tmux window `@3`).
-   * `seconds` is the silence threshold (1..N), or 0/null to disable.
-   *
-   * Issues `tmux set-option -wt @<N> monitor-silence <seconds>` synchronously.
-   * Pass `seconds = null` to disable (sends `monitor-silence 0`).
-   *
-   * Throws if tmux is unavailable or the window does not exist.
-   */
-  setMonitorSilence(windowId: string, seconds: number | null): void;
-
-  // ── end tc-7xv.15 ─────────────────────────────────────────────────────────
+  // Window-option verbs (synchronize-panes / monitor-activity / monitor-silence)
+  // are NOT on the broker surface: they are session-scoped commands served by
+  // the session-proxy's ordered input-path pipeline (`set-synchronize-panes` /
+  // `set-monitor-activity` / `set-monitor-silence` WireCommands), where the
+  // `%window-option-changed` round-trip already closes the loop (D6 / S6).
 }
 
 // ---------------------------------------------------------------------------
@@ -542,6 +504,23 @@ class ServerProxyImpl implements ServerProxyHandle {
    */
   private _claimLocks = new Map<string, Promise<{ sessionId: SessionId; endpoint: string; created: boolean; name?: string }>>();
 
+  // ── tc-4b6k.6 session-refresh coalescing (D6) ──────────────────────────────
+  /**
+   * The in-flight `_doRefreshSessions()` promise, or null when idle.  The south
+   * side is now async (tmux-south.ts), so a reconcile no longer runs
+   * atomically; this serializes reconciles so concurrent callers never
+   * interleave their reads/mutations of the session table.
+   */
+  private _refreshInFlight: Promise<void> | null = null;
+  /**
+   * A single coalesced follow-up reconcile that begins after the in-flight one
+   * completes.  Callers arriving while a reconcile is running share this ONE
+   * follow-up, so a firehose of `%sessions-changed` cannot pile up unbounded,
+   * yet a caller that mutated state (or the event that woke them) is always
+   * reflected by the reconcile their `await` resolves on.
+   */
+  private _refreshPending: Promise<void> | null = null;
+
   // ── tc-x6l server-proxy metrics ───────────────────────────────────────────────
   private readonly _metrics: ServerProxyMetrics = createServerProxyMetrics();
 
@@ -672,63 +651,6 @@ class ServerProxyImpl implements ServerProxyHandle {
     return mergeMetricsText(serverText, sessionTexts);
   }
 
-  /**
-   * Map a wire WindowId string ("w3") → tmux numeric id (3).
-   * Convention mirrors input-path.ts defaultWindowIdToTmux.
-   * Throws with code "internal" on malformed input.
-   */
-  private _parseWindowId(windowId: string, caller: string): number {
-    if (!windowId.startsWith("w")) {
-      throw Object.assign(
-        new Error(`${caller}: invalid windowId "${windowId}" — must start with "w"`),
-        { code: "internal" },
-      );
-    }
-    const windowNum = parseInt(windowId.slice(1), 10);
-    if (Number.isNaN(windowNum)) {
-      throw Object.assign(
-        new Error(`${caller}: cannot parse numeric window id from "${windowId}"`),
-        { code: "internal" },
-      );
-    }
-    return windowNum;
-  }
-
-  setSynchronizePanes(windowId: string, on: boolean): void {
-    const windowNum = this._parseWindowId(windowId, "setSynchronizePanes");
-    try {
-      setWindowSynchronizePanes(this._opts.socketName, windowNum, on);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      throw Object.assign(new Error(`tmux.unavailable: ${msg}`), { code: "tmux.unavailable" });
-    }
-  }
-
-  // ── tc-7xv.15 ──────────────────────────────────────────────────────────────
-
-  setMonitorActivity(windowId: string, on: boolean): void {
-    const windowNum = this._parseWindowId(windowId, "setMonitorActivity");
-    try {
-      setWindowMonitorActivity(this._opts.socketName, windowNum, on);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      throw Object.assign(new Error(`tmux.unavailable: ${msg}`), { code: "tmux.unavailable" });
-    }
-  }
-
-  setMonitorSilence(windowId: string, seconds: number | null): void {
-    const windowNum = this._parseWindowId(windowId, "setMonitorSilence");
-    const secondsVal = seconds !== null && seconds > 0 ? seconds : 0;
-    try {
-      setWindowMonitorSilence(this._opts.socketName, windowNum, secondsVal);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      throw Object.assign(new Error(`tmux.unavailable: ${msg}`), { code: "tmux.unavailable" });
-    }
-  }
-
-  // ── end tc-7xv.15 ─────────────────────────────────────────────────────────
-
   async start(): Promise<void> {
     if (this._started) throw new Error("ServerProxy already started");
     this._selfExited = false;
@@ -757,8 +679,9 @@ class ServerProxyImpl implements ServerProxyHandle {
     // the file WE own (see `_removeOwnedSocket`).
     this._boundSocketIno = this._statSocketIno(this._socketPath);
 
-    // Initial session load
-    this._refreshSessions();
+    // Initial session load — await so `_adoptedExistingServer` (below) and the
+    // first client's snapshot see the reconciled table.
+    await this._refreshSessions();
 
     // tc-4b6k.12 D9: probe tmux version and derive the capability map once.
     // Runs after _refreshSessions so _tmuxAvailable is already up to date; if
@@ -964,7 +887,8 @@ class ServerProxyImpl implements ServerProxyHandle {
     return createTmuxWatcher(
       this._opts.socketName,
       () => {
-        this._refreshSessions();
+        // Event-driven reconcile: fire-and-forget (coalesced in _refreshSessions).
+        void this._refreshSessions();
       },
       () => {
         this._onWatcherEof();
@@ -1063,7 +987,7 @@ class ServerProxyImpl implements ServerProxyHandle {
       // sessions may have changed during the watcher gap.
       this._watcher?.stop();
       this._watcher = this._spawnWatcher();
-      this._refreshSessions();
+      void this._refreshSessions();
     }, delayMs);
     timer.unref();
     this._respawnTimer = timer;
@@ -1237,14 +1161,60 @@ class ServerProxyImpl implements ServerProxyHandle {
       `unexpectedly (bound tmux host died); fresh session-proxy on next session.claim\n`,
     );
     if (!this._started || this._selfExited) return;
-    this._refreshSessions();
+    // Fire-and-forget: the crash handler is a synchronous supervisor callback.
+    void this._refreshSessions();
   }
 
   // ---------------------------------------------------------------------------
   // Session state management
   // ---------------------------------------------------------------------------
 
-  private _refreshSessions(): void {
+  /**
+   * Reconcile the session table against tmux.  Coalesced + serialized (D6):
+   * at most one reconcile runs at a time, and callers arriving while one is in
+   * flight share a SINGLE queued follow-up that begins after it — so a caller
+   * that mutated state (or the `%sessions-changed` that woke them) is always
+   * reflected by the reconcile their `await` resolves on, without a firehose of
+   * events piling up unbounded reconciles.
+   *
+   * The body (`_doRefreshSessions`) is now async: its south-side shell-outs no
+   * longer block the shared event loop, so a reconcile never stalls the
+   * in-process session-proxies' delta pipelines (the whole point of the change).
+   * Serialization matters because the body is no longer atomic — without it two
+   * concurrent reconciles could interleave their reads/mutations of the session
+   * table across their `await` points.
+   */
+  private _refreshSessions(): Promise<void> {
+    if (this._refreshInFlight !== null) {
+      if (this._refreshPending === null) {
+        this._refreshPending = this._refreshInFlight.then(() => {
+          this._refreshPending = null;
+          return this._startRefresh();
+        });
+      }
+      return this._refreshPending;
+    }
+    return this._startRefresh();
+  }
+
+  /** Begin one reconcile and track it as the in-flight run. */
+  private _startRefresh(): Promise<void> {
+    const p = this._doRefreshSessions()
+      .catch((err: unknown) => {
+        // A reconcile must never reject its coalescing chain (that would wedge
+        // `_refreshPending`).  The synchronous predecessor could not throw;
+        // preserve that contract by logging and swallowing.
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`serverProxy: session refresh failed: ${msg}\n`);
+      })
+      .finally(() => {
+        if (this._refreshInFlight === p) this._refreshInFlight = null;
+      });
+    this._refreshInFlight = p;
+    return p;
+  }
+
+  private async _doRefreshSessions(): Promise<void> {
     // tc-x6l: sessions gauge is updated at the end of each refresh.
     // tc-zcqr: listSessions returns null on transient failure (timeout, spawn
     // error, unexpected non-zero exit) — distinguish from "no sessions"
@@ -1259,7 +1229,7 @@ class ServerProxyImpl implements ServerProxyHandle {
     // "tmuxcc requires tmux." message without the broker ever exiting on
     // tmux-absence (tolerate-tmux-appearing-later, tc-295a.16 RCA).
     const availability: TmuxAvailabilityOut = { binaryMissing: false };
-    const rows = listSessions(this._opts.socketName, availability);
+    const rows = await listSessions(this._opts.socketName, availability);
     const nowAvailable = !availability.binaryMissing;
     if (nowAvailable !== this._tmuxAvailable) {
       this._tmuxAvailable = nowAvailable;
@@ -1278,7 +1248,7 @@ class ServerProxyImpl implements ServerProxyHandle {
     // tc-3y8.7: subtract tmuxcc-owned control-mode clients from the raw
     // session_attached count so that attachedClientCount reflects only
     // real (external) clients.
-    const tmuxccCounts = countTmuxccClientsBySession(this._opts.socketName);
+    const tmuxccCounts = await countTmuxccClientsBySession(this._opts.socketName);
 
     // Build a set of current tmux ids
     const currentTmuxIds = new Set(rows.map((r) => r.tmuxId));
@@ -1309,7 +1279,7 @@ class ServerProxyImpl implements ServerProxyHandle {
       // Fast path: a live/in-flight session-proxy proves the session exists.
       if (this._supervisor.hasSessionProxy(sid)) continue;
       // Authoritative: only a positive "absent" from a reachable server removes.
-      if (checkSessionPresence(this._opts.socketName, entry.tmuxId) !== "absent") continue;
+      if ((await checkSessionPresence(this._opts.socketName, entry.tmuxId)) !== "absent") continue;
       this._sessions.delete(sid);
       this._byName.delete(entry.name);
       this._supervisor.reapSessionProxy(sid);
@@ -1473,8 +1443,8 @@ class ServerProxyImpl implements ServerProxyHandle {
    * counts are now sourced from the SessionEntry (populated by `listSessions`
    * via a companion `list-panes -a` call) — no extra shell-out here.
    */
-  private _buildInfo(): ServerProxyInfoPayload {
-    this._refreshSessions();
+  private async _buildInfo(): Promise<ServerProxyInfoPayload> {
+    await this._refreshSessions();
 
     const sessions: ServerProxyInfoSession[] = [];
     for (const entry of this._sessions.values()) {
@@ -1491,12 +1461,14 @@ class ServerProxyImpl implements ServerProxyHandle {
     // tc-x6l: update the sessions-active gauge before building the info payload.
     this._metrics.setSessionsActive(this._sessions.size);
 
+    const tmuxServerPid = await getTmuxServerPid(this._opts.socketName);
+
     return {
       socketName: this._opts.socketName,
       serverProxySocketPath: this._socketPath,
       serverProxyPid: process.pid,
       uptimeMs: Math.max(0, Date.now() - this._startedAtMs),
-      tmuxServerPid: getTmuxServerPid(this._opts.socketName),
+      tmuxServerPid,
       adoptedExistingServer: this._adoptedExistingServer,
       connectedClientCount: this._ipcClientCount,
       // D2 (tc-4b6k.1): the durable identity each connected wire client
@@ -1520,7 +1492,7 @@ class ServerProxyImpl implements ServerProxyHandle {
    * Used by the command handler so the server-proxy.info response carries live metrics.
    */
   private async _buildInfoAsync(): Promise<ServerProxyInfoPayload> {
-    const info = this._buildInfo();
+    const info = await this._buildInfo();
     const metricsText = await this._metrics.metricsText();
     return { ...info, metricsText };
   }
@@ -1586,7 +1558,7 @@ class ServerProxyImpl implements ServerProxyHandle {
         case "session.topology":
           // tc-i9aq.2: one-shot topology query for a discovered-but-unclaimed
           // session.  Read-only — no claim, no session-proxy spawn.
-          payload = { topology: this._querySessionTopology(command.sessionId) };
+          payload = { topology: await this._querySessionTopology(command.sessionId) };
           break;
         default: {
           const _exhaustive: never = command;
@@ -1652,13 +1624,13 @@ class ServerProxyImpl implements ServerProxyHandle {
    *
    * Read-only: no claim, no session-proxy spawn, no mutation.
    */
-  private _querySessionTopology(sessionId: SessionId): SessionTopologyPayload {
+  private async _querySessionTopology(sessionId: SessionId): Promise<SessionTopologyPayload> {
     const entry = this._sessions.get(sessionId);
     if (entry === undefined) {
       // Session not in registry; caller falls back to leaf rendering.
       return { windows: [], panes: [] };
     }
-    const result = listSessionTopology(this._opts.socketName, entry.name);
+    const result = await listSessionTopology(this._opts.socketName, entry.name);
     if (result === null) {
       // tmux call failed; fall back to leaf rendering.
       return { windows: [], panes: [] };
@@ -1722,7 +1694,7 @@ class ServerProxyImpl implements ServerProxyHandle {
     const _phaseT0 = phaseNow();
 
     // Refresh session list from tmux
-    this._refreshSessions();
+    await this._refreshSessions();
 
     let entry = this._byName.get(name);
 
@@ -1744,7 +1716,7 @@ class ServerProxyImpl implements ServerProxyHandle {
       try {
         // tc-4b6k.12: pass capability state so createSession can gate
         // version-sensitive operations (e.g. scroll-on-clear on tmux 3.3+).
-        const { tmuxId } = createSession(
+        const { tmuxId } = await createSession(
           this._opts.socketName,
           name,
           this._tmuxCapabilityState?.capabilities,
@@ -1782,7 +1754,7 @@ class ServerProxyImpl implements ServerProxyHandle {
         if (msg.toLowerCase().includes("duplicate")) {
           // Race: another process created it between our check and create —
           // we attached to that process's session; `created` stays false.
-          this._refreshSessions();
+          await this._refreshSessions();
           entry = this._byName.get(name);
           if (!entry) {
             throw Object.assign(new Error(`session.create race: ${msg}`), { code: "internal" });
@@ -1801,7 +1773,7 @@ class ServerProxyImpl implements ServerProxyHandle {
     // session the user manually created then attached via tmuxcc.attachToSession),
     // this stamps them as tmuxcc-managed so they will appear in listTmuxccSessions
     // on subsequent invocations.
-    setSessionMarker(this._opts.socketName, entry.name);
+    await setSessionMarker(this._opts.socketName, entry.name);
 
     // Ensure session-proxy is running
     const sessionProxySockPath = sessionProxySocketPath(
@@ -1840,7 +1812,7 @@ class ServerProxyImpl implements ServerProxyHandle {
   private async _createSession(
     name: string,
   ): Promise<{ sessionId: SessionId; endpoint: string; created: boolean }> {
-    this._refreshSessions();
+    await this._refreshSessions();
 
     // tc-3y8.2: an in-flight claim counts as "name in use" — joining it via
     // _claimSession would resolve with created=false, contradicting the
@@ -1910,7 +1882,7 @@ class ServerProxyImpl implements ServerProxyHandle {
       // Refresh on the first pass; subsequent passes skip the refresh because
       // the session we just tried to claim is now in _byName.
       if (attempt === 0) {
-        this._refreshSessions();
+        await this._refreshSessions();
       }
 
       const candidate = attempt === 0 ? base : `${base}-${attempt + 1}`;
@@ -1957,7 +1929,7 @@ class ServerProxyImpl implements ServerProxyHandle {
   ): Promise<{ sessionId: SessionId; endpoint: string; paneId: PaneId }> {
     // Refresh the session table from tmux so a recently-disappeared session
     // is detected promptly.
-    this._refreshSessions();
+    await this._refreshSessions();
 
     const entry = this._sessions.get(sessionId);
     if (!entry) {
@@ -1990,7 +1962,7 @@ class ServerProxyImpl implements ServerProxyHandle {
 
     // Kill the tmux session
     try {
-      killSession(this._opts.socketName, entry.tmuxId);
+      await killSession(this._opts.socketName, entry.tmuxId);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       throw Object.assign(new Error(`tmux.unavailable: ${msg}`), { code: "tmux.unavailable" });
