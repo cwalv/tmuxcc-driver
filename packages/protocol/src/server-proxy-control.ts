@@ -103,6 +103,15 @@ export interface ServerProxySessionInfo {
    * (tc-295a.4 / W1.3).  Sourced from tmux's `#{session_activity}`.
    */
   readonly lastActivity: number;
+  /**
+   * Workspace identity carried on the session as the `@tmuxcc-workspace`
+   * user-option (S4 / tc-76m8.6), or `undefined` when the session carries no
+   * such option (folderless-window sessions, foreign sessions, and every
+   * session created before S4).  Sourced from tmux's `#{@tmuxcc-workspace}`.
+   * The extension matches this against the current workspace's
+   * `session-name.workspaceIdentity` to reattach by identity rather than name.
+   */
+  readonly workspaceUri?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -180,6 +189,11 @@ export interface ServerProxySessionAddedMessage extends MessageBase {
   readonly paneCount: number;
   /** Unix epoch (seconds) of last activity at add time (tc-295a.4 / W1.3). */
   readonly lastActivity: number;
+  /**
+   * Workspace identity (`@tmuxcc-workspace`), or `undefined` when unset (S4 /
+   * tc-76m8.6).  Same field as {@link ServerProxySessionInfo.workspaceUri}.
+   */
+  readonly workspaceUri?: string;
 }
 
 /**
@@ -347,6 +361,15 @@ export interface SessionCreateUniqueCommand {
   readonly kind: "session.createUnique";
   /** Base session name.  The broker appends `-2`, `-3`, … as needed. */
   readonly baseName: string;
+  /**
+   * Optional workspace identity (S4 / tc-76m8.6).  When present, the broker sets
+   * it on the freshly-minted session as the `@tmuxcc-workspace` user-option so
+   * that a later reopen/arrival matches this workspace's session by identity
+   * rather than by name.  The value is the canonical workspace URI
+   * (`session-name.workspaceIdentity`).  Omitted for folderless windows (which
+   * carry no workspace identity) and by older extensions.
+   */
+  readonly workspaceUri?: string;
 }
 
 /**

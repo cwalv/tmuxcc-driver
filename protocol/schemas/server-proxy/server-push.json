@@ -50,6 +50,10 @@
           "type": "integer",
           "minimum": 0,
           "description": "Unix epoch (seconds) of the most-recent activity in this session (#{session_activity}); 0 when unknown."
+        },
+        "workspaceUri": {
+          "type": "string",
+          "description": "Workspace identity carried on the session as the @tmuxcc-workspace user-option (S4 / tc-76m8.6), or absent when unset (folderless-window, foreign, or pre-S4 sessions). Sourced from #{@tmuxcc-workspace}."
         }
       },
       "additionalProperties": false
@@ -90,7 +94,11 @@
         "attachedClientCount": { "type": "integer", "minimum": 0 },
         "tmuxccMarked": { "type": "boolean" },
         "paneCount": { "type": "integer", "minimum": 0 },
-        "lastActivity": { "type": "integer", "minimum": 0 }
+        "lastActivity": { "type": "integer", "minimum": 0 },
+        "workspaceUri": {
+          "type": "string",
+          "description": "Workspace identity (@tmuxcc-workspace) at add time, or absent when unset (S4 / tc-76m8.6)."
+        }
       },
       "additionalProperties": false
     },

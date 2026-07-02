@@ -33,7 +33,11 @@
       "required": ["kind", "baseName"],
       "properties": {
         "kind": { "const": "session.createUnique" },
-        "baseName": { "type": "string" }
+        "baseName": { "type": "string" },
+        "workspaceUri": {
+          "type": "string",
+          "description": "Optional workspace identity (S4 / tc-76m8.6). When present the broker sets it on the minted session as the @tmuxcc-workspace user-option so a later reopen matches by identity. Canonical workspace URI; omitted for folderless windows and older extensions."
+        }
       },
       "additionalProperties": false
     },

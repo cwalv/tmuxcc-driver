@@ -32,6 +32,7 @@ import {
   killSession,
   listSessions,
   setSessionMarker,
+  setSessionWorkspace,
   probeTmuxLiveness,
   probeTmuxAlive,
   checkSessionPresence,
@@ -540,5 +541,74 @@ describe("tmux-south probeTmuxLiveness (tc-vw10)", () => {
     } finally {
       killServer(liveSocket);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// setSessionWorkspace + listSessions round-trip (S4 / tc-76m8.6)
+//
+// Proves the `@tmuxcc-workspace` identity option's SET (createUnique stamps it
+// via setSessionWorkspace) and READ (listSessions surfaces it as
+// `row.workspaceUri`) round-trip against real tmux — and that new sessions carry
+// HUMAN-readable names (no sha8 suffix) in `tmux ls`.
+// ---------------------------------------------------------------------------
+
+describe("tmux-south @tmuxcc-workspace identity round-trip (S4/tc-76m8.6)", { skip: !TMUX_AVAILABLE }, () => {
+  afterEach(() => {
+    for (const sock of [...liveSockets]) killServer(sock);
+  });
+
+  it("setSessionWorkspace stamps @tmuxcc-workspace; listSessions reads it back", async () => {
+    const socketName = nextSocketName();
+    // A human-readable name (no sha8) — this is what `tmux ls` shows for new sessions.
+    await createSession(socketName, "myproject");
+    await setSessionWorkspace(socketName, "myproject", "file:///home/user/myproject");
+
+    const rows = await listSessions(socketName);
+    assert.notEqual(rows, null, "listSessions must not be a transient failure");
+    const row = rows!.find((r) => r.name === "myproject");
+    assert.ok(row, "the human-named session must be present");
+    assert.equal(row!.workspaceUri, "file:///home/user/myproject", "workspaceUri reads back the option");
+    assert.equal(row!.tmuxccMarked, true, "session is still tmuxcc-marked");
+  });
+
+  it("a session with no @tmuxcc-workspace option → workspaceUri is undefined (pre-S4 / legacy)", async () => {
+    const socketName = nextSocketName();
+    await createSession(socketName, "legacy-sess");
+    // Deliberately do NOT set @tmuxcc-workspace.
+    const rows = await listSessions(socketName);
+    const row = rows!.find((r) => r.name === "legacy-sess");
+    assert.ok(row, "session present");
+    assert.equal(row!.workspaceUri, undefined, "unset option surfaces as undefined, not empty string");
+  });
+
+  it("preserves a multi-root identity value containing '|' and ':' verbatim", async () => {
+    const socketName = nextSocketName();
+    // workspaceIdentity joins multi-root folder URIs with '|'.
+    const identity = "file:///ws/alpha|file:///ws/beta";
+    await createSession(socketName, "multiroot");
+    await setSessionWorkspace(socketName, "multiroot", identity);
+    const rows = await listSessions(socketName);
+    const row = rows!.find((r) => r.name === "multiroot");
+    assert.equal(row!.workspaceUri, identity, "the '|'-joined identity round-trips verbatim");
+  });
+
+  it("two same-basename sessions carry DISTINCT identities (cross-workspace collision avoidance)", async () => {
+    // Distinct sessions (createUnique would mint `myproject` + `myproject-2`), each
+    // stamped with its OWN workspace identity — the S4 replacement for the sha8
+    // suffix's disambiguation.
+    const socketName = nextSocketName();
+    await createSession(socketName, "myproject");
+    await setSessionWorkspace(socketName, "myproject", "file:///home/alice/myproject");
+    await createSession(socketName, "myproject-2");
+    await setSessionWorkspace(socketName, "myproject-2", "file:///home/bob/myproject");
+
+    const rows = await listSessions(socketName);
+    const a = rows!.find((r) => r.name === "myproject");
+    const b = rows!.find((r) => r.name === "myproject-2");
+    assert.ok(a && b, "both distinct sessions present");
+    assert.equal(a!.workspaceUri, "file:///home/alice/myproject");
+    assert.equal(b!.workspaceUri, "file:///home/bob/myproject");
+    assert.notEqual(a!.workspaceUri, b!.workspaceUri, "same basename → distinct identities");
   });
 });

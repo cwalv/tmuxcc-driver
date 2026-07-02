@@ -202,6 +202,13 @@ export interface TmuxSessionRow {
    * happen in practice).
    */
   lastActivity: number;
+  /**
+   * Workspace identity carried on the session as the `@tmuxcc-workspace`
+   * user-option (S4 / tc-76m8.6), or `undefined` when the option is unset
+   * (folderless-window, foreign, or pre-S4 sessions).  Sourced from tmux's
+   * `#{@tmuxcc-workspace}` format variable (empty string → `undefined`).
+   */
+  workspaceUri?: string;
 }
 
 /**
@@ -259,9 +266,10 @@ export async function listSessions(
   out?: TmuxAvailabilityOut,
 ): Promise<TmuxSessionRow[] | null> {
   // Fields: session_id  session_name  session_windows  session_attached
-  //         @tmuxcc  session_activity
+  //         @tmuxcc  session_activity  @tmuxcc-workspace
   // Delimiter: tab (\t) avoids accidental splits on spaces in session names.
-  const FORMAT = "#{session_id}\t#{session_name}\t#{session_windows}\t#{session_attached}\t#{@tmuxcc}\t#{session_activity}";
+  // @tmuxcc-workspace values are URIs / "|"-joined URIs — never contain tabs.
+  const FORMAT = "#{session_id}\t#{session_name}\t#{session_windows}\t#{session_attached}\t#{@tmuxcc}\t#{session_activity}\t#{@tmuxcc-workspace}";
   const result = await runTmux(
     ["-L", socketName, "list-sessions", "-F", FORMAT],
     5_000,
@@ -301,8 +309,9 @@ export async function listSessions(
     .split("\n")
     .filter(Boolean)
     .map((line) => {
-      const [tmuxId, name, windows, attached, marker, activity] = line.split("\t");
+      const [tmuxId, name, windows, attached, marker, activity, workspaceUri] = line.split("\t");
       const id = tmuxId ?? "";
+      const ws = (workspaceUri ?? "").trim();
       return {
         tmuxId: id,
         name: name ?? "",
@@ -311,6 +320,7 @@ export async function listSessions(
         tmuxccMarked: (marker ?? "").trim() === "1",
         paneCount: paneCounts.get(id) ?? 0,
         lastActivity: parseInt(activity ?? "0", 10) || 0,
+        ...(ws.length > 0 ? { workspaceUri: ws } : {}),
       };
     });
 }
@@ -621,6 +631,32 @@ export async function createSession(
 export async function setSessionMarker(socketName: string, name: string): Promise<void> {
   await runTmux(
     ["-L", socketName, "set-option", "-t", name, "@tmuxcc", "1"],
+    3_000,
+  );
+}
+
+/**
+ * Set the `@tmuxcc-workspace` user-option on a session (S4 / tc-76m8.6).
+ *
+ * This is the session's stable workspace IDENTITY (the canonical workspace URI),
+ * matched at reopen/arrival so a human-named session still reattaches to the
+ * right workspace.  Set once at session birth by `session.createUnique` when the
+ * creating extension supplied a workspace URI (folderless windows carry no
+ * identity, so this is skipped for them).
+ *
+ * Mirrors {@link setSessionMarker}: the `set-option` failure is intentionally
+ * non-fatal — a session that briefly lacks the option still exists and functions;
+ * it just falls back to legacy name-matching until the option lands.  Passing the
+ * session name directly (no `=<name>` literal-match prefix) matches
+ * {@link setSessionMarker}'s note.
+ */
+export async function setSessionWorkspace(
+  socketName: string,
+  name: string,
+  workspaceUri: string,
+): Promise<void> {
+  await runTmux(
+    ["-L", socketName, "set-option", "-t", name, "@tmuxcc-workspace", workspaceUri],
     3_000,
   );
 }

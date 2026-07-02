@@ -86,6 +86,13 @@ export interface TmuxSessionRow {
      * happen in practice).
      */
     lastActivity: number;
+    /**
+     * Workspace identity carried on the session as the `@tmuxcc-workspace`
+     * user-option (S4 / tc-76m8.6), or `undefined` when the option is unset
+     * (folderless-window, foreign, or pre-S4 sessions).  Sourced from tmux's
+     * `#{@tmuxcc-workspace}` format variable (empty string → `undefined`).
+     */
+    workspaceUri?: string;
 }
 /**
  * Optional out-parameter for {@link listSessions} reporting whether the tmux
@@ -292,6 +299,22 @@ export declare function createSession(socketName: string, name: string, capabili
  * concern in practice.
  */
 export declare function setSessionMarker(socketName: string, name: string): Promise<void>;
+/**
+ * Set the `@tmuxcc-workspace` user-option on a session (S4 / tc-76m8.6).
+ *
+ * This is the session's stable workspace IDENTITY (the canonical workspace URI),
+ * matched at reopen/arrival so a human-named session still reattaches to the
+ * right workspace.  Set once at session birth by `session.createUnique` when the
+ * creating extension supplied a workspace URI (folderless windows carry no
+ * identity, so this is skipped for them).
+ *
+ * Mirrors {@link setSessionMarker}: the `set-option` failure is intentionally
+ * non-fatal — a session that briefly lacks the option still exists and functions;
+ * it just falls back to legacy name-matching until the option lands.  Passing the
+ * session name directly (no `=<name>` literal-match prefix) matches
+ * {@link setSessionMarker}'s note.
+ */
+export declare function setSessionWorkspace(socketName: string, name: string, workspaceUri: string): Promise<void>;
 /**
  * Set the server-global `scroll-on-clear` window option as a tmuxcc driver
  * default (tc-w3ir.1).

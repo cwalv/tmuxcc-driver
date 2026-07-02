@@ -50,7 +50,7 @@ import { serverProxySocketPath, removeSocket, restrictSocket, classifySocketOwne
 import { createServerProxyMetrics } from "./metrics.js";
 import { mergeMetricsText } from "./metrics-exposition.js";
 import { parseMetricsHttpBind, bindMetricsHttp } from "./metrics-http.js";
-import { listSessions, killSession, checkSessionPresence, createTmuxWatcher, probeTmuxLiveness, getTmuxServerPid, countTmuxccClientsBySession, listSessionTopology } from "./tmux-south.js";
+import { listSessions, killSession, checkSessionPresence, createTmuxWatcher, probeTmuxLiveness, getTmuxServerPid, countTmuxccClientsBySession, listSessionTopology, setSessionWorkspace } from "./tmux-south.js";
 import { probeTmuxCapabilities, MINIMUM_TMUX_VERSION } from "./tmux-capabilities.js";
 import { createSessionProxySupervisor } from "./session-proxy-supervisor.js";
 import { createSessionClaimer } from "./claim-session.js";
@@ -1002,6 +1002,8 @@ class ServerProxyImpl {
                     tmuxccMarked: row.tmuxccMarked,
                     paneCount: row.paneCount,
                     lastActivity: row.lastActivity,
+                    // S4 (tc-76m8.6): workspace identity option, when set on the session.
+                    ...(row.workspaceUri !== undefined ? { workspaceUri: row.workspaceUri } : {}),
                 };
                 this._sessions.set(sessionId, entry);
                 this._byName.set(row.name, entry);
@@ -1016,6 +1018,11 @@ class ServerProxyImpl {
                 existing.tmuxccMarked = row.tmuxccMarked;
                 existing.paneCount = row.paneCount;
                 existing.lastActivity = row.lastActivity;
+                // S4 (tc-76m8.6): keep the workspace identity current (set or clear).
+                if (row.workspaceUri !== undefined)
+                    existing.workspaceUri = row.workspaceUri;
+                else
+                    delete existing.workspaceUri;
                 this._byName.set(row.name, existing);
                 this._broadcastRenamed(existing.sessionId, row.name);
             }
@@ -1027,6 +1034,11 @@ class ServerProxyImpl {
                 existing.tmuxccMarked = row.tmuxccMarked;
                 existing.paneCount = row.paneCount;
                 existing.lastActivity = row.lastActivity;
+                // S4 (tc-76m8.6): keep the workspace identity current (set or clear).
+                if (row.workspaceUri !== undefined)
+                    existing.workspaceUri = row.workspaceUri;
+                else
+                    delete existing.workspaceUri;
             }
         }
         // tc-x6l: update the sessions-active gauge after each refresh.
@@ -1205,6 +1217,8 @@ class ServerProxyImpl {
                 tmuxccMarked: entry.tmuxccMarked,
                 paneCount: entry.paneCount,
                 lastActivity: entry.lastActivity,
+                // S4 (tc-76m8.6): workspace identity option, when set.
+                ...(entry.workspaceUri !== undefined ? { workspaceUri: entry.workspaceUri } : {}),
             });
         }
         // tc-295a.35: canonical tmux-availability flag carried in every snapshot.
@@ -1324,7 +1338,7 @@ class ServerProxyImpl {
                     payload = await this._createSession(command.name);
                     break;
                 case "session.createUnique":
-                    payload = await this._createUniqueSession(command.baseName);
+                    payload = await this._createUniqueSession(command.baseName, command.workspaceUri);
                     break;
                 case "session.destroy":
                     payload = await this._destroySession(command.sessionId);
@@ -1524,8 +1538,16 @@ class ServerProxyImpl {
      *
      * Returns `{ sessionId, name, created: true }` — `created` is always `true`
      * because this command never silently attaches.
+     *
+     * S4 (tc-76m8.6): when `workspaceUri` is supplied (a folder/file window's
+     * workspace identity), stamp it on the freshly-minted session as the
+     * `@tmuxcc-workspace` user-option so a later reopen matches this workspace's
+     * session by identity rather than by its human name.  Set once at birth,
+     * mirroring the `@tmuxcc 1` marker; the failure is non-fatal (the option
+     * simply lands on the next refresh's read is a no-op — a session that briefly
+     * lacks it falls back to legacy name-matching).
      */
-    async _createUniqueSession(baseName) {
+    async _createUniqueSession(baseName, workspaceUri) {
         // Normalise: empty / whitespace-only baseName → "tmuxcc".
         const base = (baseName ?? "").trim() || "tmuxcc";
         // eslint-disable-next-line no-constant-condition
@@ -1545,6 +1567,16 @@ class ServerProxyImpl {
             // resolves with created=false — that means the name was taken; loop.
             const result = await this._claimer.claim(candidate);
             if (result.created) {
+                // S4: stamp the workspace identity on the just-minted session so reopen
+                // matches by option, not by the (human, non-unique) name.  Also mirror
+                // it onto the in-memory entry so a snapshot requested before the next
+                // refresh already carries the identity.
+                if (workspaceUri !== undefined && workspaceUri.length > 0) {
+                    await setSessionWorkspace(this._opts.socketName, candidate, workspaceUri);
+                    const entry = this._sessions.get(result.sessionId);
+                    if (entry !== undefined)
+                        entry.workspaceUri = workspaceUri;
+                }
                 return { sessionId: result.sessionId, created: true, name: candidate };
             }
             // Name was taken by a concurrent caller — try the next suffix.
@@ -1585,6 +1617,8 @@ class ServerProxyImpl {
             tmuxccMarked: entry.tmuxccMarked,
             paneCount: entry.paneCount,
             lastActivity: entry.lastActivity,
+            // S4 (tc-76m8.6): workspace identity option, when set.
+            ...(entry.workspaceUri !== undefined ? { workspaceUri: entry.workspaceUri } : {}),
         };
         this._broadcastToAll(delta);
     }
