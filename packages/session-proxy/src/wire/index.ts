@@ -56,8 +56,8 @@ export type {
   SessionClaimCommand,
   SessionCreateCommand,
   SessionDestroyCommand,
-  // tc-7xv.36: targeted-pane attach
-  PaneAttachCommand,
+  // D5 (tc-4b6k.4): post-handshake connection→session binding
+  SessionAttachMessage,
   // tc-k6v: server-proxy diagnostics snapshot
   ServerProxyInfoCommand,
   ServerProxyInfoSession,

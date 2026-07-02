@@ -17,10 +17,10 @@
  * topology (server-proxy + N session-proxy processes + N tmux clients) cost
  * ~335-600 MB RSS at N=3.  Stage 2 collapses the N session-proxy processes into
  * the server-proxy's own event loop: each session-proxy is now created
- * IN-PROCESS via `createSessionProxy(...)` and serves clients over its own
- * per-session unix socket.  The per-session sockets and the client wire protocol
- * are BYTE-IDENTICAL — only WHERE the `createSessionProxy` + `net.createServer`
- * code runs changed (in-proc vs child proc).
+ * IN-PROCESS via `createSessionProxy(...)`.  Stage 2 kept the per-session unix
+ * socket (each session-proxy bound its own `net.createServer`); tc-4b6k.4 (D5,
+ * below) then removed even that, folding every connection onto the ONE broker
+ * socket — so the supervisor no longer touches sockets at all.
  *
  * Consequences of the collapse:
  *   - No `--socket-name`/`--session-name`/`--socket-path` argv, no spawn, no
@@ -29,35 +29,30 @@
  *     the session-proxy lives and dies with the server-proxy by construction.
  *   - `sessionProxyPid()` reports the server-proxy's own pid — the session-proxy
  *     IS this process now (tc-k6v `server-proxy.info`).
- *   - The old SIGTERM graceful path (detach `-CC`, close + remove the unix
- *     socket) is preserved as `_teardownEntry`: `sessionProxy.stop()` then close
- *     the per-session server and unlink the socket file.
+ *   - The old SIGTERM graceful path (detach `-CC`) is preserved as
+ *     `_teardownEntry`: `sessionProxy.stop()` closes tmux stdin and waits for
+ *     the `-CC` client to exit (≤3 s, then SIGKILL).
  *
- * # Data-plane endpoint convention
+ * # tc-4b6k.4 (D5): single-socket wire collapse — no per-session socket
  *
- * Per SCHEMA.md: control + data plane are multiplexed on the same per-session
- * unix socket via the 0xCC magic byte (socket-transport.ts).  The endpoint
- * returned by the supervisor IS that multiplexed socket path; clients do not
- * need a separate data socket.
+ * Before this bead each session-proxy owned its OWN `net.Server` on a per-session
+ * unix socket, and the supervisor carried a whole layer of socket-lifecycle
+ * machinery to guard the races that per-session socket rebinding across respawns
+ * created (`_socketPathRefCount`, the `_closeServerFdOnly` rename-aside dance,
+ * ABA guards on the socket path — the tc-2x3.4 / tc-2x3.6 GAP-1 generations).
  *
- * # tc-2x3.6: GAP 1 — orphaned listening fd reclamation
+ * D5 deletes all of it: there is ONE well-known broker socket. The broker
+ * accepts every connection, runs the single handshake, and — on a
+ * `session.attach {sessionId}` — hands the transport to `sessionProxy.addClient`.
+ * The supervisor no longer creates, binds, restricts, renames, refcounts, or
+ * unlinks any socket. `ensureSessionProxy` returns the live `SessionProxy`
+ * object; the broker owns the transport handoff. Session lifecycle no longer
+ * implies socket lifecycle, so the GAP-1 class ceases to exist rather than being
+ * guarded.
  *
- * tc-2x3.4 fixed the socket-file clobber race (the fresh entry's socket file
- * was being unlinked by the old entry's deferred teardown) by calling
- * `server.unref()` instead of `server.close()` when refcount > 1.  `unref()`
- * prevents the old server from blocking process exit but leaves its listening
- * fd open until the process exits — an fd leak bounded in normal use (one reattach
- * cycle) but unbounded under a persistent GAP-2 busy-loop.
- *
- * The fix: call `_closeServerFdOnly(server, path)`.  Note the fresh
- * `_createSessionProxy` re-BINDS `path` (its `removeSocket` clears the stale
- * file, then it listens again), so at teardown time `path` holds the FRESH
- * socket — `server.close()`'s synchronous libuv unlink would clobber it.  So
- * `_closeServerFdOnly` renames the fresh socket aside, calls `server.close()`
- * (its unlink now hits the empty path → ENOENT no-op), then renames the fresh
- * socket back — reclaiming the old fd without touching the live socket.  Full
- * mechanism + the libuv-synchronous-unlink invariant it relies on are documented
- * at `_closeServerFdOnly` below.
+ * The genuinely-deep parts of the supervisor survive unchanged: per-name
+ * single-flight ensure, the GAP-2 circuit breaker, the registry ABA guard on
+ * host death / boundary trip, and lazy respawn.
  *
  * # tc-2x3.6: GAP 2 — repeated-trip circuit breaker
  *
@@ -98,13 +93,8 @@
  * @module session-proxy-supervisor
  */
 
-import * as net from "node:net";
-import * as fs from "node:fs";
 import { createSessionProxy } from "@tmuxcc/session-proxy";
 import type { SessionProxy } from "@tmuxcc/session-proxy";
-import { createSocketTransport } from "./socket-transport.js";
-import type { SocketTransportMetrics } from "./socket-transport.js";
-import { removeSocket, restrictSocket } from "./runtime-dir.js";
 import { recordHostDeath } from "./death-instrument.js";
 
 // ---------------------------------------------------------------------------
@@ -162,14 +152,10 @@ export class SessionQuarantineError extends Error {
 
 /** A running in-process session-proxy entry. */
 interface SessionProxyEntry {
-  /** The unix socket path the session-proxy is listening on. */
-  socketPath: string;
   /** Stable server-proxy-assigned session id. */
   sessionId: string;
   /** The in-process session-proxy runtime. */
   sessionProxy: SessionProxy;
-  /** The per-session unix socket server. */
-  server: net.Server;
   /**
    * Set once this entry has begun teardown (intentional reap OR host-exit).
    * Guards the host.onExit crash handler against firing during an intentional
@@ -209,12 +195,13 @@ export type SessionProxyCrashHandler = (sessionId: string, info: SessionProxyExi
 
 export interface SessionProxySupervisor {
   /**
-   * Ensure a session-proxy is running for the given session and return its socket path.
+   * Ensure a session-proxy is running for the given session and return the live
+   * {@link SessionProxy} object (D5, tc-4b6k.4).
    *
-   * If a session-proxy for `sessionId` is already running, returns its socket path
+   * If a session-proxy for `sessionId` is already running, returns it
    * immediately. If not, creates one IN-PROCESS and waits for it to finish
-   * bootstrapping (the per-session socket is listening and `sessionProxy.start()`
-   * has resolved).
+   * bootstrapping (`sessionProxy.start()` has resolved). The caller (the broker)
+   * then hands each attaching connection's transport to `sessionProxy.addClient`.
    *
    * Per-name atomicity: concurrent calls for the same `sessionId` share the
    * same in-flight creation promise — only one session-proxy is ever created.
@@ -223,8 +210,7 @@ export interface SessionProxySupervisor {
     sessionId: string,
     sessionName: string,
     socketName: string,
-    sessionProxySocketPath: string,
-  ): Promise<string>;
+  ): Promise<SessionProxy>;
 
   /**
    * PID of the process serving the session-proxy for `sessionId`, or `null`
@@ -326,86 +312,6 @@ export interface SessionProxySupervisor {
 }
 
 // ---------------------------------------------------------------------------
-// GAP 1 helper: close a net.Server's fd without triggering the socket-file unlink
-// (tc-2x3.6)
-// ---------------------------------------------------------------------------
-
-/**
- * Close a `net.Server`'s listening file descriptor WITHOUT unlinking the socket
- * file at `socketPath` — used when a fresh entry has already rebound that path
- * and we must not clobber it (tc-2x3.6 GAP 1).
- *
- * # The problem
- *
- * `server.close()` calls `handle.close()` which, at the libuv level, calls
- * `unlink(socketPath)` synchronously.  When a fresh entry has already rebound
- * the same path (refcount > 1), this would delete the FRESH server's live socket
- * file — the clobber that tc-2x3.4 fixed by switching to `server.unref()`.
- *
- * `server.unref()` prevents the old server from blocking process exit but leaves
- * its fd open — an fd leak bounded in normal use but unbounded under a GAP-2
- * persistent-trip busy-loop (tc-2x3.6 GAP 1).
- *
- * # The fix: rename-protect
- *
- * At the point this function is called:
- *   - `socketPath` → fresh server's inode (the live socket clients connect to).
- *   - Old server's fd → orphaned inode (no directory entry; cannot accept connections).
- *
- * Strategy:
- *   1. `fs.renameSync(socketPath, tempPath)` — move the fresh socket aside so
- *      `socketPath` is empty.  This is synchronous and takes no event-loop turn.
- *   2. `server.close()` — libuv calls `unlink(socketPath)`.  The path is now
- *      empty (ENOENT), so the unlink is a silent no-op.  The fd is closed.
- *   3. `fs.renameSync(tempPath, socketPath)` — restore the fresh socket.
- *
- * The rename window (step 1 → step 3) is synchronous: no event loop turn fires
- * in that window, so no client connection attempt can observe the absent path.
- *
- * # Fallback
- *
- * If the rename fails for any reason (e.g. the fresh socket was already deleted),
- * we fall back to `server.unref()` — the tc-2x3.4 behavior (fd held open until
- * process exit, not a correctness bug).  The fallback is logged to stderr so
- * the operator knows GAP 1 reclamation did not fire.
- */
-function _closeServerFdOnly(server: net.Server, socketPath: string): void {
-  // Belt-and-suspenders: prevent the server from blocking process exit regardless
-  // of whether the close succeeds.  This matches the tc-2x3.4 safety floor.
-  server.unref();
-
-  const tempPath = socketPath + ".__tc2x36__";
-  try {
-    // Step 1: protect the fresh socket by renaming it aside (synchronous).
-    // If the rename throws (e.g. ENOENT — fresh socket already gone), jump to fallback.
-    fs.renameSync(socketPath, tempPath);
-  } catch {
-    // Fresh socket is already gone (nothing to protect); fall back to unref-only
-    // so we don't call close() and risk any side effects.
-    return;
-  }
-
-  try {
-    // Step 2: close the old server — libuv tries unlink(socketPath) → ENOENT (no-op).
-    // Fd is reclaimed.
-    server.close();
-  } finally {
-    // Step 3: restore the fresh socket regardless of whether close() threw.
-    try {
-      fs.renameSync(tempPath, socketPath);
-    } catch {
-      // If restoration fails, the fresh socket may be lost.  Log loudly — this is
-      // a correctness issue and should never happen in normal operation.
-      process.stderr.write(
-        `[session-proxy-supervisor] CRITICAL: failed to restore fresh socket ` +
-          `at "${socketPath}" after fd reclamation (tc-2x3.6 GAP 1). ` +
-          `The session may be unreachable to new client connections.\n`,
-      );
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Implementation
 // ---------------------------------------------------------------------------
 
@@ -422,29 +328,6 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
    * allowing per-name serialization.
    */
   private _sessionProxies = new Map<string, SessionProxyEntry | Promise<SessionProxyEntry>>();
-  /**
-   * Reference count per socket path: how many live or in-flight entries currently
-   * claim ownership of that path.  Used by the ownership guard in
-   * `_doSocketTeardown` to decide whether to unlink the socket file.
-   *
-   * Why a reference count?
-   *
-   * `stop()` can take up to ~3 s.  During that window `ensureSessionProxy` may
-   * have already called `_createSessionProxy` for the same path, incrementing the
-   * count to 2.  When the old entry's `.finally` fires, it decrements back to 1;
-   * since the count is > 0, the unlink is skipped.  When the new entry eventually
-   * tears down, it decrements to 0 and the unlink runs safely.
-   *
-   * Lifecycle:
-   *   - Incremented at the START of `_createSessionProxy` (before server.listen),
-   *     even before `start()` resolves, so the guard sees the new claim during the
-   *     in-flight phase.
-   *   - Decremented inside `_doSocketTeardown`'s `.finally` callback at unlink
-   *     time.  If the count reaches 0, the path has no living owners → unlink.
-   *   - Also decremented (and the path removed) in the creation-failure path so
-   *     a failing creation does not leak a permanent claim.
-   */
-  private _socketPathRefCount = new Map<string, number>();
   private _crashHandler: SessionProxyCrashHandler | null = null;
   private _aliveCountHandlers: Array<(count: number) => void> = [];
 
@@ -507,8 +390,7 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
     sessionId: string,
     sessionName: string,
     socketName: string,
-    sessionProxySockPath: string,
-  ): Promise<string> {
+  ): Promise<SessionProxy> {
     // tc-2x3.6 GAP 2: circuit-breaker quarantine check.
     // A quarantined session has tripped the boundary >= CIRCUIT_BREAKER_TRIP_THRESHOLD
     // times within CIRCUIT_BREAKER_WINDOW_MS.  Reject immediately — do NOT create
@@ -527,18 +409,13 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
       if (existing instanceof Promise) {
         // In-flight creation — wait for it
         const entry = await existing;
-        return entry.socketPath;
+        return entry.sessionProxy;
       }
-      return existing.socketPath;
+      return existing.sessionProxy;
     }
 
     // Slow path: create a new session-proxy in-process
-    const createPromise = this._createSessionProxy(
-      sessionId,
-      sessionName,
-      socketName,
-      sessionProxySockPath,
-    );
+    const createPromise = this._createSessionProxy(sessionId, sessionName, socketName);
 
     // Register the promise immediately so concurrent callers share it.
     // tc-eqgp: count an in-flight creation as a live session-proxy for
@@ -566,7 +443,7 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
     if (this._sessionProxies.get(sessionId) === createPromise) {
       this._sessionProxies.set(sessionId, entry);
     }
-    return entry.socketPath;
+    return entry.sessionProxy;
   }
 
   sessionProxyPid(sessionId: string): number | null {
@@ -628,38 +505,23 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
   // ---------------------------------------------------------------------------
 
   /**
-   * Create and start a session-proxy IN-PROCESS, listening on its per-session
-   * unix socket.  This is the in-process equivalent of the old
-   * session-proxy-entry.ts main(): remove the stale socket, create the
-   * SessionProxy, bind the unix socket server, restrict to 0600, start the
-   * SessionProxy (spawns `tmux -CC attach` via node-pty), and wire the
-   * host-exit teardown.
+   * Create and start a session-proxy IN-PROCESS (D5, tc-4b6k.4).
+   *
+   * No per-session socket: the broker owns the single well-known socket and
+   * hands each attaching connection's transport to `sessionProxy.addClient`.
+   * This method just creates the SessionProxy, starts it (spawns `tmux -CC
+   * attach` via node-pty), and wires the host-exit teardown.
    *
    * Mirrors the pre-collapse readiness contract: the returned promise resolves
-   * ONLY after the socket is listening AND `sessionProxy.start()` has resolved,
-   * so `session.claim` does not return an endpoint until clients can actually
-   * connect and get a snapshot (the old "READY\n" handshake guaranteed the same).
+   * ONLY after `sessionProxy.start()` has resolved, so `session.claim` /
+   * `session.attach` do not proceed until the pipeline is live and can serve a
+   * snapshot (the old "READY\n" handshake guaranteed the same).
    */
   private async _createSessionProxy(
     sessionId: string,
     sessionName: string,
     socketName: string,
-    sessionProxySockPath: string,
   ): Promise<SessionProxyEntry> {
-    // Remove stale socket file if present.
-    removeSocket(sessionProxySockPath);
-
-    // Increment the socket-path reference count BEFORE binding the server.
-    // The ownership guard in _doSocketTeardown reads this count at unlink time;
-    // incrementing early ensures the guard sees the new claim even while this
-    // creation is still in-flight (awaiting start()).  The old entry's .finally
-    // will decrement its own claim; if the count is still > 0 afterward, the
-    // fresh entry owns the path and the unlink is skipped.
-    this._socketPathRefCount.set(
-      sessionProxySockPath,
-      (this._socketPathRefCount.get(sessionProxySockPath) ?? 0) + 1,
-    );
-
     // tc-2x3.4: per-session error boundary — late-binding entry reference.
     //
     // `entry` is declared below (after `server` is created), but `onFatalError`
@@ -774,11 +636,8 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
       }
 
       // Tear down: stop the session-proxy (detach `-CC` client, ≤3 s then
-      // SIGKILL the tmux child), close the per-session socket server, unlink
-      // the socket file — with the ownership guard that prevents clobbering a
-      // fresh entry that may have taken over this socket path during stop()'s
-      // ≤3 s window (tc-2x3.4 DEFECT 1).
-      this._doSocketTeardown(entry);
+      // SIGKILL the tmux child). D5: no per-session socket to close.
+      this._teardownEntry(entry);
     };
 
     const sessionProxy = createSessionProxy({
@@ -795,32 +654,11 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
         : {}),
     });
 
-    // Create the per-session unix socket server.
-    const server = net.createServer((socket) => {
-      // tc-edf8: thread the broker's backpressure metrics hook into each
-      // per-session client transport so its drain path is observable.
-      const transport = createSocketTransport(socket, this._opts.socketTransportMetrics);
-      // tc-295a.21: catch per-connection rejections (e.g. raw/unhandshaked
-      // connections).  Without this catch, a HandshakeError from a malformed
-      // connection becomes an unhandled promise rejection → Node ≥ 22 exits.
-      // In the collapsed topology that would take the ENTIRE server-proxy and
-      // ALL its sessions down (previously it killed one session-proxy process).
-      // Per-connection catch: log fail-loud, close that socket, continue.
-      sessionProxy.addClient(transport).catch((err: unknown) => {
-        process.stderr.write(
-          `[session-proxy] client connection rejected (handshake failed): ${String(err)}\n`,
-        );
-        try { transport.close(); } catch { /* already closed by addClient's catch */ }
-      });
-    });
-
     // Pre-build the entry so the host-exit handler (wired below, after start)
     // can reference its `tornDown` flag and identity.
     const entry: SessionProxyEntry = {
       sessionId,
-      socketPath: sessionProxySockPath,
       sessionProxy,
-      server,
       tornDown: false,
     };
 
@@ -829,29 +667,13 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
     entryRef = entry;
 
     try {
-      await new Promise<void>((resolve, reject) => {
-        server.once("error", reject);
-        server.listen(sessionProxySockPath, () => {
-          server.off("error", reject);
-          resolve();
-        });
-      });
-
-      // Restrict socket permissions to 0600.
-      restrictSocket(sessionProxySockPath);
-
       // Start the session-proxy (spawns tmux -CC attach via node-pty).
       await sessionProxy.start();
     } catch (err) {
-      // Creation failed before readiness — clean up the half-built entry so we
-      // leave no listening socket or running tmux behind, then rethrow so
-      // ensureSessionProxy removes the registry slot and the claim fails.
-      // Release the socket-path ref-count claim added at the top of this method.
-      // The caller explicitly unlinks via removeSocket below; no auto-unlink here.
-      this._releaseSocketPath(sessionProxySockPath);
+      // Creation failed before readiness — kill the half-built session-proxy so
+      // we leave no running tmux behind, then rethrow so ensureSessionProxy
+      // removes the registry slot and the claim fails. D5: no socket to unlink.
       try { sessionProxy.kill(); } catch { /* not started */ }
-      await new Promise<void>((res) => { server.close(() => res()); });
-      removeSocket(sessionProxySockPath);
       throw err;
     }
 
@@ -863,34 +685,15 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
     // gone → sessions.removed, or alive → fresh session-proxy on next claim).
     // Respawn is LAZY (§6.2): nothing is created until the next claim.
     //
-    // The host.onExit handler also drives the SessionProxy's own
-    // broadcastErrorAndClose (session.unavailable) before this runs — see
-    // createSessionProxy's start().  Here we just close the per-session socket
-    // server and unlink the socket file, then fire the crash handler.
+    // The SessionProxy's own host.onExit (createSessionProxy's start()) runs
+    // synchronously before this handler in registration order and drives
+    // broadcastErrorAndClose (session.unavailable), which closes every attached
+    // client's transport (now a broker-socket connection). D5: there is no
+    // per-session socket for the supervisor to close — we only reap the registry
+    // entry and fire the crash handler.
     const onHostDeath = (): void => {
       if (entry.tornDown) return; // intentional reap already owns teardown
       entry.tornDown = true;
-
-      // Give connected clients a moment to receive session.unavailable (the
-      // SessionProxy's host.onExit broadcastErrorAndClose runs synchronously
-      // before our handler in registration order, but the close-and-unlink
-      // matches the pre-collapse 500ms grace from session-proxy-entry.ts).
-      // Ownership guard (tc-2x3.4 DEFECT 1): same close-vs-fd-only logic as
-      // _doSocketTeardown — see that method's comment for the full explanation.
-      // ensureSessionProxy may have rebound the path during the 500ms grace window.
-      // tc-2x3.6 GAP 1: use _closeServerFdOnly (not server.unref()) when a fresh
-      // entry owns the path, so the old fd is reclaimed without unlinking the
-      // fresh socket file.
-      setTimeout(() => {
-        const refCount = this._socketPathRefCount.get(sessionProxySockPath) ?? 0;
-        if (refCount <= 1) {
-          this._socketPathRefCount.delete(sessionProxySockPath);
-          server.close();
-        } else {
-          this._socketPathRefCount.set(sessionProxySockPath, refCount - 1);
-          _closeServerFdOnly(server, sessionProxySockPath);
-        }
-      }, 500);
 
       // Reap the registry entry + fire the crash handler, but only if THIS
       // entry is still the registered one (ABA guard: a reap + fresh
@@ -955,108 +758,18 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
   /**
    * Intentional teardown of an entry (reap): mirror the pre-collapse SIGTERM
    * graceful path in-process — stop the session-proxy (detach the `-CC` client,
-   * up to 3 s then SIGKILL the tmux child), then close the per-session socket
-   * server and unlink the socket file.
+   * up to 3 s then SIGKILL the tmux child).
+   *
+   * D5 (tc-4b6k.4): there is no per-session socket, so teardown is just
+   * `sessionProxy.stop()`. Any client connections attached to this session are
+   * broker-socket connections; the SessionProxy's own host.onExit /
+   * broadcastErrorAndClose closes them. Fire-and-forget — `stop()` resolves when
+   * tmux exits (≤3 s, then SIGKILL).
    */
   private _teardownEntry(entry: SessionProxyEntry): void {
     if (entry.tornDown) return;
     entry.tornDown = true;
-    this._doSocketTeardown(entry);
-  }
-
-  /**
-   * Shared deferred socket teardown: stop the session-proxy, close the server,
-   * then unlink the socket file — BUT only if no currently-live or in-flight
-   * entry owns that socket path (ownership guard, tc-2x3.4 DEFECT 1).
-   *
-   * # Ownership guard
-   *
-   * `stop()` can take up to ~3 s (detach `-CC`, then SIGKILL fallback).  During
-   * that window the extension may call `ensureSessionProxy` again for the same
-   * session, which calls `_createSessionProxy` → `removeSocket(path)` → binds a
-   * NEW server on the same path.  Without the guard, the old entry's deferred
-   * `.finally` would fire `removeSocket(path)` AFTER the fresh server has
-   * already claimed it, unlinking the LIVE socket of the newly-reattached
-   * session and making it unreachable to any new client connections.
-   *
-   * Guard mechanism: `_socketPathRefCount` tracks how many entries (live OR
-   * in-flight) claim a given path.  `_createSessionProxy` increments the count
-   * immediately (even before `start()` resolves), and `_releaseSocketPath`
-   * decrements it at unlink time, performing the unlink only when the count
-   * reaches 0 (no remaining claimants).
-   *
-   * This is the SINGLE place both the boundary path (onFatalError) and the reap
-   * path (_teardownEntry) perform the deferred unlink, so the guard is applied
-   * consistently to both.
-   *
-   * # tc-2x3.6 GAP 1: fd reclamation
-   *
-   * When a fresh entry has claimed the path (ref count > 1), the old server's
-   * listening fd must be closed to reclaim the OS file descriptor.  The previous
-   * approach (`server.unref()`) prevented the server from blocking process exit
-   * but left the fd open until the process exited — an fd leak bounded under
-   * normal use but unbounded under a GAP-2 persistent-trip busy-loop.
-   *
-   * The new approach: `_closeServerFdOnly(server)` closes the underlying libuv
-   * Pipe handle WITHOUT triggering the post-close `fs.unlink` callback that
-   * `server.close()` installs.  The socket FILE was already unlinked by the fresh
-   * `_createSessionProxy`'s `removeSocket(path)` call, so there is nothing on
-   * the filesystem to protect — the old fd is an orphaned inode with no directory
-   * entry and can safely be closed by releasing the libuv handle directly.
-   */
-  private _doSocketTeardown(entry: SessionProxyEntry): void {
-    // Fire-and-forget: stop() resolves when tmux exits (≤3 s, then SIGKILL).
-    void entry.sessionProxy.stop().finally(() => {
-      // Ownership guard (tc-2x3.4 DEFECT 1): check BEFORE calling server.close().
-      //
-      // Node.js net.Server.close() on a unix socket AUTOMATICALLY UNLINKS the
-      // socket file path that was passed to server.listen() — regardless of
-      // whether a fresh server has since bound to the same path.  If a fresh
-      // entry has claimed this path (ref count > 1), calling close() would
-      // clobber the live socket of the reattached session.
-      //
-      // When the path is still exclusively owned by THIS entry (ref count === 1),
-      // call server.close() normally — it closes the server AND unlinks the path
-      // as a side effect, which is exactly what we want.
-      //
-      // When a fresh entry has since claimed the path:
-      //   - The old server's socket FILE was already unlinked by removeSocket()
-      //     in the fresh _createSessionProxy.  The old fd is an orphaned inode
-      //     with no directory entry — it cannot accept new connections.
-      //   - We MUST close the fd (tc-2x3.6 GAP 1 fix): call _closeServerFdOnly()
-      //     which closes the libuv handle directly WITHOUT triggering the fs.unlink
-      //     that server.close() would run.  This reclaims the fd without clobbering
-      //     the fresh server's socket file.
-      //   - The ref-count claim for this entry is released.
-      const refCount = this._socketPathRefCount.get(entry.socketPath) ?? 0;
-      if (refCount <= 1) {
-        // No fresh claimant — close normally (auto-unlinks the path).
-        this._socketPathRefCount.delete(entry.socketPath);
-        entry.server.close();
-      } else {
-        // A fresh entry owns the path — close the fd without unlinking.
-        this._socketPathRefCount.set(entry.socketPath, refCount - 1);
-        _closeServerFdOnly(entry.server, entry.socketPath);
-      }
-    });
-  }
-
-  /**
-   * Decrement the socket-path reference count for `socketPath` without
-   * performing any socket file operation.  Used only in the creation-failure
-   * path (the catch block in `_createSessionProxy`) where the caller handles
-   * the unlink explicitly via `removeSocket`.
-   *
-   * The teardown path uses the inline close-vs-unref logic in `_doSocketTeardown`
-   * and the host.onExit handler directly, so this method is NOT called there.
-   */
-  private _releaseSocketPath(socketPath: string): void {
-    const current = this._socketPathRefCount.get(socketPath) ?? 0;
-    if (current <= 1) {
-      this._socketPathRefCount.delete(socketPath);
-    } else {
-      this._socketPathRefCount.set(socketPath, current - 1);
-    }
+    void entry.sessionProxy.stop();
   }
 }
 
@@ -1085,15 +798,6 @@ export interface SessionProxySupervisorOptions {
    * breaker tests.
    */
   onTopologyNotify?: (kind: string) => void;
-
-  /**
-   * Optional backpressure metrics hook (tc-edf8) passed to each per-session
-   * client transport. The broker supplies its `ServerProxyMetrics` so the
-   * per-session data/control sockets — the firehose path that actually
-   * backpressures (the `find /` wedge) — report drain-queue depth and
-   * time-in-queue onto the server-proxy registry, aggregate across sessions.
-   */
-  socketTransportMetrics?: SocketTransportMetrics;
 }
 
 export function createSessionProxySupervisor(

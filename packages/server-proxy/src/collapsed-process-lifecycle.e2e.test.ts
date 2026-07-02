@@ -143,6 +143,44 @@ async function connectAndHandshake(endpoint: string): Promise<{
   return { mux, snapshot };
 }
 
+/**
+ * D5 (tc-4b6k.4): probe whether a session is REACHABLE + serves a snapshot by
+ * opening a fresh DATA connection to the single broker socket, handshaking, and
+ * sending `session.attach {sessionId}`. Returns true iff the session snapshot
+ * arrives. Replaces the pre-D5 `probeLiveSocket(perSessionEndpoint)` check —
+ * there is no per-session socket file anymore.
+ */
+async function probeSessionReachable(
+  brokerEndpoint: string,
+  sessionId: string,
+  timeoutMs = 5_000,
+): Promise<boolean> {
+  let transport: Awaited<ReturnType<typeof connectSocketTransport>> | undefined;
+  try {
+    transport = await connectSocketTransport(brokerEndpoint);
+    await runClientHandshake(transport, CLIENT_CAPS, "server-proxy.capabilities");
+    const t = transport;
+    const mux = new TransportMux(t);
+    return await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), timeoutMs);
+      mux.subscribe((msg) => {
+        if (msg.type === "snapshot") { clearTimeout(timer); resolve(true); }
+        else if (msg.type === "error") { clearTimeout(timer); resolve(false); }
+      });
+      t.onClose(() => { clearTimeout(timer); resolve(false); });
+      t.sendControl({
+        type: "session.attach",
+        seq: 1,
+        sessionId,
+      } as unknown as Parameters<typeof t.sendControl>[0]);
+    });
+  } catch {
+    return false;
+  } finally {
+    try { transport?.close(); } catch { /* ignore */ }
+  }
+}
+
 /** Send a command and wait for the correlated response. */
 async function sendCmd(
   mux: TransportMux,
@@ -307,20 +345,20 @@ describe(
             claimResp.result.ok,
             `session.claim (phase 1) must succeed; got: ${JSON.stringify(claimResp.result)}`,
           );
-          const { sessionId: sessionId1, endpoint: sessEndpoint1 } = (
+          const { sessionId: sessionId1 } = (
             claimResp.result as {
               ok: true;
-              payload: { sessionId: string; endpoint: string; created: boolean };
+              payload: { sessionId: string; created: boolean };
             }
           ).payload;
 
           assert.ok(sessionId1, "session.claim must return a sessionId");
-          assert.ok(sessEndpoint1, "session.claim must return a session-proxy endpoint");
 
-          // Session-proxy socket must be live.
+          // D5 (tc-4b6k.4): the session must be reachable via session.attach on
+          // the broker socket (no per-session endpoint socket to probe).
           assert.ok(
-            await probeLiveSocket(sessEndpoint1, 3_000),
-            `session-proxy endpoint must be live after claim; path: ${sessEndpoint1}`,
+            await probeSessionReachable(endpoint1, sessionId1, 5_000),
+            `session must be reachable via session.attach after claim; sessionId: ${sessionId1}`,
           );
 
           mux1.raw.close();
@@ -431,10 +469,9 @@ describe(
               `(proves the reattach / rediscovery path ran)`,
           );
 
-          // 6c. session.claim on the same session name succeeds and returns a
-          //     live endpoint.  This exercises ensureSessionProxy() → the in-
-          //     process _createSessionProxy() → fresh `-CC attach` to the tmux
-          //     session that survived the SIGKILL.
+          // 6c. session.claim on the same session name succeeds.  This exercises
+          //     ensureSessionProxy() → the in-process _createSessionProxy() →
+          //     fresh `-CC attach` to the tmux session that survived the SIGKILL.
           const claimResp2 = await sendCmd(
             mux2,
             { kind: "session.claim", name: sessionName },
@@ -445,15 +482,14 @@ describe(
             `session.claim (phase 6c) on relaunch must succeed; ` +
               `got: ${JSON.stringify(claimResp2.result)}`,
           );
-          const { sessionId: sessionId2, endpoint: sessEndpoint2, created: created2 } = (
+          const { sessionId: sessionId2, created: created2 } = (
             claimResp2.result as {
               ok: true;
-              payload: { sessionId: string; endpoint: string; created: boolean };
+              payload: { sessionId: string; created: boolean };
             }
           ).payload;
 
           assert.ok(sessionId2, "session.claim on relaunch must return a sessionId");
-          assert.ok(sessEndpoint2, "session.claim on relaunch must return a session-proxy endpoint");
           // created=false: the tmux session already existed, the server-proxy attached.
           assert.equal(
             created2,
@@ -462,10 +498,11 @@ describe(
               `not newly minted by this claim)`,
           );
 
-          // 6d. The new session-proxy endpoint is a live unix socket.
+          // 6d. D5 (tc-4b6k.4): the reattached session is reachable via
+          //     session.attach on the relaunched broker's single socket.
           assert.ok(
-            await probeLiveSocket(sessEndpoint2, 5_000),
-            `reattached session-proxy endpoint must be live after relaunch; path: ${sessEndpoint2}`,
+            await probeSessionReachable(endpoint2, sessionId2, 5_000),
+            `reattached session must be reachable via session.attach after relaunch; sessionId: ${sessionId2}`,
           );
 
           mux2.raw.close();
@@ -610,29 +647,31 @@ describe(
             "adoptedExistingServer must be true after relaunch with 2 pre-existing sessions",
           );
 
-          // session.claim for both sessions must succeed with created=false.
+          // session.claim for both sessions must succeed with created=false, and
+          // each session must be reachable via session.attach on the relaunched
+          // broker's single socket (D5, tc-4b6k.4).
           const claimA2 = await sendCmd(mux2, { kind: "session.claim", name: sessionNameA }, seq2);
           assert.ok(claimA2.result.ok, `claim A on relaunch failed: ${JSON.stringify(claimA2.result)}`);
           const payloadA2 = (claimA2.result as {
             ok: true;
-            payload: { endpoint: string; created: boolean };
+            payload: { sessionId: string; created: boolean };
           }).payload;
           assert.equal(payloadA2.created, false, "session A on relaunch: created must be false");
           assert.ok(
-            await probeLiveSocket(payloadA2.endpoint, 5_000),
-            `session A reattached endpoint must be live; path: ${payloadA2.endpoint}`,
+            await probeSessionReachable(endpoint2, payloadA2.sessionId, 5_000),
+            `session A must be reachable via session.attach after relaunch; sessionId: ${payloadA2.sessionId}`,
           );
 
           const claimB2 = await sendCmd(mux2, { kind: "session.claim", name: sessionNameB }, seq2);
           assert.ok(claimB2.result.ok, `claim B on relaunch failed: ${JSON.stringify(claimB2.result)}`);
           const payloadB2 = (claimB2.result as {
             ok: true;
-            payload: { endpoint: string; created: boolean };
+            payload: { sessionId: string; created: boolean };
           }).payload;
           assert.equal(payloadB2.created, false, "session B on relaunch: created must be false");
           assert.ok(
-            await probeLiveSocket(payloadB2.endpoint, 5_000),
-            `session B reattached endpoint must be live; path: ${payloadB2.endpoint}`,
+            await probeSessionReachable(endpoint2, payloadB2.sessionId, 5_000),
+            `session B must be reachable via session.attach after relaunch; sessionId: ${payloadB2.sessionId}`,
           );
 
           mux2.raw.close();

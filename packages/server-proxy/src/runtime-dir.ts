@@ -125,22 +125,6 @@ export function metricsHttpSocketPath(
 }
 
 /**
- * Resolve a session-proxy socket path:
- * `<runtimeDir>/<socketName>/<sessionId>.sock`.
- * Re-uses the already-created socket-name sub-directory.
- */
-export function sessionProxySocketPath(
-  socketName: string,
-  sessionId: string,
-  opts: RuntimeDirOptions = {},
-): string {
-  const base = resolveBaseRuntimeDir(opts);
-  const dir = path.join(base, socketName);
-  ensureDir(dir, 0o700);
-  return path.join(dir, `${sessionId}.sock`);
-}
-
-/**
  * Create a directory if it does not exist, set its permissions.
  * Does NOT recurse — parent must exist.
  */

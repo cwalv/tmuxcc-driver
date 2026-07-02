@@ -75,7 +75,7 @@ export type {
 // Re-exported from src/index so consumers can import from "@tmuxcc/session-proxy"
 // without reaching into internal sub-paths.
 export { createSessionProxy } from "./runtime/session-proxy.js";
-export type { SessionProxy, SessionProxyOptions, SessionProxyHostView } from "./runtime/session-proxy.js";
+export type { SessionProxy, SessionProxyOptions, SessionProxyHostView, SessionProxyAddClientOptions } from "./runtime/session-proxy.js";
 // createTmuxHost is exported for @tmuxcc/server-proxy (tc-3iv): the server-proxy's thin
 // `-CC` watcher must hold a LIVE control-mode connection (its EOF is the
 // server-proxy's tmux-death exit trigger, §6.2), and tmux's client calls tcgetattr()

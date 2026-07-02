@@ -45,7 +45,7 @@ import type { OutputDemux } from "./output-demux.js";
 import { createRuntimePipeline } from "./pipeline.js";
 import type { RuntimePipeline } from "./pipeline.js";
 import { createControlServer } from "./serve.js";
-import type { ControlServer, ControlServerOptions } from "./serve.js";
+import type { ControlServer, ControlServerOptions, AddClientOptions } from "./serve.js";
 import { createInputPath } from "./input-path.js";
 import type { InputPath, InputPathOptions } from "./input-path.js";
 import { createFlowController } from "./flow-control.js";
@@ -159,6 +159,20 @@ export interface SessionProxyOptions {
 }
 
 /**
+ * Options for {@link SessionProxy.addClient}.
+ *
+ * `primaryPaneId` (tc-295a.8) selects the targeted-attach pane; the D5 fields
+ * (`startSeq` / `preNegotiated`, tc-4b6k.4) carry the broker single-socket
+ * handoff through to the control server. All optional — the bare in-memory
+ * path (`addClient(transport)`) runs the session-proxy handshake and starts
+ * the seq at 1.
+ */
+export interface SessionProxyAddClientOptions extends AddClientOptions {
+  /** Broker-forwarded targeted-attach pane (tc-295a.8). */
+  primaryPaneId?: PaneId;
+}
+
+/**
  * A fully-assembled session-proxy runtime.
  *
  * Call `start()` to spawn tmux and bootstrap the pipeline.
@@ -209,19 +223,26 @@ export interface SessionProxy {
    *
    * Runs the handshake + snapshot on the control plane, then attaches
    * the demux to the transport's data plane and wires the input path.
-   * Returns the NegotiatedSession from the handshake.
+   * Returns the NegotiatedSession.
    *
-   * tc-295a.8 (W2.2): `primaryPaneId` is the broker-forwarded target pane this
-   * transport attached for (the pane the user is binding). When supplied, the
-   * session-proxy validates it exists in the model and, after the snapshot,
+   * tc-295a.8 (W2.2): `opts.primaryPaneId` is the broker-forwarded target pane
+   * this transport attached for (the pane the user is binding). When supplied,
+   * the session-proxy validates it exists in the model and, after the snapshot,
    * guarantees its hydration (pane.hydration.begin → clear+replay → end) is
    * delivered before any live delta for it. A vanished primary pane surfaces
    * `pane.attach.failed{code:"pane.not-found"}` on this transport (fail-loud).
    * When omitted, every known pane is hydrated (the legacy bulk contract).
+   *
+   * D5 (tc-4b6k.4): `opts.preNegotiated` + `opts.startSeq` are the broker
+   * single-socket handoff — the connection already completed the
+   * `server-proxy.capabilities` handshake, so the session-proxy skips its own
+   * handshake and continues the connection's seq counter from `startSeq`. When
+   * both are omitted (in-memory test pairs, driver-admin one-shots) the
+   * session-proxy runs its own handshake and starts the seq at 1.
    */
   addClient(
     transport: Transport,
-    primaryPaneId?: PaneId,
+    opts?: SessionProxyAddClientOptions,
   ): Promise<import("../wire/handshake.js").NegotiatedSession>;
 
   /**
@@ -818,9 +839,15 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
       });
     },
 
-    async addClient(transport: Transport, primaryPaneId?: PaneId) {
+    async addClient(transport: Transport, opts: SessionProxyAddClientOptions = {}) {
+      const { primaryPaneId } = opts;
       // 1. Run control-plane handshake + send snapshot + subscribe deltas.
-      const session = await server.addClient(transport);
+      //    D5 (tc-4b6k.4): forward the broker handoff (skip handshake, continue
+      //    the connection's seq) to the control server.
+      const session = await server.addClient(transport, {
+        ...(opts.startSeq !== undefined ? { startSeq: opts.startSeq } : {}),
+        ...(opts.preNegotiated !== undefined ? { preNegotiated: opts.preNegotiated } : {}),
+      });
 
       // 1a. Register this client's FC-1 sub-ledger (tc-0wtb). The demux fans one
       //     %output append out to EVERY attached transport, so each client owes

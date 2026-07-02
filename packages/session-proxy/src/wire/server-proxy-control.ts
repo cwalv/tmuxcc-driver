@@ -2,40 +2,51 @@
  * ServerProxy wire control-plane message schema (tc-j9c Stage 0 placeholder).
  *
  * The server-proxy is a per-tmux-socket discovery and lifecycle service. Clients
- * talk to it first to learn what sessions exist and to obtain a session-proxy
- * endpoint for a specific session.
- *
- * This file defines the data shapes only. The server-proxy process, its transport,
- * and its runtime are implemented in Stage 2 (tc-j9c.3).
+ * talk to it first to learn what sessions exist and to bind a connection to a
+ * specific session.
  *
  * ---------------------------------------------------------------------------
  * WIRE CONTRACT INVARIANT
  * ---------------------------------------------------------------------------
  *
- * The server-proxy wire speaks in terms of sessions (metadata) and endpoints.
- * It MUST NEVER carry:
+ * The server-proxy wire speaks in terms of sessions (metadata) and the
+ * post-handshake `session.attach` binding. It MUST NEVER carry:
  *   - Pane-level data (output bytes, resize events, input)
  *   - South-side tmux vocabulary (%output, %begin/%end, etc.)
  *   - Renderer/host vocabulary (Pseudoterminal, VS Code types, DOM)
+ *
+ * ---------------------------------------------------------------------------
+ * SINGLE-SOCKET WIRE COLLAPSE (D5, tc-4b6k.4)
+ * ---------------------------------------------------------------------------
+ *
+ * There is ONE well-known broker socket. Every client connection lands on it
+ * and runs the single `server-proxy.capabilities` handshake. After the
+ * handshake a connection is in one of two modes:
+ *
+ *   - COMMAND connection: issues `command.request`s (claim / create / destroy /
+ *     info / topology) and receives the session-set snapshot + deltas +
+ *     `server-proxy.exiting`. The persistent extension keepalive is this
+ *     connection.
+ *   - DATA connection: sends a single {@link SessionAttachMessage}
+ *     (`session.attach {sessionId}`) which BINDS the connection to that
+ *     session's session-proxy. From that point the connection IS the
+ *     session-proxy data+control stream (0xCC-muxed) — no second handshake,
+ *     no per-session socket, no endpoint. One connection per (client, session)
+ *     preserves per-session kernel backpressure isolation (tc-edf8).
+ *
+ * `session.claim` returns a `sessionId` (no endpoint) — the deployment topology
+ * (where sockets live on disk) never leaks onto the wire.
  *
  * ---------------------------------------------------------------------------
  * DIRECTION MODEL
  * ---------------------------------------------------------------------------
  *
  * ServerProxy → Client (server-proxy push): session list snapshot + lifecycle deltas.
- * Client → ServerProxy (client request): claim/create/destroy commands.
+ * Client → ServerProxy (client request): claim/create/destroy commands; session.attach.
  * Both: capabilities handshake.
- *
- * ---------------------------------------------------------------------------
- * STATUS
- * ---------------------------------------------------------------------------
- *
- * This file compiles but is not yet wired in. ServerProxy implementation is
- * Stage 2 work (bead tc-j9c.3). Types are defined now so that Stage 0's
- * file layout matches the target shape described in SCHEMA.md.
  */
 
-import type { MessageBase, Capabilities, ClientIdentity } from "./envelope.js";
+import type { MessageBase, Capabilities, ClientIdentity, ClientFlags } from "./envelope.js";
 import type { PaneId, SessionId } from "./ids.js";
 
 // ---------------------------------------------------------------------------
@@ -273,13 +284,18 @@ export interface ServerProxyExitingMessage extends MessageBase {
 // ---------------------------------------------------------------------------
 
 /**
- * Claim or obtain the session-proxy endpoint for a named session.
+ * Claim a named session and return its stable `sessionId` (D5, tc-4b6k.4).
  *
  * Semantics:
- *   - If a session-proxy for `name` already exists, return its endpoint.
  *   - If `name` does not exist as a tmux session, create it (`tmux new-session
- *     -d -s <name>`), spawn a sessionProxy, and return.
- *   - If `name` exists but no session-proxy is bound, spawn one and return.
+ *     -d -s <name>`), spawn a sessionProxy, and return its `sessionId`.
+ *   - If `name` exists, ensure a session-proxy is running and return its
+ *     `sessionId`.
+ *
+ * The response carries `{ sessionId, name, created }` — NO endpoint. The client
+ * then opens (or reuses) a connection to the broker socket and sends
+ * {@link SessionAttachMessage} `session.attach {sessionId}` to bind that
+ * connection to the session's stream.
  *
  * Per-name atomicity: concurrent claims for the same name are serialized.
  * Two racing clients receive identical responses without producing two session-proxies.
@@ -342,48 +358,51 @@ export interface SessionDestroyCommand {
 }
 
 /**
- * Attach a new client to a specific pane within a session (tc-7xv.36).
+ * Bind THIS connection to a session's stream (D5, tc-4b6k.4).
+ *
+ * Sent by a client ONCE after the `server-proxy.capabilities` handshake, on a
+ * connection it wants to become a DATA connection. It is a top-level
+ * client→server-proxy message (NOT a `command.request`): it transitions the
+ * connection rather than returning a correlated response.
  *
  * Semantics:
- *   - Same session-proxy endpoint as `session.claim` is returned — the server-proxy does NOT
- *     spawn per-pane session-proxies, and the data plane is unchanged.
- *   - `paneId` is an opaque hint that the server-proxy echoes back in the response
- *     payload.  The client uses it to drive its render-level decision of
- *     "which pane should the host pty bind to" (vs. the default first-pane-wins).
- *   - The server-proxy does NOT validate that the pane exists.  Pane-level state is
- *     a session-proxy concern (see WIRE CONTRACT INVARIANT above) — the server-proxy only
- *     knows about sessions.  If the pane has disappeared by the time the
- *     client connects to the sessionProxy, the snapshot will simply not contain it
- *     and the client must surface that to the user.
+ *   - The broker looks up `sessionId`, ensures the session-proxy is running
+ *     (`ensureSessionProxy` — idempotent with `session.claim`'s single-flight),
+ *     detaches the connection from the command-plane (it stops receiving
+ *     session-set deltas), and hands the transport to the session-proxy's
+ *     `addClient`. The session-proxy's snapshot + deltas continue the SAME
+ *     per-connection seq counter (no reset), so the client mirror sees one
+ *     monotonic stream across the handoff.
+ *   - There is NO second handshake and NO per-session socket: the single
+ *     `server-proxy.capabilities` handshake already negotiated version +
+ *     identity for this connection.
+ *   - Success is signalled by the session snapshot arriving; an unknown
+ *     `sessionId` closes the connection (the client observes the disconnect).
  *
- * Use cases (tc-7xv.36):
- *   - `tmuxcc.detached.bindNew`: user picked a detached pane in the side view;
- *     bind a new VS Code terminal to that specific pane rather than to the
- *     first one reported by the snapshot.
- *   - `tmuxcc.dead.restart`: the dead pane's binding metadata identifies which
- *     session to attach; the new host pane will be created in that session by
- *     a subsequent split/open-window command — `pane.attach` carries the
- *     original paneId only to disambiguate the attach intent (the client may
- *     then issue a follow-up `split-pane` to materialise a fresh pane).
+ * `flags` carries the D4/D8 tmux-parity client flags (ignore-size / read-only) —
+ * RESERVED carriage only in this bead; the driver does not act on them yet
+ * (owner-only size authority is tc-4b6k.3).
  *
- * Why this lives on the server-proxy wire and not the session-proxy wire:
- *   - The same session-proxy process can serve multiple clients with disjoint host-
- *     pane targets — declaring the intent at attach time keeps the server-proxy as
- *     the single discovery entry-point for both session-wide and per-pane
- *     attaches.
- *   - The server-proxy does not pump pane bytes — `paneId` is an identifier, not
- *     pane-level data — so the wire contract invariant is preserved.
- *
- * Additive addition — non-breaking per the versioning policy.  Older server-proxies
- * will respond with `protocol.unknown-message`; clients fall back to
- * `session.claim` in that case.
+ * `primaryPaneId` is the targeted-attach hint (formerly the `pane.attach`
+ * command, tc-7xv.36): the pane the client is binding its host pty to. The
+ * session-proxy hydrates it first and fails loud (`pane.attach.failed`) if it
+ * has vanished. Omit for a session-wide attach (first-pane-wins).
  */
-export interface PaneAttachCommand {
-  readonly kind: "pane.attach";
-  /** Session containing the target pane (server-proxy-minted SessionId). */
+export interface SessionAttachMessage extends MessageBase {
+  readonly type: "session.attach";
+  /** Session to bind this connection to (server-proxy-minted SessionId). */
   readonly sessionId: SessionId;
-  /** Target pane on the session-proxy side; echoed back in the response payload. */
-  readonly paneId: PaneId;
+  /**
+   * tmux-parity per-client attach flags (D4/D8). RESERVED — carried but not
+   * acted on in tc-4b6k.4; owner-size / observer behavior is tc-4b6k.3.
+   */
+  readonly flags?: ClientFlags;
+  /**
+   * Targeted-pane hint (tc-7xv.36): the pane the client binds its host pty to.
+   * The session-proxy hydrates it first and surfaces `pane.attach.failed` if it
+   * has vanished. Omit for a session-wide (first-pane-wins) attach.
+   */
+  readonly primaryPaneId?: PaneId;
 }
 
 /**
@@ -740,7 +759,6 @@ export type ServerProxyCommand =
   | SessionCreateCommand
   | SessionCreateUniqueCommand
   | SessionDestroyCommand
-  | PaneAttachCommand
   | ServerProxyInfoCommand
   | ServerProxySetMetricsHttpCommand
   | SessionTopologyCommand;
@@ -764,26 +782,16 @@ export interface ServerProxyCommandRequestMessage extends MessageBase {
  * Successful server-proxy command result payload.
  *
  * Per-kind payloads:
- *   session.claim / session.create / session.createUnique → { sessionId, name, endpoint, created }
+ *   session.claim / session.create / session.createUnique → { sessionId, name, created }
  *   session.destroy                → { ok: true }
- *   pane.attach                    → { sessionId, endpoint, paneId }
  *   server-proxy.info              → { info }
+ *
+ * D5 (tc-4b6k.4): there is NO `endpoint` field — the client binds a connection
+ * to a session with {@link SessionAttachMessage}, not by dialing a per-session
+ * socket path.
  */
 export interface ServerProxyCommandOkPayload {
   readonly sessionId?: SessionId;
-  /**
-   * Opaque connection string (unix socket path under the v3 trust model).
-   * Clients pass it to `createSessionProxyTransport(endpoint)`.
-   */
-  readonly endpoint?: string;
-  /**
-   * Echoed target paneId for a `pane.attach` response (tc-7xv.36).
-   *
-   * Carried solely so the client has the server-proxy's confirmation that the
-   * attach intent referenced this pane.  The server-proxy does not validate
-   * existence — see `PaneAttachCommand` notes.
-   */
-  readonly paneId?: PaneId;
   /**
    * Whether this `session.claim` / `session.create` minted the tmux session
    * (tc-3y8.2).

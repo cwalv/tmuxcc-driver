@@ -249,39 +249,43 @@ export async function fetchSessionProxyInfo(
   socketName: string,
   sessionName: string,
 ): Promise<SessionProxyInfoPayload> {
-  // (1) Resolve the session-proxy endpoint off the server-proxy.
-  const serverProxyEndpoint = serverProxySocketPath(socketName);
-  const serverProxyTransport = await connectSocketTransport(serverProxyEndpoint);
+  // D5 (tc-4b6k.4): one connection to the single broker socket does the whole
+  // round-trip — handshake, `session.claim` (resolve the sessionId), then
+  // `session.attach` binds THIS connection to the session's stream. No second
+  // socket, no endpoint.
+  const brokerEndpoint = serverProxySocketPath(socketName);
+  const transport = await connectSocketTransport(brokerEndpoint);
+  let closed = false;
+  transport.onClose(() => { closed = true; });
 
-  let endpoint: string;
-  try {
-    await runClientHandshake(
-      serverProxyTransport,
-      ADMIN_SERVER_PROXY_CAPS,
-      "server-proxy.capabilities",
-    );
-    const claim = await runServerProxyCommand(
-      serverProxyTransport,
-      { kind: "session.claim", name: sessionName },
-      "session.claim",
-    );
-    if (claim.endpoint === undefined) {
-      throw new Error(
-        "server-proxy session.claim succeeded but returned no endpoint",
-      );
-    }
-    endpoint = claim.endpoint;
-  } finally {
-    try {
-      serverProxyTransport.close();
-    } catch {
-      /* already closed */
-    }
+  // (1) One `server-proxy.capabilities` handshake — its NegotiatedSession is
+  //     adopted by the SessionProxyConnection below (no second handshake).
+  const negotiated = await runClientHandshake(
+    transport,
+    ADMIN_SERVER_PROXY_CAPS,
+    "server-proxy.capabilities",
+  );
+
+  // (2) Claim the session by name to resolve its stable sessionId.
+  const claim = await runServerProxyCommand(
+    transport,
+    { kind: "session.claim", name: sessionName },
+    "session.claim",
+  );
+  if (claim.sessionId === undefined) {
+    try { if (!closed) transport.close(); } catch { /* already closed */ }
+    throw new Error("server-proxy session.claim succeeded but returned no sessionId");
   }
 
-  // (2) Connect to the session-proxy and run session-proxy.info.
-  const sessionProxyTransport = await connectSocketTransport(endpoint);
-  const conn = new SessionProxyConnection(sessionProxyTransport);
+  // (3) Bind this connection to the session's stream, then run session-proxy.info
+  //     over the pre-handshaken transport.
+  transport.sendControl({
+    type: "session.attach",
+    seq: 1,
+    sessionId: claim.sessionId,
+  } as unknown as Parameters<typeof transport.sendControl>[0]);
+
+  const conn = new SessionProxyConnection(transport, { preNegotiated: negotiated });
   try {
     await conn.connect();
     return await sendSessionProxyInfo(conn);

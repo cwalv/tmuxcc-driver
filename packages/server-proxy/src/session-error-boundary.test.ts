@@ -381,127 +381,12 @@ describe("tc-2x3.4: per-session error boundary", { skip: !TMUX_AVAILABLE }, () =
     );
   });
 
-  /**
-   * EB3: Supervisor-level reattach + socket-clobber race (tc-2x3.4 DEFECT 1).
-   *
-   * # What this proves
-   *
-   * When session A's entry is removed from the registry and a deferred async
-   * teardown (`stop()`, up to ~3 s) begins, the supervisor must NOT unlink the
-   * per-session socket file if a fresh entry has since claimed that same path
-   * (via `ensureSessionProxy(A)` immediately after the trip).
-   *
-   * Without the ownership guard in `_doSocketTeardown` the following race occurs:
-   *   1. A's entry removed; async `stop().finally(→ removeSocket(pathA))` in flight.
-   *   2. `ensureSessionProxy(A)` → `_createSessionProxy` → `removeSocket(pathA)` +
-   *      `server.listen(pathA)` (fresh entry now owns pathA).
-   *   3. Old `stop().finally` fires → `removeSocket(pathA)` **unlinks the fresh
-   *      entry's live socket** — A is now unreachable to new client connections.
-   *
-   * With the guard: step 3 re-checks `_isSocketPathOwned(pathA)` at unlink time;
-   * finds the fresh entry → skips the unlink; fresh A remains reachable.
-   *
-   * # Fault-injection method
-   *
-   * `reapSessionProxy` is used to trigger the async teardown path: it removes
-   * the entry from the registry and calls `_teardownEntry` → `_doSocketTeardown`.
-   * This is the SAME `_doSocketTeardown` code path that `onFatalError` (the
-   * boundary-trip handler) calls.  The ownership guard lives in a single shared
-   * helper, so exercising it via the reap path is sufficient to catch the clobber
-   * race for both paths.
-   *
-   * # Determinism
-   *
-   * `stop()` takes at most ~3 s (detach -CC, then SIGKILL fallback). To make the
-   * race window deterministic we:
-   *   a. Reap A (starts async stop in background).
-   *   b. Immediately call `ensureSessionProxy(A)` (fresh entry binds pathA).
-   *   c. Wait 5 s — guaranteed to outlast the SIGKILL fallback — so by the time
-   *      we check, the old `.finally` has provably run.
-   *   d. Assert `probeLiveSocket(pathA)` is true.
-   *
-   * Before the fix: step (c) completes, the old `.finally` unlinks pathA, and
-   * `probeLiveSocket` returns false — EB3 FAILS.
-   * After the fix: the guard skips the unlink; `probeLiveSocket` returns true —
-   * EB3 PASSES.
-   *
-   * The 5 s wait is acceptable because EB3 is the one test that explicitly
-   * exercises timing; it runs after the suite's other tests and is annotated
-   * with a long timeout.
-   */
-  it("EB3: reattach after trip; old teardown DOES NOT clobber fresh socket (ownership guard)", { timeout: 25_000 }, async () => {
-    const socketName = `tmuxcc-eb3-${process.pid}-${Date.now()}`;
-    const sessionName = `eb3-sess-${process.pid}`;
-    _sockets.push(socketName);
-
-    spawnTmuxSession(socketName, sessionName);
-
-    const tmpDir = makeTempDir("eb3");
-    _tmpDirs.push(tmpDir);
-    const sockPathA = path.join(tmpDir, "sess-a.sock");
-
-    // Create a supervisor and let it manage session A.
-    const supervisor: SessionProxySupervisor = createSessionProxySupervisor();
-    const sessionId = `eb3-id-${process.pid}`;
-
-    // Step 1: Bring session A up via the supervisor.
-    const sockPath1 = await supervisor.ensureSessionProxy(
-      sessionId,
-      sessionName,
-      socketName,
-      sockPathA,
-    );
-    assert.equal(sockPath1, sockPathA, "EB3: initial ensureSessionProxy must return expected socket path");
-
-    // Assert that the socket is live before the trip.
-    const aliveBefore = await probeLiveSocket(sockPathA, 1_000);
-    assert.ok(aliveBefore, "EB3: socket must be accepting connections before the trip");
-
-    // Step 2: Simulate the trip by calling reapSessionProxy — this:
-    //   (a) Removes A from the registry (same as onFatalError does).
-    //   (b) Calls _teardownEntry → _doSocketTeardown (same helper as the boundary path).
-    //   The async stop() is now in-flight; sockPathA is NOT yet unlinked.
-    supervisor.reapSessionProxy(sessionId);
-
-    // Step 3: Immediately call ensureSessionProxy(A) again — the REATTACH.
-    //   This calls _createSessionProxy → removeSocket(sockPathA) + server.listen(sockPathA).
-    //   Fresh entry is registered; sockPathA now owned by the fresh entry.
-    const sockPath2 = await supervisor.ensureSessionProxy(
-      sessionId,
-      sessionName,
-      socketName,
-      sockPathA,
-    );
-    assert.equal(sockPath2, sockPathA, "EB3: reattach ensureSessionProxy must return same socket path");
-
-    // Assert the reattached proxy is alive and receiving notifications.
-    // Trigger a new-window in session A — fresh proxy should be attached.
-    triggerNewWindow(socketName, sessionName);
-
-    // Step 4: Wait long enough for the old stop() to complete and its .finally
-    //   to fire — regardless of whether detach-client responds quickly or the
-    //   3 s SIGKILL kicks in, 5 s is a safe upper bound.
-    //   This is the moment the ownership-guard is tested: without it, the .finally
-    //   would call removeSocket(sockPathA) right here, clobbering the fresh entry.
-    //   With the guard, it checks _isSocketPathOwned(sockPathA), finds the fresh
-    //   entry → skips the unlink.
-    await new Promise<void>((r) => setTimeout(r, 5_000));
-
-    // Step 5: Assert the fresh A socket STILL accepts new connections.
-    //   Before the fix this assertion fails (socket unlinked by old teardown).
-    //   After the fix it passes (ownership guard prevented the unlink).
-    const aliveAfter = await probeLiveSocket(sockPathA, 1_000);
-    assert.ok(
-      aliveAfter,
-      "EB3: fresh session A socket MUST still be reachable after old teardown completes " +
-        "(ownership guard must prevent clobber of fresh entry's socket)",
-    );
-
-    // Cleanup: reap the fresh entry so afterEach doesn't see a leaked proxy.
-    supervisor.reapSessionProxy(sessionId);
-    // Give the final teardown a moment to close gracefully.
-    await new Promise<void>((r) => setTimeout(r, 500));
-  });
+  // EB3 (deleted, tc-4b6k.4): the socket-clobber ownership guard it exercised
+  // (`_doSocketTeardown` / `_socketPathRefCount` / `_closeServerFdOnly`) no
+  // longer exists — the single-socket wire collapse (D5) removed the per-session
+  // socket entirely, so there is no path for a deferred teardown to clobber a
+  // fresh entry's socket. The reattach-after-trip resilience it also touched is
+  // covered by EB5 (re-ensure after quarantine clear) and resilience.test.ts.
 
   // tc-hfxb.18.4: hasSessionProxy() must be true for the WHOLE live window —
   // crucially including the IN-FLIGHT creation (where sessionProxyPid() is null).
@@ -526,7 +411,7 @@ describe("tc-2x3.4: per-session error boundary", { skip: !TMUX_AVAILABLE }, () =
     // Start the creation but do NOT await yet — the in-flight promise is
     // registered synchronously, so hasSessionProxy must already be true while
     // sessionProxyPid is still null (in-flight).
-    const creating = supervisor.ensureSessionProxy(sessionId, sessionName, socketName, sockPath);
+    const creating = supervisor.ensureSessionProxy(sessionId, sessionName, socketName);
     assert.equal(supervisor.hasSessionProxy(sessionId), true, "live (in-flight) immediately after ensureSessionProxy call");
     assert.equal(supervisor.sessionProxyPid(sessionId), null, "sessionProxyPid is null while in-flight (contrast)");
 
@@ -593,7 +478,7 @@ describe("tc-2x3.4: per-session error boundary", { skip: !TMUX_AVAILABLE }, () =
     };
 
     // --- Step 1: Bring the session up once ---
-    await supervisor.ensureSessionProxy(sessionId, sessionName, socketName, sockPath);
+    await supervisor.ensureSessionProxy(sessionId, sessionName, socketName);
     await new Promise<void>((r) => setTimeout(r, 200));
 
     // --- Step 2: Sample fd count BEFORE the rapid trip cycles ---
@@ -608,7 +493,7 @@ describe("tc-2x3.4: per-session error boundary", { skip: !TMUX_AVAILABLE }, () =
 
       // Immediately reattach (fresh entry binds the same sockPath).
       // This is the race that triggered the unref-vs-close gap.
-      await supervisor.ensureSessionProxy(sessionId, sessionName, socketName, sockPath);
+      await supervisor.ensureSessionProxy(sessionId, sessionName, socketName);
     }
 
     // --- Step 4: Wait for ALL async stop() promises to settle ---
@@ -725,12 +610,12 @@ describe("tc-2x3.4: per-session error boundary", { skip: !TMUX_AVAILABLE }, () =
       );
 
       // Ensure a session-proxy is running.
-      await supervisor.ensureSessionProxy(sessionId, sessionName, socketName, sockPath);
+      // D5 (tc-4b6k.4): ensureSessionProxy resolves only after the SessionProxy
+      // has bootstrapped (pipeline live); aliveCount===1 is the liveness signal
+      // (there is no per-session socket file to probe anymore).
+      const proxy = await supervisor.ensureSessionProxy(sessionId, sessionName, socketName);
+      assert.ok(proxy, `EB5: ensureSessionProxy must return a live SessionProxy (trip ${trip})`);
       assert.equal(supervisor.aliveCount(), 1, `EB5: aliveCount must be 1 after ensureSessionProxy (trip ${trip})`);
-
-      // Wait for the session-proxy socket to be live.
-      const alive = await probeLiveSocket(sockPath, 3_000);
-      assert.ok(alive, `EB5: session-proxy socket must be live before trip ${trip}`);
 
       // Arm the poison for the next topology notification.
       state.armed = true;
@@ -762,7 +647,7 @@ describe("tc-2x3.4: per-session error boundary", { skip: !TMUX_AVAILABLE }, () =
 
     let caughtError: unknown = null;
     try {
-      await supervisor.ensureSessionProxy(sessionId, sessionName, socketName, sockPath);
+      await supervisor.ensureSessionProxy(sessionId, sessionName, socketName);
     } catch (e) {
       caughtError = e;
     }
@@ -791,13 +676,12 @@ describe("tc-2x3.4: per-session error boundary", { skip: !TMUX_AVAILABLE }, () =
     // After clearQuarantine, ensureSessionProxy must succeed (not throw).
     // We disarm the poison so the fresh session-proxy can start cleanly.
     state.armed = false;
-    const sockPathAfterClear = await supervisor.ensureSessionProxy(
+    const proxyAfterClear = await supervisor.ensureSessionProxy(
       sessionId,
       sessionName,
       socketName,
-      sockPath,
     );
-    assert.equal(sockPathAfterClear, sockPath, "EB5 G5: ensureSessionProxy must succeed after clearQuarantine");
+    assert.ok(proxyAfterClear, "EB5 G5: ensureSessionProxy must succeed (return a live SessionProxy) after clearQuarantine");
     assert.equal(supervisor.aliveCount(), 1, "EB5 G5: aliveCount must be 1 after successful reattach");
 
     // Cleanup.

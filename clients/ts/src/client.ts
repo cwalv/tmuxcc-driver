@@ -21,6 +21,7 @@
 
 import type { Transport, NegotiatedSession, PaneId, WireCommand, ClientIdentity } from "@tmuxcc/session-proxy";
 import { SessionProxyConnection } from "./connection.js";
+import type { SessionProxyConnectionOptions } from "./connection.js";
 import { Mirror } from "./mirror.js";
 import { PaneStreamConsumer, connectPaneStream } from "./pane-stream.js";
 import { createInputApi } from "./input.js";
@@ -69,6 +70,13 @@ export interface ConnectClientOptions {
    * connection. Carried and logged only — no behavior depends on it yet.
    */
   identity?: ClientIdentity;
+  /**
+   * Pre-negotiated session (D5, tc-4b6k.4). Forwarded to
+   * {@link SessionProxyConnection} so `connect()` skips its handshake — the
+   * transport was already handshaken upstream (the broker single-socket
+   * `session.attach` path). Omit for the standalone path.
+   */
+  preNegotiated?: NegotiatedSession;
 }
 
 // ---------------------------------------------------------------------------
@@ -174,10 +182,11 @@ export async function connectClient(
 ): Promise<ClientHandle> {
   // ── Construct modules ────────────────────────────────────────────────────────
 
-  const connection = new SessionProxyConnection(
-    transport,
-    opts.identity !== undefined ? { identity: opts.identity } : undefined,
-  );
+  const connectionOpts: SessionProxyConnectionOptions = {
+    ...(opts.identity !== undefined ? { identity: opts.identity } : {}),
+    ...(opts.preNegotiated !== undefined ? { preNegotiated: opts.preNegotiated } : {}),
+  };
+  const connection = new SessionProxyConnection(transport, connectionOpts);
   const mirror = new Mirror();
   const paneConsumer = new PaneStreamConsumer();
   const inputApi = createInputApi(connection, opts.input);

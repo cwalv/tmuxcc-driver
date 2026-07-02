@@ -119,6 +119,16 @@ export interface SessionProxyConnectionOptions {
    * logged only — no behavior depends on it yet.
    */
   identity?: ClientIdentity;
+  /**
+   * Pre-negotiated session (D5, tc-4b6k.4). When set, `connect()` SKIPS
+   * `runClientHandshake` and adopts this session directly — the transport was
+   * already handshaken upstream (the single-socket broker `session.attach` path:
+   * the caller ran the `server-proxy.capabilities` handshake and sent
+   * `session.attach` before handing the transport here). The connection still
+   * installs its post-handshake routing and transitions to "ready". Omit for
+   * the standalone path (run the handshake).
+   */
+  preNegotiated?: NegotiatedSession;
 }
 
 /**
@@ -177,6 +187,10 @@ export class SessionProxyConnection {
   // → anonymous connection.
   readonly #identity: ClientIdentity | undefined;
 
+  // Pre-negotiated session (D5, tc-4b6k.4); when set, connect() skips the
+  // handshake and adopts it (the transport was handshaken upstream).
+  readonly #preNegotiated: NegotiatedSession | undefined;
+
   // ── Lifecycle state ───────────────────────────────────────────────────────
 
   #state: ConnectionState = "connecting";
@@ -227,6 +241,7 @@ export class SessionProxyConnection {
       "input-forwarding",
     ];
     this.#identity = opts?.identity;
+    this.#preNegotiated = opts?.preNegotiated;
     // NOTE: we do NOT install onClose here.  runClientHandshake owns the
     // transport's onClose handler during the handshake and replaces it with a
     // no-op when it settles (see handshake.ts settle()).  We re-install our
@@ -285,28 +300,37 @@ export class SessionProxyConnection {
     };
 
     let session: NegotiatedSession;
-    try {
-      // runClientHandshake owns the transport.onControl + transport.onClose
-      // handlers while the handshake is in flight.  It replaces them with
-      // no-ops when it settles (see handshake.ts settle()).
-      // D2 (tc-4b6k.1): advertise the durable client identity, if the caller
-      // supplied one, on the session-proxy wire.
-      session = await runClientHandshake(
-        this.#transport,
-        clientCapabilities,
-        "session-proxy.capabilities",
-        this.#identity,
-      );
-    } catch (err) {
-      // Handshake failed — transition to "failed" and propagate.
-      this.#transition("failed");
-      // Close the transport; the caller shouldn't use it after this.
+    if (this.#preNegotiated !== undefined) {
+      // D5 (tc-4b6k.4): the transport was handshaken upstream (the broker
+      // single-socket `session.attach` path ran the `server-proxy.capabilities`
+      // handshake and sent `session.attach` before handing the transport here).
+      // Adopt that session and skip a second handshake — the S1 ceremony this
+      // bead deletes.
+      session = this.#preNegotiated;
+    } else {
       try {
-        this.#transport.close();
-      } catch {
-        // Ignore close errors during failure path.
+        // runClientHandshake owns the transport.onControl + transport.onClose
+        // handlers while the handshake is in flight.  It replaces them with
+        // no-ops when it settles (see handshake.ts settle()).
+        // D2 (tc-4b6k.1): advertise the durable client identity, if the caller
+        // supplied one, on the session-proxy wire.
+        session = await runClientHandshake(
+          this.#transport,
+          clientCapabilities,
+          "session-proxy.capabilities",
+          this.#identity,
+        );
+      } catch (err) {
+        // Handshake failed — transition to "failed" and propagate.
+        this.#transition("failed");
+        // Close the transport; the caller shouldn't use it after this.
+        try {
+          this.#transport.close();
+        } catch {
+          // Ignore close errors during failure path.
+        }
+        throw err;
       }
-      throw err;
     }
 
     // Handshake complete.  Install post-handshake routing BEFORE we

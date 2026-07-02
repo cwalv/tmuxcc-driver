@@ -94,6 +94,35 @@ import { phaseLog, phaseNow, PHASE_TIMING_ENABLED } from "./phase-timing.js";
 // ---------------------------------------------------------------------------
 
 /**
+ * Broker-handoff options for {@link ControlServer.addClient} (D5, tc-4b6k.4).
+ *
+ * In the single-socket topology the broker accepts the connection, runs the ONE
+ * `server-proxy.capabilities` handshake, then hands the transport here after a
+ * `session.attach`. These options let `addClient` adopt that handshake and
+ * continue the connection's seq counter monotonically across the handoff.
+ *
+ * Both fields absent ⇒ the standalone path (in-memory test pairs, driver-admin
+ * one-shots): run the session-proxy handshake and start the seq counter at 1.
+ */
+export interface AddClientOptions {
+  /**
+   * First per-connection seq to use — the snapshot's seq. Deltas continue from
+   * `startSeq + 1`. Defaults to 1. The broker passes the connection's live
+   * `nextSeq` so the session-proxy stream continues the same monotonic counter
+   * the handshake + any pre-attach broker messages already advanced.
+   */
+  startSeq?: number;
+  /**
+   * Session already negotiated by the broker's `server-proxy.capabilities`
+   * handshake for this connection. When present, `addClient` SKIPS
+   * `runSessionProxyHandshake` — the single broker handshake already negotiated
+   * version + identity, so a second handshake would be redundant ceremony (the
+   * S1 smell this bead deletes).
+   */
+  preNegotiated?: NegotiatedSession;
+}
+
+/**
  * Options for `createControlServer`.
  */
 export interface ControlServerOptions {
@@ -169,19 +198,22 @@ export interface ControlServer {
    * Accept a new client connection over the given session-proxy-side `Transport`.
    *
    * Steps performed:
-   *   1. Run `runSessionProxyHandshake(transport, sessionProxyCapabilities)`.
+   *   1. Run `runSessionProxyHandshake(transport, sessionProxyCapabilities)` —
+   *      UNLESS `opts.preNegotiated` is supplied (D5, tc-4b6k.4: the broker
+   *      already ran the single `server-proxy.capabilities` handshake for this
+   *      connection), in which case the handshake is skipped and the supplied
+   *      session is adopted.
    *   2. Subscribe to `pipeline.onModelChange` to forward subsequent deltas
-   *      (with per-connection seq stamping, starting at seq = 2).
+   *      (with per-connection seq stamping, starting at `startSeq + 1`).
    *   3. Register an `onClose` handler so cleanup happens automatic.
    *   4. Yield one microtask (`await Promise.resolve()`) so the client's
    *      post-handshake `onControl` handler is installed before the snapshot
    *      arrives (see timing contract in serve.ts addClient implementation).
-   *   5. Send `projectSnapshot(pipeline.getModel(), { seq: 1 })` as the
+   *   5. Send `projectSnapshot(pipeline.getModel(), { seq: startSeq })` as the
    *      client's first message.
    *
-   * Resolves with the `NegotiatedSession` from the handshake once the initial
-   * snapshot has been sent.  The caller may use `NegotiatedSession.features` to
-   * configure the data-plane pump.
+   * Resolves with the `NegotiatedSession` (from the handshake, or the supplied
+   * `preNegotiated`) once the initial snapshot has been sent.
    *
    * Rejects with `HandshakeError` if the handshake fails (version mismatch,
    * unexpected message type, or transport closure during handshake).  In that
@@ -189,8 +221,9 @@ export interface ControlServer {
    * to the active set.
    *
    * @param transport - The session-proxy-side half of a Transport pair for this client.
+   * @param opts      - D5 broker-handoff options (skip handshake, continue seq).
    */
-  addClient(transport: Transport): Promise<NegotiatedSession>;
+  addClient(transport: Transport, opts?: AddClientOptions): Promise<NegotiatedSession>;
 
   /**
    * Remove a client and stop sending to it.
@@ -504,7 +537,7 @@ class ControlServerImpl implements ControlServer {
     this._sessionName = opts.sessionName;
   }
 
-  async addClient(transport: Transport): Promise<NegotiatedSession> {
+  async addClient(transport: Transport, opts: AddClientOptions = {}): Promise<NegotiatedSession> {
     // tc-is5w: phase-split activation timing — the first-snapshot leg. t0 at
     // addClient entry; the span covers the capability handshake + microtask
     // yield + first snapshot send. This leg fires on the CLIENT-connect event
@@ -517,13 +550,20 @@ class ControlServerImpl implements ControlServer {
     //   • Wait for the client to send client.capabilities
     //   • Negotiate the session (version check + feature intersection)
     //
-    // IMPORTANT: runSessionProxyHandshake resets transport.onControl to a no-op when
-    // it settles (via its internal settle() function).  The client side
-    // (SessionProxyConnection.connect / runClientHandshake) installs its own
-    // post-handshake onControl handler SYNCHRONOUSLY after runClientHandshake
-    // resolves — before yielding to the event loop.  We must therefore defer the
-    // snapshot send by at least one microtask after the handshake resolves, so
-    // the client's onControl installation has a chance to run.
+    // D5 (tc-4b6k.4): when the broker hands off an already-handshaken connection
+    // (opts.preNegotiated present), SKIP this handshake — the single
+    // `server-proxy.capabilities` handshake already negotiated version + identity
+    // for this connection; a second handshake here is the S1 ceremony this bead
+    // deletes.
+    //
+    // IMPORTANT (standalone path): runSessionProxyHandshake resets
+    // transport.onControl to a no-op when it settles (via its internal settle()
+    // function).  The client side (SessionProxyConnection.connect /
+    // runClientHandshake) installs its own post-handshake onControl handler
+    // SYNCHRONOUSLY after runClientHandshake resolves — before yielding to the
+    // event loop.  We must therefore defer the snapshot send by at least one
+    // microtask after the handshake resolves, so the client's onControl
+    // installation has a chance to run.
     //
     // Timing contract (both sides):
     //   SessionProxy: await handshake → install delta subscription + onClose
@@ -536,18 +576,24 @@ class ControlServerImpl implements ControlServer {
     // With an async (socket) transport the delivery itself is deferred, so by
     // the time the snapshot bytes arrive the client's onControl is already set.
     let session: NegotiatedSession;
-    try {
-      session = await runSessionProxyHandshake(transport, this._capabilities);
-    } catch (err) {
-      // Handshake failed — transport may already be closed; close defensively.
-      try { transport.close(); } catch { /* ignore */ }
-      throw err;
+    if (opts.preNegotiated !== undefined) {
+      session = opts.preNegotiated;
+    } else {
+      try {
+        session = await runSessionProxyHandshake(transport, this._capabilities);
+      } catch (err) {
+        // Handshake failed — transport may already be closed; close defensively.
+        try { transport.close(); } catch { /* ignore */ }
+        throw err;
+      }
     }
 
-    // Allocate per-connection state. seq starts at 1 — the snapshot uses it.
+    // Allocate per-connection state. seq starts at `startSeq` (default 1) — the
+    // snapshot uses it. In the broker-handoff path this continues the same
+    // per-connection counter the handshake + pre-attach broker messages advanced.
     const state: ClientState = {
       transport,
-      nextSeq: 1,
+      nextSeq: opts.startSeq ?? 1,
       connectionId: this._mintConnectionId(),
       unsubModelChange: null,
       metricsClientLabel: this._mintClientLabel(),
@@ -665,7 +711,8 @@ class ControlServerImpl implements ControlServer {
     // arrives.  See timing contract in the comment above.
     await Promise.resolve();
 
-    // Send the initial snapshot. seq = 1.
+    // Send the initial snapshot at seq = startSeq (default 1; the broker's
+    // continued counter in the handoff path).
     // Guard: the client may have been removed during the microtask gap (e.g.
     // transport closed between handshake settle and here).
     if (this._clients.has(transport)) {

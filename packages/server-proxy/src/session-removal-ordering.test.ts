@@ -224,6 +224,47 @@ function probeUdsReachable(socketPath: string, timeoutMs = 1_000): Promise<boole
   });
 }
 
+/**
+ * D5 (tc-4b6k.4): probe whether a session is REACHABLE over the single broker
+ * socket. Opens a fresh DATA connection, handshakes, sends
+ * `session.attach {sessionId}`, and awaits the outcome:
+ *   - session snapshot arrives → true (the connection bound to the session).
+ *   - broker `error` (session.not-found) or connection close → false (gone).
+ *
+ * Replaces the pre-D5 per-session-socket `fs.existsSync` / `probeUdsReachable`
+ * liveness check — there is no longer a per-session socket file to stat.
+ */
+async function probeSessionReachable(
+  brokerEndpoint: string,
+  sessionId: string,
+  timeoutMs = 3_000,
+): Promise<boolean> {
+  let transport: Transport | undefined;
+  try {
+    transport = await connectSocketTransport(brokerEndpoint);
+    await runClientHandshake(transport, CLIENT_CAPS, "server-proxy.capabilities");
+    const t = transport;
+    const mux = new TransportMux(t);
+    return await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), timeoutMs);
+      mux.subscribe((msg) => {
+        if (msg.type === "snapshot") { clearTimeout(timer); resolve(true); }
+        else if (msg.type === "error") { clearTimeout(timer); resolve(false); }
+      });
+      t.onClose(() => { clearTimeout(timer); resolve(false); });
+      t.sendControl({
+        type: "session.attach",
+        seq: 1,
+        sessionId,
+      } as unknown as Parameters<typeof t.sendControl>[0]);
+    });
+  } catch {
+    return false;
+  } finally {
+    try { transport?.close(); } catch { /* ignore */ }
+  }
+}
+
 const TMUX_AVAILABLE = tmuxAvailable();
 
 // ---------------------------------------------------------------------------
@@ -265,20 +306,17 @@ describe("tc-295a.6 L1: sessions.removed ordering (requires tmux)", { skip: !TMU
     const sessionName = "l1-ordering-session";
     const claimResp = await sendCommand(mux, { kind: "session.claim", name: sessionName }, seq);
     assert.ok(claimResp.result.ok, `session.claim failed: ${JSON.stringify(claimResp.result)}`);
-    const { sessionId, endpoint: sessionProxyEndpoint } = (claimResp.result as {
+    const { sessionId } = (claimResp.result as {
       ok: true;
-      payload: { sessionId: string; endpoint: string };
+      payload: { sessionId: string };
     }).payload;
 
-    // Confirm the session-proxy UDS socket FILE exists before destroy.
-    // We use fs.existsSync rather than a net.connect probe because a raw
-    // (unhandshaked) connection to the session-proxy crashes it — the void
-    // addClient() call has no .catch(), and Node 22 exits on unhandled
-    // rejections. Checking for the socket file path is sufficient proof the
-    // session-proxy is up.
+    // D5 (tc-4b6k.4): confirm the session is reachable over the broker socket
+    // (session.attach → snapshot) before destroy. There is no per-session UDS
+    // file to stat anymore.
     assert.ok(
-      fs.existsSync(sessionProxyEndpoint),
-      "session-proxy UDS socket file must exist before destroy",
+      await probeSessionReachable(serverProxy.endpoint(), sessionId),
+      "session must be reachable via session.attach before destroy",
     );
 
     // Arm sessions.removed listener BEFORE issuing destroy.
@@ -307,29 +345,20 @@ describe("tc-295a.6 L1: sessions.removed ordering (requires tmux)", { skip: !TMU
     clearT();
     assert.ok(removedSeenAt !== null, "sessions.removed must be received on C1 after destroy");
 
-    // Wait for the session-proxy UDS to be removed.
-    // The chain: SIGTERM → sessionProxy.stop() (≤3s) → server.close() → removeSocket().
-    // Allow 15s to cover the full stop() grace period.
-    await waitFor(
-      () => !fs.existsSync(sessionProxyEndpoint),
-      15_000,
-      "session-proxy UDS to be removed after destroy + sessions.removed",
-    );
-
-    // Key ordering assertion: sessions.removed was already received on C1 by
-    // the time we started waiting for UDS removal, and we confirmed the UDS
-    // was reachable before the destroy. The broker always broadcasts
-    // sessions.removed BEFORE the session-proxy process exits (reap SIGTERM is
-    // sent before broadcastRemoved, but the actual UDS removal is downstream
-    // of the session-proxy process's SIGTERM handling).
+    // Key ordering assertion: sessions.removed was received on C1.
     assert.ok(
       removedSeenAt !== null,
-      "sessions.removed must arrive on C1 (ordering: broadcast before UDS removal)",
+      "sessions.removed must arrive on C1 after destroy",
     );
+
+    // D5 (tc-4b6k.4): by the time sessions.removed is broadcast, _destroySession
+    // has already deleted the session from _sessions (reap → kill → delete →
+    // broadcastRemoved), so a fresh session.attach for it fails (session gone).
+    // This is the wire-observable successor to "the per-session UDS is unlinked".
     assert.equal(
-      fs.existsSync(sessionProxyEndpoint),
+      await probeSessionReachable(serverProxy.endpoint(), sessionId),
       false,
-      "session-proxy UDS must be absent after destroy and sessions.removed",
+      "session must be unreachable via session.attach after destroy + sessions.removed",
     );
 
     mux.transport.close();
@@ -365,9 +394,9 @@ describe("tc-295a.6 L2: post-destroy C4 reconnect fails (requires tmux)", { skip
     const sessionName = "l2-destroy-reconnect";
     const claimResp = await sendCommand(mux, { kind: "session.claim", name: sessionName }, seq);
     assert.ok(claimResp.result.ok, `session.claim failed: ${JSON.stringify(claimResp.result)}`);
-    const { sessionId, endpoint: sessionProxyEndpoint } = (claimResp.result as {
+    const { sessionId } = (claimResp.result as {
       ok: true;
-      payload: { sessionId: string; endpoint: string };
+      payload: { sessionId: string };
     }).payload;
 
     // Arm sessions.removed listener.
@@ -392,23 +421,15 @@ describe("tc-295a.6 L2: post-destroy C4 reconnect fails (requires tmux)", { skip
     await Promise.race([removedPromise, tp]);
     ct();
 
-    // After sessions.removed, wait for the UDS to be removed (≤15s).
-    await waitFor(
-      () => !fs.existsSync(sessionProxyEndpoint),
-      15_000,
-      "session-proxy UDS to be removed after destroy",
-    );
-
-    // The tripwire: a client that successfully reconnects to the UDS after
-    // sessions.removed has been received would silently enter zombie state
-    // (the session is gone; the socket path doesn't exist). Clients MUST NOT
-    // reconnect to a session-proxy socket after receiving sessions.removed.
-    const reconnectSucceeded = await probeUdsReachable(sessionProxyEndpoint, 1_000);
+    // D5 (tc-4b6k.4) tripwire: after sessions.removed, a fresh session.attach for
+    // the removed sessionId MUST fail (session gone) — the successor to the
+    // pre-D5 "post-removal UDS reconnect must fail" zombie-state tripwire.
+    const reconnectSucceeded = await probeSessionReachable(serverProxy.endpoint(), sessionId, 1_000);
     assert.equal(
       reconnectSucceeded,
       false,
-      "post-removal C4 reconnect must fail: UDS path must be gone after sessions.removed " +
-      "(protocol violation tripwire — a successful reconnect means zombie state)",
+      "post-removal C4 reconnect must fail: session.attach must be rejected after sessions.removed " +
+      "(protocol violation tripwire — a successful reattach means zombie state)",
     );
 
     mux.transport.close();
@@ -471,32 +492,40 @@ describe("tc-295a.6 L3: kill-session-under-load ordering (requires tmux)", { ski
     const sessionName = "l3-kill-under-load";
     const claimResp = await sendCommand(mux, { kind: "session.claim", name: sessionName }, seq);
     assert.ok(claimResp.result.ok, `session.claim failed: ${JSON.stringify(claimResp.result)}`);
-    const { sessionId, endpoint: sessionProxyEndpoint } = (claimResp.result as {
+    const { sessionId } = (claimResp.result as {
       ok: true;
-      payload: { sessionId: string; endpoint: string };
+      payload: { sessionId: string };
     }).payload;
 
-    // ── Establish a proper C4 connection (session-proxy wire handshake).
+    // ── Establish a proper C4 DATA connection (D5, tc-4b6k.4).
     //
-    // Using a proper handshake means the session-proxy tracks this transport in
-    // its ControlServer _clients map, so it will reach our connection via
-    // broadcastErrorAndClose when the tmux session dies. This avoids the
-    // net.Server.close() deadlock that a raw (unhandshaked) connection would cause.
-    const c4Transport = await connectSocketTransport(sessionProxyEndpoint);
-    await runClientHandshake(c4Transport, SESSION_PROXY_CLIENT_CAPS, "session-proxy.capabilities");
+    // The single-socket collapse: connect to the ONE broker socket, run the
+    // `server-proxy.capabilities` handshake, then `session.attach {sessionId}`
+    // to bind this connection to the session. The session-proxy tracks it in its
+    // ControlServer _clients map, so broadcastErrorAndClose reaches it when the
+    // tmux session dies. No per-session socket, no second handshake.
+    const c4Transport = await connectSocketTransport(serverProxy.endpoint());
+    await runClientHandshake(c4Transport, CLIENT_CAPS, "server-proxy.capabilities");
 
     let c4Closed = false;
     let c4ClosedAt: number | null = null;
-    // Consume the post-handshake messages (snapshot etc.) and track close.
-    // onControl is single-slot; installing it after the handshake is correct
-    // because runClientHandshake resets it to a no-op after settling.
+    // Consume the post-handshake messages (broker snapshot, then session
+    // snapshot + deltas after attach) and track close. onControl is single-slot;
+    // installing it after the handshake is correct because runClientHandshake
+    // resets it to a no-op after settling.
     c4Transport.onControl((_msg) => {
-      // drain all C4 control messages (snapshot, deltas) — legal interleaving
+      // drain all C4 control messages — legal interleaving
     });
     c4Transport.onClose(() => {
       c4Closed = true;
       c4ClosedAt = Date.now();
     });
+    // Bind the connection to the session's stream.
+    c4Transport.sendControl({
+      type: "session.attach",
+      seq: 1,
+      sessionId,
+    } as unknown as Parameters<typeof c4Transport.sendControl>[0]);
 
     // Start a load-generating shell command so the session-proxy is actively
     // producing %output at the moment of kill.
@@ -562,16 +591,13 @@ describe("tc-295a.6 L3: kill-session-under-load ordering (requires tmux)", { ski
       `of each other — they are downstream of the same session death event; got ${orderingGapMs}ms gap`,
     );
 
-    // ── Assert 4: session-proxy UDS path is eventually removed.
-    await waitFor(
-      () => !fs.existsSync(sessionProxyEndpoint),
-      15_000,
-      "session-proxy UDS path to be removed after C4 close",
-    );
+    // ── Assert 4 (D5, tc-4b6k.4): the session is no longer reachable via the
+    // broker — a fresh session.attach for it fails (the successor to the pre-D5
+    // "per-session UDS path is removed" assertion).
     assert.equal(
-      fs.existsSync(sessionProxyEndpoint),
+      await probeSessionReachable(serverProxy.endpoint(), sessionId, 2_000),
       false,
-      "session-proxy UDS path must be removed after the session-proxy process exits",
+      "session must be unreachable via session.attach after external kill + sessions.removed",
     );
 
     mux.transport.close();
@@ -638,7 +664,7 @@ describe("tc-hfxb.19 L4: last-session kill empties the server but still broadcas
     assert.ok(claimResp.result.ok, `session.claim failed: ${JSON.stringify(claimResp.result)}`);
     const { sessionId } = (claimResp.result as {
       ok: true;
-      payload: { sessionId: string; endpoint: string };
+      payload: { sessionId: string };
     }).payload;
 
     // Sanity: it is the only session on the socket.

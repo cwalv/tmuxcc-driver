@@ -241,6 +241,45 @@ async function sendServerProxyCommand(
   return responsePromise;
 }
 
+/**
+ * D5 (tc-4b6k.4): open a fresh DATA connection to the single broker socket,
+ * handshake (`server-proxy.capabilities`), send `session.attach {sessionId}`,
+ * and wait for the session-proxy snapshot to arrive on the SAME connection
+ * (proving the broker→session-proxy handoff). Returns the mux + snapshot.
+ */
+async function attachToSession(
+  endpoint: string,
+  sessionId: string,
+  primaryPaneId?: string,
+): Promise<{ mux: TransportMux; snapshot: unknown }> {
+  const transport = await connectSocketTransport(endpoint);
+  await runClientHandshake(transport, CLIENT_CAPS, "server-proxy.capabilities");
+  const mux = new TransportMux(transport);
+
+  const snapshotPromise = new Promise<unknown>((resolve) => {
+    const unsub = mux.subscribe((msg) => {
+      // The session-proxy snapshot (type "snapshot"), NOT the broker
+      // "sessions.snapshot" the data connection receives before the attach.
+      if (msg.type === "snapshot") {
+        unsub();
+        resolve(msg);
+      }
+    });
+  });
+
+  mux.transport.sendControl({
+    type: "session.attach",
+    seq: 1,
+    sessionId,
+    ...(primaryPaneId !== undefined ? { primaryPaneId } : {}),
+  } as unknown as Parameters<typeof mux.transport.sendControl>[0]);
+
+  const [timeoutP, clearTimeoutP] = rejectAfter(10_000, "Timeout waiting for session-proxy snapshot after session.attach");
+  const snapshot = await Promise.race([snapshotPromise, timeoutP]);
+  clearTimeoutP();
+  return { mux, snapshot };
+}
+
 // ---------------------------------------------------------------------------
 // Unit tests (no real tmux)
 // ---------------------------------------------------------------------------
@@ -524,16 +563,17 @@ describe("server-proxy – integration (requires tmux)", { skip: !TMUX_AVAILABLE
     assert.equal(snapshot.sessions.length, 0);
   });
 
-  it("I2: session.claim creates a session and sessionProxy, returns endpoint + created=true", async () => {
+  it("I2: session.claim creates a session and sessionProxy, returns sessionId + created=true", async () => {
     const { mux } = await connectToServerProxy(serverProxy.endpoint());
     const seq = { value: 1 };
 
     const resp = await sendServerProxyCommand(mux, { kind: "session.claim", name: "test-claim" }, seq);
 
     assert.ok(resp.result.ok, `Expected ok=true, got: ${JSON.stringify(resp.result)}`);
-    const payload = (resp.result as { ok: true; payload: { sessionId: string; endpoint: string; created: boolean } }).payload;
+    // D5 (tc-4b6k.4): claim returns a sessionId, NO endpoint.
+    const payload = (resp.result as { ok: true; payload: { sessionId: string; endpoint?: never; created: boolean } }).payload;
     assert.ok(payload.sessionId, "Missing sessionId");
-    assert.ok(payload.endpoint, "Missing endpoint");
+    assert.equal((payload as { endpoint?: unknown }).endpoint, undefined, "D5: claim must NOT return an endpoint");
     // tc-3y8.2: a claim that mints the session must report created=true —
     // this is the client's authority for create-time-only profile apply.
     assert.equal(payload.created, true, "claim that creates must report created=true");
@@ -541,7 +581,7 @@ describe("server-proxy – integration (requires tmux)", { skip: !TMUX_AVAILABLE
     mux.transport.close();
   });
 
-  it("I3: session.claim on same name returns same sessionId + endpoint, created=false", async () => {
+  it("I3: session.claim on same name returns same sessionId, created=false", async () => {
     const { mux } = await connectToServerProxy(serverProxy.endpoint());
     const seq = { value: 1 };
 
@@ -551,11 +591,10 @@ describe("server-proxy – integration (requires tmux)", { skip: !TMUX_AVAILABLE
     assert.ok(resp1.result.ok);
     assert.ok(resp2.result.ok);
 
-    const p1 = (resp1.result as { ok: true; payload: { sessionId: string; endpoint: string; created: boolean } }).payload;
-    const p2 = (resp2.result as { ok: true; payload: { sessionId: string; endpoint: string; created: boolean } }).payload;
+    const p1 = (resp1.result as { ok: true; payload: { sessionId: string; created: boolean } }).payload;
+    const p2 = (resp2.result as { ok: true; payload: { sessionId: string; created: boolean } }).payload;
 
     assert.equal(p1.sessionId, p2.sessionId, "sessionId must be stable");
-    assert.equal(p1.endpoint, p2.endpoint, "endpoint must be stable");
     // tc-3y8.2: first claim creates, second attaches to the existing session.
     assert.equal(p1.created, true, "first claim must report created=true");
     assert.equal(p2.created, false, "second claim must report created=false (attach)");
@@ -588,7 +627,7 @@ describe("server-proxy – integration (requires tmux)", { skip: !TMUX_AVAILABLE
   // AC (2): two startNew calls without names yield two distinct sessions
   // with distinct handles — verified against the broker's live _byName truth.
 
-  it("I4a (tc-295a.5): two sequential session.createUnique calls with the same baseName yield distinct names, sessionIds, and endpoints", async () => {
+  it("I4a (tc-295a.5): two sequential session.createUnique calls with the same baseName yield distinct names + sessionIds", async () => {
     const { mux } = await connectToServerProxy(serverProxy.endpoint());
     const seq = { value: 1 };
 
@@ -600,11 +639,10 @@ describe("server-proxy – integration (requires tmux)", { skip: !TMUX_AVAILABLE
     assert.ok(r1.result.ok, `First createUnique failed: ${JSON.stringify(r1.result)}`);
     const p1 = (r1.result as {
       ok: true;
-      payload: { sessionId: string; endpoint: string; name: string; created: boolean };
+      payload: { sessionId: string; name: string; created: boolean };
     }).payload;
     assert.ok(p1.name, "createUnique response must include a name");
     assert.ok(p1.sessionId, "createUnique response must include a sessionId");
-    assert.ok(p1.endpoint, "createUnique response must include an endpoint");
     assert.equal(p1.created, true, "createUnique must always report created=true");
 
     const r2 = await sendServerProxyCommand(
@@ -615,7 +653,7 @@ describe("server-proxy – integration (requires tmux)", { skip: !TMUX_AVAILABLE
     assert.ok(r2.result.ok, `Second createUnique failed: ${JSON.stringify(r2.result)}`);
     const p2 = (r2.result as {
       ok: true;
-      payload: { sessionId: string; endpoint: string; name: string; created: boolean };
+      payload: { sessionId: string; name: string; created: boolean };
     }).payload;
     assert.ok(p2.name, "second createUnique response must include a name");
     assert.equal(p2.created, true, "second createUnique must also report created=true");
@@ -623,7 +661,6 @@ describe("server-proxy – integration (requires tmux)", { skip: !TMUX_AVAILABLE
     // The two calls must have produced two distinct sessions.
     assert.notEqual(p1.name, p2.name, `Both createUnique calls got the same name '${p1.name}' — uniquification failed`);
     assert.notEqual(p1.sessionId, p2.sessionId, "createUnique calls must return distinct sessionIds");
-    assert.notEqual(p1.endpoint, p2.endpoint, "createUnique calls must return distinct session-proxy endpoints");
 
     mux.transport.close();
   });
@@ -648,16 +685,15 @@ describe("server-proxy – integration (requires tmux)", { skip: !TMUX_AVAILABLE
 
     const p1 = (r1.result as {
       ok: true;
-      payload: { sessionId: string; endpoint: string; name: string; created: boolean };
+      payload: { sessionId: string; name: string; created: boolean };
     }).payload;
     const p2 = (r2.result as {
       ok: true;
-      payload: { sessionId: string; endpoint: string; name: string; created: boolean };
+      payload: { sessionId: string; name: string; created: boolean };
     }).payload;
 
     assert.notEqual(p1.name, p2.name, `Concurrent createUnique calls got the same name '${p1.name}' — uniquification race`);
     assert.notEqual(p1.sessionId, p2.sessionId, "Concurrent createUnique must yield distinct sessionIds");
-    assert.notEqual(p1.endpoint, p2.endpoint, "Concurrent createUnique must yield distinct endpoints");
     assert.equal(p1.created, true, "createUnique #1 must report created=true");
     assert.equal(p2.created, true, "createUnique #2 must report created=true");
 
@@ -711,57 +747,53 @@ describe("server-proxy – integration (requires tmux)", { skip: !TMUX_AVAILABLE
     mux.transport.close();
   });
 
-  it("I8 (tc-7xv.36): pane.attach returns the same session-proxy endpoint as session.claim and echoes paneId", async () => {
+  it("I8 (D5, tc-4b6k.4): session.attach with a primaryPaneId binds the connection and delivers the session snapshot", async () => {
+    // The former pane.attach BROKER command (tc-7xv.36) is subsumed by
+    // session.attach's optional primaryPaneId — a DATA connection targeting a
+    // specific pane. The server-proxy does not validate pane existence; this
+    // asserts the round-trip shape (the connection binds and gets a snapshot).
     const { mux } = await connectToServerProxy(serverProxy.endpoint());
     const seq = { value: 1 };
-
-    // First claim the session so a session-proxy is running and we know its sessionId.
     const claimResp = await sendServerProxyCommand(mux, { kind: "session.claim", name: "pane-attach-target" }, seq);
     assert.ok(claimResp.result.ok, `Claim failed: ${JSON.stringify(claimResp.result)}`);
-    const claimPayload = (claimResp.result as {
-      ok: true;
-      payload: { sessionId: string; endpoint: string };
-    }).payload;
-    const sessionId = claimPayload.sessionId;
-    const claimEndpoint = claimPayload.endpoint;
+    const sessionId = (claimResp.result as { ok: true; payload: { sessionId: string } }).payload.sessionId;
 
-    // Now attach to a specific pane.  The server-proxy does not validate pane
-    // existence; this test simply asserts the round-trip shape.
-    const attachResp = await sendServerProxyCommand(
-      mux,
-      { kind: "pane.attach", sessionId, paneId: "p1" },
-      seq,
-    );
-    assert.ok(
-      attachResp.result.ok,
-      `pane.attach failed: ${JSON.stringify(attachResp.result)}`,
-    );
-    const attachPayload = (attachResp.result as {
-      ok: true;
-      payload: { sessionId: string; endpoint: string; paneId: string };
-    }).payload;
-    assert.equal(attachPayload.sessionId, sessionId, "sessionId must match");
-    assert.equal(attachPayload.endpoint, claimEndpoint, "endpoint must match");
-    assert.equal(attachPayload.paneId, "p1", "paneId must echo back");
+    const attached = await attachToSession(serverProxy.endpoint(), sessionId, "p1");
+    assert.equal((attached.snapshot as { type: string }).type, "snapshot");
+    const sess = (attached.snapshot as { session: { sessionId: string } }).session;
+    assert.ok(sess.sessionId, "session snapshot must carry a sessionId after targeted session.attach");
 
+    attached.mux.transport.close();
     mux.transport.close();
   });
 
-  it("I9 (tc-7xv.36): pane.attach returns session.not-found for unknown session", async () => {
-    const { mux } = await connectToServerProxy(serverProxy.endpoint());
-    const seq = { value: 1 };
+  it("I9 (D5, tc-4b6k.4): session.attach for an unknown session errors + closes the connection", async () => {
+    const transport = await connectSocketTransport(serverProxy.endpoint());
+    await runClientHandshake(transport, CLIENT_CAPS, "server-proxy.capabilities");
+    const mux = new TransportMux(transport);
 
-    const resp = await sendServerProxyCommand(
-      mux,
-      { kind: "pane.attach", sessionId: "s999-nonexistent", paneId: "p0" },
-      seq,
-    );
+    const errPromise = new Promise<MessageBase>((resolve) => {
+      const unsub = mux.subscribe((msg) => {
+        if (msg.type === "error") { unsub(); resolve(msg); }
+      });
+    });
+    let closed = false;
+    transport.onClose(() => { closed = true; });
 
-    assert.equal(resp.result.ok, false);
-    const r = resp.result as { ok: false; code: string; message: string };
-    assert.equal(r.code, "session.not-found", `code should be session.not-found, got ${r.code}`);
+    mux.transport.sendControl({
+      type: "session.attach",
+      seq: 1,
+      sessionId: "s999-nonexistent",
+    } as unknown as Parameters<typeof mux.transport.sendControl>[0]);
 
-    mux.transport.close();
+    const [timeoutP, clearTimeoutP] = rejectAfter(5_000, "Timeout waiting for session.not-found error");
+    const err = await Promise.race([errPromise, timeoutP]);
+    clearTimeoutP();
+    assert.equal((err as unknown as { type: string; code: string }).code, "session.not-found");
+    // The broker closes the connection after the error; the client observes it.
+    await waitFor(() => closed, 2_000, "connection must close after session.attach not-found");
+
+    try { transport.close(); } catch { /* already closed */ }
   });
 
   it("I10 (tc-k6v): server-proxy.info reports tmux server pid + per-session session-proxy pid and pane count", async () => {
@@ -938,37 +970,21 @@ describe("server-proxy – integration (requires tmux)", { skip: !TMUX_AVAILABLE
     mux.transport.close();
   });
 
-  it("I7: connect to session-proxy endpoint and run snapshot round-trip", async () => {
+  it("I7 (D5, tc-4b6k.4): claim then session.attach on the broker socket runs the session snapshot round-trip", async () => {
     const { mux } = await connectToServerProxy(serverProxy.endpoint());
     const seq = { value: 1 };
 
     const claimResp = await sendServerProxyCommand(mux, { kind: "session.claim", name: "session-proxy-rtrip" }, seq);
     assert.ok(claimResp.result.ok, `Claim failed: ${JSON.stringify(claimResp.result)}`);
-    const endpoint = (claimResp.result as { ok: true; payload: { endpoint: string } }).payload.endpoint;
+    const sessionId = (claimResp.result as { ok: true; payload: { sessionId: string } }).payload.sessionId;
 
-    // Connect to the session-proxy endpoint using a socket transport.
-    // Run the handshake FIRST (same pattern as connectToServerProxy): the handshake
-    // installs and then resets its own onControl handler. Install the mux
-    // AFTER so its fanout handler wins the single-slot competition.
-    const sessionProxyTransport = await connectSocketTransport(endpoint);
-    await runClientHandshake(sessionProxyTransport, SESSION_PROXY_CLIENT_CAPS, "session-proxy.capabilities");
-
-    // Now safe to install the mux — handshake has settled and cleared its handler.
-    // The session-proxy snapshot arrives after the handshake, so this is not a race.
-    const sessionProxyMux = new TransportMux(sessionProxyTransport);
-
-    const snapshotPromise2 = new Promise<unknown>((resolve) => {
-      const unsub = sessionProxyMux.subscribe((msg) => {
-        if (msg.type === "snapshot") {
-          unsub();
-          resolve(msg);
-        }
-      });
-    });
-
-    const [sessionProxyTimeoutP, clearSessionProxyTimeout] = rejectAfter(10_000, "Timeout waiting for session-proxy snapshot");
-    const snapshot2 = await Promise.race([snapshotPromise2, sessionProxyTimeoutP]);
-    clearSessionProxyTimeout();
+    // D5: a fresh DATA connection to the SAME broker socket runs the ONE
+    // handshake, sends session.attach {sessionId}, and receives the
+    // session-proxy snapshot on that connection — no per-session socket.
+    const { mux: sessionProxyMux, snapshot: snapshot2 } = await attachToSession(
+      serverProxy.endpoint(),
+      sessionId,
+    );
 
     // SessionProxy SnapshotMessage (wire v3, tc-j9c.2) has singular `session: SnapshotSession`
     assert.equal((snapshot2 as { type: string }).type, "snapshot");
@@ -976,7 +992,7 @@ describe("server-proxy – integration (requires tmux)", { skip: !TMUX_AVAILABLE
     assert.ok(sess2, "SessionProxy snapshot must have a `session` field");
     assert.ok(sess2.sessionId, "SessionProxy snapshot session must have sessionId");
 
-    sessionProxyTransport.close();
+    sessionProxyMux.transport.close();
     mux.transport.close();
   });
 });
@@ -1115,7 +1131,7 @@ describe("server-proxy – race test (requires tmux)", { skip: !TMUX_AVAILABLE }
     spawnSync("tmux", ["-L", socketName, "kill-server"], { stdio: "ignore", timeout: 5_000 });
   });
 
-  it("R1: 10 concurrent claims of the same name all get the same sessionId + endpoint", async () => {
+  it("R1: 10 concurrent claims of the same name all get the same sessionId", async () => {
     const N = 10;
     const endpoint = serverProxy.endpoint();
 
@@ -1136,16 +1152,12 @@ describe("server-proxy – race test (requires tmux)", { skip: !TMUX_AVAILABLE }
       assert.ok(resp.result.ok, `Expected ok=true, got: ${JSON.stringify(resp.result)}`);
     }
 
-    // All must have the same sessionId and endpoint
+    // All must resolve to the same sessionId (D5: no endpoint on the wire).
     const sessionIds = new Set(
       responses.map((r) => (r.result as { ok: true; payload: { sessionId: string } }).payload.sessionId),
     );
-    const endpoints = new Set(
-      responses.map((r) => (r.result as { ok: true; payload: { endpoint: string } }).payload.endpoint),
-    );
 
     assert.equal(sessionIds.size, 1, `Expected 1 unique sessionId, got ${sessionIds.size}: ${[...sessionIds]}`);
-    assert.equal(endpoints.size, 1, `Expected 1 unique endpoint, got ${endpoints.size}: ${[...endpoints]}`);
 
     // tc-3y8.2: exactly ONE of the racing claims may observe created=true —
     // joined in-flight claims are remapped to created=false so create-time
@@ -1197,7 +1209,7 @@ describe("server-proxy – race test (requires tmux)", { skip: !TMUX_AVAILABLE }
       );
       const payload = (resp.result as {
         ok: true;
-        payload: { sessionId: string; endpoint: string; created: boolean };
+        payload: { sessionId: string; created: boolean };
       }).payload;
       assert.ok(payload.sessionId, `cycle ${i}: payload must include sessionId`);
       assert.equal(payload.created, true, `cycle ${i}: this claim must report created=true`);

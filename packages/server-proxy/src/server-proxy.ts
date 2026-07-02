@@ -58,6 +58,7 @@ import type {
   Transport,
   Capabilities,
   ClientIdentity,
+  NegotiatedSession,
   ServerProxyCapabilitiesMessage,
   ServerProxySnapshotMessage,
   ServerProxySessionInfo,
@@ -69,6 +70,7 @@ import type {
   ServerProxyCommandResponseMessage,
   ServerProxyInfoPayload,
   ServerProxyInfoSession,
+  SessionAttachMessage,
   MetricsHttpStatePayload,
   SpawnInfo,
   SessionTopologyPayload,
@@ -78,8 +80,8 @@ import type {
   SessionId,
 } from "@tmuxcc/session-proxy";
 
-import { createSocketServer, createSocketTransport } from "./socket-transport.js";
-import { serverProxySocketPath, sessionProxySocketPath, removeSocket, restrictSocket, classifySocketOwner } from "./runtime-dir.js";
+import { createSocketServer } from "./socket-transport.js";
+import { serverProxySocketPath, removeSocket, restrictSocket, classifySocketOwner } from "./runtime-dir.js";
 import { createServerProxyMetrics } from "./metrics.js";
 import type { ServerProxyMetrics } from "./metrics.js";
 import { mergeMetricsText } from "./metrics-exposition.js";
@@ -337,6 +339,14 @@ interface ClientState {
    * payload (`info.clients[]`). Carried and logged only — no behavior yet.
    */
   identity: ClientIdentity | undefined;
+  /**
+   * The full session negotiated by this connection's `server-proxy.capabilities`
+   * handshake (D5, tc-4b6k.4). On a `session.attach` the broker hands this to
+   * `sessionProxy.addClient({ preNegotiated })` so the session-proxy adopts it
+   * instead of running a second handshake — the single broker handshake already
+   * negotiated version + identity for this connection.
+   */
+  session: NegotiatedSession;
 }
 
 // ---------------------------------------------------------------------------
@@ -351,7 +361,6 @@ const SERVER_PROXY_CAPABILITIES: Capabilities = {
     "session-create",
     "session-unique-create", // tc-295a.5 / W1.4: broker-minted unique names
     "session-destroy",
-    "pane-attach", // tc-7xv.36
     "server-proxy-info", // tc-k6v
     "server-proxy-metrics-http", // tc-44u4.4
     "tmux-caps", // tc-4b6k.12: server-proxy.info carries TmuxCapabilityMap
@@ -502,7 +511,7 @@ class ServerProxyImpl implements ServerProxyHandle {
    * `_claimSession` so exactly one claimant observes `created: true` per
    * session creation (the authority for create-time-only profile apply).
    */
-  private _claimLocks = new Map<string, Promise<{ sessionId: SessionId; endpoint: string; created: boolean; name?: string }>>();
+  private _claimLocks = new Map<string, Promise<{ sessionId: SessionId; created: boolean; name?: string }>>();
 
   // ── tc-4b6k.6 session-refresh coalescing (D6) ──────────────────────────────
   /**
@@ -545,13 +554,11 @@ class ServerProxyImpl implements ServerProxyHandle {
     this._runtimeDirOpts = opts.runtimeDir !== undefined ? { runtimeDir: opts.runtimeDir } : {};
     this._idleExitMs = opts.idleExitMs ?? DEFAULT_IDLE_EXIT_MS;
     this._persistThroughTmuxGone = opts.persistThroughTmuxGone ?? false;
-    // tc-edf8: hand the broker's metrics registry to the supervisor so each
-    // per-session client transport's drain path is observable (the firehose
-    // backpressure path). `_metrics` is a field initializer above, so it is
-    // already assigned here.
-    this._supervisor = createSessionProxySupervisor({
-      socketTransportMetrics: this._metrics,
-    });
+    // D5 (tc-4b6k.4): the supervisor no longer owns any socket — every data
+    // connection lands on the broker's single socket server, which already
+    // reports its drain path onto `_metrics` (the tc-edf8 firehose
+    // backpressure path is preserved on the broker's `createSocketServer`).
+    this._supervisor = createSessionProxySupervisor();
   }
 
   endpoint(): string {
@@ -1359,7 +1366,7 @@ class ServerProxyImpl implements ServerProxyHandle {
 
     // nextSeq starts at 2: the handshake itself sent seq=1 (server-proxy.capabilities).
     // The snapshot is the second server-side message and therefore seq=2.
-    const state: ClientState = { transport, nextSeq: 2, identity: session.clientIdentity };
+    const state: ClientState = { transport, nextSeq: 2, identity: session.clientIdentity, session };
     this._clients.set(transport, state);
 
     process.stderr.write(
@@ -1377,13 +1384,93 @@ class ServerProxyImpl implements ServerProxyHandle {
     state.nextSeq++;
     transport.sendControl(snapshot as unknown as Parameters<typeof transport.sendControl>[0]);
 
-    // Handle incoming commands
+    // Handle incoming client→server-proxy messages.
     transport.onControl((msg: MessageBase) => {
       if (msg.type === "command.request") {
         void this._handleCommand(state, msg as unknown as ServerProxyCommandRequestMessage);
+      } else if (msg.type === "session.attach") {
+        // D5 (tc-4b6k.4): bind this connection to a session's stream. The
+        // handler transitions the connection out of the command plane and hands
+        // the transport to the session-proxy — after this the broker's onControl
+        // is replaced by the session-proxy's (see _handleAttach).
+        void this._handleAttach(state, msg as unknown as SessionAttachMessage);
       }
-      // Other message types: emit protocol.unknown-message error
+      // Other message types: dropped (protocol.unknown-message is best-effort).
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // session.attach — single-socket connection→session binding (D5, tc-4b6k.4)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Bind a connection to a session's stream in response to `session.attach`.
+   *
+   * The seq contract is the load-bearing invariant here: this connection's seq
+   * counter has already advanced past the handshake (seq=1) and the
+   * sessions.snapshot (seq=2), plus any session-set deltas broadcast before the
+   * attach arrived. We SYNCHRONOUSLY (before any await) capture the connection's
+   * live `nextSeq` and remove it from `_clients` so the broker never touches its
+   * seq again, then hand `startSeq` to the session-proxy so its snapshot + deltas
+   * continue the SAME monotonic per-connection counter. The client mirror sees
+   * one unbroken stream across the handoff.
+   *
+   * The single broker `server-proxy.capabilities` handshake already negotiated
+   * version + identity for this connection, so the session-proxy skips its own
+   * handshake (`preNegotiated: state.session`) — no second handshake, the S1
+   * ceremony this bead deletes.
+   */
+  private async _handleAttach(state: ClientState, msg: SessionAttachMessage): Promise<void> {
+    const { transport } = state;
+
+    // Capture the continued seq + detach from the command plane BEFORE the first
+    // await, so no broker broadcast (added/removed/renamed/exiting) can advance
+    // this connection's seq after the handoff point.
+    const startSeq = state.nextSeq;
+    this._clients.delete(transport);
+
+    // Refresh the session table so a recently-created session is visible.
+    this._refreshSessions();
+    const entry = this._sessions.get(msg.sessionId);
+    if (entry === undefined) {
+      // Unknown session — surface a fail-loud error then close the connection;
+      // the client observes the disconnect (its data connection never resolves).
+      try {
+        const err: ErrorMessage = {
+          type: "error",
+          seq: startSeq,
+          code: "session.not-found",
+          message: `Session '${msg.sessionId}' not found`,
+        };
+        transport.sendControl(err as unknown as Parameters<typeof transport.sendControl>[0]);
+      } catch { /* transport may already be closed */ }
+      try { transport.close(); } catch { /* ignore */ }
+      return;
+    }
+
+    try {
+      // Ensure the session-proxy is running (idempotent with session.claim's
+      // single-flight), then hand this transport to it with the continued seq.
+      const sessionProxy = await this._supervisor.ensureSessionProxy(
+        entry.sessionId,
+        entry.name,
+        this._opts.socketName,
+      );
+      await sessionProxy.addClient(transport, {
+        startSeq,
+        preNegotiated: state.session,
+        ...(msg.primaryPaneId !== undefined ? { primaryPaneId: msg.primaryPaneId } : {}),
+      });
+    } catch (err: unknown) {
+      // ensureSessionProxy (quarantine / start failure) or addClient rejected.
+      // Fail-loud on stderr and close the connection so the client sees the
+      // disconnect (previously the per-session net.createServer callback owned
+      // this catch, tc-295a.21).
+      process.stderr.write(
+        `serverProxy: session.attach for '${msg.sessionId}' failed: ${String(err)}\n`,
+      );
+      try { transport.close(); } catch { /* already closed */ }
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -1519,7 +1606,7 @@ class ServerProxyImpl implements ServerProxyHandle {
     const rpcStartMs = Date.now();
 
     try {
-      let payload: { sessionId?: SessionId; endpoint?: string; paneId?: PaneId; created?: boolean; ok?: true; info?: ServerProxyInfoPayload; topology?: SessionTopologyPayload; name?: string; metricsHttp?: MetricsHttpStatePayload };
+      let payload: { sessionId?: SessionId; created?: boolean; ok?: true; info?: ServerProxyInfoPayload; topology?: SessionTopologyPayload; name?: string; metricsHttp?: MetricsHttpStatePayload };
 
       switch (command.kind) {
         case "session.claim":
@@ -1547,13 +1634,6 @@ class ServerProxyImpl implements ServerProxyHandle {
           payload = {
             metricsHttp: await this.setMetricsHttp(command.enabled, command.bind),
           };
-          break;
-        case "pane.attach":
-          // tc-7xv.36: attach intent for a specific pane.  The server-proxy doesn't
-          // own pane-level state — it just ensures the session-proxy is running for
-          // the named session and echoes the paneId back so the client has a
-          // round-tripped acknowledgement of its targeted attach.
-          payload = await this._attachPane(command.sessionId, command.paneId);
           break;
         case "session.topology":
           // tc-i9aq.2: one-shot topology query for a discovered-but-unclaimed
@@ -1662,8 +1742,10 @@ class ServerProxyImpl implements ServerProxyHandle {
   // ---------------------------------------------------------------------------
 
   /**
-   * Claim or obtain the session-proxy endpoint for a named session.
-   * Per-name serialization via _claimLocks.
+   * Claim a named session and return its stable `sessionId` (D5, tc-4b6k.4).
+   * Ensures the session exists (creating it if needed) and its session-proxy is
+   * running, then returns the id — the client binds a connection to it with
+   * `session.attach`. Per-name serialization via _claimLocks.
    *
    * tc-3y8.2: the returned `created` flag reports whether THIS claim minted
    * the tmux session.  Joining an in-flight claim returns `created: false`
@@ -1671,7 +1753,7 @@ class ServerProxyImpl implements ServerProxyHandle {
    * the creating claim, so exactly one claimant per session creation sees
    * `created: true`.
    */
-  private _claimSession(name: string): Promise<{ sessionId: SessionId; endpoint: string; created: boolean }> {
+  private _claimSession(name: string): Promise<{ sessionId: SessionId; created: boolean }> {
     const inFlight = this._claimLocks.get(name);
     if (inFlight) {
       // Joined claim: by the time this resolves the session exists; this
@@ -1692,7 +1774,7 @@ class ServerProxyImpl implements ServerProxyHandle {
 
   private async _doClaimSession(
     name: string,
-  ): Promise<{ sessionId: SessionId; endpoint: string; created: boolean; name?: string }> {
+  ): Promise<{ sessionId: SessionId; created: boolean; name?: string }> {
     // tc-is5w: phase-split activation timing — t0 at claim entry. The claim leg
     // is everything up to (but not including) the ensureSessionProxy await; the
     // ensure leg wraps that await (which itself contains the bootstrap leg,
@@ -1781,24 +1863,19 @@ class ServerProxyImpl implements ServerProxyHandle {
     // on subsequent invocations.
     await setSessionMarker(this._opts.socketName, entry.name);
 
-    // Ensure session-proxy is running
-    const sessionProxySockPath = sessionProxySocketPath(
-      this._socketDirName,
-      entry.sessionId,
-      this._runtimeDirOpts,
-    );
-
     // tc-is5w: claim leg ends here (pre-ensure work); the ensure leg is the
     // ensureSessionProxy await. On a fresh-fork claim the ensure span is
     // dominated by `await sessionProxy.start()` → bootstrap-requery (emitted as
     // a separate `phase=bootstrap` line, nested inside ensure_ms).
     const _phaseClaimEnd = phaseNow();
 
-    const endpoint = await this._supervisor.ensureSessionProxy(
+    // D5 (tc-4b6k.4): ensure the session-proxy is running (warm before claim
+    // returns — the READY-before-claim contract). The client then binds a
+    // connection with `session.attach {sessionId}`; there is no endpoint.
+    await this._supervisor.ensureSessionProxy(
       entry.sessionId,
       entry.name,
       this._opts.socketName,
-      sessionProxySockPath,
     );
 
     const _phaseEnd = phaseNow();
@@ -1812,12 +1889,12 @@ class ServerProxyImpl implements ServerProxyHandle {
       total_ms: _phaseEnd - _phaseT0,
     });
 
-    return { sessionId: entry.sessionId, endpoint, created };
+    return { sessionId: entry.sessionId, created };
   }
 
   private async _createSession(
     name: string,
-  ): Promise<{ sessionId: SessionId; endpoint: string; created: boolean }> {
+  ): Promise<{ sessionId: SessionId; created: boolean }> {
     await this._refreshSessions();
 
     // tc-3y8.2: an in-flight claim counts as "name in use" — joining it via
@@ -1874,12 +1951,12 @@ class ServerProxyImpl implements ServerProxyHandle {
    *     and observe `created: false`, which this method treats as a collision
    *     and re-tries with the next suffix.
    *
-   * Returns `{ sessionId, name, endpoint, created: true }` — `created` is
-   * always `true` because this command never silently attaches.
+   * Returns `{ sessionId, name, created: true }` — `created` is always `true`
+   * because this command never silently attaches.
    */
   private async _createUniqueSession(
     baseName: string,
-  ): Promise<{ sessionId: SessionId; endpoint: string; created: boolean; name: string }> {
+  ): Promise<{ sessionId: SessionId; created: boolean; name: string }> {
     // Normalise: empty / whitespace-only baseName → "tmuxcc".
     const base = (baseName ?? "").trim() || "tmuxcc";
 
@@ -1903,53 +1980,10 @@ class ServerProxyImpl implements ServerProxyHandle {
       // resolves with created=false — that means the name was taken; loop.
       const result = await this._claimSession(candidate);
       if (result.created) {
-        return { sessionId: result.sessionId, endpoint: result.endpoint, created: true, name: candidate };
+        return { sessionId: result.sessionId, created: true, name: candidate };
       }
       // Name was taken by a concurrent caller — try the next suffix.
     }
-  }
-
-  /**
-   * Handle `pane.attach` (tc-7xv.36).
-   *
-   * The server-proxy doesn't track panes — it only knows about sessions.  This
-   * handler:
-   *   1. Verifies the named session exists in the server-proxy's session table
-   *      (after a refresh from tmux).
-   *   2. Ensures the per-session session-proxy is running and returns its endpoint
-   *      (same path used by `session.claim`).
-   *   3. Echoes the supplied `paneId` back to the client as an acknowledgement
-   *      of the targeted-attach intent — the client uses it to drive its host-
-   *      pty binding decision.
-   *
-   * Pane existence is NOT validated here.  If the pane has disappeared by the
-   * time the client connects to the sessionProxy, the session-proxy's snapshot simply will
-   * not contain it; the client is expected to detect the missing pane and
-   * surface a UI signal.  Validating in the server-proxy would require the server-proxy
-   * to inspect session-proxy-side state, which crosses the wire-contract invariant
-   * (the server-proxy speaks in sessions, not panes).
-   */
-  private async _attachPane(
-    sessionId: SessionId,
-    paneId: PaneId,
-  ): Promise<{ sessionId: SessionId; endpoint: string; paneId: PaneId }> {
-    // Refresh the session table from tmux so a recently-disappeared session
-    // is detected promptly.
-    await this._refreshSessions();
-
-    const entry = this._sessions.get(sessionId);
-    if (!entry) {
-      throw Object.assign(
-        new Error(`Session '${sessionId}' not found`),
-        { code: "session.not-found" },
-      );
-    }
-
-    // Ensure the session-proxy is up.  Reuse the same per-name claim semantics so
-    // concurrent pane.attach + session.claim requests share one spawn.
-    const { endpoint } = await this._claimSession(entry.name);
-
-    return { sessionId: entry.sessionId, endpoint, paneId };
   }
 
   private async _destroySession(
