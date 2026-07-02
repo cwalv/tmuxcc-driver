@@ -66,8 +66,10 @@ function createStubPipeline() {
         stop: () => { },
         isLive: () => false,
         buffers,
-        // Stub no-ops for methods ControlServer never calls.
+        // Stub no-ops for methods ControlServer never calls at runtime beyond
+        // subscribing (onPaneNotify is subscribed in the ControlServer ctor, tc-76m8.1).
         onNotification: () => () => { },
+        onPaneNotify: () => () => { },
         injectNotification: () => { },
         patchModel: () => { },
         send: () => Promise.resolve({ ok: true, output: "" }),

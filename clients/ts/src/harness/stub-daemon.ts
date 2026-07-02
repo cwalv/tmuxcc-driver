@@ -301,6 +301,16 @@ export function runStubDaemon(
           continue;
         }
         transport.sendControl(s.message);
+        // After the snapshot, yield a macrotask so the client's `connectClient`
+        // promise resolves and consumers attach their post-connect hooks (e.g.
+        // onPaneNotify, tc-76m8.1) before subsequent live pushes flow. Gated
+        // transcripts get this yield for free from the command.response wait;
+        // an ungated deltas-only transcript needs it explicitly, else a push
+        // delivered in the same synchronous burst as the snapshot races
+        // handler registration (in-memory transport delivery is synchronous).
+        if (s.message.type === "snapshot") {
+          await new Promise((resolve) => setImmediate(resolve));
+        }
       }
       resolveDone();
     })();

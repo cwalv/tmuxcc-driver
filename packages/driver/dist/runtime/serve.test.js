@@ -31,6 +31,7 @@ import { WIRE_PROTOCOL_VERSION as WPV } from "@tmuxcc/protocol";
 function createFakePipeline(initialModel) {
     let current = initialModel ?? emptyModel();
     const handlers = new Set();
+    const paneNotifyHandlers = new Set();
     return {
         getModel() { return current; },
         isLive() { return true; },
@@ -43,6 +44,10 @@ function createFakePipeline(initialModel) {
         onNotification(_handler) {
             // FakePipeline does not emit notifications — no-op for serve.test.ts.
             return () => { };
+        },
+        onPaneNotify(handler) {
+            paneNotifyHandlers.add(handler);
+            return () => { paneNotifyHandlers.delete(handler); };
         },
         injectNotification(_event) {
             // FakePipeline: no-op — serve.test.ts does not test the optimistic-update path.
@@ -76,6 +81,11 @@ function createFakePipeline(initialModel) {
             current = newModel;
             for (const h of handlers) {
                 h(newModel, prevModel);
+            }
+        },
+        firePaneNotify(notify) {
+            for (const h of paneNotifyHandlers) {
+                h(notify);
             }
         },
     };
@@ -525,6 +535,42 @@ describe("createControlServer", () => {
 //     get their own seq=1 snapshot and seq=2 first-delta, regardless of when
 //     they connected relative to each other.
 // ---------------------------------------------------------------------------
+describe("pane.notify broadcast (tc-76m8.1, S9)", () => {
+    it("broadcasts a scanner-emitted pane.notify to a connected client", async () => {
+        const pipeline = createFakePipeline(makeModel1());
+        const server = createControlServer(pipeline);
+        const { received } = await connectClient(server);
+        pipeline.firePaneNotify({ paneId: P1, kind: "osc9", payload: { message: "done", source: "osc9" } });
+        await new Promise((r) => setImmediate(r));
+        const notify = received.find((m) => m.type === "pane.notify");
+        assert.ok(notify, "client should receive a pane.notify");
+        assert.equal(notify.paneId, P1);
+        assert.equal(notify.kind, "osc9");
+        assert.deepEqual(notify.payload, { message: "done", source: "osc9" });
+        assert.ok(notify.seq >= 1, "pane.notify carries a per-connection seq");
+    });
+    it("omits payload for a bell notify", async () => {
+        const pipeline = createFakePipeline(makeModel1());
+        const server = createControlServer(pipeline);
+        const { received } = await connectClient(server);
+        pipeline.firePaneNotify({ paneId: P1, kind: "bell" });
+        await new Promise((r) => setImmediate(r));
+        const notify = received.find((m) => m.type === "pane.notify");
+        assert.ok(notify, "client should receive a pane.notify");
+        assert.equal(notify.kind, "bell");
+        assert.equal(notify.payload, undefined);
+    });
+    it("fans one pane.notify out to every connected client", async () => {
+        const pipeline = createFakePipeline(makeModel1());
+        const server = createControlServer(pipeline);
+        const { received: recvA } = await connectClient(server);
+        const { received: recvB } = await connectClient(server);
+        pipeline.firePaneNotify({ paneId: P1, kind: "bell" });
+        await new Promise((r) => setImmediate(r));
+        assert.ok(recvA.some((m) => m.type === "pane.notify"), "client A got the notify");
+        assert.ok(recvB.some((m) => m.type === "pane.notify"), "client B got the notify");
+    });
+});
 describe("multi-client snapshot fan-out (tc-j9c.7)", () => {
     it("two clients each receive their own snapshot with seq=1", async () => {
         const model = makeModel1();

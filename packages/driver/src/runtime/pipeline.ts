@@ -111,8 +111,10 @@ import type { SessionProxyRegistry } from "../metrics/registry.js";
 import { classifyCommand } from "../metrics/registry.js";
 import { decodeOutputPayload } from "../parser/output-codec.js";
 import { OscTitleSniffer } from "../parser/osc-title-sniffer.js";
+import { PaneNotifyScanner } from "../parser/notify-scanner.js";
+import { PaneNotifyRateLimiter, isTier1NotifyKind } from "./notify-rate-limiter.js";
 import { paneId as mintPaneId } from "@tmuxcc/protocol";
-import type { PaneId } from "@tmuxcc/protocol";
+import type { PaneId, PaneNotifyKind, PaneNotifyPayload } from "@tmuxcc/protocol";
 import { paneBoundOptionName } from "../state/bootstrap.js";
 import type { TmuxHost } from "./tmux-host.js";
 import { phaseLog, phaseNow } from "./phase-timing.js";
@@ -159,6 +161,26 @@ export type NotificationHandler = (event: NotificationEvent) => void;
  * an unknown keyword).
  */
 export type TopologyNotifyHandler = (kind: TopologyEventKind) => void;
+
+/**
+ * One attention/status signal the pipeline recognised on a pane's `%output`
+ * byte stream (tc-76m8.1, user-stories.md S9), after driver-side rate limiting.
+ * `paneId` is the WIRE pane id ("p3"); emitted for BOTH bound and unbound panes.
+ * The ControlServer broadcasts these to clients as `pane.notify`.
+ */
+export interface PaneNotifyEmission {
+  readonly paneId: PaneId;
+  readonly kind: PaneNotifyKind;
+  readonly payload?: PaneNotifyPayload;
+}
+
+/**
+ * Called for every rate-limited `pane.notify` the escape scanner emits.
+ * The control-plane server subscribes to broadcast them to clients. Fired
+ * synchronously from the `%output` dispatch path; only while the pipeline is
+ * live. Returns an unsubscribe function.
+ */
+export type PaneNotifyHandler = (notify: PaneNotifyEmission) => void;
 
 /** Options for `createRuntimePipeline`. */
 export interface RuntimePipelineOptions {
@@ -376,6 +398,17 @@ export interface RuntimePipeline {
   onNotification(handler: NotificationHandler): () => void;
 
   /**
+   * Register a callback for every `pane.notify` the escape scanner emits
+   * (tc-76m8.1, S9) — attention/status signals recognised on the per-pane
+   * `%output` byte stream, after driver-side rate limiting. Fired synchronously
+   * from the output-dispatch path, for BOTH bound and unbound panes.
+   *
+   * Downstream seam: serve.ts subscribes and broadcasts each as a `pane.notify`
+   * server-push to all connected clients. Returns an unsubscribe function.
+   */
+  onPaneNotify(handler: PaneNotifyHandler): () => void;
+
+  /**
    * Inject a synthetic `NotificationEvent` into the pipeline as if it had
    * arrived from tmux. Used by `input-path.ts` for the optimistic-update
    * pattern (tc-7xv.12): after sending a tmux command, callers inject the
@@ -566,6 +599,7 @@ class RuntimePipelineImpl implements RuntimePipeline {
   private _coalescer: Coalescer | null = null;
   private readonly _modelChangeHandlers = new Set<ModelChangeHandler>();
   private readonly _notificationHandlers = new Set<NotificationHandler>();
+  private readonly _paneNotifyHandlers = new Set<PaneNotifyHandler>();
   private _unsubData: (() => void) | null = null;
   /**
    * Per-pane OSC title sniffers (tc-2mn8).
@@ -578,6 +612,17 @@ class RuntimePipelineImpl implements RuntimePipeline {
    * pane closes (via onModelChange — see the cleanup in start()).
    */
   private readonly _oscSniffers = new Map<string, OscTitleSniffer>();
+  /**
+   * Per-pane attention/status escape scanners + rate limiters (tc-76m8.1, S9).
+   *
+   * Keyed by the wire PaneId string. Each scanner keeps its own bounded state
+   * machine across %output chunks (so a notification split across chunks is
+   * recognised); each limiter keeps per-kind token buckets so a storm in one
+   * pane cannot flood the wire. Created lazily on first output for a pane and
+   * removed when the pane closes (alongside `_oscSniffers`).
+   */
+  private readonly _notifyScanners = new Map<string, PaneNotifyScanner>();
+  private readonly _notifyLimiters = new Map<string, PaneNotifyRateLimiter>();
   private _started = false;
   private _stopped = false;
   private _live = false;
@@ -1152,8 +1197,10 @@ class RuntimePipelineImpl implements RuntimePipeline {
     this._coalescer?.stop();
     this._unsubData?.();
     this._unsubData = null;
-    // tc-2mn8: drop all sniffer state on shutdown.
+    // tc-2mn8 / tc-76m8.1: drop all per-pane streaming state on shutdown.
     this._oscSniffers.clear();
+    this._notifyScanners.clear();
+    this._notifyLimiters.clear();
   }
 
   getModel(): SessionModel {
@@ -1175,6 +1222,13 @@ class RuntimePipelineImpl implements RuntimePipeline {
     this._notificationHandlers.add(handler);
     return () => {
       this._notificationHandlers.delete(handler);
+    };
+  }
+
+  onPaneNotify(handler: PaneNotifyHandler): () => void {
+    this._paneNotifyHandlers.add(handler);
+    return () => {
+      this._paneNotifyHandlers.delete(handler);
     };
   }
 
@@ -1383,6 +1437,18 @@ class RuntimePipelineImpl implements RuntimePipeline {
         this._opts.metrics.incOutputBytes(bytes.length);
         this._opts.metrics.observeOutputFrameSize(bytes.length);
       }
+
+      // tc-76m8.1 (S9): scan the DECODED raw pty bytes for attention/status
+      // escapes and emit `pane.notify` for BOTH bound and unbound panes (the
+      // driver is the sole observer of unbound panes). This is a PURE TAP —
+      // `decoded`/`bytes` are unchanged; the render path above is byte-identical.
+      // Scanning `decoded` (pre-title-strip) is deliberate: the scanner consumes
+      // a BEL that terminates an OSC-0/2 title as the OSC terminator, so it is
+      // NOT miscounted as a bell.
+      if (this._paneNotifyHandlers.size > 0 || this._opts.metrics !== undefined) {
+        this._scanPaneNotify(pid, decoded);
+      }
+
       this._fireNotificationHandlers(event);
       return;
     }
@@ -1552,6 +1618,64 @@ class RuntimePipelineImpl implements RuntimePipeline {
     }
   }
 
+  /**
+   * tc-76m8.1 (S9): run the per-pane escape scanner over the decoded pty bytes,
+   * apply the per-(pane,kind) rate limiter, and emit the survivors as
+   * `pane.notify`. `pid` is the wire PaneId string; `decoded` is NOT modified.
+   */
+  private _scanPaneNotify(pid: string, decoded: Uint8Array): void {
+    let scanner = this._notifyScanners.get(pid);
+    if (scanner === undefined) {
+      scanner = new PaneNotifyScanner();
+      this._notifyScanners.set(pid, scanner);
+    }
+    const detections = scanner.scan(decoded);
+    if (detections.length === 0) return;
+
+    let limiter = this._notifyLimiters.get(pid);
+    if (limiter === undefined) {
+      limiter = new PaneNotifyRateLimiter();
+      this._notifyLimiters.set(pid, limiter);
+    }
+    const metrics = this._opts.metrics;
+    const paneId = mintPaneId(pid);
+
+    for (const det of detections) {
+      if (!limiter.allow(det.kind)) {
+        // Rate-limited drop. For Tier-1 kinds this is an expected-zero tripwire
+        // (a real storm or a bug) — count it AND loud-log per the repo fail-loud
+        // norm. Tier-2 (progress/cmd-exit) drops are routine coalescing: counted
+        // (for the ratio) but not loud.
+        metrics?.incPaneNotifyDropped(det.kind);
+        if (isTier1NotifyKind(det.kind)) {
+          process.stderr.write(
+            `[pipeline] PANE-NOTIFY RATE LIMIT: dropped a Tier-1 ${det.kind} notification for pane ${pid} — ` +
+              `the pane is emitting addressed signals faster than the per-kind budget. Expected-zero ` +
+              `tripwire (pane_notify_dropped_total{kind=${det.kind}}); investigate a notification storm (tc-76m8.1).\n`,
+          );
+        }
+        continue;
+      }
+      metrics?.incPaneNotify(det.kind);
+      this._firePaneNotifyHandlers(
+        det.payload === undefined
+          ? { paneId, kind: det.kind }
+          : { paneId, kind: det.kind, payload: det.payload },
+      );
+    }
+  }
+
+  private _firePaneNotifyHandlers(notify: PaneNotifyEmission): void {
+    if (this._paneNotifyHandlers.size === 0) return;
+    for (const handler of this._paneNotifyHandlers) {
+      try {
+        handler(notify);
+      } catch (e) {
+        console.warn("[pipeline] pane-notify handler threw:", e);
+      }
+    }
+  }
+
   private _emitModelChange(model: SessionModel, prev: SessionModel): void {
     if (this._opts.checkInvariantsOnUpdate) {
       const violations: InvariantViolation[] = checkInvariants(model);
@@ -1560,14 +1684,16 @@ class RuntimePipelineImpl implements RuntimePipeline {
       }
     }
 
-    // tc-2mn8: clean up OSC title sniffers for panes that have left the model.
-    // This keeps memory bounded: each closed pane's streaming parser state is
-    // dropped when the pane is no longer known to the model.
-    if (this._oscSniffers.size > 0) {
+    // tc-2mn8 / tc-76m8.1: clean up per-pane streaming state for panes that have
+    // left the model. This keeps memory bounded: each closed pane's OSC title
+    // sniffer, notify scanner, and notify rate limiter are dropped when the pane
+    // is no longer known to the model.
+    if (this._oscSniffers.size > 0 || this._notifyScanners.size > 0) {
       for (const [pid] of prev.panes) {
-        if (!model.panes.has(pid) && this._oscSniffers.has(pid)) {
-          this._oscSniffers.delete(pid);
-        }
+        if (model.panes.has(pid)) continue;
+        this._oscSniffers.delete(pid);
+        this._notifyScanners.delete(pid);
+        this._notifyLimiters.delete(pid);
       }
     }
 

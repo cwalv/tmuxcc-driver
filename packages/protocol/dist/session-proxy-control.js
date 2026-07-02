@@ -73,6 +73,8 @@ export function isSessionProxyMessage(msg) {
         t === "pane.label-changed" ||
         // Live shell title delta (tc-2mn8)
         t === "pane.title-changed" ||
+        // Pane attention/status notification (tc-76m8.1, S9)
+        t === "pane.notify" ||
         // Window deltas
         t === "window.added" ||
         t === "window.closed" ||

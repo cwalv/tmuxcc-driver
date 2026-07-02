@@ -136,6 +136,7 @@ interface StubPipeline {
   // RuntimePipeline-compatible surface
   getModel(): SessionModel;
   onModelChange(h: ModelChangeHandler): () => void;
+  onPaneNotify(h: () => void): () => void;
   start(): Promise<void>;
   stop(): void;
   isLive(): boolean;
@@ -157,6 +158,8 @@ function createStubPipeline(): StubPipeline {
       handlers.add(h);
       return () => { handlers.delete(h); };
     },
+    // tc-76m8.1: the ControlServer subscribes to onPaneNotify in its ctor.
+    onPaneNotify: () => () => {},
     start: () => Promise.resolve(),
     stop: () => {},
     isLive: () => false,

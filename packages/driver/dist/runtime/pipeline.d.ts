@@ -84,6 +84,7 @@ import type { SessionModel } from "../state/model.js";
 import type { SwitchClientOutcome } from "../state/switch-client.js";
 import { type Clock, type TopologyEventKind } from "../state/coalescer.js";
 import type { SessionProxyRegistry } from "../metrics/registry.js";
+import type { PaneId, PaneNotifyKind, PaneNotifyPayload } from "@tmuxcc/protocol";
 import type { TmuxHost } from "./tmux-host.js";
 import { diffModel } from "../state/projection.js";
 import type { SessionProxyMessage } from "@tmuxcc/protocol";
@@ -115,6 +116,24 @@ export type NotificationHandler = (event: NotificationEvent) => void;
  * an unknown keyword).
  */
 export type TopologyNotifyHandler = (kind: TopologyEventKind) => void;
+/**
+ * One attention/status signal the pipeline recognised on a pane's `%output`
+ * byte stream (tc-76m8.1, user-stories.md S9), after driver-side rate limiting.
+ * `paneId` is the WIRE pane id ("p3"); emitted for BOTH bound and unbound panes.
+ * The ControlServer broadcasts these to clients as `pane.notify`.
+ */
+export interface PaneNotifyEmission {
+    readonly paneId: PaneId;
+    readonly kind: PaneNotifyKind;
+    readonly payload?: PaneNotifyPayload;
+}
+/**
+ * Called for every rate-limited `pane.notify` the escape scanner emits.
+ * The control-plane server subscribes to broadcast them to clients. Fired
+ * synchronously from the `%output` dispatch path; only while the pipeline is
+ * live. Returns an unsubscribe function.
+ */
+export type PaneNotifyHandler = (notify: PaneNotifyEmission) => void;
 /** Options for `createRuntimePipeline`. */
 export interface RuntimePipelineOptions {
     /**
@@ -312,6 +331,16 @@ export interface RuntimePipeline {
      * %pause / %continue without going through the model.
      */
     onNotification(handler: NotificationHandler): () => void;
+    /**
+     * Register a callback for every `pane.notify` the escape scanner emits
+     * (tc-76m8.1, S9) — attention/status signals recognised on the per-pane
+     * `%output` byte stream, after driver-side rate limiting. Fired synchronously
+     * from the output-dispatch path, for BOTH bound and unbound panes.
+     *
+     * Downstream seam: serve.ts subscribes and broadcasts each as a `pane.notify`
+     * server-push to all connected clients. Returns an unsubscribe function.
+     */
+    onPaneNotify(handler: PaneNotifyHandler): () => void;
     /**
      * Inject a synthetic `NotificationEvent` into the pipeline as if it had
      * arrived from tmux. Used by `input-path.ts` for the optimistic-update

@@ -484,6 +484,21 @@ export interface SessionProxyRegistry {
      */
     incResync(cause: ResyncCause): void;
     /**
+     * Increment `pane_notify_total{kind}` (tc-76m8.1). One increment per
+     * `pane.notify` the escape scanner emits (AFTER rate limiting), by kind.
+     * The observability numerator for the S9 attention pipeline.
+     */
+    incPaneNotify(kind: string): void;
+    /**
+     * Increment `pane_notify_dropped_total{kind}` (tc-76m8.1). One increment per
+     * `pane.notify` DROPPED by the driver-side rate limiter, by kind. For Tier-1
+     * kinds (`bell`, `osc9`) this is an EXPECTED-ZERO tripwire — a real storm or
+     * a bug — and the wiring caller ALSO loud-logs to stderr. Tier-2 kinds
+     * (`progress`, `cmd-exit`) drop as routine coalescing; those rows are
+     * expected non-zero.
+     */
+    incPaneNotifyDropped(kind: string): void;
+    /**
      * Observe a single per-cycle delta count sample on the `deltas_per_cycle`
      * histogram (tc-3si.5). Called at the same site as `incDeltasEmitted`
      * (every pipeline-level cycle, coalescer or patch). EXPECT small (1–5)

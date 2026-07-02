@@ -109,7 +109,7 @@ export type {
   ControlServer,
   ControlServerOptions,
 } from "./runtime/serve.js";
-export type { RuntimePipeline } from "./runtime/pipeline.js";
+export type { RuntimePipeline, PaneNotifyEmission, PaneNotifyHandler } from "./runtime/pipeline.js";
 
 // tc-is5w: dev-gated phase-split activation timing. Shared so the server-proxy
 // (server-proxy._doClaimSession) and the session-proxy legs emit a uniform

@@ -35,7 +35,7 @@ import type { Transport, ControlMessage, SessionProxyMessage, SessionProxyComman
 
 import { connectClient } from "../client.js";
 import { applySnapshot, applyDelta } from "../mirror.js";
-import type { ClientModel } from "../mirror.js";
+import type { ClientModel, PaneNotifyEvent } from "../mirror.js";
 import type { VerbResult } from "../input.js";
 
 import { TranscriptError, serverSteps } from "./transcript.js";
@@ -135,6 +135,13 @@ export async function conformClientToTranscript(t: Transcript): Promise<void> {
     observedResponses.push(msg.result);
   });
 
+  // tc-76m8.1 (S9): every pane.notify the mirror surfaces via onPaneNotify, in
+  // arrival order — the seam the extension attention layer consumes.
+  const observedNotifies: PaneNotifyEvent[] = [];
+  const unsubNotify = handle.mirror.onPaneNotify((e) => {
+    observedNotifies.push(e);
+  });
+
   try {
     const verbResults = new Map<string, VerbResult>();
     for (const cs of t.transcript.filter((s): s is ClientStep => s.direction === "client→session-proxy")) {
@@ -210,8 +217,25 @@ export async function conformClientToTranscript(t: Transcript): Promise<void> {
         `SDK-side: command.response #${i} payload mismatch (tc-ozk.1 / tc-295a.11)`,
       );
     }
+
+    // tc-76m8.1 (S9): the mirror must surface every scripted pane.notify on the
+    // onPaneNotify seam, in order, as {paneId, kind, payload?} (type/seq dropped).
+    const expectedNotifies = serverSteps(t)
+      .filter((s) => s.message.type === "pane.notify")
+      .map((s) => {
+        const m = s.message as Extract<SessionProxyMessage, { type: "pane.notify" }>;
+        return m.payload === undefined
+          ? { paneId: m.paneId, kind: m.kind }
+          : { paneId: m.paneId, kind: m.kind, payload: m.payload };
+      });
+    assert.deepEqual(
+      observedNotifies,
+      expectedNotifies,
+      "SDK-side: onPaneNotify surface mismatch (tc-76m8.1)",
+    );
   } finally {
     unsubResp();
+    unsubNotify();
     daemon.stop();
     handle.disconnect();
   }
@@ -352,6 +376,23 @@ export async function conformDaemonToTranscript(t: Transcript): Promise<void> {
       }
     }
     // Let the daemon's synchronous fan-out settle.
+    await Promise.resolve();
+  }
+
+  // tc-76m8.1 (S9): drive the transcript's pane.notify server steps through the
+  // fake pipeline (the stand-in for the escape scanner), so the REAL
+  // ControlServer's broadcast path emits them. pane.notify has no client-step
+  // cause — it originates from the driver's %output scan — so the runner fires
+  // it directly. Fired here (after any verb-driven pushes) because the current
+  // transcript set never interleaves notifies with verb deltas.
+  for (const s of serverSteps(t)) {
+    if (s.message.type !== "pane.notify") continue;
+    const m = s.message;
+    pipeline.firePaneNotify(
+      m.payload === undefined
+        ? { paneId: m.paneId, kind: m.kind }
+        : { paneId: m.paneId, kind: m.kind, payload: m.payload },
+    );
     await Promise.resolve();
   }
 

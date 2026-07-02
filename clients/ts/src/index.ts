@@ -38,6 +38,8 @@ export type {
   CommandResponseHandler,
   HydrationEvent,
   HydrationEventHandler,
+  PaneNotifyEvent,
+  PaneNotifyEventHandler,
 } from "./mirror.js";
 
 // ---------------------------------------------------------------------------

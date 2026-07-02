@@ -156,6 +156,13 @@ class ControlServerImpl {
     _mintConnectionId() {
         return this._freeConnectionIds.pop() ?? mintConnectionId(`conn${this._nextConnectionSeq++}`);
     }
+    /**
+     * tc-76m8.1 (S9): unsubscribe from `pipeline.onPaneNotify`. The subscription
+     * is server-level (one per session, not per client) because `pane.notify` is
+     * a broadcast — the same signal for every client, unlike the per-client
+     * `onModelChange` deltas which resolve per identity.
+     */
+    _unsubPaneNotify;
     constructor(pipeline, opts = {}) {
         this._pipeline = pipeline;
         this._capabilities = opts.capabilities ?? DEFAULT_CAPABILITIES;
@@ -163,6 +170,8 @@ class ControlServerImpl {
         this._originLookup = opts.originLookup;
         this._closeCauseLookup = opts.closeCauseLookup;
         this._sessionName = opts.sessionName;
+        // tc-76m8.1 (S9): broadcast every scanner-emitted pane.notify to all clients.
+        this._unsubPaneNotify = this._pipeline.onPaneNotify((n) => this._broadcastPaneNotify(n));
     }
     async addClient(transport, opts = {}) {
         // tc-is5w: phase-split activation timing — the first-snapshot leg. t0 at
@@ -448,6 +457,31 @@ class ControlServerImpl {
         for (const [transport, state] of this._clients) {
             if (transport === opts.exclude)
                 continue;
+            const stamped = { ...base, seq: state.nextSeq };
+            state.nextSeq++;
+            try {
+                transport.sendControl(stamped);
+            }
+            catch {
+                // Transport may already be closed — clean it up and continue.
+                this._cleanupClient(transport);
+            }
+        }
+    }
+    /**
+     * tc-76m8.1 (S9): broadcast one scanner-emitted `pane.notify` to every
+     * connected client, each stamped with that connection's own seq (mirrors
+     * `broadcastClientCountTo`). The event is identical for all clients — unlike
+     * model deltas, it carries no per-client resolution — so a single server-level
+     * pipeline subscription fans it out here rather than a per-client one.
+     */
+    _broadcastPaneNotify(notify) {
+        if (this._clients.size === 0)
+            return;
+        const base = notify.payload === undefined
+            ? { type: "pane.notify", paneId: notify.paneId, kind: notify.kind }
+            : { type: "pane.notify", paneId: notify.paneId, kind: notify.kind, payload: notify.payload };
+        for (const [transport, state] of this._clients) {
             const stamped = { ...base, seq: state.nextSeq };
             state.nextSeq++;
             try {

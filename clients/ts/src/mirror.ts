@@ -53,7 +53,7 @@
  * # NO DOM, NO vscode, NO host API, NO Pseudoterminal
  */
 
-import type { SnapshotMessage, SessionProxyMessage, SessionProxyCommandResponseMessage, ClientMessage, ResyncRequestMessage, PaneId, WindowId, SessionId, ConnectionId, WindowLayout, PaneMode, Origin } from "@tmuxcc/protocol";
+import type { SnapshotMessage, SessionProxyMessage, SessionProxyCommandResponseMessage, ClientMessage, ResyncRequestMessage, PaneId, WindowId, SessionId, ConnectionId, WindowLayout, PaneMode, Origin, PaneNotifyKind, PaneNotifyPayload } from "@tmuxcc/protocol";
 import type { SessionProxyConnection } from "./connection.js";
 import type { RenderHook, ByteSource } from "./render-hook.js";
 import { EDH_TRACE_ENABLED, edhTrace } from "./edh-trace.js";
@@ -714,6 +714,15 @@ export function applyDelta(model: ClientModel, msg: SessionProxyMessage): Client
     case "pane.hydration.end":
       return model;
 
+    // ── Pane attention/status notification (tc-76m8.1, S9) ────────────────────
+    //
+    // Not state-bearing for the topology model — a bell/notification/progress is
+    // a transient signal, not durable state. Seq-tracked in receiveDelta (so it
+    // doesn't create a false gap) and surfaced to consumers via
+    // Mirror.onPaneNotify. The model is returned unchanged.
+    case "pane.notify":
+      return model;
+
     // ── Exhaustiveness check ─────────────────────────────────────────────────
     default: {
       // TypeScript will error here if a new SessionProxyMessage variant is added but
@@ -770,6 +779,26 @@ export interface HydrationEvent {
 
 /** Handler for hydration / attach protocol events from the mirror. */
 export type HydrationEventHandler = (event: HydrationEvent) => void;
+
+/**
+ * A pane attention/status notification surfaced by the mirror (tc-76m8.1, S9).
+ *
+ * Recognised by the driver on a pane's raw pty byte stream and delivered here
+ * for BOTH bound and unbound panes. The mirror is not state-bearing for these
+ * (a bell/notification is transient, not durable model state) — it seq-tracks
+ * them and forwards them to `Mirror.onPaneNotify`. The extension maps `kind`
+ * onto the S9 attention tiers (Tier 1: osc9/bell → toast + badge; Tier 2:
+ * cmd-exit/progress → tree decoration).
+ */
+export interface PaneNotifyEvent {
+  readonly paneId: PaneId;
+  readonly kind: PaneNotifyKind;
+  /** Kind-scoped payload; absent for `bell`. */
+  readonly payload?: PaneNotifyPayload;
+}
+
+/** Handler for pane attention/status notifications from the mirror. */
+export type PaneNotifyEventHandler = (event: PaneNotifyEvent) => void;
 
 /**
  * Stateful client-side mirror of the session-proxy session model.
@@ -846,6 +875,7 @@ export class Mirror {
   // the mirror, but the mirror owns the single-slot onControl handler).
   readonly #commandResponseHandlers: CommandResponseHandler[] = [];
   readonly #hydrationHandlers: HydrationEventHandler[] = [];
+  readonly #paneNotifyHandlers: PaneNotifyEventHandler[] = [];
 
   // ── Public model access ───────────────────────────────────────────────────
 
@@ -939,6 +969,23 @@ export class Mirror {
     return () => {
       const idx = this.#hydrationHandlers.indexOf(handler);
       if (idx !== -1) this.#hydrationHandlers.splice(idx, 1);
+    };
+  }
+
+  /**
+   * Register a handler for pane attention/status notifications (tc-76m8.1, S9):
+   * `pane.notify` for osc9 / bell / progress / cmd-exit, on bound AND unbound
+   * panes. The mirror is not state-bearing for these; it forwards them here.
+   *
+   * Handlers are APPENDED. Returns an unsubscribe function. The extension's
+   * attention-surface layer (tc-76m8.9/.10) registers here to route each `kind`
+   * onto its S9 tier surface.
+   */
+  onPaneNotify(handler: PaneNotifyEventHandler): () => void {
+    this.#paneNotifyHandlers.push(handler);
+    return () => {
+      const idx = this.#paneNotifyHandlers.indexOf(handler);
+      if (idx !== -1) this.#paneNotifyHandlers.splice(idx, 1);
     };
   }
 
@@ -1119,6 +1166,22 @@ export class Mirror {
           message: msg.message,
         });
       }
+      return;
+    }
+
+    // tc-76m8.1 (S9): pane attention/status notification. Not state-bearing —
+    // seq-track it (so it doesn't forge a false gap) and surface it on the
+    // pane-notify hook instead of firing onModelChange.
+    if (msg.type === "pane.notify") {
+      this.#lastSeq = msg.seq;
+      if (EDH_TRACE_ENABLED) {
+        edhTrace({ hop: "mirror-delta", conn: this.#model.ownConnectionId, seq: msg.seq, type: msg.type, applied: false });
+      }
+      this.#emitPaneNotify(
+        msg.payload === undefined
+          ? { paneId: msg.paneId, kind: msg.kind }
+          : { paneId: msg.paneId, kind: msg.kind, payload: msg.payload },
+      );
       return;
     }
 
@@ -1525,6 +1588,12 @@ export class Mirror {
 
   #emitHydration(event: HydrationEvent): void {
     for (const handler of this.#hydrationHandlers) {
+      handler(event);
+    }
+  }
+
+  #emitPaneNotify(event: PaneNotifyEvent): void {
+    for (const handler of this.#paneNotifyHandlers) {
       handler(event);
     }
   }

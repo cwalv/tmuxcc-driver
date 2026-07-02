@@ -67,7 +67,7 @@
  * @module runtime/serve
  */
 
-import type { RuntimePipeline } from "./pipeline.js";
+import type { RuntimePipeline, PaneNotifyEmission } from "./pipeline.js";
 import type { Transport } from "@tmuxcc/protocol";
 import {
   runSessionProxyHandshake,
@@ -80,6 +80,7 @@ import type {
   ControlMessage,
   ErrorMessage,
   ClientCountChangedMessage,
+  PaneNotifyMessage,
 } from "@tmuxcc/protocol";
 import { projectSnapshot } from "../state/projection.js";
 import { diffModel } from "../state/projection.js";
@@ -555,6 +556,14 @@ class ControlServerImpl implements ControlServer {
     return this._freeConnectionIds.pop() ?? mintConnectionId(`conn${this._nextConnectionSeq++}`);
   }
 
+  /**
+   * tc-76m8.1 (S9): unsubscribe from `pipeline.onPaneNotify`. The subscription
+   * is server-level (one per session, not per client) because `pane.notify` is
+   * a broadcast — the same signal for every client, unlike the per-client
+   * `onModelChange` deltas which resolve per identity.
+   */
+  private readonly _unsubPaneNotify: () => void;
+
   constructor(pipeline: RuntimePipeline, opts: ControlServerOptions = {}) {
     this._pipeline = pipeline;
     this._capabilities = opts.capabilities ?? DEFAULT_CAPABILITIES;
@@ -562,6 +571,8 @@ class ControlServerImpl implements ControlServer {
     this._originLookup = opts.originLookup;
     this._closeCauseLookup = opts.closeCauseLookup;
     this._sessionName = opts.sessionName;
+    // tc-76m8.1 (S9): broadcast every scanner-emitted pane.notify to all clients.
+    this._unsubPaneNotify = this._pipeline.onPaneNotify((n) => this._broadcastPaneNotify(n));
   }
 
   async addClient(transport: Transport, opts: AddClientOptions = {}): Promise<NegotiatedSession> {
@@ -858,6 +869,31 @@ class ControlServerImpl implements ControlServer {
     };
     for (const [transport, state] of this._clients) {
       if (transport === opts.exclude) continue;
+      const stamped: SessionProxyMessage = { ...base, seq: state.nextSeq } as SessionProxyMessage;
+      state.nextSeq++;
+      try {
+        transport.sendControl(stamped);
+      } catch {
+        // Transport may already be closed — clean it up and continue.
+        this._cleanupClient(transport);
+      }
+    }
+  }
+
+  /**
+   * tc-76m8.1 (S9): broadcast one scanner-emitted `pane.notify` to every
+   * connected client, each stamped with that connection's own seq (mirrors
+   * `broadcastClientCountTo`). The event is identical for all clients — unlike
+   * model deltas, it carries no per-client resolution — so a single server-level
+   * pipeline subscription fans it out here rather than a per-client one.
+   */
+  private _broadcastPaneNotify(notify: PaneNotifyEmission): void {
+    if (this._clients.size === 0) return;
+    const base: Omit<PaneNotifyMessage, "seq"> =
+      notify.payload === undefined
+        ? { type: "pane.notify", paneId: notify.paneId, kind: notify.kind }
+        : { type: "pane.notify", paneId: notify.paneId, kind: notify.kind, payload: notify.payload };
+    for (const [transport, state] of this._clients) {
       const stamped: SessionProxyMessage = { ...base, seq: state.nextSeq } as SessionProxyMessage;
       state.nextSeq++;
       try {

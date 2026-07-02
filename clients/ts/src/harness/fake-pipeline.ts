@@ -16,7 +16,7 @@
  * @module harness/fake-pipeline
  */
 
-import type { RuntimePipeline, SessionModel } from "@tmuxcc/driver";
+import type { RuntimePipeline, SessionModel, PaneNotifyEmission } from "@tmuxcc/driver";
 import { emptyModel } from "@tmuxcc/driver";
 
 /** A fake pipeline the harness drives directly. */
@@ -25,6 +25,12 @@ export interface FakePipeline extends RuntimePipeline {
   fireChange(newModel: SessionModel, prevModel: SessionModel): void;
   /** Replace the model getModel() returns (without firing handlers). */
   setModel(model: SessionModel): void;
+  /**
+   * tc-76m8.1: fire all onPaneNotify handlers with `notify`. Stands in for the
+   * escape scanner so the conformance runner can drive the REAL ControlServer's
+   * pane.notify broadcast path with zero tmux / no live %output.
+   */
+  firePaneNotify(notify: PaneNotifyEmission): void;
 }
 
 /**
@@ -38,6 +44,7 @@ export interface FakePipeline extends RuntimePipeline {
 export function createFakePipeline(initialModel?: SessionModel): FakePipeline {
   let current: SessionModel = initialModel ?? emptyModel();
   const handlers = new Set<(m: SessionModel, prev: SessionModel) => void>();
+  const paneNotifyHandlers = new Set<(n: PaneNotifyEmission) => void>();
 
   const unsupported = (name: string): never => {
     throw new Error(`FakePipeline.${name} is not supported in the conformance harness`);
@@ -65,6 +72,12 @@ export function createFakePipeline(initialModel?: SessionModel): FakePipeline {
     onNotification() {
       // The harness drives model changes via fireChange, not notifications.
       return () => {};
+    },
+    onPaneNotify(handler) {
+      paneNotifyHandlers.add(handler);
+      return () => {
+        paneNotifyHandlers.delete(handler);
+      };
     },
     injectNotification() {
       unsupported("injectNotification");
@@ -94,6 +107,9 @@ export function createFakePipeline(initialModel?: SessionModel): FakePipeline {
     fireChange(newModel, prevModel) {
       current = newModel;
       for (const h of handlers) h(newModel, prevModel);
+    },
+    firePaneNotify(notify) {
+      for (const h of paneNotifyHandlers) h(notify);
     },
   };
 }

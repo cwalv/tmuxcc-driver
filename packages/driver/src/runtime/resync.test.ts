@@ -90,6 +90,8 @@ function createFakePipeline(initialModel?: SessionModel): FakePipeline {
       handlers.add(handler);
       return () => { handlers.delete(handler); };
     },
+    // tc-76m8.1: the ControlServer subscribes to onPaneNotify in its ctor.
+    onPaneNotify() { return () => {}; },
     get buffers(): never {
       throw new Error("FakePipeline has no buffers");
     },

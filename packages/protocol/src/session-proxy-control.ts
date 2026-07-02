@@ -792,6 +792,93 @@ export interface PaneModeChangedMessage extends MessageBase {
 }
 
 // ---------------------------------------------------------------------------
+// Pane attention/status notification (tc-76m8.1, user-stories.md S9)
+// ---------------------------------------------------------------------------
+
+/**
+ * ConEmu OSC 9;4 progress state (tc-76m8.1). Mirrors the ConEmu numeric state
+ * codes, mapped to readable strings:
+ *   0 → "remove"        (clear the progress indicator)
+ *   1 → "set"           (normal progress; `progress` 0–100 present)
+ *   2 → "error"         (error state; `progress` may be present)
+ *   3 → "indeterminate" (busy, no percentage)
+ *   4 → "paused"        (paused/warning; `progress` may be present)
+ */
+export type PaneProgressState = "remove" | "set" | "error" | "indeterminate" | "paused";
+
+/**
+ * Which escape carried an `osc9` desktop-notification (tc-76m8.1). Diagnostic
+ * only — the extension routes all three to the same Tier-1 "Needs you" surface.
+ */
+export type PaneNotifySource = "osc9" | "osc777";
+
+/**
+ * The four attention/status signal kinds recognised on a pane's raw pty byte
+ * stream (tc-76m8.1, user-stories.md S9 "Liveness budget"). Grouped by tier:
+ *   - Tier 1 "Needs you" (interrupting): `osc9`, `bell`
+ *   - Tier 2 "State changed" (decoration-grade): `cmd-exit`, `progress`
+ */
+export type PaneNotifyKind = "osc9" | "bell" | "progress" | "cmd-exit";
+
+/**
+ * Kind-scoped payload for a {@link PaneNotifyMessage} (tc-76m8.1). All fields
+ * are optional; which apply is determined by the message's `kind`:
+ *   - `bell`     → no payload (omitted).
+ *   - `osc9`     → `message` (body), optional `title`, `source`.
+ *   - `progress` → `progressState`, optional `progress` (0–100).
+ *   - `cmd-exit` → `exitCode`.
+ * Additive-optional shape (never versioned): a future kind may add fields
+ * without breaking older consumers.
+ */
+export interface PaneNotifyPayload {
+  /** osc9: the notification body text (OSC 9 argument, OSC 777 body). */
+  readonly message?: string;
+  /** osc9: notification title, when the source carries one (OSC 777 `title;body`). */
+  readonly title?: string;
+  /** osc9: which escape carried the notification (diagnostic). */
+  readonly source?: PaneNotifySource;
+  /** progress: the ConEmu OSC 9;4 progress state. */
+  readonly progressState?: PaneProgressState;
+  /** progress: progress percentage 0–100, when the state carries one. */
+  readonly progress?: number;
+  /** cmd-exit: the command's reported exit code (OSC 633;D shell integration). */
+  readonly exitCode?: number;
+}
+
+/**
+ * An attention/status signal recognised on a pane's raw pty byte stream
+ * (tc-76m8.1, user-stories.md S9 "the-changed-world").
+ * direction: session-proxy→client
+ *
+ * The driver scans every attached session's per-pane `%output` byte stream for
+ * notification/status escapes (OSC 9, OSC 777, BEL, ConEmu OSC 9;4 progress,
+ * OSC 633;D command-exit) and emits ONE `pane.notify` per recognised signal.
+ * This is the D8 "richer than tmux" mechanism: the driver is the SOLE observer
+ * of unbound panes, so the recognizer cannot live extension-side — `pane.notify`
+ * is emitted for BOTH bound and unbound panes.
+ *
+ * The recognizer is a best-effort passthrough TAP: the scanned bytes flow to the
+ * render path untouched (a BEL still lights the native terminal-tab bell on a
+ * bound pane); unrecognised/malformed bytes are never dropped or buffered
+ * unboundedly. Driver-side rate limiting coalesces storms; a Tier-1 drop is a
+ * surfaced tripwire (fail-loud), never silent.
+ *
+ * The extension maps `kind` onto the S9 tiers (this event carries no tier — the
+ * mapping + surfacing policy is extension-side, tc-76m8.9/.10). `payload` is
+ * absent for `bell` and kind-scoped otherwise (see {@link PaneNotifyPayload}).
+ *
+ * Non-breaking additive delta — older clients that do not recognise this type
+ * fall through to the `default` branch in `applyDelta` and ignore it.
+ */
+export interface PaneNotifyMessage extends MessageBase {
+  readonly type: "pane.notify";
+  readonly paneId: PaneId;
+  readonly kind: PaneNotifyKind;
+  /** Kind-scoped payload; absent for `bell`. See {@link PaneNotifyPayload}. */
+  readonly payload?: PaneNotifyPayload;
+}
+
+// ---------------------------------------------------------------------------
 // Per-pane attach + hydration protocol (tc-295a.8 / tc-295a.9)
 // ---------------------------------------------------------------------------
 
@@ -1729,6 +1816,8 @@ export type SessionProxyMessage =
   | PaneTitleChangedMessage
   // Durable policy/intent delta (tc-i9aq.1, cold-start.md §4.A)
   | PanePolicyChangedMessage
+  // Pane attention/status notification (tc-76m8.1, S9)
+  | PaneNotifyMessage
   // Window deltas
   | WindowAddedMessage
   | WindowClosedMessage
@@ -1800,6 +1889,8 @@ export function isSessionProxyMessage(msg: ControlMessage): msg is SessionProxyM
     t === "pane.label-changed" ||
     // Live shell title delta (tc-2mn8)
     t === "pane.title-changed" ||
+    // Pane attention/status notification (tc-76m8.1, S9)
+    t === "pane.notify" ||
     // Window deltas
     t === "window.added" ||
     t === "window.closed" ||

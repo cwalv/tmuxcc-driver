@@ -101,6 +101,12 @@ export type {
   PaneDeadChangedMessage,
   PaneTitleChangedMessage,
   PanePolicyChangedMessage,
+  // SessionProxy → Client (pane attention/status notification — tc-76m8.1, S9)
+  PaneNotifyMessage,
+  PaneNotifyKind,
+  PaneNotifyPayload,
+  PaneNotifySource,
+  PaneProgressState,
   // SessionProxy → Client (window deltas)
   WindowAddedMessage,
   WindowClosedMessage,

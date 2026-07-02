@@ -1,0 +1,134 @@
+{
+  "$schema": "../schemas/session-proxy/server-push.json",
+  "description": "Conformance transcript (tc-76m8.1, S9): pane.notify — the driver-side attention/status pipeline. After the snapshot the driver emits pane.notify for each recognised signal kind (bell, osc9, progress, cmd-exit), including one for an UNBOUND pane (p99, not in the model) to pin the 'driver is the sole observer of unbound panes' contract. No verbs: pane.notify has no client-step cause — the daemon-side runner fires them through the fake pipeline (stand-in for the escape scanner), the SDK-side runner asserts the mirror surfaces them via onPaneNotify.",
+
+  "protocolVersion": 3,
+
+  "initialModel": {
+    "session": { "sessionId": "s0", "name": "main" },
+    "windows": [
+      {
+        "windowId": "w0",
+        "name": "editor",
+        "active": true,
+        "paneIds": ["p0"],
+        "activePaneId": "p0",
+        "synchronizePanes": false,
+        "monitorActivity": true,
+        "monitorSilence": 0,
+        "layout": {
+          "cols": 80,
+          "rows": 24,
+          "root": { "kind": "pane", "paneId": "p0", "rect": { "x": 0, "y": 0, "cols": 80, "rows": 24 } }
+        }
+      }
+    ],
+    "panes": [
+      { "paneId": "p0", "windowId": "w0", "cols": 80, "rows": 24 }
+    ],
+    "focus": { "paneId": "p0", "windowId": "w0" },
+    "connectionId": "conn1"
+  },
+
+  "verbs": {},
+
+  "transcript": [
+    {
+      "direction": "session-proxy→client",
+      "step": 1,
+      "label": "session-proxy advertises capabilities",
+      "message": {
+        "type": "session-proxy.capabilities",
+        "seq": 1,
+        "capabilities": { "protocolVersion": 3, "features": ["pane-lifecycle", "layout-updates", "focus-events", "input-forwarding"] }
+      }
+    },
+    {
+      "direction": "client→session-proxy",
+      "step": 2,
+      "label": "client responds with its own capabilities",
+      "message": {
+        "type": "client.capabilities",
+        "seq": 1,
+        "capabilities": { "protocolVersion": 3, "features": ["pane-lifecycle", "layout-updates", "focus-events", "input-forwarding"] }
+      }
+    },
+    {
+      "direction": "session-proxy→client",
+      "step": 3,
+      "label": "snapshot (one window, one pane; carries this client's connectionId)",
+      "syncPoint": "Baseline established; pane.notify signals follow.",
+      "message": {
+        "type": "snapshot",
+        "seq": 2,
+        "session": { "sessionId": "s0", "name": "main" },
+        "windows": [
+          {
+            "windowId": "w0",
+            "name": "editor",
+            "active": true,
+            "synchronizePanes": false,
+            "monitorActivity": true,
+            "monitorSilence": 0,
+            "layout": {
+              "cols": 80,
+              "rows": 24,
+              "root": { "kind": "pane", "paneId": "p0", "rect": { "x": 0, "y": 0, "cols": 80, "rows": 24 } }
+            }
+          }
+        ],
+        "panes": [ { "paneId": "p0", "windowId": "w0", "cols": 80, "rows": 24 } ],
+        "focus": { "paneId": "p0", "windowId": "w0" },
+        "connectionId": "conn1"
+      }
+    },
+    {
+      "direction": "session-proxy→client",
+      "step": 4,
+      "label": "pane.notify: BEL rang in the bound pane p0 (Tier 1, no payload)",
+      "message": { "type": "pane.notify", "seq": 3, "paneId": "p0", "kind": "bell" }
+    },
+    {
+      "direction": "session-proxy→client",
+      "step": 5,
+      "label": "pane.notify: OSC 9 desktop notification in p0 (Tier 1)",
+      "message": {
+        "type": "pane.notify",
+        "seq": 4,
+        "paneId": "p0",
+        "kind": "osc9",
+        "payload": { "message": "Build finished", "source": "osc9" }
+      }
+    },
+    {
+      "direction": "session-proxy→client",
+      "step": 6,
+      "label": "pane.notify: ConEmu OSC 9;4 progress in p0 (Tier 2)",
+      "message": {
+        "type": "pane.notify",
+        "seq": 5,
+        "paneId": "p0",
+        "kind": "progress",
+        "payload": { "progressState": "set", "progress": 60 }
+      }
+    },
+    {
+      "direction": "session-proxy→client",
+      "step": 7,
+      "label": "pane.notify: OSC 633;D command-exit in p0 (Tier 2)",
+      "message": {
+        "type": "pane.notify",
+        "seq": 6,
+        "paneId": "p0",
+        "kind": "cmd-exit",
+        "payload": { "exitCode": 1 }
+      }
+    },
+    {
+      "direction": "session-proxy→client",
+      "step": 8,
+      "label": "pane.notify: BEL in the UNBOUND foreign pane p99 (not in the model) — the driver is its sole observer",
+      "message": { "type": "pane.notify", "seq": 7, "paneId": "p99", "kind": "bell" }
+    }
+  ]
+}

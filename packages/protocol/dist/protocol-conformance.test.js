@@ -285,6 +285,27 @@ describe("protocol schema conformance", () => {
             const valid = validateSessionProxyMsg(bad);
             assert.strictEqual(valid, false, "seq=0 should fail validation (minimum is 1)");
         });
+        it("rejects pane.notify with an unknown kind — tc-76m8.1", () => {
+            const bad = {
+                type: "pane.notify",
+                seq: 1,
+                paneId: "p0",
+                kind: "toast",
+            };
+            const valid = validateSessionProxyMsg(bad);
+            assert.strictEqual(valid, false, "unknown kind should fail validation");
+        });
+        it("rejects pane.notify whose payload carries an extra property — tc-76m8.1", () => {
+            const bad = {
+                type: "pane.notify",
+                seq: 1,
+                paneId: "p0",
+                kind: "osc9",
+                payload: { message: "hi", urgency: "critical" },
+            };
+            const valid = validateSessionProxyMsg(bad);
+            assert.strictEqual(valid, false, "payload with extra property should fail validation");
+        });
         it("rejects focus.changed with non-null/non-string paneId", () => {
             const bad = {
                 type: "focus.changed",
@@ -670,6 +691,56 @@ describe("protocol schema conformance", () => {
                 type: "pane.hydration.end",
                 seq: 15,
                 paneId: P0,
+            };
+            assert.ok(validateSessionProxyMsg(msg), JSON.stringify(validateSessionProxyMsg.errors));
+        });
+        // tc-76m8.1 (S9): pane attention/status notifications, all four kinds.
+        it("PaneNotifyMessage (bell — no payload)", () => {
+            const msg = {
+                type: "pane.notify",
+                seq: 20,
+                paneId: P0,
+                kind: "bell",
+            };
+            assert.ok(validateSessionProxyMsg(msg), JSON.stringify(validateSessionProxyMsg.errors));
+        });
+        it("PaneNotifyMessage (osc9 — OSC 9 body)", () => {
+            const msg = {
+                type: "pane.notify",
+                seq: 21,
+                paneId: P0,
+                kind: "osc9",
+                payload: { message: "Build finished", source: "osc9" },
+            };
+            assert.ok(validateSessionProxyMsg(msg), JSON.stringify(validateSessionProxyMsg.errors));
+        });
+        it("PaneNotifyMessage (osc9 — OSC 777 title+body)", () => {
+            const msg = {
+                type: "pane.notify",
+                seq: 22,
+                paneId: P0,
+                kind: "osc9",
+                payload: { title: "agent", message: "needs your input", source: "osc777" },
+            };
+            assert.ok(validateSessionProxyMsg(msg), JSON.stringify(validateSessionProxyMsg.errors));
+        });
+        it("PaneNotifyMessage (progress — ConEmu OSC 9;4)", () => {
+            const msg = {
+                type: "pane.notify",
+                seq: 23,
+                paneId: P0,
+                kind: "progress",
+                payload: { progressState: "set", progress: 42 },
+            };
+            assert.ok(validateSessionProxyMsg(msg), JSON.stringify(validateSessionProxyMsg.errors));
+        });
+        it("PaneNotifyMessage (cmd-exit — OSC 633;D)", () => {
+            const msg = {
+                type: "pane.notify",
+                seq: 24,
+                paneId: P0,
+                kind: "cmd-exit",
+                payload: { exitCode: 1 },
             };
             assert.ok(validateSessionProxyMsg(msg), JSON.stringify(validateSessionProxyMsg.errors));
         });

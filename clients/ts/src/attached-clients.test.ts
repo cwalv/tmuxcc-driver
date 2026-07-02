@@ -216,6 +216,7 @@ describe("tc-1elae: ControlServer stamps attachedClientCount in snapshots", () =
         return () => { handlers.delete(h); };
       },
       onNotification() { return () => {}; },
+      onPaneNotify() { return () => {}; },
       injectNotification() {},
       patchModel(updater: (m: typeof model) => typeof model) {
         const prev = current;
@@ -258,6 +259,7 @@ describe("tc-1elae: ControlServer stamps attachedClientCount in snapshots", () =
         return () => { handlers.delete(h); };
       },
       onNotification() { return () => {}; },
+      onPaneNotify() { return () => {}; },
       injectNotification() {},
       patchModel(updater: (m: typeof model) => typeof model) {
         const prev = current;
@@ -309,6 +311,7 @@ describe("tc-1elae: ControlServer stamps attachedClientCount in snapshots", () =
         return () => { handlers.delete(h); };
       },
       onNotification() { return () => {}; },
+      onPaneNotify() { return () => {}; },
       injectNotification() {},
       patchModel(updater: (m: typeof model) => typeof model) {
         const prev = current;
@@ -414,6 +417,7 @@ describe("tc-1elae: end-to-end via connectClient", () => {
         return () => { handlers.delete(h); };
       },
       onNotification() { return () => {}; },
+      onPaneNotify() { return () => {}; },
       injectNotification() {},
       patchModel(updater: (m: typeof model) => typeof model) {
         const prev = current;
@@ -495,6 +499,7 @@ function buildLivePipeline() {
         return () => { handlers.delete(h); };
       },
       onNotification() { return () => {}; },
+      onPaneNotify() { return () => {}; },
       injectNotification() {},
       patchModel(updater: (m: typeof model) => typeof model) {
         const prev = current;

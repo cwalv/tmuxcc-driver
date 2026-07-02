@@ -314,6 +314,58 @@
       "additionalProperties": false
     },
 
+    "PaneNotifyMessage": {
+      "allOf": [
+        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
+      ],
+      "type": "object",
+      "description": "An attention/status signal recognised on a pane's raw pty byte stream (tc-76m8.1, user-stories.md S9). The driver scans every attached pane's %output for notification/status escapes (OSC 9, OSC 777, BEL, ConEmu OSC 9;4 progress, OSC 633;D command-exit) and emits one pane.notify per signal, for BOTH bound and unbound panes (the driver is the sole observer of unbound panes). Best-effort passthrough TAP: scanned bytes reach the render path untouched. The extension maps `kind` onto the S9 tiers. `payload` is absent for `bell`, kind-scoped otherwise. direction: session-proxy→client.",
+      "required": ["type", "seq", "paneId", "kind"],
+      "properties": {
+        "type": { "const": "pane.notify" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "paneId": { "$ref": "tmuxcc:shared/primitives#/$defs/PaneId" },
+        "kind": {
+          "enum": ["osc9", "bell", "progress", "cmd-exit"],
+          "description": "The signal kind. Tier 1 (interrupting): osc9, bell. Tier 2 (decoration-grade): progress, cmd-exit."
+        },
+        "payload": {
+          "type": "object",
+          "description": "Kind-scoped payload. bell: omitted. osc9: message/title/source. progress: progressState/progress. cmd-exit: exitCode.",
+          "properties": {
+            "message": {
+              "type": "string",
+              "description": "osc9: the notification body text (OSC 9 argument, OSC 777 body)."
+            },
+            "title": {
+              "type": "string",
+              "description": "osc9: notification title, when the source carries one (OSC 777 title;body)."
+            },
+            "source": {
+              "enum": ["osc9", "osc777"],
+              "description": "osc9: which escape carried the notification (diagnostic)."
+            },
+            "progressState": {
+              "enum": ["remove", "set", "error", "indeterminate", "paused"],
+              "description": "progress: the ConEmu OSC 9;4 progress state."
+            },
+            "progress": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100,
+              "description": "progress: progress percentage 0-100, when the state carries one."
+            },
+            "exitCode": {
+              "type": "integer",
+              "description": "cmd-exit: the command's reported exit code (OSC 633;D shell integration)."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+
     "LayoutUpdatedMessage": {
       "allOf": [
         { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
@@ -700,6 +752,7 @@
         { "$ref": "#/$defs/PaneModeChangedMessage" },
         { "$ref": "#/$defs/PaneLabelChangedMessage" },
         { "$ref": "#/$defs/PaneDeadChangedMessage" },
+        { "$ref": "#/$defs/PaneNotifyMessage" },
         { "$ref": "#/$defs/LayoutUpdatedMessage" },
         { "$ref": "#/$defs/FocusChangedMessage" },
         { "$ref": "#/$defs/WindowAddedMessage" },

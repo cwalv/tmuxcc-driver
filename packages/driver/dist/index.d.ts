@@ -35,7 +35,7 @@ export type { FlowController, FlowControllerOptions } from "./runtime/flow-contr
 export type { CommandResult } from "./parser/correlator.js";
 export { createControlServer } from "./runtime/serve.js";
 export type { ControlServer, ControlServerOptions, } from "./runtime/serve.js";
-export type { RuntimePipeline } from "./runtime/pipeline.js";
+export type { RuntimePipeline, PaneNotifyEmission, PaneNotifyHandler } from "./runtime/pipeline.js";
 export { phaseLog, phaseNow, PHASE_TIMING_ENABLED } from "./runtime/phase-timing.js";
 export type { PhaseFields } from "./runtime/phase-timing.js";
 export { createSessionProxyRegistry, createStormAlarm } from "./metrics/index.js";

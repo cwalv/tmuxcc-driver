@@ -404,6 +404,24 @@ export function createSessionProxyRegistry() {
         labelNames: ["cause"],
         registers: [reg],
     });
+    // tc-76m8.1 (S9): pane.notify pipeline counters. `total` is the emit
+    // numerator; `dropped` is the rate-limiter drop counter. kind is bounded
+    // vocabulary (osc9|bell|progress|cmd-exit) — no per-pane label (cardinality
+    // rule). The bell/osc9 rows of `dropped` are expected-zero tripwires (caller
+    // loud-logs); progress/cmd-exit drops are routine coalescing.
+    const paneNotifyTotal = new Counter({
+        name: "pane_notify_total",
+        help: "Pane attention/status notifications emitted by the escape scanner, by kind (post rate-limit).",
+        labelNames: ["kind"],
+        registers: [reg],
+    });
+    const paneNotifyDroppedTotal = new Counter({
+        name: "pane_notify_dropped_total",
+        help: "Pane notifications dropped by the driver-side rate limiter, by kind. " +
+            "kind=bell|osc9 (Tier-1) is an expected-zero tripwire; kind=progress|cmd-exit is routine coalescing.",
+        labelNames: ["kind"],
+        registers: [reg],
+    });
     // tc-2x3.4: per-session error boundary trip counter.
     //
     // Incremented by the supervisor's onFatalError handler whenever the
@@ -559,6 +577,12 @@ export function createSessionProxyRegistry() {
         },
         incResync(cause) {
             resyncsTotal.inc({ cause });
+        },
+        incPaneNotify(kind) {
+            paneNotifyTotal.inc({ kind });
+        },
+        incPaneNotifyDropped(kind) {
+            paneNotifyDroppedTotal.inc({ kind });
         },
         incBoundaryTrip() {
             sessionBoundaryTripsTotal.inc();
