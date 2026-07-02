@@ -171,6 +171,18 @@ export interface ServerProxyOptions {
    * on/off later regardless of this start-time value.
    */
   metricsAddr?: string;
+
+  /**
+   * tc-i1pg: server-side handshake timeout.  A connection that connects but
+   * never sends `client.capabilities` within this window is closed so that
+   * `server.close()` is not blocked indefinitely during shutdown — specifically
+   * the idle-exit and tmux-gone self-exit paths that no launcher SIGKILL covers.
+   *
+   * Default 10 s (well beyond any legitimate client startup latency).  Tests
+   * inject a shorter value to keep suite time bounded.  The entry point reads
+   * `TMUXCC_HANDSHAKE_TIMEOUT_MS` for deployment-time adjustment.
+   */
+  handshakeTimeoutMs?: number;
 }
 
 /**
@@ -374,6 +386,13 @@ const SERVER_PROXY_CAPABILITIES: Capabilities = {
 /** Default idle (zero IPC clients) self-exit hysteresis: 5 minutes. */
 const DEFAULT_IDLE_EXIT_MS = 5 * 60_000;
 
+/**
+ * Default server-side handshake timeout (tc-i1pg): close connections that
+ * don't complete the wire handshake within this window so `server.close()`
+ * is not blocked indefinitely during idle-exit / tmux-gone self-exit paths.
+ */
+const DEFAULT_HANDSHAKE_TIMEOUT_MS = 10_000;
+
 /** Timeout for the `tmux ls` liveness probe after a watcher EOF. */
 const TMUX_PROBE_TIMEOUT_MS = 1_000;
 
@@ -472,6 +491,8 @@ class ServerProxyImpl implements ServerProxyHandle {
   // ── tc-3iv self-exit state ──────────────────────────────────────────────────
   /** Idle hysteresis window (ms) before self-exit at zero IPC clients. */
   private readonly _idleExitMs: number;
+  /** tc-i1pg: server-side handshake timeout (ms). */
+  private readonly _handshakeTimeoutMs: number;
   /** tc-295a.41: suppress the "tmux-gone" self-exit (test-harness affordance). */
   private readonly _persistThroughTmuxGone: boolean;
   /** Raw IPC connection count, maintained by the socket server (§6.2 "client"). */
@@ -551,6 +572,7 @@ class ServerProxyImpl implements ServerProxyHandle {
     this._socketDirName = opts.socketName;
     this._runtimeDirOpts = opts.runtimeDir !== undefined ? { runtimeDir: opts.runtimeDir } : {};
     this._idleExitMs = opts.idleExitMs ?? DEFAULT_IDLE_EXIT_MS;
+    this._handshakeTimeoutMs = opts.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS;
     this._persistThroughTmuxGone = opts.persistThroughTmuxGone ?? false;
     // D5 (tc-4b6k.4): the supervisor no longer owns any socket — every data
     // connection lands on the broker's single socket server, which already
@@ -1368,14 +1390,38 @@ class ServerProxyImpl implements ServerProxyHandle {
   // ---------------------------------------------------------------------------
 
   private async _handleConnection(transport: Transport): Promise<void> {
+    // tc-i1pg: bounded handshake timeout — close a connection that never sends
+    // client.capabilities so server.close() is not blocked indefinitely during
+    // idle-exit / tmux-gone self-exit paths (which have no launcher SIGKILL to
+    // cover them).  The timer calls transport.close(), which fires
+    // runServerHandshake's onClose handler (transport.closed rejection) and
+    // falls through to the catch below.
+    const handshakeTimer = setTimeout(() => {
+      try { transport.close(); } catch { /* ignore */ }
+    }, this._handshakeTimeoutMs);
+
     // Run server-proxy-wire handshake
     let session: Awaited<ReturnType<typeof runServerHandshake>>;
     try {
       session = await runServerHandshake(transport, SERVER_PROXY_CAPABILITIES, "server-proxy.capabilities");
-    } catch (err) {
+    } catch {
+      clearTimeout(handshakeTimer);
       try { transport.close(); } catch { /* ignore */ }
       return;
     }
+    clearTimeout(handshakeTimer);
+
+    // tc-9r2y: reject a late handshake that completed after shutdown began.
+    // _shutdownOnce clears _clients and reaps all session-proxies before
+    // server.close() — a connection registered here would spawn a fresh
+    // session-proxy that nothing can reap (S2/S3 two-live-full-CC state).
+    // _shutdownPromise is set synchronously by shutdown() before _shutdownOnce
+    // runs any async work, so it is a reliable "shutdown has begun" sentinel.
+    if (this._shutdownPromise !== null) {
+      try { transport.close(); } catch { /* ignore */ }
+      return;
+    }
+
     // features not yet used in v3 alpha; the client's durable identity (D2,
     // tc-4b6k.1) IS captured — stored on the connection, logged, and surfaced
     // in server-proxy.info. Carried and logged only; no behavior depends on it.
@@ -1444,6 +1490,14 @@ class ServerProxyImpl implements ServerProxyHandle {
     // this connection's seq after the handoff point.
     const startSeq = state.nextSeq;
     this._clients.delete(transport);
+
+    // tc-9r2y: a session.attach that arrives after shutdown began must not spawn
+    // a fresh session-proxy — the supervisor was already reaped by _shutdownOnce
+    // and nothing would reap the new proxy (S2/S3 two-live-full-CC state).
+    if (this._shutdownPromise !== null) {
+      try { transport.close(); } catch { /* ignore */ }
+      return;
+    }
 
     // Refresh the session table so a recently-created session is visible.
     this._refreshSessions();
@@ -1611,6 +1665,17 @@ class ServerProxyImpl implements ServerProxyHandle {
     req: ServerProxyCommandRequestMessage,
   ): Promise<void> {
     const { correlationId, command } = req;
+
+    // tc-9r2y: refuse commands during shutdown — the supervisor and session
+    // table are being torn down; commands that spawn session-proxies
+    // (session.claim, session.create) would mint resources with no reaper.
+    if (this._shutdownPromise !== null) {
+      this._sendResponse(state, {
+        correlationId,
+        result: { ok: false, code: "server-proxy.shutting-down", message: "Server proxy is shutting down" },
+      });
+      return;
+    }
 
     // tc-x6l: increment command counter before dispatch.
     this._metrics.incCommand(command.kind);

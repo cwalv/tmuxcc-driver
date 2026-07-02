@@ -1979,3 +1979,118 @@ describe("server-proxy – enriched session fields (tc-295a.4)", { skip: !TMUX_A
     mux.transport.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Shutdown drain bugs (tc-i1pg, tc-9r2y)
+//
+// Both are unit tests (no tmux required) — the races are exercisable with
+// an in-process broker and a raw socket transport.
+//
+// tc-i1pg: a connection that connects but never sends client.capabilities
+// suspends _handleConnection forever and prevents server.close() from resolving.
+// Fix: a bounded server-side handshake timer closes the transport on expiry.
+//
+// tc-9r2y: a connection whose client.capabilities lands AFTER _clients.clear()
+// re-registers on the dying broker, gets a snapshot, and can issue session.attach
+// → ensureSessionProxy after reapAll — nothing reaps it.
+// Fix: after runServerHandshake resolves, gate on _shutdownPromise !== null.
+// ---------------------------------------------------------------------------
+
+describe("server-proxy – shutdown drain: handshake timeout + late-connect guard (tc-i1pg, tc-9r2y)", () => {
+  it("tc-i1pg: wedge connection (no handshake) must not block shutdown() — fail-before/pass-after", async () => {
+    const socketName = nextSocketName();
+    const runtimeDir = makeRuntimeDir("i1pg");
+    // Inject a short handshake timeout so the test budget is bounded.
+    const serverProxy = createServerProxy({ socketName, runtimeDir, handshakeTimeoutMs: 300 });
+    await serverProxy.start();
+    const endpoint = serverProxy.endpoint();
+
+    // Open a raw connection but never complete the handshake (no client.capabilities).
+    const wedge = await connectSocketTransport(endpoint);
+    await waitFor(() => serverProxy.connectedClientCount === 1, 2_000, "wedge connected");
+
+    // shutdown() must resolve within a bounded budget despite the open socket.
+    // Without tc-i1pg's fix: server.close() blocks on the wedge socket indefinitely.
+    // With the fix: the 300 ms timer closes the transport, unblocking server.close().
+    const [timeoutP, clearTimeoutFn] = rejectAfter(
+      3_000,
+      "shutdown() hung — tc-i1pg not fixed: wedge connection blocked server.close()",
+    );
+    try {
+      await Promise.race([serverProxy.shutdown(), timeoutP]);
+    } finally {
+      clearTimeoutFn();
+      wedge.close(); // idempotent; already closed by the timeout
+      await serverProxy.shutdown(); // idempotent after completion
+      fs.rmSync(runtimeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("tc-9r2y: late handshake completing after shutdown is rejected — no snapshot, transport closed", async () => {
+    const socketName = nextSocketName();
+    const runtimeDir = makeRuntimeDir("9r2y");
+    // Long handshake timeout so the tc-9r2y guard fires first (not the timeout).
+    const serverProxy = createServerProxy({ socketName, runtimeDir, handshakeTimeoutMs: 10_000 });
+    await serverProxy.start();
+    const endpoint = serverProxy.endpoint();
+
+    // Connect and wait for server-proxy.capabilities — the first step of the
+    // wire handshake.  We deliberately do NOT yet send client.capabilities.
+    const lateTransport = await connectSocketTransport(endpoint);
+    await waitFor(() => serverProxy.connectedClientCount === 1, 2_000, "late client connected");
+
+    const serverCapsP = new Promise<void>((resolve) => {
+      lateTransport.onControl((msg) => {
+        if ((msg as MessageBase).type === "server-proxy.capabilities") resolve();
+      });
+    });
+    const [serverCapTimeoutP, clearServerCapTimeout] = rejectAfter(
+      2_000,
+      "Timeout waiting for server-proxy.capabilities",
+    );
+    await Promise.race([serverCapsP, serverCapTimeoutP]);
+    clearServerCapTimeout();
+
+    // Arm close and snapshot trackers BEFORE triggering shutdown so events
+    // dispatched during shutdown are captured.
+    let snapshotReceived = false;
+    let transportClosed = false;
+    lateTransport.onControl((msg) => {
+      if ((msg as MessageBase).type === "sessions.snapshot") snapshotReceived = true;
+    });
+    lateTransport.onClose(() => { transportClosed = true; });
+
+    // Begin shutdown.  _shutdownOnce runs synchronously to its first await,
+    // clearing _clients and reaping session-proxies.  _shutdownPromise is now
+    // non-null — the tc-9r2y guard sentinel.
+    const shutdownP = serverProxy.shutdown();
+
+    // Complete the handshake late (after shutdown has started).
+    lateTransport.sendControl({
+      type: "client.capabilities",
+      seq: 1,
+      capabilities: { protocolVersion: WIRE_PROTOCOL_VERSION, features: [] },
+    } as unknown as Parameters<typeof lateTransport.sendControl>[0]);
+
+    // Shutdown must complete AND the late transport must be closed without a snapshot.
+    // Without tc-9r2y's fix: _handleConnection re-registers the transport, sends a
+    // snapshot (snapshotReceived=true), and server.close() stays blocked.
+    // With the fix: the guard closes the transport, server.close() unblocks, shutdown
+    // completes, and no snapshot is sent.
+    const [shutdownTimeoutP, clearShutdownTimeout] = rejectAfter(
+      3_000,
+      "shutdown() hung — tc-9r2y: late-connect guard may not be closing the transport",
+    );
+    try {
+      await Promise.race([shutdownP, shutdownTimeoutP]);
+    } finally {
+      clearShutdownTimeout();
+      lateTransport.close();
+      await serverProxy.shutdown(); // idempotent
+      fs.rmSync(runtimeDir, { recursive: true, force: true });
+    }
+
+    assert.ok(transportClosed, "late-handshake transport must be closed by the tc-9r2y guard");
+    assert.equal(snapshotReceived, false, "sessions.snapshot must NOT be sent to a late-handshake connection");
+  });
+});
