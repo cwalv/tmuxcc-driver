@@ -47,7 +47,7 @@
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createTmuxHost } from "@tmuxcc/session-proxy";
-import type { TmuxHost } from "@tmuxcc/session-proxy";
+import type { TmuxHost, TmuxCapabilityMap } from "@tmuxcc/session-proxy";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -454,7 +454,11 @@ export function listSessionTopology(
  * session-proxy will start; the session just won't appear in the attach-picker until
  * the marker is applied on the next claim.
  */
-export function createSession(socketName: string, name: string): { tmuxId: string } {
+export function createSession(
+  socketName: string,
+  name: string,
+  capabilities?: TmuxCapabilityMap,
+): { tmuxId: string } {
   const result = spawnSync(
     "tmux",
     ["-L", socketName, "new-session", "-d", "-s", name, "-P", "-F", "#{session_id}"],
@@ -487,7 +491,10 @@ export function createSession(socketName: string, name: string): { tmuxId: strin
   // cleared-screen content into history, which is what `capture-pane -S -`
   // otherwise resurrects as the reattach phantom for our remote renderers
   // (tc-kyq4.5). See setGlobalScrollOnClear for the full rationale.
-  setGlobalScrollOnClear(socketName, false);
+  // tc-4b6k.12: pass capabilities so the call is skipped on tmux < 3.3 where
+  // scroll-on-clear is absent; when capabilities is undefined the old
+  // best-effort behaviour (try and silently swallow) is preserved.
+  setGlobalScrollOnClear(socketName, false, capabilities);
 
   return { tmuxId };
 }
@@ -538,13 +545,21 @@ export function setSessionMarker(socketName: string, name: string): void {
  * hydration snapshot. `off` is therefore correct for the entire
  * proxied-renderer client model, not an xterm.js-specific quirk.
  *
- * Non-fatal (mirrors {@link setSessionMarker}): if `set-option` fails (e.g. a
- * tmux too old to know the option, or the server was killed in the
- * meantime), the error is silently ignored — the session still works; the
- * only cost is the reattach phantom reappearing. The observable result is
- * verified via `show-options -A -w scroll-on-clear` (inheritance-resolved).
+ * tc-4b6k.12: the optional `capabilities` parameter gates the call on
+ * `capabilities.scrollOnClear`. When capabilities are provided and the flag
+ * is false, this is a no-op — the capability absence is model state, not an
+ * error to swallow. When `capabilities` is omitted, the legacy best-effort
+ * behaviour (try and silently discard any error) is preserved for callers that
+ * do not yet have access to the capability state.
  */
-export function setGlobalScrollOnClear(socketName: string, on: boolean): void {
+export function setGlobalScrollOnClear(
+  socketName: string,
+  on: boolean,
+  capabilities?: TmuxCapabilityMap,
+): void {
+  // scroll-on-clear was added in tmux 3.3 (CHANGES FROM 3.2a TO 3.3).
+  // When the caller supplies capabilities, skip silently if the feature is absent.
+  if (capabilities !== undefined && !capabilities.scrollOnClear) return;
   spawnSync(
     "tmux",
     ["-L", socketName, "set-option", "-wg", "scroll-on-clear", on ? "on" : "off"],

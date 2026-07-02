@@ -109,6 +109,7 @@ export type WireFeature =
   | "pane-attach"      // server-proxy wire: client may attach to a specific pane (tc-7xv.36)
   | "server-proxy-info"      // server-proxy wire: client may request a diagnostics snapshot (tc-k6v)
   | "server-proxy-metrics-http" // server-proxy wire: client may toggle the /metrics HTTP exposition (tc-44u4.4)
+  | "tmux-caps"              // server-proxy wire: driver has probed tmux capabilities; info includes TmuxCapabilityMap (tc-4b6k.12)
   | (string & Record<never, never>); // open-ended for future features
 
 // ---------------------------------------------------------------------------

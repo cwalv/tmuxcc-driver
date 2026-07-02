@@ -565,6 +565,62 @@ export interface ServerProxyInfoSession {
 }
 
 /**
+ * tmux version→capability map held as canonical driver-owned state (tc-4b6k.12 D9).
+ *
+ * Each field is `true` iff the probed tmux version supports the feature.
+ * Version floors are sourced from the tmux CHANGES file (github/tmux/tmux).
+ */
+export interface TmuxCapabilityMap {
+  /**
+   * `window-size` option (smallest / largest / manual / default-size).
+   * CHANGES FROM 2.8 TO 2.9.
+   */
+  readonly windowSize: boolean;
+  /**
+   * `no-output` control-mode client flag via `refresh-client -F`/`-f`.
+   * CHANGES FROM 2.9 TO 3.0.
+   */
+  readonly noOutputFlag: boolean;
+  /**
+   * `window-size latest` mode — size based on the most-recently-used client.
+   * CHANGES FROM 3.0a TO 3.1.
+   */
+  readonly windowSizeLatest: boolean;
+  /**
+   * `ignore-size` client flag, separated from `read-only`.
+   * CHANGES FROM 3.1c TO 3.2.
+   */
+  readonly ignoreSizeFlag: boolean;
+  /**
+   * `read-only` flag via the unified `-f` mechanism for any client type.
+   * The original `-r` flag predates 3.2, but the unified `-f` mechanism
+   * that applies to control-mode clients was introduced in 3.2.
+   * CHANGES FROM 3.1c TO 3.2.
+   */
+  readonly readOnlyFlag: boolean;
+  /**
+   * `pause-after` client flag for pacing control-mode output.
+   * CHANGES FROM 3.1c TO 3.2.
+   */
+  readonly pauseAfterFlag: boolean;
+  /**
+   * `active-pane` client flag for per-client independent active pane.
+   * CHANGES FROM 3.1c TO 3.2.
+   */
+  readonly activePaneFlag: boolean;
+  /**
+   * `scroll-on-clear` window option.
+   * CHANGES FROM 3.2a TO 3.3.
+   */
+  readonly scrollOnClear: boolean;
+  /**
+   * `no-detach-on-destroy` client option.
+   * CHANGES FROM 3.5a TO 3.6.
+   */
+  readonly noDetachOnDestroy: boolean;
+}
+
+/**
  * Provenance stamp written by the spawner at spawn time and echoed
  * read-only by the driver via `server-proxy.info` (tc-7aqb.2).
  *
@@ -649,6 +705,23 @@ export interface ServerProxyInfoPayload {
    * clients that don't know about this field simply ignore it.
    */
   readonly spawnInfo?: SpawnInfo;
+  /**
+   * tmux version and capability state probed once at startup (tc-4b6k.12 D9).
+   *
+   * `null` when `tmux -V` failed or returned an unparseable version string.
+   * The `sessions.snapshot` `tmuxAvailable` flag is authoritative for
+   * binary-presence; this field adds version and feature detail when the
+   * binary is present and parseable.
+   *
+   * `belowFloor` true means the detected version is below the driver's
+   * minimum supported floor and the driver has emitted an actionable error
+   * message.
+   */
+  readonly tmuxCapabilities: {
+    readonly version: string;
+    readonly capabilities: TmuxCapabilityMap;
+    readonly belowFloor: boolean;
+  } | null;
 }
 
 /**

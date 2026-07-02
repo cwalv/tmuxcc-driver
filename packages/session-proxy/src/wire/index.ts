@@ -61,6 +61,7 @@ export type {
   ServerProxyInfoCommand,
   ServerProxyInfoSession,
   ServerProxyInfoPayload,
+  TmuxCapabilityMap,
   // tc-44u4.4: runtime metrics-HTTP toggle
   ServerProxySetMetricsHttpCommand,
   MetricsHttpStatePayload,

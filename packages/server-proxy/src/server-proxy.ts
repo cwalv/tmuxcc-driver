@@ -85,6 +85,8 @@ import { parseMetricsHttpBind, bindMetricsHttp } from "./metrics-http.js";
 import type { MetricsHttpListener } from "./metrics-http.js";
 import { listSessions, createSession, killSession, checkSessionPresence, createTmuxWatcher, probeTmuxLiveness, setWindowSynchronizePanes, setWindowMonitorActivity, setWindowMonitorSilence, setSessionMarker, getTmuxServerPid, countTmuxccClientsBySession, listSessionTopology } from "./tmux-south.js";
 import type { TmuxWatcher, TmuxAvailabilityOut } from "./tmux-south.js";
+import { probeTmuxCapabilities, MINIMUM_TMUX_VERSION } from "./tmux-capabilities.js";
+import type { TmuxCapabilityState } from "./tmux-capabilities.js";
 import { createSessionProxySupervisor } from "./session-proxy-supervisor.js";
 import type { SessionProxySupervisor, SessionProxyExitInfo } from "./session-proxy-supervisor.js";
 import type { RuntimeDirOptions } from "./runtime-dir.js";
@@ -381,6 +383,7 @@ const SERVER_PROXY_CAPABILITIES: Capabilities = {
     "pane-attach", // tc-7xv.36
     "server-proxy-info", // tc-k6v
     "server-proxy-metrics-http", // tc-44u4.4
+    "tmux-caps", // tc-4b6k.12: server-proxy.info carries TmuxCapabilityMap
   ],
 };
 
@@ -468,6 +471,23 @@ class ServerProxyImpl implements ServerProxyHandle {
    * corrects it before the first client snapshot is built.
    */
   private _tmuxAvailable = true;
+
+  // ── tc-4b6k.12 tmux capability state ───────────────────────────────────────
+  /**
+   * tmux version and capability map, probed once via `tmux -V` during
+   * `start()` (tc-4b6k.12 D9).
+   *
+   * Canonical driver-owned state: probed once, never re-probed (the installed
+   * tmux binary does not change under a running server-proxy). Exposed through
+   * `server-proxy.info` responses so diagnostics and the extension can read
+   * the effective capability set. Used internally to gate version-sensitive
+   * operations (e.g. `scroll-on-clear`).
+   *
+   * `null` means the probe failed: either `tmux -V` errored, or the output
+   * was not parseable. In the `null` case we fall back to best-effort (same
+   * as before this capability system existed).
+   */
+  private _tmuxCapabilityState: TmuxCapabilityState | null = null;
 
   // ── tc-3iv self-exit state ──────────────────────────────────────────────────
   /** Idle hysteresis window (ms) before self-exit at zero IPC clients. */
@@ -730,6 +750,21 @@ class ServerProxyImpl implements ServerProxyHandle {
 
     // Initial session load
     this._refreshSessions();
+
+    // tc-4b6k.12 D9: probe tmux version and derive the capability map once.
+    // Runs after _refreshSessions so _tmuxAvailable is already up to date; if
+    // tmux is absent the probe also returns null (consistent with _tmuxAvailable
+    // false). Must complete before the first client connection so the initial
+    // snapshot and _buildInfo() see the correct capability state.
+    this._tmuxCapabilityState = probeTmuxCapabilities();
+    if (this._tmuxCapabilityState?.belowFloor) {
+      // Actionable floor-gate message. The server-proxy stays up (same as the
+      // _tmuxAvailable path) so the extension can surface it to the user.
+      process.stderr.write(
+        `serverProxy: tmuxcc requires tmux ${MINIMUM_TMUX_VERSION} or later` +
+        ` (detected ${this._tmuxCapabilityState.version})\n`,
+      );
+    }
 
     // tc-k6v: sessions present at start ⇒ the tmux server pre-existed this
     // server-proxy — it was "adopted", not minted by a later session.claim (§6.2).
@@ -1454,6 +1489,8 @@ class ServerProxyImpl implements ServerProxyHandle {
       metricsText: null,
       // tc-7aqb.2: echo the spawn-info provenance stamp opaquely.
       ...(this._opts.spawnInfo !== undefined ? { spawnInfo: this._opts.spawnInfo } : {}),
+      // tc-4b6k.12 D9: canonical tmux capability state probed once at startup.
+      tmuxCapabilities: this._tmuxCapabilityState,
     };
   }
 
@@ -1684,7 +1721,13 @@ class ServerProxyImpl implements ServerProxyHandle {
       // contend for the tmux server's response budget in this window) and
       // silently produced "Session 'X' not found after creation".
       try {
-        const { tmuxId } = createSession(this._opts.socketName, name);
+        // tc-4b6k.12: pass capability state so createSession can gate
+        // version-sensitive operations (e.g. scroll-on-clear on tmux 3.3+).
+        const { tmuxId } = createSession(
+          this._opts.socketName,
+          name,
+          this._tmuxCapabilityState?.capabilities,
+        );
         created = true;
         entry = this._byName.get(name);
         if (!entry) {
