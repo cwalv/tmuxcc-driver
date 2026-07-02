@@ -1036,10 +1036,9 @@ describe("protocol schema conformance", () => {
       assert.strictEqual(validateIdentity({ id: 42 }), false);
     });
 
-    // ClientFlags is the reserved-not-implemented slot for session.attach
-    // (tc-4b6k.4). Nothing carries it on the wire yet, so we validate the $def
-    // shape directly — this is the conformance material for the two flags.
-    it("accepts ClientFlags {} (all reserved flags absent)", () => {
+    // ClientFlags: D4 (tc-4b6k.3) wired the behavior; these tests validate the
+    // $def shape. The wider parity-map (activePane, pauseAfter, …) stays reserved.
+    it("accepts ClientFlags {} (all flags absent)", () => {
       const flags: ClientFlags = {};
       assert.ok(validateFlags(flags), JSON.stringify(validateFlags.errors));
     });

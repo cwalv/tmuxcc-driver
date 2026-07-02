@@ -53,7 +53,7 @@
 
 import type { PaneId, WindowId, ConnectionId } from "./ids.js";
 import type { WindowLayout } from "./layout.js";
-import type { MessageBase, Capabilities, ClientIdentity } from "./envelope.js";
+import type { MessageBase, Capabilities, ClientIdentity, ClientFlags } from "./envelope.js";
 
 // ---------------------------------------------------------------------------
 // Causality tag for creation deltas (tc-ozk.2)
@@ -1147,12 +1147,16 @@ export interface SessionProxyInfoPayload {
    */
   readonly stormThreshold: number;
   /**
-   * Connected session-proxy-wire clients and the durable identity each presented
-   * at handshake (D2, tc-4b6k.1). One entry per live client connection to this
-   * bound session; `identity` is absent for a connection that did not advertise
-   * one. Additive optional field — carried for observability only.
+   * Connected session-proxy-wire clients and the per-client facts each presented
+   * at attach time (D2/D4, tc-4b6k.1, tc-4b6k.3). One entry per live client
+   * connection to this bound session; `identity` is absent for a connection that
+   * did not advertise one; `flags` is absent when none were carried on
+   * `session.attach`. Additive optional field — carried for observability only.
    */
-  readonly clients?: ReadonlyArray<{ readonly identity?: ClientIdentity }>;
+  readonly clients?: ReadonlyArray<{
+    readonly identity?: ClientIdentity;
+    readonly flags?: ClientFlags;
+  }>;
 }
 
 /**

@@ -282,3 +282,65 @@ can `refresh-client -C <w>x<h>` and gate the capture on the resulting `%end`,
 yielding a single-pass reflowed reconstruction. Currently `addClient` takes no
 size parameter; the client's dimensions arrive async via `resize.request` after
 attach, so the resize-gate is not achievable in `hydration.ts` alone.
+
+---
+
+## §8 — Size partition and the client-flags model (D4, tc-4b6k.3)
+
+### Problem: multi-client viewport flap
+
+Each `session.attach` connection can issue `resize.request` → the driver issues
+`refresh-client -C <W>x<H>` on the single tmux -CC client. When two VS Code
+windows share the same session (different viewport sizes), both connections send
+`resize.request` and the two calls race, flapping the tmux viewport between the
+two window sizes. Every flap triggers a `%layout-change`, a diff, and a
+`layout.updated` wire blast to all clients — a thundering-herd of size noise.
+
+### Solution: owner/non-owner size partition
+
+`session.attach` carries `flags?: ClientFlags` (`ignoreSize`, `readOnly`). The
+session-proxy (D4, tc-4b6k.3) enforces two gates in its `transport.onControl`
+handler, before messages reach `input-path.ts`:
+
+- **ignoreSize gate**: if `flags.ignoreSize === true`, `resize.request` messages
+  from this connection are silently dropped. Only the owning (non-ignoreSize)
+  connection drives `refresh-client -C`.
+- **readOnly gate**: if `flags.readOnly === true`, `input` messages are silently
+  dropped and mutating `command.request` verbs are rejected with
+  `{ ok: false, code: "read-only" }`. Read-only queries (`pane.capture`,
+  `session-proxy.info`) are served normally.
+
+`ClientFlags` is stored on `ClientState` in `serve.ts` and surfaced in the
+`session-proxy.info` → `clients[].flags` field for observability.
+
+### Extension policy (current)
+
+The VS Code extension (D4, `server-proxy-connect.ts`) applies a simple ownership
+rule based on the `session.claim` response:
+
+| Path | `created` | flags sent |
+|---|---|---|
+| `connectServerProxyAndClaim` (session creator) | `true` | none (owner) |
+| `connectServerProxyAndClaim` (session joiner) | `false` | `{ ignoreSize: true }` |
+| `connectServerProxyAndAttachPane` | n/a | `{ ignoreSize: true }` |
+
+The `readOnly` flag is wired in the driver but not applied by the extension in
+this revision. The primary goal is **zero size flap** — `ignoreSize` achieves it.
+
+### Future-facility seam: multi-client arbitration modes
+
+The `ClientFlags` wire slot and the driver gates are the _infrastructure_ for
+richer size arbitration. Planned modes (reserved, not yet implemented):
+
+1. **Minimum-size** (tmux default): smallest viewport among all attached clients.
+   Currently bypassed by control-mode single-client architecture.
+2. **Owner-only** (current, D4): one designated client drives `refresh-client -C`;
+   others carry `ignoreSize: true`. The "owner" is whichever connection created
+   the session; ownership transfer on reconnect is TBD.
+3. **Latest-sender** (S3, deleted): last `resize.request` wins regardless of
+   source — the pre-D4 behavior, now gated out for non-owners.
+
+Owner-transfer across reconnects (a previous owner disconnects and reconnects
+with `created === false`) is left for a future bead: the newly reconnected window
+would need to re-acquire ownership via a separate signal (e.g. a
+`session.claim-ownership` server-proxy command).

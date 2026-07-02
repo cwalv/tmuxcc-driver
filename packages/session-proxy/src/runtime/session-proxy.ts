@@ -46,6 +46,7 @@ import { createRuntimePipeline } from "./pipeline.js";
 import type { RuntimePipeline } from "./pipeline.js";
 import { createControlServer } from "./serve.js";
 import type { ControlServer, ControlServerOptions, AddClientOptions } from "./serve.js";
+import type { ClientFlags } from "../wire/envelope.js";
 import { createInputPath } from "./input-path.js";
 import type { InputPath, InputPathOptions } from "./input-path.js";
 import { createFlowController } from "./flow-control.js";
@@ -163,13 +164,22 @@ export interface SessionProxyOptions {
  *
  * `primaryPaneId` (tc-295a.8) selects the targeted-attach pane; the D5 fields
  * (`startSeq` / `preNegotiated`, tc-4b6k.4) carry the broker single-socket
- * handoff through to the control server. All optional — the bare in-memory
- * path (`addClient(transport)`) runs the session-proxy handshake and starts
- * the seq at 1.
+ * handoff through to the control server; `flags` (D4, tc-4b6k.3) carries the
+ * tmux-parity client flags from `session.attach`. All optional — the bare
+ * in-memory path (`addClient(transport)`) runs the session-proxy handshake and
+ * starts the seq at 1.
  */
 export interface SessionProxyAddClientOptions extends AddClientOptions {
   /** Broker-forwarded targeted-attach pane (tc-295a.8). */
   primaryPaneId?: PaneId;
+  /**
+   * D4 (tc-4b6k.3): tmux-parity flags from `session.attach`.
+   * `ignoreSize: true` → drop this client's `resize.request` (don't issue
+   * `refresh-client -C`).
+   * `readOnly: true` → drop `input` messages and reject mutating
+   * `command.request` verbs (driver-enforced; tmux `-CC` ignores the flag).
+   */
+  flags?: ClientFlags;
 }
 
 /**
@@ -841,12 +851,15 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
 
     async addClient(transport: Transport, opts: SessionProxyAddClientOptions = {}) {
       const { primaryPaneId } = opts;
+      const clientFlags: ClientFlags | undefined = opts.flags;
       // 1. Run control-plane handshake + send snapshot + subscribe deltas.
       //    D5 (tc-4b6k.4): forward the broker handoff (skip handshake, continue
       //    the connection's seq) to the control server.
+      //    D4 (tc-4b6k.3): forward flags so serve.ts stores them for info.
       const session = await server.addClient(transport, {
         ...(opts.startSeq !== undefined ? { startSeq: opts.startSeq } : {}),
         ...(opts.preNegotiated !== undefined ? { preNegotiated: opts.preNegotiated } : {}),
+        ...(clientFlags !== undefined ? { flags: clientFlags } : {}),
       });
 
       // 1a. Register this client's FC-1 sub-ledger (tc-0wtb). The demux fans one
@@ -1000,6 +1013,19 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
           return;
         }
 
+        // D4 (tc-4b6k.3): ignoreSize gate — non-owner clients must not drive
+        // `refresh-client -C`.  Drop resize.request silently before it reaches
+        // input-path.ts where the unconditional refresh-client call lives.
+        if (msg.type === "resize.request" && clientFlags?.ignoreSize === true) {
+          return;
+        }
+
+        // D4 (tc-4b6k.3): readOnly gate — observer clients must not send input
+        // or issue mutating commands.  Drop input silently.
+        if (msg.type === "input" && clientFlags?.readOnly === true) {
+          return;
+        }
+
         // tc-295a.11: pane.capture — one-shot pane text snapshot.
         // Handled here (not in input-path) because it:
         //   a) requires a directed command.response via the per-connection seq counter,
@@ -1072,6 +1098,21 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
               },
             });
           });
+          return;
+        }
+
+        // D4 (tc-4b6k.3): readOnly gate for mutating command.request verbs.
+        // pane.capture and session-proxy.info are read-only queries already
+        // handled above; all other command.request verbs cause tmux mutations
+        // and are rejected for read-only clients.
+        if (msg.type === "command.request" && clientFlags?.readOnly === true) {
+          const req = msg as import("../wire/session-proxy-control.js").SessionProxyCommandRequestMessage;
+          server.sendCommandError(
+            transport,
+            req.correlationId,
+            "read-only",
+            "Client is read-only: mutating commands are not allowed.",
+          );
           return;
         }
 

@@ -116,15 +116,15 @@
 
     "ClientFlags": {
       "type": "object",
-      "description": "Per-client tmux-parity attach flags (D4/D8, decisions §2.1). RESERVED-NOT-IMPLEMENTED in tc-4b6k.1: this $def defines the protocol SLOTS the two minimum flags will occupy on `session.attach` — the attach wire step is created by tc-4b6k.4, and the driver behavior (owner-drives-size / observer partition) is tc-4b6k.3. Nothing carries this object on the wire yet; it exists so later beads land on a defined shape, and conformance validates the shape directly. The vocabulary mirrors tmux(1) client flags; the wider parity map (per-client size, active-pane, pause-after, no-detach-on-destroy, session groups) is enumerated in PROTOCOL.md as reserved prose, not typed here.",
+      "description": "Per-client tmux-parity attach flags (D4/D8, tc-4b6k.3, decisions §2.1). Carried on `session.attach`; the driver acts on both flags (tc-4b6k.3). The vocabulary mirrors tmux(1) client flags; the wider parity map (active-pane, pause-after, no-detach-on-destroy, session groups) is enumerated in PROTOCOL.md as reserved prose, not typed here.",
       "properties": {
         "ignoreSize": {
           "type": "boolean",
-          "description": "tmux-parity `ignore-size` flag: this client does not contribute its viewport to the session's size arbitration (only the owning client drives `refresh-client -C`). Reserved slot; the driver does not act on it in tc-4b6k.1 (owner-only size authority is tc-4b6k.3)."
+          "description": "tmux-parity `ignore-size` flag: this client does not contribute its viewport to the session's size arbitration. When true the driver drops `resize.request` messages from this client without issuing `refresh-client -C`. Only the owning (non-ignoreSize) client drives the tmux viewport."
         },
         "readOnly": {
           "type": "boolean",
-          "description": "tmux-parity `read-only` flag: the client attaches as an observer. CAVEAT (decisions §2.1, verified in tmux source): over control mode, `read-only` does NOT bind the `-CC` command channel — its authority semantics are DRIVER-ENFORCED, never delegated to tmux's flag. The protocol only CARRIES the flag; the driver owns what it means. Reserved slot; no behavior in tc-4b6k.1."
+          "description": "tmux-parity `read-only` flag: the client attaches as an observer. CAVEAT (decisions §2.1, verified in tmux source): over control mode, `read-only` does NOT bind the `-CC` command channel — its authority semantics are DRIVER-ENFORCED, never delegated to tmux's flag. When true the driver drops `input` messages and rejects mutating `command.request` verbs for this client."
         }
       },
       "additionalProperties": false

@@ -1476,6 +1476,8 @@ class ServerProxyImpl implements ServerProxyHandle {
         startSeq,
         preNegotiated: state.session,
         ...(msg.primaryPaneId !== undefined ? { primaryPaneId: msg.primaryPaneId } : {}),
+        // D4 (tc-4b6k.3): forward tmux-parity client flags from session.attach.
+        ...(msg.flags !== undefined ? { flags: msg.flags } : {}),
       });
     } catch (err: unknown) {
       // ensureSessionProxy (quarantine / start failure) or addClient rejected.

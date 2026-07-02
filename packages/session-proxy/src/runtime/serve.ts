@@ -74,7 +74,7 @@ import {
   type NegotiatedSession,
 } from "../wire/handshake.js";
 import { WIRE_PROTOCOL_VERSION, describeClientIdentity } from "../wire/envelope.js";
-import type { Capabilities, ClientIdentity } from "../wire/envelope.js";
+import type { Capabilities, ClientIdentity, ClientFlags } from "../wire/envelope.js";
 import type {
   SessionProxyMessage,
   ControlMessage,
@@ -120,6 +120,13 @@ export interface AddClientOptions {
    * S1 smell this bead deletes).
    */
   preNegotiated?: NegotiatedSession;
+  /**
+   * D4 (tc-4b6k.3): tmux-parity client flags carried on `session.attach`.
+   * Stored on `ClientState` and surfaced via `session-proxy.info`. Behavioral
+   * enforcement (ignoreSize gate, readOnly gate) lives in session-proxy.ts; this
+   * layer stores and exposes the value.
+   */
+  flags?: ClientFlags;
 }
 
 /**
@@ -266,13 +273,13 @@ export interface ControlServer {
   clientIdentityFor(transport: Transport): ClientIdentity | undefined;
 
   /**
-   * The durable identity each currently-connected client presented at handshake
-   * (D2, tc-4b6k.1). One entry per live client, in connection order; `identity`
-   * is `undefined` for a client that advertised none. Consumed by the
-   * `session-proxy.info` handler to surface `info.clients[]`. Carried for
-   * observability only — no behavior depends on it.
+   * Per-client facts for each currently-connected client (D2/D4, tc-4b6k.1,
+   * tc-4b6k.3). One entry per live client, in connection order; `identity` is
+   * absent for a client that advertised none; `flags` is absent when none were
+   * sent on `session.attach`. Consumed by the `session-proxy.info` handler to
+   * surface `info.clients[]`. Carried for observability only.
    */
-  connectedClientIdentities(): ReadonlyArray<{ readonly identity?: ClientIdentity }>;
+  connectedClientIdentities(): ReadonlyArray<{ readonly identity?: ClientIdentity; readonly flags?: ClientFlags }>;
 
   /**
    * Push an unsolicited `ErrorMessage` to ALL currently connected clients.
@@ -441,9 +448,16 @@ interface ClientState {
    * Durable client identity this connection presented on `client.capabilities`
    * (D2, tc-4b6k.1), or `undefined` if it advertised none. Captured from the
    * handshake result; logged on connect and surfaced in the `session-proxy.info`
-   * payload. Carried and logged only — no behavior depends on it yet.
+   * payload.
    */
   identity: ClientIdentity | undefined;
+  /**
+   * D4 (tc-4b6k.3): tmux-parity client flags carried on `session.attach`
+   * (`ignoreSize`, `readOnly`), or `undefined` if none were sent. Behavioral
+   * enforcement is in session-proxy.ts; this slot stores the value for
+   * `session-proxy.info` observability.
+   */
+  flags: ClientFlags | undefined;
   /**
    * tc-3si.5: wall-clock timestamp (ms, from `Date.now()`) of the most
    * recent `resync.request` from this client, or `null` if none has fired
@@ -598,9 +612,12 @@ class ControlServerImpl implements ControlServer {
       unsubModelChange: null,
       metricsClientLabel: this._mintClientLabel(),
       // D2 (tc-4b6k.1): capture the durable identity the client advertised on
-      // client.capabilities (undefined if none). Carried + logged only.
+      // client.capabilities (undefined if none). Surfaced in session-proxy.info.
       identity: session.clientIdentity,
       lastResyncAtMs: null,
+      // D4 (tc-4b6k.3): capture the tmux-parity flags from session.attach.
+      // Behavioral enforcement lives in session-proxy.ts; stored here for info.
+      flags: opts.flags,
     };
     this._clients.set(transport, state);
 
@@ -767,10 +784,13 @@ class ControlServerImpl implements ControlServer {
     return this._clients.get(transport)?.identity;
   }
 
-  connectedClientIdentities(): ReadonlyArray<{ readonly identity?: ClientIdentity }> {
-    const out: Array<{ identity?: ClientIdentity }> = [];
+  connectedClientIdentities(): ReadonlyArray<{ readonly identity?: ClientIdentity; readonly flags?: ClientFlags }> {
+    const out: Array<{ identity?: ClientIdentity; flags?: ClientFlags }> = [];
     for (const state of this._clients.values()) {
-      out.push(state.identity !== undefined ? { identity: state.identity } : {});
+      const entry: { identity?: ClientIdentity; flags?: ClientFlags } = {};
+      if (state.identity !== undefined) entry.identity = state.identity;
+      if (state.flags !== undefined) entry.flags = state.flags;
+      out.push(entry);
     }
     return out;
   }
