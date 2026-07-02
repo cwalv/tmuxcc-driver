@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src"],
+  "exclude": [
+    "src/runtime/e2e-smoke.test.ts",
+    "src/runtime/flow-load.test.ts",
+    "src/runtime/resize-roundtrip.test.ts",
+    "src/runtime/resilience.test.ts",
+    "src/runtime/resync.test.ts",
+    "src/runtime/topology-canary.test.ts",
+    "src/runtime/break-pane-rehome.test.ts",
+    "src/runtime/break-pane-noop.test.ts"
+  ]
+}
