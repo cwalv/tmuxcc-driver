@@ -223,10 +223,27 @@ export function createSessionProxy(opts) {
         // tc-2x3.4: per-session error boundary — forward the fatal-error hook so
         // the supervisor can tear down + reattach only this session on a pipeline
         // exception, without affecting siblings (tc-2x3.4).
-        // Use a conditional spread so exactOptionalPropertyTypes is satisfied:
-        // `undefined` is not assignable to `(err: unknown) => void` when the
-        // option is optional-but-not-undefined-typed.
-        ...(opts.onFatalError !== undefined ? { onFatalError: opts.onFatalError } : {}),
+        //
+        // tc-76m8.38: FAULT farewell.  A boundary trip means the session-proxy
+        // itself broke while the tmux session is (as far as we know) still alive.
+        // The supervisor teardown that follows funnels through stop() → host exit,
+        // whose farewell says "session.unavailable" — the DESIGNED session-death
+        // goodbye that tells clients to stand down their crash reaction.  That is
+        // a mis-attribution here (per the WireErrorCode vocabulary,
+        // "session.unavailable" = the session has gone away; "internal" = an
+        // unexpected session-proxy-side error).  Broadcast the fault farewell with
+        // code "internal" FIRST — before the supervisor's teardown closes the
+        // transports — so clients keep their unexpected-disconnect recovery
+        // (reconnect affordance) instead of treating this as a session death.
+        // The later host-exit broadcast then finds no clients and is a no-op.
+        onFatalError: (err) => {
+            serverRef?.broadcastErrorAndClose({
+                type: "error",
+                code: "internal",
+                message: "The session-proxy hit an internal error; the tmux session may still be running.",
+            });
+            opts.onFatalError?.(err);
+        },
         // tc-x6l: per-kind counters + storm alarm attach to the topology
         // classification choke point — the coalescer's onNotify path, surfaced
         // through this pipeline option. The hook only fires for topology-

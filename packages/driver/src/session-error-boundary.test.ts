@@ -60,6 +60,11 @@ import type { SessionProxy } from "./runtime/session-proxy.js";
 import { createSessionProxySupervisor, SessionQuarantineError } from "./session-proxy-supervisor.js";
 import type { SessionProxySupervisor, SessionProxySupervisorOptions } from "./session-proxy-supervisor.js";
 import { probeLiveSocket } from "./runtime-dir.js";
+import {
+  createInMemoryTransportPair,
+  runClientHandshake,
+  WIRE_PROTOCOL_VERSION,
+} from "@tmuxcc/protocol";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -379,6 +384,97 @@ describe("tc-2x3.4: per-session error boundary", { skip: !TMUX_AVAILABLE }, () =
       1,
       `EB2: session_boundary_trips_total must equal 1 after one boundary trip; got: ${counterValue}`,
     );
+  });
+
+  /**
+   * EB6 (tc-76m8.38): a boundary trip farewells connected clients with the
+   * FAULT code ("internal"), not the designed session-death goodbye
+   * ("session.unavailable").
+   *
+   * Clients discriminate a designed session teardown from a session-proxy
+   * fault by the farewell code on the data transport: "session.unavailable"
+   * means the tmux session is gone (stand down the crash reaction — the
+   * broker's sessions.removed drain owns teardown), while "internal" / no
+   * farewell means the session may still be alive and the client should keep
+   * its unexpected-disconnect recovery (reconnect affordance).  The tmux
+   * session here is ALIVE when the pipeline trips, so the farewell MUST NOT
+   * claim the session went away.
+   */
+  it("EB6: boundary trip farewells clients with code internal, not session.unavailable", { timeout: 25_000 }, async () => {
+    const socketName = `tmuxcc-eb6-${process.pid}-${Date.now()}`;
+    const sessionName = `eb6-sess-${process.pid}`;
+    _sockets.push(socketName);
+    spawnTmuxSession(socketName, sessionName);
+
+    let boundaryFired = false;
+    let _readyToFault = false;
+    let _faultFired = false;
+
+    const proxy = createSessionProxy({
+      host: { socketName, sessionName, attach: true },
+      onFatalError(_err: unknown) {
+        boundaryFired = true;
+      },
+      onTopologyNotify(_kind: string) {
+        if (!_readyToFault || _faultFired) return;
+        _faultFired = true;
+        throw new Error("[EB6 fault injection] deliberate pipeline exception for farewell test");
+      },
+    });
+    _proxies.push(proxy);
+
+    await proxy.start();
+
+    // Attach a client with the full production wiring so the farewell
+    // broadcast + transport close are observable (the resilience R5 donor).
+    const { sessionProxy: dt, client: ct } = createInMemoryTransportPair();
+    const addP = proxy.addClient(dt);
+    await runClientHandshake(ct, {
+      protocolVersion: WIRE_PROTOCOL_VERSION,
+      features: [
+        "pane-lifecycle" as const,
+        "layout-updates" as const,
+        "focus-events" as const,
+        "input-forwarding" as const,
+      ],
+    });
+    await addP;
+
+    // Capture control messages + close AFTER the handshake settles.
+    const received: Array<{ type: string; code?: string | undefined }> = [];
+    let clientClosed = false;
+    ct.onControl((msg) => {
+      const m = msg as { type: string; code?: string };
+      received.push({ type: m.type, code: m.code });
+    });
+    ct.onClose(() => { clientClosed = true; });
+
+    _readyToFault = true;
+
+    // Inject the fault: a new-window topology notification routes through the
+    // throwing onTopologyNotify hook inside the host.onData try/catch.
+    triggerNewWindow(socketName, sessionName);
+
+    await waitFor(() => boundaryFired, 8_000, "boundary trip to fire (EB6)");
+    await waitFor(() => clientClosed, 5_000, "client transport to close after the fault farewell");
+
+    const fault = received.find((m) => m.type === "error" && m.code === "internal");
+    assert.ok(
+      fault !== undefined,
+      `EB6: client must receive the fault farewell error{code:"internal"}; got: ${JSON.stringify(received)}`,
+    );
+    const misattributed = received.find(
+      (m) => m.type === "error" && m.code === "session.unavailable",
+    );
+    assert.equal(
+      misattributed,
+      undefined,
+      `EB6: a boundary trip must NOT emit the designed session-death goodbye ` +
+        `(session.unavailable) — the tmux session is still alive; got: ${JSON.stringify(received)}`,
+    );
+    // Sanity: the session's tmux host is still up at farewell time (the whole
+    // point of the discrimination).
+    assert.ok(!proxy.host.exited, "EB6: tmux host must still be alive after the boundary trip");
   });
 
   // EB3 (deleted, tc-4b6k.4): the socket-clobber ownership guard it exercised

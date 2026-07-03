@@ -53,7 +53,7 @@
  * # NO DOM, NO vscode, NO host API, NO Pseudoterminal
  */
 
-import type { SnapshotMessage, SessionProxyMessage, SessionProxyCommandResponseMessage, ClientMessage, ResyncRequestMessage, PaneId, WindowId, SessionId, ConnectionId, WindowLayout, PaneMode, Origin, PaneNotifyKind, PaneNotifyPayload } from "@tmuxcc/protocol";
+import type { SnapshotMessage, SessionProxyMessage, SessionProxyCommandResponseMessage, ClientMessage, ResyncRequestMessage, ErrorMessage, PaneId, WindowId, SessionId, ConnectionId, WindowLayout, PaneMode, Origin, PaneNotifyKind, PaneNotifyPayload } from "@tmuxcc/protocol";
 import type { SessionProxyConnection } from "./connection.js";
 import type { RenderHook, ByteSource } from "./render-hook.js";
 import { EDH_TRACE_ENABLED, edhTrace } from "./edh-trace.js";
@@ -808,6 +808,20 @@ export interface PaneNotifyEvent {
 export type PaneNotifyEventHandler = (event: PaneNotifyEvent) => void;
 
 /**
+ * Handler for unsolicited session-proxy `error` frames observed on the control
+ * stream (tc-76m8.38).
+ *
+ * The mirror is not state-bearing for these (it only seq-tracks them), but it
+ * owns the single-slot `onControl` handler, so it forwards each frame here.
+ * The load-bearing consumer is the extension's transport-disconnect
+ * discriminator: a farewell `error{code:"session.unavailable"}` precedes the
+ * transport close on every DESIGNED session-death teardown (same-socket, so
+ * race-free), while a fault/crash close arrives without it (or with
+ * `code:"internal"`).
+ */
+export type ProxyErrorHandler = (msg: ErrorMessage) => void;
+
+/**
  * Stateful client-side mirror of the session-proxy session model.
  *
  * Usage (pure manual drive):
@@ -889,6 +903,9 @@ export class Mirror {
    */
   readonly #hydrationLog: HydrationEvent[] = [];
   readonly #paneNotifyHandlers: PaneNotifyEventHandler[] = [];
+  // tc-76m8.38: forwarders for unsolicited `error` frames (not state-bearing
+  // for the mirror, but the mirror owns the single-slot onControl handler).
+  readonly #proxyErrorHandlers: ProxyErrorHandler[] = [];
 
   // ── Public model access ───────────────────────────────────────────────────
 
@@ -1017,6 +1034,24 @@ export class Mirror {
     };
   }
 
+  /**
+   * Register a handler for unsolicited session-proxy `error` frames
+   * (tc-76m8.38).  Forwarded UP-FRONT in `receiveDelta` — before the
+   * init/seq gating — because the load-bearing frame is the session-death
+   * farewell (`code:"session.unavailable"`) written immediately before the
+   * session-proxy closes the transport; it must reach the consumer even if it
+   * arrives outside normal seq accounting.
+   *
+   * Handlers are APPENDED. Returns an unsubscribe function.
+   */
+  onProxyError(handler: ProxyErrorHandler): () => void {
+    this.#proxyErrorHandlers.push(handler);
+    return () => {
+      const idx = this.#proxyErrorHandlers.indexOf(handler);
+      if (idx !== -1) this.#proxyErrorHandlers.splice(idx, 1);
+    };
+  }
+
   // ── Receive methods ───────────────────────────────────────────────────────
 
   /**
@@ -1074,7 +1109,20 @@ export class Mirror {
       }
     }
 
-    // Not yet initialized — ignore (command.response handlers already fired).
+    // tc-76m8.38: unsolicited `error` frames forward up front for the same
+    // reason as command.response — the session-death farewell
+    // (`code:"session.unavailable"`) is written immediately before the
+    // session-proxy closes the transport and must reach its consumer (the
+    // extension's disconnect discriminator) regardless of init/seq state.
+    // Seq accounting for the frame still runs below once initialized.
+    if (msg.type === "error") {
+      for (const handler of this.#proxyErrorHandlers) {
+        handler(msg);
+      }
+    }
+
+    // Not yet initialized — ignore (command.response/error handlers already
+    // fired).
     if (!this.#initialized || this.#lastSeq === null) return;
 
     // Snapshot messages should go to receiveSnapshot, not here.

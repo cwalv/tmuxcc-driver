@@ -40,6 +40,7 @@ export type {
   HydrationEventHandler,
   PaneNotifyEvent,
   PaneNotifyEventHandler,
+  ProxyErrorHandler,
 } from "./mirror.js";
 
 // ---------------------------------------------------------------------------

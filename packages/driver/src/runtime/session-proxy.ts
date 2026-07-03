@@ -147,15 +147,18 @@ export interface SessionProxyOptions {
    * Called when the per-session pipeline catches an unhandled exception
    * (tc-2x3.4 per-session error boundary).
    *
-   * Forwarded verbatim to `RuntimePipelineOptions.onFatalError`.  In the
-   * collapsed single-process topology (tc-2x3.3), a throwing pipeline can
-   * crash every session; this callback lets the caller (the server-proxy
-   * supervisor) tear down and reattach ONLY the affected session while
-   * leaving siblings running.
+   * Forwarded to `RuntimePipelineOptions.onFatalError` behind a wrapper that
+   * first broadcasts the FAULT farewell (`error{code:"internal"}`) and closes
+   * every client transport (tc-76m8.38) — clients must see a fault close, not
+   * the designed `session.unavailable` session-death goodbye that the
+   * host-exit path emits.  In the collapsed single-process topology
+   * (tc-2x3.3), a throwing pipeline can crash every session; this callback
+   * lets the caller (the server-proxy supervisor) tear down and reattach ONLY
+   * the affected session while leaving siblings running.
    *
-   * When omitted, boundary trips are logged to stderr but the session is
-   * NOT automatically recycled — backward-compat for test setups that do
-   * not exercise the supervisor path.
+   * When omitted, boundary trips are logged to stderr and the fault farewell
+   * still goes out, but the session is NOT automatically recycled —
+   * backward-compat for test setups that do not exercise the supervisor path.
    */
   onFatalError?: (err: unknown) => void;
 
@@ -517,10 +520,28 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
     // tc-2x3.4: per-session error boundary — forward the fatal-error hook so
     // the supervisor can tear down + reattach only this session on a pipeline
     // exception, without affecting siblings (tc-2x3.4).
-    // Use a conditional spread so exactOptionalPropertyTypes is satisfied:
-    // `undefined` is not assignable to `(err: unknown) => void` when the
-    // option is optional-but-not-undefined-typed.
-    ...(opts.onFatalError !== undefined ? { onFatalError: opts.onFatalError } : {}),
+    //
+    // tc-76m8.38: FAULT farewell.  A boundary trip means the session-proxy
+    // itself broke while the tmux session is (as far as we know) still alive.
+    // The supervisor teardown that follows funnels through stop() → host exit,
+    // whose farewell says "session.unavailable" — the DESIGNED session-death
+    // goodbye that tells clients to stand down their crash reaction.  That is
+    // a mis-attribution here (per the WireErrorCode vocabulary,
+    // "session.unavailable" = the session has gone away; "internal" = an
+    // unexpected session-proxy-side error).  Broadcast the fault farewell with
+    // code "internal" FIRST — before the supervisor's teardown closes the
+    // transports — so clients keep their unexpected-disconnect recovery
+    // (reconnect affordance) instead of treating this as a session death.
+    // The later host-exit broadcast then finds no clients and is a no-op.
+    onFatalError: (err: unknown): void => {
+      serverRef?.broadcastErrorAndClose({
+        type: "error",
+        code: "internal",
+        message:
+          "The session-proxy hit an internal error; the tmux session may still be running.",
+      });
+      opts.onFatalError?.(err);
+    },
     // tc-x6l: per-kind counters + storm alarm attach to the topology
     // classification choke point — the coalescer's onNotify path, surfaced
     // through this pipeline option. The hook only fires for topology-

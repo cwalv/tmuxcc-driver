@@ -1435,3 +1435,65 @@ describe("hydration / attach protocol events", () => {
     assert.equal(changes, 0, "hydration sentinels must not trigger a model-change render");
   });
 });
+
+describe("unsolicited error frames — onProxyError (tc-76m8.38)", () => {
+  it("error frames forward to onProxyError, advance seq (no false gap), and are not state-bearing", () => {
+    const mirror = new Mirror();
+    const errors: Array<{ code: string; message: string }> = [];
+    mirror.onProxyError((e) => errors.push({ code: e.code, message: e.message }));
+    let resyncFired = false;
+    mirror.onResyncNeeded(() => { resyncFired = true; });
+    let changes = 0;
+
+    mirror.receiveSnapshot(makeSnapshot(5)); // lastSeq = 5
+    mirror.onModelChange(() => { changes++; });
+
+    // The session-death farewell shape: written by the session-proxy
+    // immediately before it closes the transport on a designed teardown.
+    mirror.receiveDelta({
+      type: "error",
+      seq: 6,
+      code: "session.unavailable",
+      message: "The tmux session has exited unexpectedly.",
+    });
+    // A real topology delta at seq 7 must NOT read as a gap — the error frame
+    // consumed its seq slot (tc-295a.31).
+    mirror.receiveDelta({ type: "pane.resized", seq: 7, paneId: P1, cols: 99, rows: 30 });
+
+    assert.deepEqual(errors, [
+      { code: "session.unavailable", message: "The tmux session has exited unexpectedly." },
+    ]);
+    assert.equal(resyncFired, false, "error frames must advance seq so no false gap");
+    assert.equal(changes, 1, "only the topology delta fires onModelChange, not the error frame");
+    assert.equal(mirror.getModel().panes.get(P1)!.cols, 99, "the post-error delta applied");
+  });
+
+  it("an error frame arriving before the snapshot still forwards (pre-init robustness)", () => {
+    const mirror = new Mirror();
+    const codes: string[] = [];
+    mirror.onProxyError((e) => codes.push(e.code));
+
+    // No snapshot yet — the mirror is uninitialized, but the farewell must
+    // still reach its consumer (a session can die during connect).
+    mirror.receiveDelta({
+      type: "error",
+      seq: 1,
+      code: "session.unavailable",
+      message: "The bound tmux session is no longer available.",
+    });
+
+    assert.deepEqual(codes, ["session.unavailable"]);
+  });
+
+  it("unsubscribe severs the forward", () => {
+    const mirror = new Mirror();
+    const codes: string[] = [];
+    const unsub = mirror.onProxyError((e) => codes.push(e.code));
+    mirror.receiveSnapshot(makeSnapshot(5));
+
+    unsub();
+    mirror.receiveDelta({ type: "error", seq: 6, code: "internal", message: "boom" });
+
+    assert.deepEqual(codes, []);
+  });
+});

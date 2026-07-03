@@ -120,15 +120,18 @@ export interface SessionProxyOptions {
      * Called when the per-session pipeline catches an unhandled exception
      * (tc-2x3.4 per-session error boundary).
      *
-     * Forwarded verbatim to `RuntimePipelineOptions.onFatalError`.  In the
-     * collapsed single-process topology (tc-2x3.3), a throwing pipeline can
-     * crash every session; this callback lets the caller (the server-proxy
-     * supervisor) tear down and reattach ONLY the affected session while
-     * leaving siblings running.
+     * Forwarded to `RuntimePipelineOptions.onFatalError` behind a wrapper that
+     * first broadcasts the FAULT farewell (`error{code:"internal"}`) and closes
+     * every client transport (tc-76m8.38) — clients must see a fault close, not
+     * the designed `session.unavailable` session-death goodbye that the
+     * host-exit path emits.  In the collapsed single-process topology
+     * (tc-2x3.3), a throwing pipeline can crash every session; this callback
+     * lets the caller (the server-proxy supervisor) tear down and reattach ONLY
+     * the affected session while leaving siblings running.
      *
-     * When omitted, boundary trips are logged to stderr but the session is
-     * NOT automatically recycled — backward-compat for test setups that do
-     * not exercise the supervisor path.
+     * When omitted, boundary trips are logged to stderr and the fault farewell
+     * still goes out, but the session is NOT automatically recycled —
+     * backward-compat for test setups that do not exercise the supervisor path.
      */
     onFatalError?: (err: unknown) => void;
     /**
