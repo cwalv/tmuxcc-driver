@@ -155,7 +155,7 @@
 
     "ServerProxyCommandOkPayload": {
       "type": "object",
-      "description": "Successful server-proxy command result payload. Per-kind: session.claim/session.create → {sessionId, created}; session.createUnique → {sessionId, name, created:true}; session.destroy → {}; server-proxy.info → {info}. D5 (tc-4b6k.4): there is NO endpoint field — the client binds a connection to a session with session.attach, not by dialing a per-session socket path.",
+      "description": "Successful server-proxy command result payload. Per-kind: session.claim/session.create → {sessionId, created}; session.createUnique → {sessionId, name, created:true}; session.destroy → {}; session.applyTemplate → {applyTemplate}; session.freezeTemplate → {frozenTemplate}; server-proxy.info → {info}. D5 (tc-4b6k.4): there is NO endpoint field — the client binds a connection to a session with session.attach, not by dialing a per-session socket path.",
       "properties": {
         "sessionId": { "$ref": "tmuxcc:shared/primitives#/$defs/SessionId" },
         "created": {
@@ -165,6 +165,14 @@
         "name": {
           "type": "string",
           "description": "Broker-minted session name on a session.createUnique response (tc-295a.5 / W1.4). Absent on all other command kinds."
+        },
+        "applyTemplate": {
+          "$ref": "tmuxcc:shared/session-template#/$defs/TemplateApplyResult",
+          "description": "Result of a session.applyTemplate response (tc-gjdx.4): the would-create set (dryRun) / did-create set (real apply). Absent on all other command kinds."
+        },
+        "frozenTemplate": {
+          "$ref": "tmuxcc:shared/session-template#/$defs/SessionTemplate",
+          "description": "The schema-valid template captured by a session.freezeTemplate response (tc-gjdx.5). Absent on all other command kinds."
         },
         "info": {
           "type": "object",
@@ -263,7 +271,7 @@
                 "ok": { "const": false },
                 "code": {
                   "type": "string",
-                  "description": "Error code. Known values: protocol.unknown-message, protocol.malformed, protocol.version-mismatch, session.not-found, session.name-taken, tmux.unavailable, internal."
+                  "description": "Error code. Known values: protocol.unknown-message, protocol.malformed, protocol.version-mismatch, session.not-found, session.name-taken, template.invalid, tmux.unavailable, internal."
                 },
                 "message": { "type": "string" }
               },

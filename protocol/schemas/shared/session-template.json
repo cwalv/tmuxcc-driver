@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tmuxcc:shared/session-template",
+  "title": "tmuxcc session template",
+  "description": "A session template: a named, declarative session shape the driver can apply (at session-create, exactly once — or to a live session, safe-direction merge) and freeze back out of a live session (tc-gjdx). ONE shared schema, full tmux fidelity — the extension's managed subset is a semantic capability (apply-don't-reject), NOT a type wall.\n\nThe wire carries FULLY-SUBSTITUTED concrete templates: substitution (${workspaceFolder}, ${env:NAME}) is a client-side concern (tc-gjdx.6) and NO substitution syntax appears in this schema. Geometry is a structured split tree; tmux layout strings are a driver-internal compile artifact (tc-gjdx.3) and NEVER appear here or on the wire.\n\nVocabulary note: a template leaf pane names its shell command `command`; the driver's creating verbs (open-window / split-pane) name the same thing `shellCommand`. The compiler (tc-gjdx.3) maps template `command` -> verb `shellCommand` and template `env` -> the repeatable `-e` flag (D9-gated, tc-gjdx.2).",
+
+  "$defs": {
+    "TemplatePane": {
+      "type": "object",
+      "description": "A leaf node in the geometry tree: one pane. The sibling of shared/layout.json's LayoutPane, but DESIRED (a request), not ACTUAL: it carries NO paneId and NO Rect — the driver mints the pane and tmux sizes it. Every field is optional: an empty `{ \"kind\": \"pane\" }` is a default-shell pane inheriting the session working directory and environment.",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "pane" },
+        "cwd": {
+          "type": "string",
+          "description": "Working directory for the pane (compiled to the creating verb's `cwd` -> tmux `-c`). Omitted: inherit the session working directory. A fully-substituted absolute path — no ${...} syntax."
+        },
+        "command": {
+          "type": "string",
+          "description": "Shell command to run in the pane (compiled to the creating verb's `shellCommand` -> the trailing tmux shell-command). Omitted: the default shell. A single shell-interpreted string, fully substituted."
+        },
+        "env": {
+          "type": "object",
+          "description": "Environment variables to set in the pane, name -> value (compiled to repeatable tmux `-e NAME=value`; D9 capability-gated per tc-gjdx.2). Omitted: inherit the session environment. Values are fully substituted — no ${...} syntax.",
+          "additionalProperties": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "TemplateHSplit": {
+      "type": "object",
+      "description": "A horizontal split node: children are arranged side-by-side (left to right). Mirrors shared/layout.json's LayoutHSplit and tmux's '[…]' notation, expressed semantically. A DESIRED split — no Rect; sizes are proportional, not absolute.",
+      "required": ["kind", "children"],
+      "properties": {
+        "kind": { "const": "hsplit" },
+        "children": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/TemplateNode" },
+          "minItems": 2,
+          "description": "Child nodes arranged left to right."
+        },
+        "sizes": {
+          "type": "array",
+          "items": { "type": "number", "exclusiveMinimum": 0 },
+          "minItems": 2,
+          "description": "Optional proportional weights, PARALLEL to `children` (same length, i-th weight for i-th child). Relative — only the ratios matter (e.g. [2, 1] or [0.66, 0.34] both mean 2:1). Omitted: an equal split. The length-equals-children invariant is enforced by semantic validation in code (JSON Schema cannot cross-reference two array lengths)."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "TemplateVSplit": {
+      "type": "object",
+      "description": "A vertical split node: children are stacked top-to-bottom. Mirrors shared/layout.json's LayoutVSplit and tmux's '{…}' notation, expressed semantically. A DESIRED split — no Rect; sizes are proportional, not absolute.",
+      "required": ["kind", "children"],
+      "properties": {
+        "kind": { "const": "vsplit" },
+        "children": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/TemplateNode" },
+          "minItems": 2,
+          "description": "Child nodes stacked top to bottom."
+        },
+        "sizes": {
+          "type": "array",
+          "items": { "type": "number", "exclusiveMinimum": 0 },
+          "minItems": 2,
+          "description": "Optional proportional weights, PARALLEL to `children` (same length). See TemplateHSplit.sizes."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "TemplateNode": {
+      "oneOf": [
+        { "$ref": "#/$defs/TemplatePane" },
+        { "$ref": "#/$defs/TemplateHSplit" },
+        { "$ref": "#/$defs/TemplateVSplit" }
+      ],
+      "description": "Any node in a window's desired-geometry tree. Discriminate on `kind`: \"pane\" (leaf), \"hsplit\", or \"vsplit\". Arbitrary nesting is valid — expressive enough for anything tmux holds. The extension's strip-shaped managed subset (a single split of pane leaves) is a semantic capability, not a type restriction; wilder trees still apply (unmanaged, apply-don't-reject)."
+    },
+
+    "WindowTemplate": {
+      "type": "object",
+      "description": "One window in a session template: an optional name plus an optional desired-geometry tree.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Optional window name. Also the merge key for apply-to-live (tc-gjdx.4): a live window with a matching name is left alone; a window whose name is absent live is created. Omitted: tmux names the window."
+        },
+        "geometry": {
+          "$ref": "#/$defs/TemplateNode",
+          "description": "The window's desired split tree; leaves are pane specs. OMITTED: a single default-shell pane (the common 'just give me a window' case) — the compiler (tc-gjdx.3) treats a window with no geometry as one empty TemplatePane."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "SessionTemplate": {
+      "type": "object",
+      "description": "A complete session template: an ordered list of windows, with an optional identity name. Carried on the creating claim verbs (applied iff created:true), on the apply-to-live verb, and returned by freeze. Full tmux fidelity — validation is structural only; capability (managed vs unmanaged) is a downstream semantic, never a hard reject (apply-don't-reject).",
+      "required": ["windows"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Optional template identity. When applied, the driver records it as the `@tmuxcc-template` session user-option so 'created from template X' survives reattach (tc-gjdx.3 awareness). Also the config key under the extension's `sessionTemplates` setting (tc-gjdx.6). Omitted for inline/ad-hoc templates (no awareness stamp)."
+        },
+        "windows": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/WindowTemplate" },
+          "minItems": 1,
+          "description": "The windows to create, in order. At least one — a template describes a non-empty session. (This is the INPUT template's window list; the apply-to-live would-create RESULT set may be empty when nothing is missing.)"
+        }
+      },
+      "additionalProperties": false,
+      "examples": [
+        {
+          "name": "web-dev",
+          "windows": [
+            {
+              "name": "editor",
+              "geometry": { "kind": "pane", "command": "nvim ." }
+            },
+            {
+              "name": "servers",
+              "geometry": {
+                "kind": "hsplit",
+                "children": [
+                  { "kind": "pane", "command": "npm run dev", "cwd": "/repo/web" },
+                  { "kind": "pane", "command": "npm run api", "cwd": "/repo/api", "env": { "PORT": "4000" } }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "windows": [
+            {
+              "name": "wild",
+              "geometry": {
+                "kind": "vsplit",
+                "sizes": [3, 1],
+                "children": [
+                  {
+                    "kind": "hsplit",
+                    "children": [
+                      { "kind": "pane" },
+                      {
+                        "kind": "vsplit",
+                        "children": [
+                          { "kind": "pane", "command": "htop" },
+                          { "kind": "pane" }
+                        ]
+                      }
+                    ]
+                  },
+                  { "kind": "pane", "command": "tail -f log" }
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+
+    "TemplateApplyResult": {
+      "type": "object",
+      "description": "Result of a `session.applyTemplate` command (tc-gjdx.4). In dryRun (preview) mode `windows` is the would-create set; on a real apply that SUCCEEDS `windows` is the did-create set — the two are equal for the same template+session (the preview-equals-apply invariant clients confirm against). A real apply that fails mid-transaction does NOT return this payload: it fails loud via the command response's error result (code + message naming the failed verb and the created-so-far state), with no rollback (tc-gjdx.3 partial-failure semantics).",
+      "required": ["dryRun", "windows"],
+      "properties": {
+        "dryRun": {
+          "type": "boolean",
+          "description": "Echoes the request: true = preview only (nothing was created); false = the windows were actually created."
+        },
+        "windows": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/WindowTemplate" },
+          "description": "The windows the safe-direction merge would create (dryRun) / did create (real apply): the subset of the template's windows whose names are absent in the live session. Empty when the template is already satisfied (a re-apply is a no-op). A would-create window IS a WindowTemplate (name + geometry)."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

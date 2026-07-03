@@ -48,6 +48,7 @@
 
 import type { MessageBase, Capabilities, ClientIdentity, ClientFlags } from "./envelope.js";
 import type { PaneId, SessionId } from "./ids.js";
+import type { SessionTemplate, TemplateApplyResult } from "./session-template.js";
 
 // ---------------------------------------------------------------------------
 // ServerProxy → Client: capabilities handshake
@@ -325,6 +326,15 @@ export interface ServerProxyExitingMessage extends MessageBase {
 export interface SessionClaimCommand {
   readonly kind: "session.claim";
   readonly name: string;
+  /**
+   * Optional concrete session template to apply (tc-gjdx).
+   *
+   * Applied by the driver EXACTLY ONCE, iff this claim minted the session
+   * (`created:true` — the tc-3y8.2 exactly-once contract); ignored when the
+   * claim attaches to a pre-existing session. Fully-substituted by the client
+   * (tc-gjdx.6); driver-side application is tc-gjdx.3.
+   */
+  readonly template?: SessionTemplate;
 }
 
 /**
@@ -334,6 +344,13 @@ export interface SessionClaimCommand {
 export interface SessionCreateCommand {
   readonly kind: "session.create";
   readonly name: string;
+  /**
+   * Optional concrete session template to apply on creation (tc-gjdx).
+   * Applied iff `created:true`; since `session.create` always mints (or
+   * fails), this applies whenever the command succeeds. Fully-substituted;
+   * driver-side application is tc-gjdx.3.
+   */
+  readonly template?: SessionTemplate;
 }
 
 /**
@@ -370,6 +387,13 @@ export interface SessionCreateUniqueCommand {
    * carry no workspace identity) and by older extensions.
    */
   readonly workspaceUri?: string;
+  /**
+   * Optional concrete session template to apply on creation (tc-gjdx).
+   * `session.createUnique` always mints (`created:true`), so this applies
+   * whenever the command succeeds. Fully-substituted; driver-side application
+   * is tc-gjdx.3.
+   */
+  readonly template?: SessionTemplate;
 }
 
 /**
@@ -378,6 +402,54 @@ export interface SessionCreateUniqueCommand {
 export interface SessionDestroyCommand {
   readonly kind: "session.destroy";
   readonly sessionId: SessionId;
+}
+
+/**
+ * Apply a concrete session template to a LIVE session, safe direction
+ * (tc-gjdx.4).
+ *
+ * The driver diffs the template against the live session model and creates
+ * only the windows whose names are absent live; name-matching windows are
+ * left alone (idempotent — a re-apply is a no-op). With `dryRun` the driver
+ * computes but does NOT create the would-create set (a preview for the
+ * confirmation UI, tc-gjdx.7).
+ *
+ * The response payload ({@link TemplateApplyResult} under
+ * {@link ServerProxyCommandOkPayload.applyTemplate}) carries the would-create
+ * set (dryRun) / did-create set (real apply). A real apply executes via the
+ * same transaction machinery as apply-at-create and fails loud with no
+ * rollback (tc-gjdx.3 partial-failure semantics).
+ */
+export interface SessionApplyTemplateCommand {
+  readonly kind: "session.applyTemplate";
+  readonly sessionId: SessionId;
+  readonly template: SessionTemplate;
+  /**
+   * True: compute the would-create set and return it WITHOUT applying
+   * (preview). False/omitted: actually create the missing windows/panes.
+   */
+  readonly dryRun?: boolean;
+}
+
+/**
+ * Freeze a LIVE session into a schema-valid session template (tc-gjdx.5) —
+ * "save current session as template".
+ *
+ * The driver captures window names, per-pane working directories, and geometry
+ * (from `window_layout`) as a desired-geometry tree. Any client may invoke it.
+ * The response payload ({@link ServerProxyCommandOkPayload.frozenTemplate}) is
+ * a {@link SessionTemplate} that re-applies with full topology/geometry
+ * fidelity.
+ */
+export interface SessionFreezeTemplateCommand {
+  readonly kind: "session.freezeTemplate";
+  readonly sessionId: SessionId;
+  /**
+   * Optional name to embed as the frozen template's `name`. Omitted: the
+   * driver leaves the output template unnamed (or defaults to the session
+   * name — tc-gjdx.5's call).
+   */
+  readonly name?: string;
 }
 
 /**
@@ -782,6 +854,8 @@ export type ServerProxyCommand =
   | SessionCreateCommand
   | SessionCreateUniqueCommand
   | SessionDestroyCommand
+  | SessionApplyTemplateCommand
+  | SessionFreezeTemplateCommand
   | ServerProxyInfoCommand
   | ServerProxySetMetricsHttpCommand
   | SessionTopologyCommand;
@@ -807,6 +881,8 @@ export interface ServerProxyCommandRequestMessage extends MessageBase {
  * Per-kind payloads:
  *   session.claim / session.create / session.createUnique → { sessionId, name, created }
  *   session.destroy                → { ok: true }
+ *   session.applyTemplate          → { applyTemplate }
+ *   session.freezeTemplate         → { frozenTemplate }
  *   server-proxy.info              → { info }
  *
  * D5 (tc-4b6k.4): there is NO `endpoint` field — the client binds a connection
@@ -849,6 +925,17 @@ export interface ServerProxyCommandOkPayload {
    */
   readonly topology?: SessionTopologyPayload;
   /**
+   * Apply-to-live result for a `session.applyTemplate` response (tc-gjdx.4):
+   * the would-create set (dryRun) / did-create set (real apply). Absent on all
+   * other command kinds.
+   */
+  readonly applyTemplate?: TemplateApplyResult;
+  /**
+   * The schema-valid template captured by a `session.freezeTemplate` response
+   * (tc-gjdx.5). Absent on all other command kinds.
+   */
+  readonly frozenTemplate?: SessionTemplate;
+  /**
    * Post-toggle metrics-HTTP listener state for a
    * `server-proxy.set-metrics-http` response (tc-44u4.4).
    * Absent on all other command kinds.
@@ -887,6 +974,11 @@ export interface ServerProxyCommandResponseMessage extends MessageBase {
  * "session.not-found"         — session.claim, session.destroy, or pane.attach
  *                               named an unknown session.
  * "session.name-taken"        — session.create requested a name already in use.
+ * "template.invalid"          — session.applyTemplate / a template-carrying claim
+ *                               (or session.freezeTemplate output) failed template
+ *                               validation, or the apply transaction failed
+ *                               mid-flight; the message names the failed verb and
+ *                               the created-so-far state (tc-gjdx.3/.4 fail-loud).
  * "tmux.unavailable"          — underlying tmux server is gone or refusing commands.
  * "internal"                  — unexpected server-proxy-side error.
  *
@@ -898,6 +990,7 @@ export type ServerProxyErrorCode =
   | "protocol.version-mismatch"
   | "session.not-found"
   | "session.name-taken"
+  | "template.invalid"
   | "tmux.unavailable"
   | "internal"
   | (string & Record<never, never>);

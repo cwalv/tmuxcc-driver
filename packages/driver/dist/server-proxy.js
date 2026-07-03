@@ -1382,6 +1382,23 @@ class ServerProxyImpl {
                     // connection's identity so the picker's bind affordance is per-client.
                     payload = { topology: await this._querySessionTopology(command.sessionId, state.identity?.id) };
                     break;
+                case "session.applyTemplate":
+                case "session.freezeTemplate":
+                    // tc-gjdx.1 declares these verbs in the protocol; the driver-side
+                    // handlers land in tc-gjdx.4 (apply-to-live merge-diff) and tc-gjdx.5
+                    // (freeze).  Until they do, the driver fails loud rather than silently
+                    // accepting — a client feature-detects the missing handler via the
+                    // additive-compat convention (protocol.unknown-message), exactly as it
+                    // would against an older driver.
+                    this._sendResponse(state, {
+                        correlationId,
+                        result: {
+                            ok: false,
+                            code: "protocol.unknown-message",
+                            message: `${command.kind} is declared but not yet handled by this driver`,
+                        },
+                    });
+                    return;
                 default: {
                     const _exhaustive = command;
                     void _exhaustive;

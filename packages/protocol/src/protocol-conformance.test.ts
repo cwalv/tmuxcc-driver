@@ -70,6 +70,13 @@ import type {
   PanePolicyChangedMessage,
   ClientIdentity,
   ClientFlags,
+  // tc-gjdx.1: session template + apply/freeze verb surface
+  SessionTemplate,
+  WindowTemplate,
+  TemplateApplyResult,
+  ServerProxyCommandRequestMessage,
+  ServerProxyCommandResponseMessage,
+  ServerProxyMessage,
 } from "./index.js";
 
 // ---------------------------------------------------------------------------
@@ -93,6 +100,7 @@ const goldenDir = resolve(driverRoot, "protocol/golden");
 const SCHEMA_FILES = [
   "shared/primitives.json",
   "shared/layout.json",
+  "shared/session-template.json",
   "session-proxy/server-push.json",
   "session-proxy/client.json",
   "server-proxy/server-push.json",
@@ -102,6 +110,7 @@ const SCHEMA_FILES = [
 type SchemaId =
   | "tmuxcc:shared/primitives"
   | "tmuxcc:shared/layout"
+  | "tmuxcc:shared/session-template"
   | "tmuxcc:session-proxy/server-push"
   | "tmuxcc:session-proxy/client"
   | "tmuxcc:server-proxy/server-push"
@@ -1332,6 +1341,332 @@ describe("protocol schema conformance", () => {
         false,
         "unknown parity-map flags stay reserved prose (§12), not typed slots yet",
       );
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 7. Session template schema — tc-gjdx.1
+  // -------------------------------------------------------------------------
+
+  describe("session template schema (tc-gjdx.1)", () => {
+    let validateTemplate: ValidateFunction;
+
+    before(() => {
+      validateTemplate = ajv.compile({
+        $ref: "tmuxcc:shared/session-template#/$defs/SessionTemplate",
+      });
+    });
+
+    // A strip-shaped template — the extension's MANAGED subset: a single split
+    // of pane leaves. Validates via the same full-fidelity schema (one schema,
+    // not a driver + extension subset).
+    const stripTemplate: SessionTemplate = {
+      name: "web-dev",
+      windows: [
+        { name: "editor", geometry: { kind: "pane", command: "nvim ." } },
+        {
+          name: "servers",
+          geometry: {
+            kind: "hsplit",
+            children: [
+              { kind: "pane", command: "npm run dev", cwd: "/repo/web" },
+              { kind: "pane", command: "npm run api", cwd: "/repo/api", env: { PORT: "4000" } },
+            ],
+          },
+        },
+      ],
+    };
+
+    // A wild nested tree — beyond the managed subset. Still valid; the extension
+    // renders it UNMANAGED (apply-don't-reject), the driver applies full fidelity.
+    const wildTemplate: SessionTemplate = {
+      windows: [
+        {
+          name: "wild",
+          geometry: {
+            kind: "vsplit",
+            sizes: [3, 1],
+            children: [
+              {
+                kind: "hsplit",
+                children: [
+                  { kind: "pane" },
+                  {
+                    kind: "vsplit",
+                    children: [
+                      { kind: "pane", command: "htop" },
+                      { kind: "pane" },
+                    ],
+                  },
+                ],
+              },
+              { kind: "pane", command: "tail -f log" },
+            ],
+          },
+        },
+      ],
+    };
+
+    it("accepts a strip-shaped template (managed subset)", () => {
+      assert.ok(validateTemplate(stripTemplate), JSON.stringify(validateTemplate.errors));
+    });
+
+    it("accepts a wild nested tree (unmanaged — apply-don't-reject)", () => {
+      assert.ok(validateTemplate(wildTemplate), JSON.stringify(validateTemplate.errors));
+    });
+
+    it("accepts a window with omitted geometry (compiler default: single default pane)", () => {
+      const t: SessionTemplate = { windows: [{ name: "shell" }] };
+      assert.ok(validateTemplate(t), JSON.stringify(validateTemplate.errors));
+    });
+
+    it("accepts a single-pane window (geometry is a lone pane leaf)", () => {
+      const t: SessionTemplate = { windows: [{ geometry: { kind: "pane" } }] };
+      assert.ok(validateTemplate(t), JSON.stringify(validateTemplate.errors));
+    });
+
+    it("accepts an unnamed inline template (no top-level name)", () => {
+      const t: SessionTemplate = { windows: [{ name: "w", geometry: { kind: "pane" } }] };
+      assert.ok(validateTemplate(t), JSON.stringify(validateTemplate.errors));
+    });
+
+    it("accepts a leaf pane with cwd + command + env", () => {
+      const t: SessionTemplate = {
+        windows: [{ geometry: { kind: "pane", cwd: "/x", command: "sh", env: { A: "1", B: "" } } }],
+      };
+      assert.ok(validateTemplate(t), JSON.stringify(validateTemplate.errors));
+    });
+
+    it("rejects a template with no windows key", () => {
+      assert.strictEqual(validateTemplate({ name: "x" }), false, "windows is required");
+    });
+
+    it("rejects a template with an empty windows array", () => {
+      assert.strictEqual(validateTemplate({ windows: [] }), false, "minItems 1 — a template describes a non-empty session");
+    });
+
+    it("rejects a split with a single child", () => {
+      const bad = { windows: [{ geometry: { kind: "hsplit", children: [{ kind: "pane" }] } }] };
+      assert.strictEqual(validateTemplate(bad), false, "a split needs at least two children");
+    });
+
+    it("rejects an unknown node kind", () => {
+      const bad = { windows: [{ geometry: { kind: "tab", children: [] } }] };
+      assert.strictEqual(validateTemplate(bad), false, "kind must be pane | hsplit | vsplit");
+    });
+
+    it("rejects a leaf pane carrying a paneId (no ids in the DESIRED tree)", () => {
+      const bad = { windows: [{ geometry: { kind: "pane", paneId: "p0" } }] };
+      assert.strictEqual(validateTemplate(bad), false, "desired-geometry leaves carry no paneId (additionalProperties:false)");
+    });
+
+    it("rejects a leaf pane carrying a rect (no ABSOLUTE geometry)", () => {
+      const bad = { windows: [{ geometry: { kind: "pane", rect: { x: 0, y: 0, cols: 80, rows: 24 } } }] };
+      assert.strictEqual(validateTemplate(bad), false, "desired geometry is proportional — no absolute Rect");
+    });
+
+    it("rejects a window carrying a raw tmux layout string (layout strings never on the wire)", () => {
+      const bad = { windows: [{ name: "w", layout: "5x24,0,0[5x12,0,0,0,5x12,0,12,1]" }] };
+      assert.strictEqual(validateTemplate(bad), false, "layout strings are a driver-internal compile artifact — additionalProperties:false rejects a `layout` field");
+    });
+
+    it("rejects a non-string env value", () => {
+      const bad = { windows: [{ geometry: { kind: "pane", env: { PORT: 4000 } } }] };
+      assert.strictEqual(validateTemplate(bad), false, "env values are strings (fully substituted)");
+    });
+
+    it("rejects an extra property on a leaf pane", () => {
+      const bad = { windows: [{ geometry: { kind: "pane", shellCommand: "sh" } }] };
+      assert.strictEqual(validateTemplate(bad), false, "leaf uses `command`, not the verb's `shellCommand` — additionalProperties:false");
+    });
+
+    it("rejects a proportional weight of zero", () => {
+      const bad = { windows: [{ geometry: { kind: "hsplit", sizes: [1, 0], children: [{ kind: "pane" }, { kind: "pane" }] } }] };
+      assert.strictEqual(validateTemplate(bad), false, "weights are positive (exclusiveMinimum 0)");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 8. Session template verb surface — tc-gjdx.1 (server-proxy wire, additive)
+  // -------------------------------------------------------------------------
+
+  describe("session template verb surface (tc-gjdx.1)", () => {
+    const template: SessionTemplate = {
+      name: "web-dev",
+      windows: [
+        { name: "editor", geometry: { kind: "pane", command: "nvim ." } },
+        {
+          name: "servers",
+          geometry: {
+            kind: "hsplit",
+            sizes: [2, 1],
+            children: [
+              { kind: "pane", command: "npm run dev" },
+              { kind: "pane", command: "npm run api", env: { PORT: "4000" } },
+            ],
+          },
+        },
+      ],
+    };
+
+    // --- creating verbs carry an optional template (applied iff created:true) ---
+
+    it("accepts session.claim carrying a template", () => {
+      const msg: ServerProxyCommandRequestMessage = {
+        type: "command.request",
+        seq: 2,
+        correlationId: "claim-t1",
+        command: { kind: "session.claim", name: "main", template },
+      };
+      assert.ok(validateServerProxyClientMsg(msg), JSON.stringify(validateServerProxyClientMsg.errors));
+    });
+
+    it("accepts session.create carrying a template", () => {
+      const msg: ServerProxyCommandRequestMessage = {
+        type: "command.request",
+        seq: 2,
+        correlationId: "create-t1",
+        command: { kind: "session.create", name: "main", template },
+      };
+      assert.ok(validateServerProxyClientMsg(msg), JSON.stringify(validateServerProxyClientMsg.errors));
+    });
+
+    it("accepts session.createUnique carrying a template", () => {
+      const msg: ServerProxyCommandRequestMessage = {
+        type: "command.request",
+        seq: 2,
+        correlationId: "unique-t1",
+        command: { kind: "session.createUnique", baseName: "tmuxcc", workspaceUri: "file:///repo", template },
+      };
+      assert.ok(validateServerProxyClientMsg(msg), JSON.stringify(validateServerProxyClientMsg.errors));
+    });
+
+    // Additive guarantee: a template-less claim (the pre-tc-gjdx shape) still validates.
+    it("accepts session.claim WITHOUT a template (template is additive-optional)", () => {
+      const msg: ServerProxyCommandRequestMessage = {
+        type: "command.request",
+        seq: 2,
+        correlationId: "claim-plain",
+        command: { kind: "session.claim", name: "main" },
+      };
+      assert.ok(validateServerProxyClientMsg(msg), JSON.stringify(validateServerProxyClientMsg.errors));
+    });
+
+    // --- apply-to-live verb (with preview/dry-run) ---
+
+    it("accepts a session.applyTemplate command (real apply)", () => {
+      const msg: ServerProxyCommandRequestMessage = {
+        type: "command.request",
+        seq: 3,
+        correlationId: "apply-1",
+        command: { kind: "session.applyTemplate", sessionId: sessionId("s0"), template },
+      };
+      assert.ok(validateServerProxyClientMsg(msg), JSON.stringify(validateServerProxyClientMsg.errors));
+    });
+
+    it("accepts a session.applyTemplate command (dryRun preview)", () => {
+      const msg: ServerProxyCommandRequestMessage = {
+        type: "command.request",
+        seq: 3,
+        correlationId: "apply-preview",
+        command: { kind: "session.applyTemplate", sessionId: sessionId("s0"), template, dryRun: true },
+      };
+      assert.ok(validateServerProxyClientMsg(msg), JSON.stringify(validateServerProxyClientMsg.errors));
+    });
+
+    it("rejects a session.applyTemplate missing the template", () => {
+      const bad = {
+        type: "command.request",
+        seq: 3,
+        correlationId: "apply-bad",
+        command: { kind: "session.applyTemplate", sessionId: "s0" },
+      };
+      assert.strictEqual(validateServerProxyClientMsg(bad), false, "template is required on applyTemplate");
+    });
+
+    it("rejects a session.applyTemplate missing the sessionId", () => {
+      const bad = {
+        type: "command.request",
+        seq: 3,
+        correlationId: "apply-bad2",
+        command: { kind: "session.applyTemplate", template },
+      };
+      assert.strictEqual(validateServerProxyClientMsg(bad), false, "sessionId is required on applyTemplate");
+    });
+
+    // --- freeze verb ---
+
+    it("accepts a session.freezeTemplate command", () => {
+      const msg: ServerProxyCommandRequestMessage = {
+        type: "command.request",
+        seq: 4,
+        correlationId: "freeze-1",
+        command: { kind: "session.freezeTemplate", sessionId: sessionId("s0") },
+      };
+      assert.ok(validateServerProxyClientMsg(msg), JSON.stringify(validateServerProxyClientMsg.errors));
+    });
+
+    it("accepts a session.freezeTemplate command with a name", () => {
+      const msg: ServerProxyCommandRequestMessage = {
+        type: "command.request",
+        seq: 4,
+        correlationId: "freeze-named",
+        command: { kind: "session.freezeTemplate", sessionId: sessionId("s0"), name: "snapshot" },
+      };
+      assert.ok(validateServerProxyClientMsg(msg), JSON.stringify(validateServerProxyClientMsg.errors));
+    });
+
+    // --- result payloads (server-proxy → client) ---
+
+    it("accepts a command.response carrying an applyTemplate preview (would-create set)", () => {
+      const result: TemplateApplyResult = {
+        dryRun: true,
+        windows: [{ name: "servers", geometry: { kind: "pane", command: "npm run api" } }],
+      };
+      const msg: ServerProxyCommandResponseMessage = {
+        type: "command.response",
+        seq: 5,
+        correlationId: "apply-preview",
+        result: { ok: true, payload: { applyTemplate: result } },
+      };
+      assert.ok(validateServerProxyMsg(msg as ServerProxyMessage), JSON.stringify(validateServerProxyMsg.errors));
+    });
+
+    it("accepts a command.response carrying an applyTemplate did-create set (empty = no-op re-apply)", () => {
+      const result: TemplateApplyResult = { dryRun: false, windows: [] };
+      const msg: ServerProxyCommandResponseMessage = {
+        type: "command.response",
+        seq: 6,
+        correlationId: "apply-noop",
+        result: { ok: true, payload: { applyTemplate: result } },
+      };
+      assert.ok(validateServerProxyMsg(msg as ServerProxyMessage), JSON.stringify(validateServerProxyMsg.errors));
+    });
+
+    it("accepts a command.response carrying a frozenTemplate", () => {
+      const frozen: SessionTemplate = {
+        name: "snapshot",
+        windows: [
+          { name: "main", geometry: { kind: "hsplit", children: [{ kind: "pane", cwd: "/a" }, { kind: "pane", cwd: "/b" }] } },
+        ],
+      };
+      const msg: ServerProxyCommandResponseMessage = {
+        type: "command.response",
+        seq: 7,
+        correlationId: "freeze-1",
+        result: { ok: true, payload: { frozenTemplate: frozen } },
+      };
+      assert.ok(validateServerProxyMsg(msg as ServerProxyMessage), JSON.stringify(validateServerProxyMsg.errors));
+    });
+
+    it("accepts a command.response reporting template.invalid (fail-loud, no rollback)", () => {
+      const msg: ServerProxyCommandResponseMessage = {
+        type: "command.response",
+        seq: 8,
+        correlationId: "apply-fail",
+        result: { ok: false, code: "template.invalid", message: "split-pane failed on window 'servers'; created windows: editor" },
+      };
+      assert.ok(validateServerProxyMsg(msg as ServerProxyMessage), JSON.stringify(validateServerProxyMsg.errors));
     });
   });
 });

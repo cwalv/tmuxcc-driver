@@ -11,7 +11,11 @@
       "required": ["kind", "name"],
       "properties": {
         "kind": { "const": "session.claim" },
-        "name": { "type": "string" }
+        "name": { "type": "string" },
+        "template": {
+          "$ref": "tmuxcc:shared/session-template#/$defs/SessionTemplate",
+          "description": "Optional concrete session template to apply (tc-gjdx). Applied by the driver EXACTLY ONCE, iff this claim minted the session (created:true — the tc-3y8.2 exactly-once contract); ignored when attaching to a pre-existing session. Fully-substituted (tc-gjdx.6); driver-side application is tc-gjdx.3."
+        }
       },
       "additionalProperties": false
     },
@@ -22,7 +26,11 @@
       "required": ["kind", "name"],
       "properties": {
         "kind": { "const": "session.create" },
-        "name": { "type": "string" }
+        "name": { "type": "string" },
+        "template": {
+          "$ref": "tmuxcc:shared/session-template#/$defs/SessionTemplate",
+          "description": "Optional concrete session template to apply on creation (tc-gjdx). Applied iff created:true; since session.create always mints (or fails), this applies whenever the command succeeds. Fully-substituted; driver-side application is tc-gjdx.3."
+        }
       },
       "additionalProperties": false
     },
@@ -37,6 +45,41 @@
         "workspaceUri": {
           "type": "string",
           "description": "Optional workspace identity (S4 / tc-76m8.6). When present the broker sets it on the minted session as the @tmuxcc-workspace user-option so a later reopen matches by identity. Canonical workspace URI; omitted for folderless windows and older extensions."
+        },
+        "template": {
+          "$ref": "tmuxcc:shared/session-template#/$defs/SessionTemplate",
+          "description": "Optional concrete session template to apply on creation (tc-gjdx). createUnique always mints (created:true), so this applies whenever the command succeeds. Fully-substituted; driver-side application is tc-gjdx.3."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "SessionApplyTemplateCommand": {
+      "type": "object",
+      "description": "Apply a concrete session template to a LIVE session, safe direction (tc-gjdx.4). The driver diffs the template against the live session model and creates only the windows whose names are absent live; name-matching windows are left alone (idempotent — a re-apply is a no-op). With dryRun the driver computes but does NOT create the would-create set (a preview for the confirmation UI, tc-gjdx.7). The response payload (applyTemplate) carries the would-create set (dryRun) / did-create set (real apply). A real apply executes via the same transaction machinery as apply-at-create and fails loud with no rollback (tc-gjdx.3 partial-failure semantics).",
+      "required": ["kind", "sessionId", "template"],
+      "properties": {
+        "kind": { "const": "session.applyTemplate" },
+        "sessionId": { "$ref": "tmuxcc:shared/primitives#/$defs/SessionId" },
+        "template": { "$ref": "tmuxcc:shared/session-template#/$defs/SessionTemplate" },
+        "dryRun": {
+          "type": "boolean",
+          "description": "True: compute the would-create set and return it WITHOUT applying (preview). False/omitted: actually create the missing windows/panes."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "SessionFreezeTemplateCommand": {
+      "type": "object",
+      "description": "Freeze a LIVE session into a schema-valid session template (tc-gjdx.5) — 'save current session as template'. The driver captures window names, per-pane working directories, and geometry (from window_layout) as a desired-geometry tree. Any client may invoke it. The response payload (frozenTemplate) is a SessionTemplate that re-applies with full topology/geometry fidelity.",
+      "required": ["kind", "sessionId"],
+      "properties": {
+        "kind": { "const": "session.freezeTemplate" },
+        "sessionId": { "$ref": "tmuxcc:shared/primitives#/$defs/SessionId" },
+        "name": {
+          "type": "string",
+          "description": "Optional name to embed as the frozen template's `name`. Omitted: the driver leaves the output template unnamed (or defaults to the session name — tc-gjdx.5's call)."
         }
       },
       "additionalProperties": false
@@ -83,6 +126,8 @@
         { "$ref": "#/$defs/SessionCreateCommand" },
         { "$ref": "#/$defs/SessionCreateUniqueCommand" },
         { "$ref": "#/$defs/SessionDestroyCommand" },
+        { "$ref": "#/$defs/SessionApplyTemplateCommand" },
+        { "$ref": "#/$defs/SessionFreezeTemplateCommand" },
         { "$ref": "#/$defs/ServerProxyInfoCommand" }
       ],
       "description": "Discriminated union of all server-proxy commands a client may issue via command.request. Narrow on `kind`. (session.attach is a top-level message, not a command — see SessionAttachMessage.)"

@@ -35,6 +35,17 @@ export type {
   WindowLayout,
 } from "./layout.js";
 
+// Session template types (tc-gjdx): declarative session shape + desired-geometry tree
+export type {
+  TemplatePane,
+  TemplateHSplit,
+  TemplateVSplit,
+  TemplateNode,
+  WindowTemplate,
+  SessionTemplate,
+  TemplateApplyResult,
+} from "./session-template.js";
+
 // Shared envelope types — protocol version, capabilities, base types
 export { WIRE_PROTOCOL_VERSION } from "./envelope.js";
 export type { Capabilities, WireFeature, MessageBase, ClientIdentity, ClientFlags } from "./envelope.js";
@@ -55,7 +66,11 @@ export type {
   ServerProxyCommand,
   SessionClaimCommand,
   SessionCreateCommand,
+  SessionCreateUniqueCommand,
   SessionDestroyCommand,
+  // tc-gjdx.1: apply-to-live + freeze template verbs
+  SessionApplyTemplateCommand,
+  SessionFreezeTemplateCommand,
   // D5 (tc-4b6k.4): post-handshake connection→session binding
   SessionAttachMessage,
   // tc-k6v: server-proxy diagnostics snapshot
