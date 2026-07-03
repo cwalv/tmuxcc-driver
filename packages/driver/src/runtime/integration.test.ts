@@ -850,6 +850,11 @@ describe("tc-93a: SessionProxy integration — fake-tmux harness", () => {
     const addPromise = server.addClient(dt);
     await runClientHandshake(ct, CLIENT_CAPS);
     await addPromise;
+    // Register the client's FC sub-ledger (tc-0wtb; with zero registered
+    // clients the controller accounts nothing — FC-6). This test drains it
+    // manually below (the attached transport is bare, not the draining
+    // wrapper).
+    fc.addClient(dt);
 
     const P5 = paneId("p5");
 
@@ -892,7 +897,7 @@ describe("tc-93a: SessionProxy integration — fake-tmux harness", () => {
 
     // --- Phase 4: drain below LOW watermark → resume ---
     // Simulate client draining the 600 bytes (below LOW=100).
-    fc.noteDrained(P5, 600);
+    fc.noteDrained(P5, 600, dt);
 
     assert.equal(fc.isPanePaused(P5), false, "pane must be resumed after draining below low-water mark");
     assert.equal(demux.isPanePaused(P5), false, "demux gate must be open after resume");
@@ -1142,6 +1147,11 @@ describe("tc-7ml.1: flow-control resume wiring — notification routing + noteDr
 
     const P1 = paneId("p1");
 
+    // Register a client sub-ledger for the flood to fan into (tc-0wtb; with
+    // zero registered clients the controller accounts nothing — FC-6). This
+    // test never drains it: resume comes via the %continue notification.
+    fcW1.addClient({ id: "w1-client" });
+
     // Sanity: not paused before flood.
     assert.equal(fcW1.isPanePaused(P1), false, "W1: pane must not be paused before flood");
 
@@ -1269,9 +1279,14 @@ describe("tc-7ml.1: flow-control resume wiring — notification routing + noteDr
   //     wraps sendData to call fc.noteDrained automatically
   //
   // This is a unit-level check of the drainingTransport pattern introduced
-  // in createSessionProxy.addClient.  We replicate the pattern directly and verify:
-  //   - when sendData fires, fc.noteDrained is called for the right pane + count
-  //   - after a pause+drain cycle driven purely by sendData, the FC is drained
+  // in createSessionProxy.addClient.  We replicate the pattern directly (a
+  // scripted inner transport that returns a shared pending Promise while
+  // "backpressured", like SocketTransport) and verify:
+  //   - while backpressured, NO credit fires before the real drain: the
+  //     counter climbs, crosses HIGH and pauses (deferred-credit branch)
+  //   - when the drain promise resolves, the deferred credits fire against
+  //     the right (pane × client) and the pane resumes
+  //   - an un-backpressured sendData credits synchronously (void branch)
   //
   // This tests the WIRING PATTERN, not createSessionProxy directly (since createSessionProxy
   // creates its own TmuxHost internally and can't easily accept a fake host).
@@ -1286,19 +1301,21 @@ describe("tc-7ml.1: flow-control resume wiring — notification routing + noteDr
     const LOW = 100;
 
     const demuxW3 = createOutputDemux();
-    // tc-3si.1: this test exercises drain accounting and never triggers a
-    // pause/continue command, so a never-resolving `send` stub is sufficient.
+    // tc-3si.1: this test exercises drain accounting and never asserts on
+    // pause/continue commands, so a never-resolving `send` stub is sufficient.
     const fcW3 = createFlowController(
       () => new Promise(() => {}),
       demuxW3,
       { highWaterBytes: HIGH, lowWaterBytes: LOW },
     );
 
-    // Create the accounting store (same as createSessionProxy's accountingStore).
+    // Accounting store with the PRODUCTION order (session-proxy.ts, tc-t4k1):
+    // COUNT BEFORE FAN-OUT, so a synchronous credit can never precede its own
+    // debit, and the crossing chunk is gated before it is fanned out.
     const accountingW3: typeof demuxW3.store = {
       append(pid: PaneId, bytes: Uint8Array): void {
-        demuxW3.store.append(pid, bytes);
         if (bytes.length > 0) fcW3.onPaneBytes(pid, bytes.length);
+        demuxW3.store.append(pid, bytes);
       },
       getContents: demuxW3.store.getContents.bind(demuxW3.store),
       size: demuxW3.store.size.bind(demuxW3.store),
@@ -1307,69 +1324,98 @@ describe("tc-7ml.1: flow-control resume wiring — notification routing + noteDr
     };
 
     const P7 = paneId("p7");
+    demuxW3.notifyPaneBound(P7);
 
-    // Flood BEFORE attaching the client — bytes go to store but no transport
-    // to call sendData, so noteDrained is never called. The crossing chunk's
-    // overshoot is gate-dropped (FC-4, tc-2ztp), so the counter clamps to
-    // exactly HIGH while paused (not HIGH+1).
-    accountingW3.append(P7, new Uint8Array(HIGH + 1).fill(0xBB));
-    assert.equal(fcW3.isPanePaused(P7), true, "W3: pane must be paused after flood");
-    const pausedCounter = fcW3.bufferedBytes(P7);
-    assert.equal(
-      pausedCounter,
-      HIGH,
-      `W3: bufferedBytes (${pausedCounter}) clamps to HIGH (${HIGH}) at the pause edge`,
-    );
-
-    // Now attach a client via the drainingTransport pattern (createSessionProxy's fix).
-    const { sessionProxy: rawSessionProxy } = createInMemoryTransportPair();
-    const drainingTransport: Transport = {
+    // Scripted inner transport with SocketTransport's backpressure contract:
+    // while `backpressured`, sendData returns a shared pending Promise that
+    // resolves on "drain".
+    const { sessionProxy: rawSessionProxy, client: clientW3 } = createInMemoryTransportPair();
+    clientW3.onData(() => {}); // sink
+    let backpressured = true;
+    let drainResolve: (() => void) | null = null;
+    let drainPromise: Promise<void> | null = null;
+    /** The socket "drains": release the shared drain promise (SocketTransport's contract). */
+    function releaseDrain(): void {
+      const r = drainResolve;
+      drainPromise = null;
+      drainResolve = null;
+      assert.ok(r !== null, "W3: precondition — backpressured sends must have deferred on the drain promise");
+      r();
+    }
+    const innerW3: Transport = {
       ...rawSessionProxy,
       sendData(pid: PaneId, bytes: Uint8Array): void | Promise<void> {
-        const result = rawSessionProxy.sendData(pid, bytes);
-        if (bytes.length > 0) {
-          fcW3.noteDrained(pid, bytes.length);
+        void rawSessionProxy.sendData(pid, bytes);
+        if (!backpressured || bytes.length === 0) return undefined;
+        if (drainPromise === null) {
+          drainPromise = new Promise<void>((res) => {
+            drainResolve = res;
+          });
         }
-        return result;
+        return drainPromise;
+      },
+    };
+
+    // The drainingTransport pattern from createSessionProxy.addClient: register
+    // the client and credit ITS sub-ledger when its transport drains (tc-0wtb).
+    fcW3.addClient(innerW3);
+    const drainingTransport: Transport = {
+      ...innerW3,
+      sendData(pid: PaneId, bytes: Uint8Array): void | Promise<void> {
+        const result = innerW3.sendData(pid, bytes);
+        if (bytes.length === 0) return result;
+        if (result !== undefined && typeof (result as Promise<void>).then === "function") {
+          return (result as Promise<void>).then(() => {
+            fcW3.noteDrained(pid, bytes.length, innerW3);
+          });
+        }
+        fcW3.noteDrained(pid, bytes.length, innerW3);
+        return undefined;
       },
     };
     demuxW3.attachTransport(drainingTransport);
 
-    // While paused, the gate is CLOSED — sendData is NOT called on append.
-    // So noteDrained is NOT auto-called by the transport path while paused.
-    // The resume must come from a manual noteDrained call (or %continue notification).
-    // Verify: draining via noteDrained explicitly resumes.
-    const drainAmount = pausedCounter - LOW + 1; // enough to go below LOW
-    fcW3.noteDrained(P7, drainAmount);
+    // Flood in 150-byte chunks against the backpressured client. Chunks 1–3
+    // (450 bytes) are fanned out with their credits DEFERRED on the pending
+    // drain promise; chunk 4 crosses HIGH inside onPaneBytes, pauses the pane
+    // BEFORE its own fan-out (the crossing chunk is gate-dropped and never
+    // credited), and clamps the sub-ledger to HIGH (FC-4, tc-2ztp).
+    const chunk = new Uint8Array(150).fill(0xBB);
+    for (let i = 0; i < 4; i++) accountingW3.append(P7, chunk);
+    assert.equal(fcW3.isPanePaused(P7), true, "W3: pane must be paused after flood");
+    assert.equal(
+      fcW3.bufferedBytes(P7),
+      HIGH,
+      "W3: no credit may fire before the real drain (counter clamps to HIGH at the pause edge)",
+    );
 
+    // The socket drains: the deferred credits (3 × 150 = 450) fire against
+    // this client's sub-ledger → 500 − 450 = 50 ≤ LOW → auto-resume.
+    backpressured = false;
+    releaseDrain();
+    await new Promise((res) => setImmediate(res)); // run the credit microtasks
+
+    assert.equal(
+      fcW3.bufferedBytes(P7),
+      HIGH - 3 * chunk.length,
+      "W3: deferred credits must debit exactly the fanned-out bytes on drain",
+    );
     assert.equal(
       fcW3.isPanePaused(P7),
       false,
-      "W3: pane must be resumed after manual noteDrained below low-water",
+      "W3: pane must resume once the deferred credits fall to/below low-water",
     );
-    assert.equal(
-      demuxW3.isPanePaused(P7),
-      false,
-      "W3: demux gate must be open after resume",
-    );
+    assert.equal(demuxW3.isPanePaused(P7), false, "W3: demux gate must be open after resume");
 
-    // Now send new bytes (gate is open) — verify drainingTransport calls noteDrained.
+    // Un-backpressured append: the void branch credits synchronously, so the
+    // counter returns to the pre-append residue immediately.
     const preCounter = fcW3.bufferedBytes(P7);
-    const newChunk = new Uint8Array(50).fill(0xCC);
-    accountingW3.append(P7, newChunk);
-
-    // Expected: onPaneBytes(50) increments, then sendData → noteDrained(50) decrements.
-    // Net: counter may return to ~preCounter (if noteDrained(50) is called after onPaneBytes(50)).
-    // But actually: sendData fires BEFORE onPaneBytes in accountingStore.append.
-    // So noteDrained(50) fires first (may clamp to 0 if counter was 0), then onPaneBytes(50) fires.
-    // Either way, bufferedBytes should be ≤ preCounter + 50 (not unboundedly growing).
-    const postCounter = fcW3.bufferedBytes(P7);
-    assert.ok(
-      postCounter <= preCounter + newChunk.length,
-      `W3: bufferedBytes (${postCounter}) must not grow unboundedly; ` +
-      `was ${preCounter} before append, chunk ${newChunk.length} bytes`,
+    accountingW3.append(P7, new Uint8Array(30).fill(0xCC));
+    assert.equal(
+      fcW3.bufferedBytes(P7),
+      preCounter,
+      "W3: the sync credit must land within the append (count → fan-out → drain)",
     );
-    // Pane must still be unpaused (50 << HIGH=500).
     assert.equal(fcW3.isPanePaused(P7), false, "W3: pane must remain unpaused after small post-resume append");
   });
 });

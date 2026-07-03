@@ -64,6 +64,17 @@
  *         owed to any transport. bufferedBytes is therefore frozen at the pause
  *         instant (capped at HIGH_WATER) until a drain credit or further append
  *         after resume moves it.
+ *   FC-6  Zero-client intervals (tc-76m8.32). The ledger's keys are exactly
+ *         the registered client set: with zero registered clients onPaneBytes
+ *         accounts nothing and backpressure never engages. Pane bytes still
+ *         land in the (capped) scrollback store — the continuity mirror a
+ *         reattaching client hydrates from — but they are owed to no transport
+ *         (FC-4's sense), and a sub-ledger entry no transport drains could
+ *         never be debited: it would pin the FC-3 max above LOW_WATER forever,
+ *         wedging a pane that flooded while detached even across a reattach.
+ *         Because removeClient re-evaluates paused panes (FC-3) and the max
+ *         over the empty set is 0, no pane stays backpressure-paused into a
+ *         zero-client interval either.
  *
  * # Design
  *
@@ -106,8 +117,11 @@
  *    `removeClient(clientKey)`.  A client attaching mid-flood starts at 0 (its
  *    history replay is delivered on the raw transport and never counted; only
  *    live deltas from its attach point are credited).  When zero clients are
- *    registered the controller accounts against a single implicit client, which
- *    is the N=1 reduction used by direct-drive callers/tests.
+ *    registered NO accounting occurs at all (FC-6): there is no consumer queue
+ *    to bound, and a sub-ledger without a draining client would wedge the
+ *    resume edge permanently (tc-76m8.32).  Direct-drive callers/tests
+ *    register an explicit client key and drain it themselves — the N=1
+ *    reduction to the original single shared counter.
  *
  * 2. **Honor tmux's unsolicited %pause/%continue**: tmux may also send these
  *    notifications on its own (e.g. capacity management across multiple clients).
@@ -139,9 +153,11 @@
  * ## API seam for tc-93a (integration test)
  *
  *   tc-93a drives a flood via the pipeline's notification path:
+ *     0. Register a client key (`fc.addClient(key)`) — with zero registered
+ *        clients no accounting occurs (FC-6).
  *     1. Call `fc.onPaneBytes(paneId, byteCount)` for each append.
  *     2. Observe the `send` callback's recorded commands for pause/continue.
- *     3. Call `fc.noteDrained(paneId, byteCount)` to simulate client drain.
+ *     3. Call `fc.noteDrained(paneId, byteCount, key)` to simulate client drain.
  *     4. Observe resume command + demux gate state.
  *
  *   Alternatively tc-93a can subscribe to pipeline notifications and call the
@@ -172,15 +188,6 @@ export const DEFAULT_HIGH_WATER_BYTES = 262_144; // 256 KiB
 
 /** Default low-water mark in bytes (64 KiB). Resume triggered below this. */
 export const DEFAULT_LOW_WATER_BYTES = 65_536; // 64 KiB
-
-/**
- * The implicit single client used when no clients are explicitly registered
- * (tc-0wtb). Direct-drive callers (tests, the single-client integration layer)
- * never call `addClient`/`removeClient`; accounting routes to this one
- * sub-ledger, reducing the per-client model to the original single shared
- * counter (the N=1 case).
- */
-const DEFAULT_CLIENT: ClientKey = { default: true };
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -280,7 +287,9 @@ export interface FlowController {
    * Called by the caller each time bytes are appended to the demux store
    * (i.e. wrap around the append tap or call from the pipeline layer).
    * When the cumulative total crosses the high-water mark the controller
-   * issues a pause command and gates the demux.
+   * issues a pause command and gates the demux. With zero registered clients
+   * this is a no-op (FC-6): the bytes are owed to no transport, so they are
+   * not buffered and backpressure never engages.
    */
   onPaneBytes(paneId: PaneId, byteCount: number): void;
 
@@ -307,12 +316,13 @@ export interface FlowController {
    * `clientKey`'s per-pane sub-ledger (tc-0wtb).
    *
    * When ALL clients' backlogs for the pane have fallen to/below the low-water
-   * mark while the pane is paused, the controller issues a continue command and
-   * opens the demux gate. `clientKey` may be omitted by direct-drive callers
-   * (tests / the single-client integration layer); it then debits the implicit
-   * default client used when no clients are explicitly registered.
+   * mark while the pane is paused, the controller issues a continue command
+   * and opens the demux gate. `clientKey` must name a sub-ledger that has
+   * actually been credited — a credit for an unknown (pane × client) trips
+   * the `onDrainClamped` tripwire and debits nothing (tc-76m8.27; FC-6 means
+   * there is no implicit client a keyless credit could ever have named).
    */
-  noteDrained(paneId: PaneId, byteCount: number, clientKey?: ClientKey): void;
+  noteDrained(paneId: PaneId, byteCount: number, clientKey: ClientKey): void;
 
   /**
    * Honor an incoming `%pause %<pane>` notification from tmux.
@@ -378,9 +388,9 @@ class FlowControllerImpl implements FlowController {
 
   /**
    * The registered client set (tc-0wtb). `onPaneBytes` fans bytes into each of
-   * these clients' sub-ledgers. When empty, `_DEFAULT_CLIENT` stands in (the
-   * N=1 reduction for direct-drive callers/tests). Once any real client is
-   * registered the default is no longer used.
+   * these clients' sub-ledgers — and into NOTHING when the set is empty
+   * (FC-6, tc-76m8.32): the ledger's keys are exactly this set, so an entry
+   * no client is responsible for draining cannot exist by construction.
    */
   private readonly _clients = new Set<ClientKey>();
 
@@ -414,9 +424,7 @@ class FlowControllerImpl implements FlowController {
     // Idempotent. A client added mid-flood starts at 0: we create no
     // sub-ledger entry here, so onPaneBytes only credits it from the next
     // append onward (its history replay rides the raw transport and is never
-    // counted). The implicit DEFAULT_CLIENT sub-ledger, if any, is left in
-    // place but ignored once a real client exists (accounting iterates
-    // _clients).
+    // counted).
     this._clients.add(clientKey);
   }
 
@@ -458,11 +466,18 @@ class FlowControllerImpl implements FlowController {
       this._metrics.onBytesWhilePaused?.(paneId, byteCount);
       return;
     }
+    // FC-6 (tc-76m8.32): with zero registered clients the bytes are owed to
+    // no transport — account NOTHING (no entry materialized, no pause). The
+    // scrollback store still mirrors them for reattach hydration; an entry
+    // fanned in here would have no draining client and would pin the resume
+    // edge forever once it crossed high-water.
+    if (this._clients.size === 0) return;
+
     // Fan the bytes into EVERY registered client's sub-ledger — the demux fans
     // one append out to all attached transports, so each client independently
     // owes these bytes until its own transport drains them (tc-0wtb).
     const inner = this._innerFor(paneId);
-    for (const clientKey of this._effectiveClients()) {
+    for (const clientKey of this._clients) {
       inner.set(clientKey, (inner.get(clientKey) ?? 0) + byteCount);
     }
 
@@ -477,18 +492,17 @@ class FlowControllerImpl implements FlowController {
       // to HIGH_WATER so the un-deliverable overshoot doesn't pin the resume
       // edge (same reasoning as the while-paused early-return above).
       this._pause(paneId);
-      for (const clientKey of this._effectiveClients()) {
+      for (const clientKey of this._clients) {
         const cur = inner.get(clientKey) ?? 0;
         if (cur > this._highWater) inner.set(clientKey, this._highWater);
       }
     }
   }
 
-  noteDrained(paneId: PaneId, byteCount: number, clientKey?: ClientKey): void {
+  noteDrained(paneId: PaneId, byteCount: number, clientKey: ClientKey): void {
     if (byteCount <= 0) return;
-    const client = this._resolveClient(clientKey);
     const inner = this._buffered.get(paneId);
-    const prev = inner?.get(client);
+    const prev = inner?.get(clientKey);
     if (inner === undefined || prev === undefined) {
       // A drain credit for a (pane × client) sub-ledger that does not exist:
       // the client was never credited a byte for this pane, or was already
@@ -506,7 +520,7 @@ class FlowControllerImpl implements FlowController {
       // this remains a genuine expected-zero tripwire (tc-0wtb).
       this._metrics.onDrainClamped?.(paneId, byteCount - prev);
     }
-    inner.set(client, Math.max(0, prev - byteCount));
+    inner.set(clientKey, Math.max(0, prev - byteCount));
 
     // Trigger resume only when ALL clients have fallen to/below low-water and
     // the pane is currently paused by backpressure (we only resume what we
@@ -578,27 +592,6 @@ class FlowControllerImpl implements FlowController {
       if (v > max) max = v;
     }
     return max;
-  }
-
-  /**
-   * The clients accounting fans into: the registered set, or the implicit
-   * default when none are registered (the N=1 direct-drive reduction).
-   */
-  private _effectiveClients(): Iterable<ClientKey> {
-    return this._clients.size > 0 ? this._clients : [DEFAULT_CLIENT];
-  }
-
-  /**
-   * Resolve a `noteDrained` client key to the sub-ledger it debits. An omitted
-   * key (direct-drive callers) maps to DEFAULT_CLIENT. An explicit key must
-   * name a sub-ledger that has actually been credited: the production
-   * draining wrapper (session-proxy.ts) suppresses credits once the client's
-   * transport has closed, so a credit arriving for a removed client's key is
-   * an accounting bug — noteDrained witnesses it via onDrainClamped and
-   * debits nothing (tc-76m8.27).
-   */
-  private _resolveClient(clientKey?: ClientKey): ClientKey {
-    return clientKey ?? DEFAULT_CLIENT;
   }
 
   // -------------------------------------------------------------------------
@@ -680,8 +673,10 @@ class FlowControllerImpl implements FlowController {
  * //    fc.onContinueNotification(paneId) — on %continue %<pane>
  * //    fc.onExtendedOutput(paneId, bytes.length) — on %extended-output
  *
- * // 4. Notify when client drains (e.g. from the serve layer after sendData):
- * //    fc.noteDrained(paneId, byteCount)
+ * // 4. Register each attaching client and notify when it drains (e.g. from
+ * //    the serve layer after sendData):
+ * //    fc.addClient(transport)
+ * //    fc.noteDrained(paneId, byteCount, transport)
  * ```
  *
  * # Water-mark policy

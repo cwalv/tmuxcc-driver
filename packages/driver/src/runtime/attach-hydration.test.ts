@@ -326,16 +326,19 @@ function makeFcHarness() {
     },
   );
 
-  // Per-client draining wrapper — mirrors session-proxy.ts addClient exactly.
+  // Per-client draining wrapper — mirrors session-proxy.ts addClient exactly:
+  // register the client and credit ITS sub-ledger (keyed by the raw
+  // transport, tc-0wtb).
+  fc.addClient(rawTransport);
   const drainingTransport: Transport = {
     ...rawTransport,
     sendData(pid: PaneId, bytes: Uint8Array): void | Promise<void> {
       const result = rawTransport.sendData(pid, bytes);
       if (bytes.length === 0) return result;
       if (result !== undefined && typeof (result as Promise<void>).then === "function") {
-        return (result as Promise<void>).then(() => fc.noteDrained(pid, bytes.length));
+        return (result as Promise<void>).then(() => fc.noteDrained(pid, bytes.length, rawTransport));
       }
-      fc.noteDrained(pid, bytes.length);
+      fc.noteDrained(pid, bytes.length, rawTransport);
       return undefined;
     },
   };
@@ -413,7 +416,7 @@ describe("tc-t4k1 FC-1 drain over-credit on hydration", () => {
     // ledger never held. If this did not clamp, the positive tests above would
     // be vacuous.
     const h = makeFcHarness();
-    h.fc.noteDrained(P1, 1_234); // no prior onPaneBytes → pure over-credit
+    h.fc.noteDrained(P1, 1_234, h.rawTransport); // no prior onPaneBytes → pure over-credit
     assert.equal(h.clamps.length, 1, "drain for un-buffered bytes must clamp");
     assert.equal(h.clamps[0]!.excess, 1_234);
   });

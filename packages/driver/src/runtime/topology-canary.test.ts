@@ -134,6 +134,12 @@ describe(
         try {
           const { sessionProxy, controller, paneId: pane1Id } = session;
           const fc = sessionProxy.flowController;
+          // tc-76m8.32 (FC-6): with zero registered clients the controller
+          // accounts nothing. This suite drains manually, so register a
+          // synthetic client key for the flood to fan into — the explicit
+          // N=1 direct-drive reduction (tc-0wtb).
+          const manualClient = { id: "manual-drain" };
+          fc.addClient(manualClient);
           const pipeline = sessionProxy.pipeline;
 
           // Sanity: start with exactly one pane (1 window).
@@ -195,7 +201,7 @@ describe(
             if (fc.isPanePaused(firehosePaneId)) {
               const b = fc.bufferedBytes(firehosePaneId);
               if (b > DEFAULT_LOW_WATER_BYTES) {
-                fc.noteDrained(firehosePaneId, b - DEFAULT_LOW_WATER_BYTES + 1);
+                fc.noteDrained(firehosePaneId, b - DEFAULT_LOW_WATER_BYTES + 1, manualClient);
               }
             }
           }, 5);
@@ -312,7 +318,7 @@ describe(
             // Drain residue so teardown is clean.
             const residue = fc.bufferedBytes(firehosePaneId);
             if (residue > 0) {
-              fc.noteDrained(firehosePaneId, residue);
+              fc.noteDrained(firehosePaneId, residue, manualClient);
             }
           }
         } finally {

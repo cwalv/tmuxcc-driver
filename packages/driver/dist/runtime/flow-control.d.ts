@@ -64,6 +64,17 @@
  *         owed to any transport. bufferedBytes is therefore frozen at the pause
  *         instant (capped at HIGH_WATER) until a drain credit or further append
  *         after resume moves it.
+ *   FC-6  Zero-client intervals (tc-76m8.32). The ledger's keys are exactly
+ *         the registered client set: with zero registered clients onPaneBytes
+ *         accounts nothing and backpressure never engages. Pane bytes still
+ *         land in the (capped) scrollback store — the continuity mirror a
+ *         reattaching client hydrates from — but they are owed to no transport
+ *         (FC-4's sense), and a sub-ledger entry no transport drains could
+ *         never be debited: it would pin the FC-3 max above LOW_WATER forever,
+ *         wedging a pane that flooded while detached even across a reattach.
+ *         Because removeClient re-evaluates paused panes (FC-3) and the max
+ *         over the empty set is 0, no pane stays backpressure-paused into a
+ *         zero-client interval either.
  *
  * # Design
  *
@@ -106,8 +117,11 @@
  *    `removeClient(clientKey)`.  A client attaching mid-flood starts at 0 (its
  *    history replay is delivered on the raw transport and never counted; only
  *    live deltas from its attach point are credited).  When zero clients are
- *    registered the controller accounts against a single implicit client, which
- *    is the N=1 reduction used by direct-drive callers/tests.
+ *    registered NO accounting occurs at all (FC-6): there is no consumer queue
+ *    to bound, and a sub-ledger without a draining client would wedge the
+ *    resume edge permanently (tc-76m8.32).  Direct-drive callers/tests
+ *    register an explicit client key and drain it themselves — the N=1
+ *    reduction to the original single shared counter.
  *
  * 2. **Honor tmux's unsolicited %pause/%continue**: tmux may also send these
  *    notifications on its own (e.g. capacity management across multiple clients).
@@ -139,9 +153,11 @@
  * ## API seam for tc-93a (integration test)
  *
  *   tc-93a drives a flood via the pipeline's notification path:
+ *     0. Register a client key (`fc.addClient(key)`) — with zero registered
+ *        clients no accounting occurs (FC-6).
  *     1. Call `fc.onPaneBytes(paneId, byteCount)` for each append.
  *     2. Observe the `send` callback's recorded commands for pause/continue.
- *     3. Call `fc.noteDrained(paneId, byteCount)` to simulate client drain.
+ *     3. Call `fc.noteDrained(paneId, byteCount, key)` to simulate client drain.
  *     4. Observe resume command + demux gate state.
  *
  *   Alternatively tc-93a can subscribe to pipeline notifications and call the
@@ -251,7 +267,9 @@ export interface FlowController {
      * Called by the caller each time bytes are appended to the demux store
      * (i.e. wrap around the append tap or call from the pipeline layer).
      * When the cumulative total crosses the high-water mark the controller
-     * issues a pause command and gates the demux.
+     * issues a pause command and gates the demux. With zero registered clients
+     * this is a no-op (FC-6): the bytes are owed to no transport, so they are
+     * not buffered and backpressure never engages.
      */
     onPaneBytes(paneId: PaneId, byteCount: number): void;
     /**
@@ -275,12 +293,13 @@ export interface FlowController {
      * `clientKey`'s per-pane sub-ledger (tc-0wtb).
      *
      * When ALL clients' backlogs for the pane have fallen to/below the low-water
-     * mark while the pane is paused, the controller issues a continue command and
-     * opens the demux gate. `clientKey` may be omitted by direct-drive callers
-     * (tests / the single-client integration layer); it then debits the implicit
-     * default client used when no clients are explicitly registered.
+     * mark while the pane is paused, the controller issues a continue command
+     * and opens the demux gate. `clientKey` must name a sub-ledger that has
+     * actually been credited — a credit for an unknown (pane × client) trips
+     * the `onDrainClamped` tripwire and debits nothing (tc-76m8.27; FC-6 means
+     * there is no implicit client a keyless credit could ever have named).
      */
-    noteDrained(paneId: PaneId, byteCount: number, clientKey?: ClientKey): void;
+    noteDrained(paneId: PaneId, byteCount: number, clientKey: ClientKey): void;
     /**
      * Honor an incoming `%pause %<pane>` notification from tmux.
      *
@@ -355,8 +374,10 @@ export interface FlowController {
  * //    fc.onContinueNotification(paneId) — on %continue %<pane>
  * //    fc.onExtendedOutput(paneId, bytes.length) — on %extended-output
  *
- * // 4. Notify when client drains (e.g. from the serve layer after sendData):
- * //    fc.noteDrained(paneId, byteCount)
+ * // 4. Register each attaching client and notify when it drains (e.g. from
+ * //    the serve layer after sendData):
+ * //    fc.addClient(transport)
+ * //    fc.noteDrained(paneId, byteCount, transport)
  * ```
  *
  * # Water-mark policy

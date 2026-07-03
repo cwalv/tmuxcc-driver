@@ -27,11 +27,14 @@
  * # How pause is triggered
  *
  * The session-proxy's `accountingStore` (wired in session-proxy.ts) calls `fc.onPaneBytes`
- * on every append.  `noteDrained` is NEVER called automatically by the real
- * serve layer — it is an explicit drain signal.  Therefore, under a real
- * firehose, `fc.bufferedBytes` grows monotonically until the high-water mark
- * is crossed and pause is issued.  Tests drive the resume cycle by calling
- * `sessionProxy.flowController.noteDrained(paneId, n)` directly.
+ * on every append.  Each test registers a synthetic client key on the flow
+ * controller (with zero registered clients the controller accounts nothing —
+ * FC-6, tc-76m8.32) whose sub-ledger is NEVER credited automatically: the
+ * harness attaches a bare transport, not the production draining wrapper.
+ * Therefore, under a real firehose, `fc.bufferedBytes` grows monotonically
+ * until the high-water mark is crossed and pause is issued.  Tests drive the
+ * resume cycle by calling
+ * `sessionProxy.flowController.noteDrained(paneId, n, manualClient)` directly.
  *
  * # Cap-eviction semantics
  *
@@ -187,6 +190,12 @@ describe(
         try {
           const { sessionProxy, controller, paneId } = session;
           const fc = sessionProxy.flowController;
+          // tc-76m8.32 (FC-6): with zero registered clients the controller
+          // accounts nothing. This suite drains manually, so register a
+          // synthetic client key for the flood to fan into — the explicit
+          // N=1 direct-drive reduction (tc-0wtb).
+          const manualClient = { id: "manual-drain" };
+          fc.addClient(manualClient);
           const demux = sessionProxy.demux;
 
           // Sanity: pane is not paused at start.
@@ -269,6 +278,12 @@ describe(
         try {
           const { sessionProxy, controller, paneId } = session;
           const fc = sessionProxy.flowController;
+          // tc-76m8.32 (FC-6): with zero registered clients the controller
+          // accounts nothing. This suite drains manually, so register a
+          // synthetic client key for the flood to fan into — the explicit
+          // N=1 direct-drive reduction (tc-0wtb).
+          const manualClient = { id: "manual-drain" };
+          fc.addClient(manualClient);
           const demux = sessionProxy.demux;
 
           // Start firehose to trigger pause.
@@ -310,7 +325,7 @@ describe(
           // the same synchronous block — no event can interleave, so the
           // residual is deterministic and asserted EXACTLY (verifies FC-1).
           const drainAmount = buffered - DEFAULT_LOW_WATER_BYTES + 1;
-          fc.noteDrained(paneId, drainAmount);
+          fc.noteDrained(paneId, drainAmount, manualClient);
 
           // Must have resumed synchronously within noteDrained (verifies FC-3).
           assert.equal(
@@ -364,6 +379,12 @@ describe(
         try {
           const { sessionProxy, controller, paneId } = session;
           const fc = sessionProxy.flowController;
+          // tc-76m8.32 (FC-6): with zero registered clients the controller
+          // accounts nothing. This suite drains manually, so register a
+          // synthetic client key for the flood to fan into — the explicit
+          // N=1 direct-drive reduction (tc-0wtb).
+          const manualClient = { id: "manual-drain" };
+          fc.addClient(manualClient);
           const demux = sessionProxy.demux;
 
           for (let cycle = 1; cycle <= 2; cycle++) {
@@ -386,7 +407,7 @@ describe(
 
             // Drain to resume.
             const buffered = fc.bufferedBytes(paneId);
-            fc.noteDrained(paneId, buffered); // drain to 0 — well below low-water
+            fc.noteDrained(paneId, buffered, manualClient); // drain to 0 — well below low-water
 
             assert.equal(fc.isPanePaused(paneId), false, `cycle ${cycle}: must be resumed`);
             assert.equal(demux.isPanePaused(paneId), false, `cycle ${cycle}: demux must be open`);
@@ -427,6 +448,12 @@ describe(
         try {
           const { sessionProxy, controller, paneId } = session;
           const fc = sessionProxy.flowController;
+          // tc-76m8.32 (FC-6): with zero registered clients the controller
+          // accounts nothing. This suite drains manually, so register a
+          // synthetic client key for the flood to fan into — the explicit
+          // N=1 direct-drive reduction (tc-0wtb).
+          const manualClient = { id: "manual-drain" };
+          fc.addClient(manualClient);
           const store = sessionProxy.demux.store;
 
           // Start a high-output loop (bounded: 100k iterations of echo).
@@ -488,7 +515,7 @@ describe(
           // Drain the flow controller and let the pane recover.
           const currentBuffered = fc.bufferedBytes(paneId);
           if (currentBuffered > 0) {
-            fc.noteDrained(paneId, currentBuffered);
+            fc.noteDrained(paneId, currentBuffered, manualClient);
           }
 
           // Pane must still be alive post-flood.
@@ -536,6 +563,12 @@ describe(
         try {
           const { sessionProxy, controller, paneId } = session;
           const fc = sessionProxy.flowController;
+          // tc-76m8.32 (FC-6): with zero registered clients the controller
+          // accounts nothing. This suite drains manually, so register a
+          // synthetic client key for the flood to fan into — the explicit
+          // N=1 direct-drive reduction (tc-0wtb).
+          const manualClient = { id: "manual-drain" };
+          fc.addClient(manualClient);
 
           // Run a bounded sequential loop.
           // Use a high-numbered sentinel that cannot appear in the command
@@ -552,7 +585,7 @@ describe(
             if (!drainerActive) return;
             const buffered = fc.bufferedBytes(paneId);
             if (buffered > DRAIN_THRESHOLD) {
-              fc.noteDrained(paneId, buffered);
+              fc.noteDrained(paneId, buffered, manualClient);
             }
           }, 50);
 
@@ -568,7 +601,7 @@ describe(
             await session.waitForOutput(paneId, "line499", 30_000);
 
             // Drain any remaining buffer.
-            fc.noteDrained(paneId, fc.bufferedBytes(paneId));
+            fc.noteDrained(paneId, fc.bufferedBytes(paneId), manualClient);
             // Brief wait for final bytes to fan-out.
             await delay(400);
 
@@ -657,6 +690,12 @@ describe(
         try {
           const { sessionProxy, controller, paneId } = session;
           const fc = sessionProxy.flowController;
+          // tc-76m8.32 (FC-6): with zero registered clients the controller
+          // accounts nothing. This suite drains manually, so register a
+          // synthetic client key for the flood to fan into — the explicit
+          // N=1 direct-drive reduction (tc-0wtb).
+          const manualClient = { id: "manual-drain" };
+          fc.addClient(manualClient);
           const demux = sessionProxy.demux;
 
           // Start firehose.
@@ -677,7 +716,7 @@ describe(
 
           // Drain the flow controller to resume.
           const buffered = fc.bufferedBytes(paneId);
-          fc.noteDrained(paneId, buffered);
+          fc.noteDrained(paneId, buffered, manualClient);
 
           // Assert clean state.
           assert.equal(

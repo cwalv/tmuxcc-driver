@@ -49,6 +49,13 @@ function commands(writes) {
 /** PaneId helpers. */
 const P3 = paneId("p3");
 const P5 = paneId("p5");
+/**
+ * The single registered client used by the direct-drive tests below (the N=1
+ * reduction, tc-0wtb): with zero registered clients the controller accounts
+ * nothing at all (FC-6, tc-76m8.32), so every accounting test registers this
+ * key and drains against it explicitly.
+ */
+const SOLO = { id: "solo" };
 // ---------------------------------------------------------------------------
 // Flood → pause
 // ---------------------------------------------------------------------------
@@ -60,6 +67,7 @@ describe("createFlowController — flood → pause", () => {
             highWaterBytes: 1_000,
             lowWaterBytes: 200,
         });
+        fc.addClient(SOLO);
         // Send bytes up to (but not exceeding) the high-water mark — no pause.
         fc.onPaneBytes(P3, 1_000);
         assert.equal(demux.isPanePaused(P3), false, "not paused at exactly high-water");
@@ -78,6 +86,7 @@ describe("createFlowController — flood → pause", () => {
             highWaterBytes: 100,
             lowWaterBytes: 20,
         });
+        fc.addClient(SOLO);
         fc.onPaneBytes(P5, 101);
         const cmds = commands(writes);
         assert.ok(cmds[0]?.includes("%5:pause"), `expected %5:pause, got: ${cmds[0]}`);
@@ -89,6 +98,7 @@ describe("createFlowController — flood → pause", () => {
             highWaterBytes: 100,
             lowWaterBytes: 20,
         });
+        fc.addClient(SOLO);
         fc.onPaneBytes(P3, 101); // triggers pause
         const countAfterFirst = writes.length;
         fc.onPaneBytes(P3, 1_000); // still paused — must NOT re-issue
@@ -101,6 +111,7 @@ describe("createFlowController — flood → pause", () => {
             highWaterBytes: 500,
             lowWaterBytes: 100,
         });
+        fc.addClient(SOLO);
         fc.onPaneBytes(P3, 501);
         assert.equal(fc.isPanePaused(P3), true);
     });
@@ -116,6 +127,7 @@ describe("createFlowController — drain → continue", () => {
             highWaterBytes: 1_000,
             lowWaterBytes: 200,
         });
+        fc.addClient(SOLO);
         // Flood past high-water to trigger pause. The crossing chunk's overshoot
         // is gate-dropped (FC-4, tc-2ztp), so buffered clamps to HIGH_WATER (1000)
         // rather than the raw 1001 appended.
@@ -123,11 +135,11 @@ describe("createFlowController — drain → continue", () => {
         assert.equal(fc.bufferedBytes(P3), 1_000, "buffered clamps to high-water at the pause edge");
         writes.length = 0; // reset to track only the resume command
         // Drain to just above low-water — not enough to resume.
-        fc.noteDrained(P3, 799); // buffered = 201 > 200 lowWater
+        fc.noteDrained(P3, 799, SOLO); // buffered = 201 > 200 lowWater
         assert.equal(demux.isPanePaused(P3), true, "still paused above low-water");
         assert.equal(writes.length, 0, "no continue command yet");
         // Drain two more bytes — falls below low-water.
-        fc.noteDrained(P3, 2); // buffered = 199 < 200
+        fc.noteDrained(P3, 2, SOLO); // buffered = 199 < 200
         assert.equal(demux.isPanePaused(P3), false, "demux resumed after draining below low-water");
         const cmds = commands(writes);
         assert.equal(cmds.length, 1, "exactly one continue command");
@@ -140,8 +152,9 @@ describe("createFlowController — drain → continue", () => {
             highWaterBytes: 1_000,
             lowWaterBytes: 200,
         });
+        fc.addClient(SOLO);
         fc.onPaneBytes(P3, 500); // below high-water — no pause
-        fc.noteDrained(P3, 499); // below low-water — but not paused
+        fc.noteDrained(P3, 499, SOLO); // below low-water — but not paused
         assert.equal(writes.length, 0, "no commands issued when not paused");
     });
     it("isPanePaused returns false after drain below low-water", () => {
@@ -151,9 +164,10 @@ describe("createFlowController — drain → continue", () => {
             highWaterBytes: 100,
             lowWaterBytes: 20,
         });
+        fc.addClient(SOLO);
         fc.onPaneBytes(P3, 101);
         assert.equal(fc.isPanePaused(P3), true);
-        fc.noteDrained(P3, 90); // buffered = 11 < 20
+        fc.noteDrained(P3, 90, SOLO); // buffered = 11 < 20
         assert.equal(fc.isPanePaused(P3), false);
     });
     it("bufferedBytes tracks onPaneBytes minus noteDrained", () => {
@@ -163,11 +177,12 @@ describe("createFlowController — drain → continue", () => {
             highWaterBytes: 10_000,
             lowWaterBytes: 1_000,
         });
+        fc.addClient(SOLO);
         fc.onPaneBytes(P3, 5_000);
         assert.equal(fc.bufferedBytes(P3), 5_000);
-        fc.noteDrained(P3, 3_000);
+        fc.noteDrained(P3, 3_000, SOLO);
         assert.equal(fc.bufferedBytes(P3), 2_000);
-        fc.noteDrained(P3, 4_000); // cannot go below 0
+        fc.noteDrained(P3, 4_000, SOLO); // cannot go below 0
         assert.equal(fc.bufferedBytes(P3), 0);
     });
 });
@@ -199,6 +214,7 @@ describe("createFlowController — honor %pause / %continue notifications", () =
             highWaterBytes: 100,
             lowWaterBytes: 20,
         });
+        fc.addClient(SOLO);
         fc.onPaneBytes(P3, 101); // triggers backpressure pause
         const cmdCountAfterBP = writes.length;
         // tmux sends its %pause notification — must not cause another write
@@ -226,6 +242,7 @@ describe("createFlowController — %extended-output", () => {
             highWaterBytes: 1_000,
             lowWaterBytes: 200,
         });
+        fc.addClient(SOLO);
         fc.onExtendedOutput(P3, 1_001);
         assert.equal(demux.isPanePaused(P3), true, "extended-output bytes trigger pause");
         const cmds = commands(writes);
@@ -243,6 +260,7 @@ describe("createFlowController — pane id mapping", () => {
             highWaterBytes: 10,
             lowWaterBytes: 2,
         });
+        fc.addClient(SOLO);
         fc.onPaneBytes(paneId("p3"), 11);
         const cmds = commands(writes);
         assert.ok(cmds[0]?.includes("%3:pause"), `got: ${cmds[0]}`);
@@ -254,9 +272,10 @@ describe("createFlowController — pane id mapping", () => {
             highWaterBytes: 10,
             lowWaterBytes: 2,
         });
+        fc.addClient(SOLO);
         fc.onPaneBytes(paneId("p5"), 11); // pause
         writes.length = 0;
-        fc.noteDrained(paneId("p5"), 10); // drain below low-water → continue
+        fc.noteDrained(paneId("p5"), 10, SOLO); // drain below low-water → continue
         const cmds = commands(writes);
         assert.ok(cmds[0]?.includes("%5:continue"), `got: ${cmds[0]}`);
     });
@@ -267,6 +286,7 @@ describe("createFlowController — pane id mapping", () => {
             highWaterBytes: 10,
             lowWaterBytes: 2,
         });
+        fc.addClient(SOLO);
         // "x99" doesn't start with "p" — defaultPaneIdToTmux now throws TypeError
         // rather than returning NaN and silently dropping the command.
         assert.throws(() => fc.onPaneBytes(paneId("x99"), 9999), (err) => err instanceof TypeError && /p<N>/.test(err.message));
@@ -286,6 +306,7 @@ describe("createFlowController — byte integrity", () => {
             highWaterBytes: 1_000,
             lowWaterBytes: 200,
         });
+        fc.addClient(SOLO);
         const received = [];
         client.onData((pid, b) => received.push({ paneId: pid, bytes: new Uint8Array(b) }));
         // Before high-water: bytes flow through.
@@ -313,7 +334,7 @@ describe("createFlowController — byte integrity", () => {
         fc.onPaneBytes(P3, chunk3.length); // still paused (1200 > 200 low-water)
         assert.equal(received.length, 2, "chunk3 NOT delivered while paused");
         // Drain below low-water → resume.
-        fc.noteDrained(P3, 1_001); // 1200 - 1001 = 199 < 200 → resume
+        fc.noteDrained(P3, 1_001, SOLO); // 1200 - 1001 = 199 < 200 → resume
         assert.equal(demux.isPanePaused(P3), false, "pane resumed");
         // After resume: new appends flow through.
         const chunk4 = makeBytes(50, 0xDD);
@@ -332,6 +353,7 @@ describe("createFlowController — byte integrity", () => {
             highWaterBytes: 10_000,
             lowWaterBytes: 1_000,
         });
+        fc.addClient(SOLO);
         const received = [];
         client.onData((_pid, b) => received.push(new Uint8Array(b)));
         // Non-UTF-8 byte sequence (surrogate bytes, null, 0xFF, 0xFE).
@@ -351,6 +373,7 @@ describe("createFlowController — byte integrity", () => {
             highWaterBytes: 10_000,
             lowWaterBytes: 1_000,
         });
+        fc.addClient(SOLO);
         const order = [];
         client.onData((_pid, b) => order.push(...Array.from(b)));
         for (let i = 0; i < 5; i++) {
@@ -371,6 +394,7 @@ describe("createFlowController — byte integrity", () => {
             highWaterBytes: 100,
             lowWaterBytes: 20,
         });
+        fc.addClient(SOLO);
         const received = [];
         client.onData((pid, b) => received.push({ paneId: pid, bytes: new Uint8Array(b) }));
         // Flood P3 to trigger pause.
@@ -554,6 +578,83 @@ describe("createFlowController — multi-client per-client ledgers (tc-0wtb)", (
     });
 });
 // ---------------------------------------------------------------------------
+// Zero-client intervals (FC-6, tc-76m8.32)
+//
+// The bug: after the LAST client detached, onPaneBytes kept fanning pane
+// output into the implicit DEFAULT_CLIENT sub-ledger — a ledger no transport
+// ever drains. A pane that flooded past high-water during that zero-client
+// interval paused and could NEVER resume, even after a new client attached:
+// the stale entry pinned the resume-gating MAX above low-water forever.
+//
+// The fix: the ledger's keys are exactly the registered client set. With zero
+// registered clients onPaneBytes accounts nothing — the bytes are owed to no
+// transport (FC-4's sense), so backpressure never engages, and no undrainable
+// entry can exist by construction.
+// ---------------------------------------------------------------------------
+describe("createFlowController — zero-client intervals (FC-6, tc-76m8.32)", () => {
+    it("accounts nothing with zero registered clients: no pause, no ledger, no command", () => {
+        const { writes, send } = makeFakeSend();
+        const demux = createOutputDemux();
+        const fc = createFlowController(send, demux, {
+            highWaterBytes: 1_000,
+            lowWaterBytes: 200,
+        });
+        // No client has ever registered. A flood far past high-water must not
+        // engage backpressure: nothing is owed to any transport (FC-6).
+        fc.onPaneBytes(P3, 5_000);
+        assert.equal(fc.isPanePaused(P3), false, "zero-client flood must not pause the pane");
+        assert.equal(fc.bufferedBytes(P3), 0, "zero-client bytes are not buffered — owed to nobody");
+        assert.equal(writes.length, 0, "no pause command issued during a zero-client interval");
+    });
+    it("RED→GREEN wedge: detach-all → flood → reattach must not leave the pane paused", () => {
+        const { send } = makeFakeSend();
+        const demux = createOutputDemux();
+        const fc = createFlowController(send, demux, {
+            highWaterBytes: 1_000,
+            lowWaterBytes: 200,
+        });
+        // A client attaches and detaches — the post-last-detach interval.
+        const c1 = { id: "c1" };
+        fc.addClient(c1);
+        fc.removeClient(c1);
+        // Flood past high-water while zero clients are registered. Pre-fix this
+        // paused the pane on the undrainable DEFAULT_CLIENT ledger.
+        fc.onPaneBytes(P3, 1_500);
+        assert.equal(fc.isPanePaused(P3), false, "zero-client flood must not pause (the wedge)");
+        assert.equal(fc.bufferedBytes(P3), 0, "no stale ledger entry may survive the interval");
+        // A new client attaches: it starts at 0 and nothing pins the max.
+        const c2 = { id: "c2" };
+        fc.addClient(c2);
+        assert.equal(fc.isPanePaused(P3), false, "reattach must find the pane unpaused");
+        assert.equal(fc.bufferedBytes(P3), 0, "fresh client starts at 0");
+        // Backpressure still works for the new client: pause on flood, resume on
+        // drain (the crossing chunk clamps to high-water per FC-4).
+        fc.onPaneBytes(P3, 1_001);
+        assert.equal(fc.isPanePaused(P3), true, "FC must still engage for the live client");
+        fc.noteDrained(P3, 900, c2); // 1000 − 900 = 100 ≤ 200 → resume
+        assert.equal(fc.isPanePaused(P3), false, "FC must still release for the live client");
+    });
+    it("removing the last client releases a backpressure pause (FC-3 re-eval over the empty set)", () => {
+        const { writes, send } = makeFakeSend();
+        const demux = createOutputDemux();
+        const fc = createFlowController(send, demux, {
+            highWaterBytes: 1_000,
+            lowWaterBytes: 200,
+        });
+        const only = { id: "only" };
+        fc.addClient(only);
+        fc.onPaneBytes(P3, 1_001); // pause on the sole client
+        assert.equal(fc.isPanePaused(P3), true, "paused on the sole client's backlog");
+        writes.length = 0;
+        // The last client detaches: nothing is owed to anyone → the max over the
+        // empty set is 0 → the resume edge must fire (no pane stays paused into a
+        // zero-client interval).
+        fc.removeClient(only);
+        assert.equal(fc.isPanePaused(P3), false, "last-detach must release the pause");
+        assert.ok(commands(writes).some((c) => c.includes("%3:continue")), "continue must be issued on last-detach");
+    });
+});
+// ---------------------------------------------------------------------------
 // Defaults
 // ---------------------------------------------------------------------------
 describe("createFlowController — defaults", () => {
@@ -565,6 +666,7 @@ describe("createFlowController — defaults", () => {
         const { send } = makeFakeSend();
         const demux = createOutputDemux();
         const fc = createFlowController(send, demux);
+        fc.addClient(SOLO);
         // Below default high-water: no pause.
         fc.onPaneBytes(P3, 262_144);
         assert.equal(fc.isPanePaused(P3), false, "not paused at exactly 262144");
@@ -592,16 +694,17 @@ describe("createFlowController — metrics hooks (tc-d7i)", () => {
                 onDrainClamped: (pane, excess) => clamps.push({ pane, excess }),
             },
         });
+        fc.addClient(SOLO);
         fc.onPaneBytes(P3, 100);
-        fc.noteDrained(P3, 100); // exact drain — no clamp
+        fc.noteDrained(P3, 100, SOLO); // exact drain — no clamp
         assert.equal(clamps.length, 0, "exact drain must not clip");
         fc.onPaneBytes(P3, 50);
-        fc.noteDrained(P3, 80); // over-drain by 30
+        fc.noteDrained(P3, 80, SOLO); // over-drain by 30
         assert.equal(clamps.length, 1, "over-drain must fire the clamp hook once");
         assert.equal(clamps[0].pane, P3);
         assert.equal(clamps[0].excess, 30);
         assert.equal(fc.bufferedBytes(P3), 0, "counter clamped at 0");
-        fc.noteDrained(P5, 10); // drain for a pane with no bytes at all
+        fc.noteDrained(P5, 10, SOLO); // drain for a pane with no bytes at all
         assert.equal(clamps.length, 2, "drain-for-unknown-pane must clip");
         assert.equal(clamps[1].excess, 10);
     });
@@ -647,6 +750,7 @@ describe("createFlowController — metrics hooks (tc-d7i)", () => {
                 onBytesWhilePaused: (_pane, n) => seen.push(n),
             },
         });
+        fc.addClient(SOLO);
         fc.onPaneBytes(P3, 900); // below high-water — not paused
         assert.deepEqual(seen, [], "pre-pause bytes are not counted");
         fc.onPaneBytes(P3, 200); // crosses high-water: THIS call pauses; the
@@ -666,7 +770,7 @@ describe("createFlowController — metrics hooks (tc-d7i)", () => {
         // climb to 1000+300+50.
         assert.equal(fc.bufferedBytes(P3), 1_000, "while-paused bytes are not retained in the resume-gating ledger");
         // Drain to resume; subsequent bytes are no longer counted.
-        fc.noteDrained(P3, fc.bufferedBytes(P3));
+        fc.noteDrained(P3, fc.bufferedBytes(P3), SOLO);
         assert.equal(fc.isPanePaused(P3), false);
         fc.onPaneBytes(P3, 40);
         assert.deepEqual(seen, [300, 50], "post-resume bytes are not counted");
@@ -690,8 +794,9 @@ describe("createFlowController — metrics hooks (tc-d7i)", () => {
                 onCommandFailed: (kind) => failures.push(kind),
             },
         });
+        fc.addClient(SOLO);
         fc.onPaneBytes(P3, 1_100); // pause → %error reply
-        fc.noteDrained(P3, 1_100); // resume → ok reply
+        fc.noteDrained(P3, 1_100, SOLO); // resume → ok reply
         fc.onPaneBytes(P3, 1_100); // pause again → rejected (teardown)
         // Let the scripted promises settle.
         await new Promise((r) => setImmediate(r));

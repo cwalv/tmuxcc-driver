@@ -81,7 +81,9 @@ function makeFakeSend() {
 /**
  * Build a "draining transport" identical in shape to the one session-proxy.ts wraps
  * around every attached transport — calls fc.noteDrained after sendData (sync
- * or after promise resolution per the tc-7xv.6 fix).
+ * or after promise resolution per the tc-7xv.6 fix). Credits are keyed by the
+ * RAW `inner` transport, matching production (tc-0wtb); the caller must have
+ * registered it via `fc.addClient(inner)`.
  */
 function buildDrainingTransport(inner, fc) {
     return {
@@ -92,10 +94,10 @@ function buildDrainingTransport(inner, fc) {
                 return result;
             if (result !== undefined && typeof result.then === "function") {
                 return result.then(() => {
-                    fc.noteDrained(pid, bytes.length);
+                    fc.noteDrained(pid, bytes.length, inner);
                 });
             }
-            fc.noteDrained(pid, bytes.length);
+            fc.noteDrained(pid, bytes.length, inner);
             return undefined;
         },
     };
@@ -133,6 +135,8 @@ describe("tc-7xv.24 wedge regression — real-socket backpressure engages tmux p
         const { writes, send } = makeFakeSend();
         const demux = createOutputDemux();
         const fc = createFlowController(send, demux);
+        // Register the client so per-client accounting matches production (tc-0wtb).
+        fc.addClient(clientTransport);
         // Wrap demux.store with the same accounting tap that production uses.
         const baseStore = demux.store;
         const accountingStore = {
@@ -203,6 +207,8 @@ describe("tc-7xv.24 wedge regression — real-socket backpressure engages tmux p
         const { writes, send } = makeFakeSend();
         const demux = createOutputDemux();
         const fc = createFlowController(send, demux);
+        // Register the client so per-client accounting matches production (tc-0wtb).
+        fc.addClient(clientTransport);
         const baseStore = demux.store;
         const accountingStore = {
             append(pid, bytes) {
