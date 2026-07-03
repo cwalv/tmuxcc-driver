@@ -30,6 +30,11 @@
         "template": {
           "$ref": "tmuxcc:shared/session-template#/$defs/SessionTemplate",
           "description": "Optional concrete session template to apply on creation (tc-gjdx). Applied iff created:true; since session.create always mints (or fails), this applies whenever the command succeeds. Fully-substituted; driver-side application is tc-gjdx.3."
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Environment variables to inject into the session's initial pane. Each key-value pair is compiled to a repeated -e NAME=value flag on new-session. Requires tmux >= 3.2 (newSessionEnvFlag); an env-carrying request against an older tmux fails loud. Additive optional. tc-gjdx.2."
         }
       },
       "additionalProperties": false
@@ -49,6 +54,11 @@
         "template": {
           "$ref": "tmuxcc:shared/session-template#/$defs/SessionTemplate",
           "description": "Optional concrete session template to apply on creation (tc-gjdx). createUnique always mints (created:true), so this applies whenever the command succeeds. Fully-substituted; driver-side application is tc-gjdx.3."
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Environment variables to inject into the session's initial pane. Each key-value pair is compiled to a repeated -e NAME=value flag on new-session. Requires tmux >= 3.2 (newSessionEnvFlag); an env-carrying request against an older tmux fails loud. Additive optional. tc-gjdx.2."
         }
       },
       "additionalProperties": false

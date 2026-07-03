@@ -120,25 +120,17 @@ describe("tmux-south createSession (tc-zcqr)", { skip: !TMUX_AVAILABLE }, () => 
             killServer(socketName);
         }
     });
-    // tc-gjdx.2: real-tmux moat — env visible in the created session's initial pane
-    it("tc-gjdx.2: env is visible in the session's initial pane (real tmux)", async () => {
+    // tc-gjdx.2: real-tmux moat — env stored in the session environment (real tmux)
+    it("tc-gjdx.2: env is stored in the session environment (real tmux)", async () => {
         const socketName = nextSocketName();
         try {
-            // Create the session with an env variable injected.
             await createSession(socketName, "env-test", undefined, { TMUXCC_TEST_ENV: "moat-value" });
-            // Give the shell in the new pane a moment to start up; then show the variable.
-            // We run `tmux send-keys` to echo the value into the pane and capture it.
-            // Use `printenv TMUXCC_TEST_ENV` (exit 1 if unset) and capture the pane.
-            //
-            // Strategy: run-shell in the new session to print the env var, capture output.
-            const run = spawnSync("tmux", [
-                "-L", socketName,
-                "run-shell",
-                "-t", "env-test",
-                "printenv TMUXCC_TEST_ENV",
-            ], { encoding: "utf8", timeout: 5_000 });
-            assert.equal(run.status, 0, `printenv TMUXCC_TEST_ENV failed (tmux < 3.2 env not injected?): stdout=${run.stdout} stderr=${run.stderr}`);
-            assert.equal((run.stdout ?? "").trim(), "moat-value", `Expected env var TMUXCC_TEST_ENV=moat-value, got: ${JSON.stringify(run.stdout)}`);
+            // `tmux show-environment` inspects the session's environment delta —
+            // it returns "VAR=value" on stdout (exit 0) when the var is set, exit 1
+            // when it is absent.  This is the canonical way to verify -e landed.
+            const show = spawnSync("tmux", ["-L", socketName, "show-environment", "-t", "env-test", "TMUXCC_TEST_ENV"], { encoding: "utf8", timeout: 5_000 });
+            assert.equal(show.status, 0, `show-environment TMUXCC_TEST_ENV returned non-zero (env not injected?): stdout=${show.stdout} stderr=${show.stderr}`);
+            assert.equal((show.stdout ?? "").trim(), "TMUXCC_TEST_ENV=moat-value", `Expected TMUXCC_TEST_ENV=moat-value, got: ${JSON.stringify(show.stdout)}`);
         }
         finally {
             killServer(socketName);

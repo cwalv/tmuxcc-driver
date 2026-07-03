@@ -120,6 +120,11 @@
         "shellCommand": {
           "type": "string",
           "description": "Shell command to run in the first pane. Additive optional. tc-cr4dz."
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Environment variables to inject into the new pane. Each key-value pair is compiled to a repeated -e NAME=value flag on new-window. Floor tmux 3.0 = MINIMUM_TMUX_VERSION; no capability gate needed. Additive optional. tc-gjdx.2."
         }
       },
       "additionalProperties": false
@@ -147,6 +152,11 @@
         "shellCommand": {
           "type": "string",
           "description": "Shell command to run in the new pane. Additive optional. tc-cr4dz."
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Environment variables to inject into the new pane. Each key-value pair is compiled to a repeated -e NAME=value flag on split-window. Floor tmux 3.0 = MINIMUM_TMUX_VERSION; no capability gate needed. Additive optional. tc-gjdx.2."
         }
       },
       "additionalProperties": false

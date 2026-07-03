@@ -1394,5 +1394,104 @@ describe("protocol schema conformance", () => {
             assert.ok(validateServerProxyMsg(msg), JSON.stringify(validateServerProxyMsg.errors));
         });
     });
+    // -------------------------------------------------------------------------
+    // 9. env on creating verbs — tc-gjdx.2 (session-proxy + server-proxy, additive)
+    // -------------------------------------------------------------------------
+    describe("env on creating verbs (tc-gjdx.2)", () => {
+        // --- session-proxy: open-window and split-pane ---
+        it("accepts open-window carrying env (session-proxy)", () => {
+            const msg = {
+                type: "command.request",
+                seq: 20,
+                correlationId: "ow-env-1",
+                command: { kind: "open-window", env: { MY_VAR: "hello", PORT: "8080" } },
+            };
+            assert.ok(validateClientMsg(msg), JSON.stringify(validateClientMsg.errors));
+        });
+        it("accepts split-pane carrying env (session-proxy)", () => {
+            const msg = {
+                type: "command.request",
+                seq: 21,
+                correlationId: "sp-env-1",
+                command: { kind: "split-pane", direction: "horizontal", env: { TOKEN: "abc", EMPTY: "" } },
+            };
+            assert.ok(validateClientMsg(msg), JSON.stringify(validateClientMsg.errors));
+        });
+        // Additive guarantee: open-window and split-pane WITHOUT env still validates.
+        it("accepts open-window WITHOUT env (env is additive-optional)", () => {
+            const msg = {
+                type: "command.request",
+                seq: 22,
+                correlationId: "ow-plain",
+                command: { kind: "open-window" },
+            };
+            assert.ok(validateClientMsg(msg), JSON.stringify(validateClientMsg.errors));
+        });
+        it("rejects open-window with a non-string env value", () => {
+            const bad = {
+                type: "command.request",
+                seq: 23,
+                correlationId: "ow-bad-env",
+                command: { kind: "open-window", env: { PORT: 8080 } },
+            };
+            assert.strictEqual(validateClientMsg(bad), false, "env values must be strings — additionalProperties:{type:string}");
+        });
+        it("rejects split-pane with a non-string env value", () => {
+            const bad = {
+                type: "command.request",
+                seq: 24,
+                correlationId: "sp-bad-env",
+                command: { kind: "split-pane", direction: "horizontal", env: { COUNT: 3 } },
+            };
+            assert.strictEqual(validateClientMsg(bad), false, "env values must be strings — additionalProperties:{type:string}");
+        });
+        // --- server-proxy: session.create and session.createUnique ---
+        it("accepts session.create carrying env (server-proxy)", () => {
+            const msg = {
+                type: "command.request",
+                seq: 25,
+                correlationId: "create-env-1",
+                command: { kind: "session.create", name: "main", env: { API_KEY: "secret", PORT: "3000" } },
+            };
+            assert.ok(validateServerProxyClientMsg(msg), JSON.stringify(validateServerProxyClientMsg.errors));
+        });
+        it("accepts session.createUnique carrying env (server-proxy)", () => {
+            const msg = {
+                type: "command.request",
+                seq: 26,
+                correlationId: "unique-env-1",
+                command: { kind: "session.createUnique", baseName: "dev", env: { WORKSPACE: "/home/user/proj" } },
+            };
+            assert.ok(validateServerProxyClientMsg(msg), JSON.stringify(validateServerProxyClientMsg.errors));
+        });
+        // Additive guarantee: session.create and session.createUnique WITHOUT env still validate.
+        it("accepts session.create WITHOUT env (env is additive-optional)", () => {
+            const msg = {
+                type: "command.request",
+                seq: 27,
+                correlationId: "create-plain",
+                command: { kind: "session.create", name: "plain" },
+            };
+            assert.ok(validateServerProxyClientMsg(msg), JSON.stringify(validateServerProxyClientMsg.errors));
+        });
+        it("rejects session.create with a non-string env value", () => {
+            const bad = {
+                type: "command.request",
+                seq: 28,
+                correlationId: "create-bad-env",
+                command: { kind: "session.create", name: "x", env: { COUNT: 99 } },
+            };
+            assert.strictEqual(validateServerProxyClientMsg(bad), false, "env values must be strings — additionalProperties:{type:string}");
+        });
+        it("rejects session.createUnique with a non-string env value", () => {
+            const bad = {
+                type: "command.request",
+                seq: 29,
+                correlationId: "unique-bad-env",
+                command: { kind: "session.createUnique", baseName: "dev", env: { NUM: true } },
+            };
+            assert.strictEqual(validateServerProxyClientMsg(bad), false, "env values must be strings — additionalProperties:{type:string}");
+        });
+    });
 });
 //# sourceMappingURL=protocol-conformance.test.js.map
