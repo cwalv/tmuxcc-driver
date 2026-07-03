@@ -647,4 +647,159 @@ describe("TmuxHost — real tmux 3.4", { skip: !tmuxAvailable ? "tmux not found 
 
     host.kill();
   });
+
+  // -------------------------------------------------------------------------
+  // tc-76m8.20 — pty write-after-close fd lifecycle (node-pty+1.1.0.patch).
+  //
+  // node-pty's CustomWriteStream writes to the RAW pty-master fd number, from
+  // a queue whose dispatch is asynchronous.  Unpatched, the queue was never
+  // retired when the pty died, so writes enqueued just before a tmux child's
+  // death dispatched AFTER the read side closed the fd.  Two failure modes,
+  // both observed in one instrumented integration.test.ts run (the R2 flake):
+  //
+  //   1. fd still closed → EBADF → node-pty console.error's "Unhandled pty
+  //      write error" and silently drops the queue (caller never told).
+  //   2. fd number already RECYCLED by the next forkpty() in this process
+  //      (the very next test's tmux) → the dead session's queued commands are
+  //      injected into the NEW session's -CC stdin.  tmux answers them with
+  //      un-slotted %begin/%end blocks that shift the FIFO correlator pairing,
+  //      so the new session's list-panes slot binds an EMPTY reply → snapshot
+  //      with 0 panes → integration R2's "must have at least 1 pane" flake.
+  //
+  // The patch retires the write queue on every death path (child reap, read
+  // socket error, socket close, destroy) and writes synchronously in the event
+  // loop (fs.writeSync) so a syscall can never straddle the fd close/recycle
+  // (a threadpool fs.write already submitted cannot be revoked by any flag —
+  // that exact straddle was observed: dispatched .890, fd closed .891, next
+  // pty spawned on the fd .901, write landed in it .902).
+  //
+  // These tests provoke both races BY CONSTRUCTION (no statistical flake):
+  // each drives the dead host's write stream directly after the fd close —
+  // the deterministic equivalent of the observed threadpool straddle — with
+  // the fd's two possible fates (still closed → EBADF drop; recycled by the
+  // next spawn → injection).  Unpatched node-pty fails both.  (A parked-queue
+  // provocation via SIGSTOP + pty-buffer overflow does NOT work here: the
+  // tmux SERVER holds a dup of the client tty and keeps draining it even
+  // while the -CC client is stopped.)
+  // -------------------------------------------------------------------------
+
+  it("a stale write stream is retired on pty death — no EBADF queue drop (tc-76m8.20)", async () => {
+    const sock = sockName("wac-ebadf");
+    after(() => killServer(sock));
+
+    const host = createTmuxHost({ socketName: sock, sessionName: "tc-76m820-ebadf" });
+    host.onError(() => {});
+    const chunks: Uint8Array[] = [];
+    host.onData((c) => chunks.push(c));
+
+    await host.start();
+    await waitFor(chunks, (all) => all.indexOf(DCS_INTRO) >= 0, 5000, "DCS intro timeout");
+
+    const ptyInternals = (host as unknown as {
+      _pty: { _writeStream: { write(data: string): void } };
+    })._pty;
+
+    host.kill();
+    await new Promise<void>((r) => { host.onExit(() => r()); });
+    // node-pty emits 'exit' only after the read socket has closed, so the
+    // master fd is closed (and its number free for recycling) from here on.
+
+    // Capture node-pty's direct console.error reporting.
+    const consoleErrors: string[] = [];
+    const realConsoleError = console.error;
+    console.error = (...args: unknown[]) => { consoleErrors.push(args.map(String).join(" ")); };
+
+    try {
+      // The deterministic equivalent of a write enqueued moments before death
+      // whose syscall dispatches after the fd close (the observed threadpool
+      // straddle), with the fd NOT yet recycled: unpatched, this fs.write hits
+      // EBADF, logs "Unhandled pty write error", and silently drops the queue.
+      // Patched, the write stream was retired on death and no syscall happens.
+      ptyInternals._writeStream.write("refresh-client\n");
+
+      // Let any (buggy) dispatch and its threadpool callback settle.
+      await new Promise<void>((r) => setTimeout(r, 200));
+    } finally {
+      console.error = realConsoleError;
+    }
+
+    const ptyWriteErrors = consoleErrors.filter((line) => line.includes("Unhandled pty write error"));
+    assert.deepEqual(
+      ptyWriteErrors,
+      [],
+      "a write against a dead pty must be dropped by the retired write stream, not dispatched against the closed fd",
+    );
+  });
+
+  it("a stale write stream cannot inject into a recycled pty fd (tc-76m8.20)", async () => {
+    const sockA = sockName("wac-inj-a");
+    const sockB = sockName("wac-inj-b");
+    after(() => { killServer(sockA); killServer(sockB); });
+
+    // Internal seams (test-only): node-pty's UnixTerminal exposes the master
+    // fd; its CustomWriteStream is the write path under test.
+    type PtyInternals = { fd: number; _writeStream: { write(data: string): void } };
+
+    // ── Host A: spawn, note its master fd, kill it. ─────────────────────────
+    const hostA = createTmuxHost({ socketName: sockA, sessionName: "tc-76m820-inj-a" });
+    hostA.onError(() => {});
+    const chunksA: Uint8Array[] = [];
+    hostA.onData((c) => chunksA.push(c));
+    await hostA.start();
+    await waitFor(chunksA, (all) => all.indexOf(DCS_INTRO) >= 0, 5000, "A: DCS intro timeout");
+
+    const ptyA = (hostA as unknown as { _pty: PtyInternals })._pty;
+    const fdA = ptyA.fd;
+
+    hostA.kill();
+    await new Promise<void>((r) => { hostA.onExit(() => r()); });
+    // node-pty emits 'exit' only after the read socket has closed, so fd fdA
+    // is free for recycling from here on.
+
+    // ── Host B: the next forkpty() takes the lowest free fd — fdA. ─────────
+    // Bounded retry in case an unrelated open grabbed the number first.
+    let hostB = createTmuxHost({ socketName: sockB, sessionName: "tc-76m820-inj-b" });
+    hostB.onError(() => {});
+    let chunksB: Uint8Array[] = [];
+    hostB.onData((c) => chunksB.push(c));
+    await hostB.start();
+    for (let attempt = 0; (hostB as unknown as { _pty: PtyInternals })._pty.fd !== fdA && attempt < 3; attempt++) {
+      hostB.kill();
+      await new Promise<void>((r) => { hostB.onExit(() => r()); });
+      // The -CC client is dead but its server (and session) survive on sockB;
+      // reap it so the respawned new-session doesn't collide.
+      killServer(sockB);
+      hostB = createTmuxHost({ socketName: sockB, sessionName: "tc-76m820-inj-b" });
+      hostB.onError(() => {});
+      chunksB = [];
+      hostB.onData((c) => chunksB.push(c));
+      await hostB.start();
+    }
+    const fdB = (hostB as unknown as { _pty: PtyInternals })._pty.fd;
+    assert.equal(fdB, fdA, "test premise: B's pty must recycle A's fd number");
+    await waitFor(chunksB, (all) => all.indexOf(DCS_INTRO) >= 0, 5000, "B: DCS intro timeout");
+
+    // ── The provoked race ───────────────────────────────────────────────────
+    // Drive A's (dead) write stream directly.  This is the deterministic
+    // equivalent of a write enqueued moments before A's death whose syscall
+    // dispatches after B recycled the fd — the observed integration-R2
+    // injection, with the threadpool latency compressed to a direct call.
+    // Unpatched, this fs.write(fdA) SUCCEEDS into B's tmux -CC stdin and the
+    // marker comes back in B's reply stream.
+    ptyA._writeStream.write("display-message -p TC76M820-INJECTED\n");
+
+    // Prove B stays clean: give an injected command ample time to round-trip,
+    // while confirming B is live via its own echoed marker.
+    hostB.write("display-message -p TC76M820-OWN\n");
+    await waitFor(chunksB, (all) => all.includes("TC76M820-OWN"), 5000, "B: own display-message timeout");
+
+    const bStream = Buffer.concat(chunksB.map((c) => Buffer.from(c))).toString("utf8");
+    assert.ok(
+      !bStream.includes("TC76M820-INJECTED"),
+      "a dead pty's write stream must never inject bytes into a recycled fd",
+    );
+
+    hostB.kill();
+    await new Promise<void>((r) => { hostB.onExit(() => r()); });
+  });
 });
