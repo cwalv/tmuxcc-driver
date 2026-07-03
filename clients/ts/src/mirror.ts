@@ -781,6 +781,13 @@ export interface HydrationEvent {
 export type HydrationEventHandler = (event: HydrationEvent) => void;
 
 /**
+ * tc-76m8.28: cap on the mirror's retained hydration-event log. A connection
+ * sees a handful of events per pane bind; 1024 is orders of magnitude of
+ * headroom while bounding a pathological begin/end storm.
+ */
+const HYDRATION_LOG_CAP = 1024;
+
+/**
  * A pane attention/status notification surfaced by the mirror (tc-76m8.1, S9).
  *
  * Recognised by the driver on a pane's raw pty byte stream and delivered here
@@ -875,6 +882,12 @@ export class Mirror {
   // the mirror, but the mirror owns the single-slot onControl handler).
   readonly #commandResponseHandlers: CommandResponseHandler[] = [];
   readonly #hydrationHandlers: HydrationEventHandler[] = [];
+
+  /**
+   * tc-76m8.28: retained hydration-event log (see {@link getHydrationEvents}).
+   * Bounded FIFO — oldest entries drop beyond {@link HYDRATION_LOG_CAP}.
+   */
+  readonly #hydrationLog: HydrationEvent[] = [];
   readonly #paneNotifyHandlers: PaneNotifyEventHandler[] = [];
 
   // ── Public model access ───────────────────────────────────────────────────
@@ -970,6 +983,21 @@ export class Mirror {
       const idx = this.#hydrationHandlers.indexOf(handler);
       if (idx !== -1) this.#hydrationHandlers.splice(idx, 1);
     };
+  }
+
+  /**
+   * tc-76m8.28: every hydration / attach protocol event this mirror has seen,
+   * in arrival order (bounded to the last {@link HYDRATION_LOG_CAP}).
+   *
+   * Unlike `onHydrationEvent`, this misses NOTHING: events that arrive before
+   * any subscriber exists (the connect-time window — a session-proxy's
+   * unsolicited addClient replay lands right behind the snapshot) are
+   * retained. The dev-inspection seam reads this so e2e specs can assert on
+   * the COMPLETE hydration history of a connection, not the post-subscription
+   * suffix.
+   */
+  getHydrationEvents(): HydrationEvent[] {
+    return [...this.#hydrationLog];
   }
 
   /**
@@ -1587,6 +1615,14 @@ export class Mirror {
   }
 
   #emitHydration(event: HydrationEvent): void {
+    // tc-76m8.28: retain every event in the mirror's own log so
+    // `getHydrationEvents()` observation is complete BY CONSTRUCTION. A
+    // subscription-based observer misses events that arrive on the heels of
+    // the snapshot (e.g. a session-proxy's addClient-time replay fires before
+    // any post-connect subscriber exists) — exactly the events a regression
+    // test for unsolicited hydration needs to see.
+    if (this.#hydrationLog.length >= HYDRATION_LOG_CAP) this.#hydrationLog.shift();
+    this.#hydrationLog.push(event);
     for (const handler of this.#hydrationHandlers) {
       handler(event);
     }

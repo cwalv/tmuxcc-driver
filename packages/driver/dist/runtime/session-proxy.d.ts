@@ -165,6 +165,8 @@ export interface SessionProxyAddClientOptions extends AddClientOptions {
      * `refresh-client -C`).
      * `readOnly: true` → drop `input` messages and reject mutating
      * `command.request` verbs (driver-enforced; tmux `-CC` ignores the flag).
+     * `pullHydration: true` (tc-76m8.28) → skip the unsolicited addClient-time
+     * bulk replay; this client hydrates each pane explicitly via `pane.attach`.
      */
     flags?: ClientFlags;
 }
@@ -226,6 +228,11 @@ export interface SessionProxy {
      * delivered before any live delta for it. A vanished primary pane surfaces
      * `pane.attach.failed{code:"pane.not-found"}` on this transport (fail-loud).
      * When omitted, every known pane is hydrated (the legacy bulk contract).
+     *
+     * tc-76m8.28: `opts.flags.pullHydration` suppresses BOTH unsolicited forms
+     * (bulk and targeted-primary) — the client hydrates each pane explicitly
+     * via `pane.attach`, so the driver never replays a grid captured before the
+     * client converged tmux to its tabs' geometry.
      *
      * D5 (tc-4b6k.4): `opts.preNegotiated` + `opts.startSeq` are the broker
      * single-socket handoff — the connection already completed the

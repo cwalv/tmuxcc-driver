@@ -146,9 +146,11 @@ export function describeClientIdentity(identity: ClientIdentity | undefined): st
  * observer partition — is tc-4b6k.3). Nothing carries this on the wire yet; it
  * exists so later beads land on a defined shape.
  *
- * The vocabulary mirrors tmux(1) client flags. The wider parity map (per-client
- * size, active-pane, pause-after, no-detach-on-destroy, session groups) is
- * reserved prose in PROTOCOL.md §12, not typed here.
+ * The core vocabulary mirrors tmux(1) client flags. The wider parity map
+ * (per-client size, active-pane, pause-after, no-detach-on-destroy, session
+ * groups) is reserved prose in PROTOCOL.md §12, not typed here.
+ * `pullHydration` is tmuxcc-native (no tmux counterpart): it negotiates which
+ * side owns the hydration replay for this client.
  */
 export interface ClientFlags {
   /**
@@ -177,6 +179,29 @@ export interface ClientFlags {
    * the driver supports it.
    */
   readonly readOnly?: boolean;
+  /**
+   * tc-76m8.28: this client requests each pane's hydration replay EXPLICITLY
+   * (`pane.attach`) — the session-proxy must NOT push the unsolicited
+   * addClient-time bulk replay (tc-5quo) to it.
+   *
+   * Why this exists: the addClient-time push captures tmux's grid at attach,
+   * BEFORE the client has converged tmux to its tabs' geometry. For a client
+   * that gates its own replay on geometry settling (the extension's
+   * resize-then-restore gate, tc-76m8.24), that early stale-geometry capture
+   * is at best redundant (overwritten by the client's own gated `pane.attach`
+   * replay) and at worst lands history rows in-viewport on an open tab where
+   * the subsequent resize's SIGWINCH redraw destroys them. A client that
+   * declares `pullHydration` owns the WHEN of every replay; the driver's only
+   * hydration entry point for it is `pane.attach`.
+   *
+   * Disconnect-gap recovery moves with the pull: the client's `pane.attach`
+   * replay is the same full-history capture, so bytes emitted while the
+   * client was away still reach it — just at the client's chosen moment.
+   *
+   * Absent/false → the tc-5quo bulk-push contract is unchanged (clients that
+   * never send `pane.attach` still get hydrated).
+   */
+  readonly pullHydration?: boolean;
 }
 
 /**

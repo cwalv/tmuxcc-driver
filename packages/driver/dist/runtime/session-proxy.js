@@ -734,22 +734,36 @@ export function createSessionProxy(opts) {
             //     wrapper would credit fc.noteDrained for un-buffered bytes and
             //     over-credit the FC-1 ledger. See attachAndHydratePane's docstring.
             const sentinels = makeSentinels(transport, drainingTransport);
-            if (primaryPaneId !== undefined) {
-                // tc-295a.8: broker-forwarded targeted attach. Validate the primary
-                // pane exists; hydrate it FIRST (guaranteed before any live delta for
-                // it), then hydrate the remaining known panes. A vanished primary pane
-                // surfaces pane.attach.failed{pane.not-found} — fail-loud.
-                void attachAndHydratePane(transport, transport, sentinels, primaryPaneId).then(() => {
-                    const others = [];
-                    for (const pid of pipeline.getModel().panes.keys()) {
-                        if (pid !== primaryPaneId)
-                            others.push(pid);
-                    }
-                    void hydrateTransport(pipeline, transport, others, sentinels);
-                });
-            }
-            else {
-                void hydrateTransport(pipeline, transport, pipeline.getModel().panes.keys(), sentinels);
+            // tc-76m8.28: a client that declared `pullHydration` owns the WHEN of
+            // every replay — it requests each pane explicitly via `pane.attach`
+            // (the extension gates those on settled geometry, tc-76m8.24). Pushing
+            // the addClient-time capture at it would replay a grid captured BEFORE
+            // the client converges tmux to its tabs' geometry: on a reconnect with
+            // geometry changed during the blip, history rows land in-viewport on
+            // the open tab and the managed resize's SIGWINCH redraw destroys them
+            // (the tc-76m8.24 corruption class, via this entry point). Skip the
+            // unsolicited replay entirely; `pane.attach` (below) is this client's
+            // single hydration entry point — including the targeted-attach primary
+            // pane, whose validation (pane.attach.failed{pane.not-found}) moves to
+            // the client's own `pane.attach` for it.
+            if (clientFlags?.pullHydration !== true) {
+                if (primaryPaneId !== undefined) {
+                    // tc-295a.8: broker-forwarded targeted attach. Validate the primary
+                    // pane exists; hydrate it FIRST (guaranteed before any live delta for
+                    // it), then hydrate the remaining known panes. A vanished primary pane
+                    // surfaces pane.attach.failed{pane.not-found} — fail-loud.
+                    void attachAndHydratePane(transport, transport, sentinels, primaryPaneId).then(() => {
+                        const others = [];
+                        for (const pid of pipeline.getModel().panes.keys()) {
+                            if (pid !== primaryPaneId)
+                                others.push(pid);
+                        }
+                        void hydrateTransport(pipeline, transport, others, sentinels);
+                    });
+                }
+                else {
+                    void hydrateTransport(pipeline, transport, pipeline.getModel().panes.keys(), sentinels);
+                }
             }
             // 3. Wire input path: forward client control messages to tmux.
             //

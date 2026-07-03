@@ -1095,6 +1095,12 @@ describe("protocol schema conformance", () => {
             const flags = { ignoreSize: true, readOnly: false };
             assert.ok(validateFlags(flags), JSON.stringify(validateFlags.errors));
         });
+        // tc-76m8.28: pullHydration — client-declared pull-hydration (the
+        // session-proxy skips the unsolicited addClient bulk replay for it).
+        it("accepts ClientFlags with pullHydration", () => {
+            const flags = { pullHydration: true };
+            assert.ok(validateFlags(flags), JSON.stringify(validateFlags.errors));
+        });
         it("rejects ClientFlags with a non-boolean flag", () => {
             assert.strictEqual(validateFlags({ ignoreSize: "yes" }), false);
         });

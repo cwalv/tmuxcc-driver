@@ -265,6 +265,7 @@ the axis so widening later is an implementation change, not a protocol change
 |---|---|---|
 | Durable client identity | (n/a — tmuxcc concept) | **Implemented** (tc-4b6k.1): `ClientIdentity` on `client.capabilities`, both wires |
 | Passive/observer attach | client flags `ignore-size`, `read-only` (`attach -r` = `read-only,ignore-size`) | **Slot typed** (tc-4b6k.1): `ClientFlags.{ignoreSize,readOnly}`. Carried by `session.attach` (tc-4b6k.4); driver behavior tc-4b6k.3 |
+| Hydration ownership | (n/a — tmuxcc concept) | **Implemented** (tc-76m8.28): `ClientFlags.pullHydration` — the client requests each pane's replay explicitly via `pane.attach`; the session-proxy skips the unsolicited addClient bulk replay (tc-5quo) for it. Lets a client that gates replays on settled geometry (tc-76m8.24) own the WHEN of every capture. |
 | Per-client size | `refresh-client -C WxH`; `window-size latest\|largest\|smallest\|manual` | **`latest` policy implemented** (tc-76m8.3, S3): the driver drives `refresh-client -C` for the size OWNER only; ownership follows client activity (window-size-`latest`), debounced. `smallest\|largest\|manual` arbitration still reserved. |
 | Client activity / focus | `input`; explicit foreground (`client.focus`) | **Implemented** (tc-76m8.3): `input` traffic + the `client.focus` message mark a client active; the most-recently-active client owns the session size. Mere connection is not activity. |
 | Independent active pane | client flag `active-pane` | Reserved: per-client focus fact (today focus is one model triple) |

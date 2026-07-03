@@ -116,7 +116,7 @@
 
     "ClientFlags": {
       "type": "object",
-      "description": "Per-client tmux-parity attach flags (D4/D8, tc-4b6k.3, decisions §2.1). Carried on `session.attach`; the driver acts on both flags (tc-4b6k.3). The vocabulary mirrors tmux(1) client flags; the wider parity map (active-pane, pause-after, no-detach-on-destroy, session groups) is enumerated in PROTOCOL.md as reserved prose, not typed here.",
+      "description": "Per-client attach flags (D4/D8, tc-4b6k.3, decisions §2.1). Carried on `session.attach`; the driver acts on all flags. The core vocabulary mirrors tmux(1) client flags (`pullHydration` is tmuxcc-native); the wider parity map (active-pane, pause-after, no-detach-on-destroy, session groups) is enumerated in PROTOCOL.md as reserved prose, not typed here.",
       "properties": {
         "ignoreSize": {
           "type": "boolean",
@@ -125,6 +125,10 @@
         "readOnly": {
           "type": "boolean",
           "description": "tmux-parity `read-only` flag: the client attaches as an observer. CAVEAT (decisions §2.1, verified in tmux source): over control mode, `read-only` does NOT bind the `-CC` command channel — its authority semantics are DRIVER-ENFORCED, never delegated to tmux's flag. When true the driver drops `input` messages and rejects mutating `command.request` verbs for this client."
+        },
+        "pullHydration": {
+          "type": "boolean",
+          "description": "tc-76m8.28 (tmuxcc-native, no tmux counterpart): this client requests each pane's hydration replay explicitly via `pane.attach`. When true the session-proxy skips the unsolicited addClient-time bulk replay (tc-5quo) for this client — that capture happens BEFORE the client converges tmux to its tabs' geometry, so pushing it to a client that gates its own replay on settled geometry (tc-76m8.24) is redundant at best and corrupting at worst. Absent/false preserves the bulk-push contract."
         }
       },
       "additionalProperties": false
