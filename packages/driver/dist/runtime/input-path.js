@@ -626,9 +626,11 @@ export function createInputPath(deps, opts = {}) {
                 }
                 switch (command.kind) {
                     case "open-window": {
-                        // new-window with optional name, cwd, and shellCommand.
+                        // new-window with optional name, cwd, shellCommand, and env.
                         // tc-cr4dz: cwd and shellCommand are additive optional fields set
                         // by the cold-start profile applicator after substitution.
+                        // tc-gjdx.2: env is an additive optional map compiled to repeated
+                        // -e NAME=value flags; floor is tmux 3.0 = MINIMUM, no gate needed.
                         //
                         // tc-ozk.1: always print the created ids (-P -F) and RETURN them in
                         // the VerbResult via runCreatingVerb.
@@ -636,6 +638,7 @@ export function createInputPath(deps, opts = {}) {
                             printIds: true,
                             ...(command.name !== undefined ? { name: command.name } : {}),
                             ...(command.cwd !== undefined ? { startDirectory: command.cwd } : {}),
+                            ...(command.env !== undefined ? { env: command.env } : {}),
                             ...(command.shellCommand !== undefined ? { shellCommand: command.shellCommand } : {}),
                         });
                         runCreatingVerb(respond, correlationId, "open-window", cmd);
@@ -647,6 +650,8 @@ export function createInputPath(deps, opts = {}) {
                         // (when absent, splitWindow emits no -t flag so tmux targets the
                         // current pane — used when the new window's first pane ID is not
                         // yet known).
+                        // tc-gjdx.2: env is an additive optional map compiled to repeated
+                        // -e NAME=value flags; floor is tmux 3.0 = MINIMUM, no gate needed.
                         //
                         // tc-ozk.1: always print the created ids (-P -F) and RETURN them.
                         let tmuxPaneNum;
@@ -656,6 +661,7 @@ export function createInputPath(deps, opts = {}) {
                         const cmd = splitWindow(tmuxPaneNum, command.direction, {
                             printIds: true,
                             ...(command.cwd !== undefined ? { startDirectory: command.cwd } : {}),
+                            ...(command.env !== undefined ? { env: command.env } : {}),
                             ...(command.shellCommand !== undefined ? { shellCommand: command.shellCommand } : {}),
                         });
                         runCreatingVerb(respond, correlationId, "split-pane", cmd);

@@ -495,6 +495,13 @@ export interface NewWindowOptions {
    * call sites that don't need the ids).
    */
   printIds?: boolean;
+  /**
+   * Environment variables to inject into the new window's first pane.
+   * Each entry is compiled to a repeated `-e NAME=value` flag.
+   * tc-gjdx.2: `-e` on `new-window` landed in tmux 3.0 (CHANGES FROM 2.9 TO 3.0),
+   * which equals MINIMUM_TMUX_VERSION — no capability gate required.
+   */
+  env?: Record<string, string>;
 }
 
 /**
@@ -518,6 +525,11 @@ export function newWindow(opts?: NewWindowOptions): string {
   }
   if (opts?.startDirectory !== undefined) {
     parts.push(`-c ${quoteArg(opts.startDirectory)}`);
+  }
+  if (opts?.env !== undefined) {
+    for (const [name, value] of Object.entries(opts.env)) {
+      parts.push(`-e ${quoteArg(`${name}=${value}`)}`);
+    }
   }
   if (opts?.shellCommand !== undefined) {
     parts.push(quoteArg(opts.shellCommand));
@@ -758,6 +770,13 @@ export interface SplitWindowOptions {
    * `-P -F EFFECT_IDS_FORMAT` (tc-ozk.1).  See NewWindowOptions.printIds.
    */
   printIds?: boolean;
+  /**
+   * Environment variables to inject into the new pane.
+   * Each entry is compiled to a repeated `-e NAME=value` flag.
+   * tc-gjdx.2: `-e` on `split-window` landed in tmux 3.0 (CHANGES FROM 2.9 TO 3.0),
+   * which equals MINIMUM_TMUX_VERSION — no capability gate required.
+   */
+  env?: Record<string, string>;
 }
 
 /**
@@ -798,6 +817,11 @@ export function splitWindow(
   }
   if (opts?.startDirectory !== undefined) {
     parts.push(`-c ${quoteArg(opts.startDirectory)}`);
+  }
+  if (opts?.env !== undefined) {
+    for (const [name, value] of Object.entries(opts.env)) {
+      parts.push(`-e ${quoteArg(`${name}=${value}`)}`);
+    }
   }
   if (opts?.shellCommand !== undefined) {
     parts.push(quoteArg(opts.shellCommand));

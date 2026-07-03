@@ -47,7 +47,7 @@ export function createSessionClaimer(ctx) {
      * `phaseLog` line, and calls `ctx.onClaimComplete(timing)` — the tc-is5w
      * histogram hook.
      */
-    async function doClaimSession(name) {
+    async function doClaimSession(name, env) {
         // tc-is5w: record t0 at claim entry for the "claim" phase timer.
         const t0 = phaseNow();
         // Refresh session list from tmux.
@@ -70,7 +70,10 @@ export function createSessionClaimer(ctx) {
             try {
                 // tc-4b6k.12: pass capability state so createSession can gate
                 // version-sensitive operations (e.g. scroll-on-clear on tmux 3.3+).
-                const { tmuxId } = await createSession(ctx.socketName, name, ctx.getCapabilities());
+                // tc-gjdx.2: env is forwarded so new-session can inject -e NAME=value
+                // flags; createSession gates env on the newSessionEnvFlag capability
+                // (tmux >= 3.2) and throws loud if the flag is absent.
+                const { tmuxId } = await createSession(ctx.socketName, name, ctx.getCapabilities(), env);
                 created = true;
                 entry = ctx.lookupByName(name);
                 if (!entry) {
@@ -82,6 +85,9 @@ export function createSessionClaimer(ctx) {
             }
             catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
+                const code = err instanceof Object && "code" in err
+                    ? err.code
+                    : undefined;
                 if (msg.toLowerCase().includes("duplicate")) {
                     // Race: another process created it between our check and create —
                     // we attached to that process's session; `created` stays false.
@@ -90,6 +96,12 @@ export function createSessionClaimer(ctx) {
                     if (!entry) {
                         throw Object.assign(new Error(`session.create race: ${msg}`), { code: "internal" });
                     }
+                }
+                else if (code === "tmux.capability-required") {
+                    // tc-gjdx.2: capability-required errors (e.g. env on tmux < 3.2) must
+                    // propagate with their original code so the server-proxy can surface
+                    // a specific error to the client — don't re-wrap as tmux.unavailable.
+                    throw err;
                 }
                 else {
                     throw Object.assign(new Error(`tmux.unavailable: ${msg}`), { code: "tmux.unavailable" });
@@ -148,15 +160,17 @@ export function createSessionClaimer(ctx) {
         return { sessionId: entry.sessionId, created };
     }
     return {
-        claim(name) {
+        claim(name, env) {
             const inFlight = claimLocks.get(name);
             if (inFlight) {
                 // Joined claim: by the time this resolves the session exists; this
                 // caller did not create it (tc-3y8.2: only the initiating claim
                 // reports `created: true`).
+                // tc-gjdx.2: env is applied only at creation time; a joined claim
+                // discards it (the session is already being created by the initiator).
                 return inFlight.then((r) => ({ ...r, created: false }));
             }
-            const promise = doClaimSession(name).finally(() => {
+            const promise = doClaimSession(name, env).finally(() => {
                 // Only remove the lock if it's still THIS promise (not a newer one).
                 if (claimLocks.get(name) === promise) {
                     claimLocks.delete(name);

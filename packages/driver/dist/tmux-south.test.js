@@ -120,6 +120,103 @@ describe("tmux-south createSession (tc-zcqr)", { skip: !TMUX_AVAILABLE }, () => 
             killServer(socketName);
         }
     });
+    // tc-gjdx.2: real-tmux moat — env visible in the created session's initial pane
+    it("tc-gjdx.2: env is visible in the session's initial pane (real tmux)", async () => {
+        const socketName = nextSocketName();
+        try {
+            // Create the session with an env variable injected.
+            await createSession(socketName, "env-test", undefined, { TMUXCC_TEST_ENV: "moat-value" });
+            // Give the shell in the new pane a moment to start up; then show the variable.
+            // We run `tmux send-keys` to echo the value into the pane and capture it.
+            // Use `printenv TMUXCC_TEST_ENV` (exit 1 if unset) and capture the pane.
+            //
+            // Strategy: run-shell in the new session to print the env var, capture output.
+            const run = spawnSync("tmux", [
+                "-L", socketName,
+                "run-shell",
+                "-t", "env-test",
+                "printenv TMUXCC_TEST_ENV",
+            ], { encoding: "utf8", timeout: 5_000 });
+            assert.equal(run.status, 0, `printenv TMUXCC_TEST_ENV failed (tmux < 3.2 env not injected?): stdout=${run.stdout} stderr=${run.stderr}`);
+            assert.equal((run.stdout ?? "").trim(), "moat-value", `Expected env var TMUXCC_TEST_ENV=moat-value, got: ${JSON.stringify(run.stdout)}`);
+        }
+        finally {
+            killServer(socketName);
+        }
+    });
+});
+// ---------------------------------------------------------------------------
+// createSession env capability gate — unit tests (no tmux required, tc-gjdx.2)
+// ---------------------------------------------------------------------------
+describe("tmux-south createSession env capability gate (tc-gjdx.2)", () => {
+    // tc-gjdx.2: below-floor fail-loud — env-carrying create against tmux < 3.2
+    // must throw before any I/O (pure capability check, no real tmux needed).
+    it("throws capability-required when newSessionEnvFlag is false", async () => {
+        // Simulate pre-3.2 capabilities: newSessionEnvFlag absent.
+        const below32Caps = {
+            windowSize: true,
+            noOutputFlag: true,
+            windowSizeLatest: true,
+            ignoreSizeFlag: false,
+            readOnlyFlag: false,
+            pauseAfterFlag: false,
+            activePaneFlag: false,
+            newSessionEnvFlag: false,
+            scrollOnClear: false,
+            noDetachOnDestroy: false,
+        };
+        // The capability guard fires before any tmux call when capabilities are
+        // provided and the flag is false; the nonexistent socket name is irrelevant.
+        const err = await createSession("tmuxcc-nonexistent-socket", "some-session", below32Caps, { MY_VAR: "value" }).then(() => null, (e) => e);
+        assert.ok(err instanceof Error, `Expected an Error, got: ${String(err)}`);
+        assert.ok(err.code === "tmux.capability-required", `Expected code "tmux.capability-required", got: ${JSON.stringify(err.code)}`);
+        assert.ok(err.message.includes("newSessionEnvFlag"), `Expected "newSessionEnvFlag" in error message: ${err.message}`);
+        assert.ok(err.message.includes("3.2"), `Expected "3.2" (the version floor) in error message: ${err.message}`);
+    });
+    it("does not throw when env is undefined (no gate needed)", async () => {
+        // When env is omitted entirely, the guard must be silent even with a
+        // below-floor capability map — the socket doesn't exist, but the error
+        // (if any) comes from tmux, not from our gate.
+        const below32Caps = {
+            windowSize: true,
+            noOutputFlag: true,
+            windowSizeLatest: true,
+            ignoreSizeFlag: false,
+            readOnlyFlag: false,
+            pauseAfterFlag: false,
+            activePaneFlag: false,
+            newSessionEnvFlag: false,
+            scrollOnClear: false,
+            noDetachOnDestroy: false,
+        };
+        const err = await createSession("tmuxcc-nonexistent-socket", "some-session", below32Caps, undefined).then(() => null, (e) => e);
+        // If an error is thrown, it must NOT be a capability-required error —
+        // that would mean the guard fired spuriously.
+        if (err !== null) {
+            const code = err.code;
+            assert.ok(code !== "tmux.capability-required", `Guard must not fire for undefined env; got code "${code}"`);
+        }
+    });
+    it("does not throw when env is an empty map (no -e flags emitted)", async () => {
+        // An empty env map must also bypass the gate — nothing to inject.
+        const below32Caps = {
+            windowSize: true,
+            noOutputFlag: true,
+            windowSizeLatest: true,
+            ignoreSizeFlag: false,
+            readOnlyFlag: false,
+            pauseAfterFlag: false,
+            activePaneFlag: false,
+            newSessionEnvFlag: false,
+            scrollOnClear: false,
+            noDetachOnDestroy: false,
+        };
+        const err = await createSession("tmuxcc-nonexistent-socket", "some-session", below32Caps, {}).then(() => null, (e) => e);
+        if (err !== null) {
+            const code = err.code;
+            assert.ok(code !== "tmux.capability-required", `Guard must not fire for empty env; got code "${code}"`);
+        }
+    });
 });
 // ---------------------------------------------------------------------------
 // checkSessionPresence (tc-hfxb.18.4)

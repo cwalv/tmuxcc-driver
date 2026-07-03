@@ -446,6 +446,50 @@ describe("createInputPath — CommandRequestMessage", () => {
     assert.equal(host.lastWrite, "new-window -P -F '#{pane_id} #{window_id}' -n editor\n");
   });
 
+  // tc-gjdx.2: env forwarding on creating verbs (floor 3.0 = MINIMUM, no gate)
+  it("open-window with env → new-window -e NAME=value", () => {
+    const host = makeFakeDeps();
+    const path = createInputPath(host);
+
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "c4a",
+      command: {
+        kind: "open-window",
+        env: { MY_TOKEN: "abc123", PORT: "8080" },
+      },
+    };
+    path.handleClientMessage(msg);
+
+    const written = host.lastWrite ?? "";
+    assert.ok(written.includes("-e MY_TOKEN=abc123"), `Expected -e MY_TOKEN=abc123 in: ${written}`);
+    assert.ok(written.includes("-e PORT=8080"), `Expected -e PORT=8080 in: ${written}`);
+    assert.ok(written.startsWith("new-window"), `Expected new-window command, got: ${written}`);
+  });
+
+  it("split-pane with env → split-window -e NAME=value", () => {
+    const host = makeFakeDeps();
+    const path = createInputPath(host);
+
+    const msg: CommandRequestMessage = {
+      type: "command.request",
+      seq: nextSeq(),
+      correlationId: "c4b",
+      command: {
+        kind: "split-pane",
+        paneId: paneId("p3"),
+        direction: "horizontal",
+        env: { SECRET: "xyz" },
+      },
+    };
+    path.handleClientMessage(msg);
+
+    const written = host.lastWrite ?? "";
+    assert.ok(written.includes("-e SECRET=xyz"), `Expected -e SECRET=xyz in: ${written}`);
+    assert.ok(written.startsWith("split-window"), `Expected split-window command, got: ${written}`);
+  });
+
   it("close-pane → kill-pane -t %2", () => {
     const host = makeFakeDeps();
     const path = createInputPath(host);

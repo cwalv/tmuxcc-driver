@@ -351,6 +351,15 @@ export interface SessionCreateCommand {
    * driver-side application is tc-gjdx.3.
    */
   readonly template?: SessionTemplate;
+  /**
+   * Environment variables to set in the initial pane of the created session.
+   * Each entry is compiled to a repeated `-e NAME=value` flag on `new-session`.
+   * Additive optional field — non-breaking per the versioning policy.
+   * tc-gjdx.2: requires tmux >= 3.2 (`newSessionEnvFlag`). An env-carrying
+   * request against an older tmux fails loud (capability error surfaced to the
+   * client).
+   */
+  readonly env?: Record<string, string>;
 }
 
 /**
@@ -394,6 +403,15 @@ export interface SessionCreateUniqueCommand {
    * is tc-gjdx.3.
    */
   readonly template?: SessionTemplate;
+  /**
+   * Environment variables to set in the initial pane of the created session.
+   * Each entry is compiled to a repeated `-e NAME=value` flag on `new-session`.
+   * Additive optional field — non-breaking per the versioning policy.
+   * tc-gjdx.2: requires tmux >= 3.2 (`newSessionEnvFlag`). An env-carrying
+   * request against an older tmux fails loud (capability error surfaced to the
+   * client).
+   */
+  readonly env?: Record<string, string>;
 }
 
 /**
@@ -732,6 +750,13 @@ export interface TmuxCapabilityMap {
    * CHANGES FROM 3.5a TO 3.6.
    */
   readonly noDetachOnDestroy: boolean;
+  /**
+   * `-e NAME=value` flag on `new-session` to inject environment variables into
+   * the session's initial pane.  Added in 3.2 alongside the same flag for
+   * `new-window` / `split-window` (which landed earlier in 3.0).
+   * CHANGES FROM 3.1c TO 3.2.
+   */
+  readonly newSessionEnvFlag: boolean;
 }
 
 /**

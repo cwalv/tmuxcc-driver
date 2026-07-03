@@ -995,6 +995,14 @@ export interface OpenWindowCommand {
    * tc-cr4dz: set by the cold-start profile applicator after substitution.
    */
   readonly shellCommand?: string;
+  /**
+   * Environment variables to set in the first pane of the new window.
+   * Each entry is compiled to a repeated `-e NAME=value` flag on `new-window`.
+   * Additive optional field — non-breaking per the versioning policy.
+   * tc-gjdx.2: floor is tmux 3.0 (CHANGES FROM 2.9 TO 3.0) = MINIMUM_TMUX_VERSION,
+   * so no capability gate is required.
+   */
+  readonly env?: Record<string, string>;
 }
 
 /**
@@ -1027,6 +1035,14 @@ export interface SplitPaneCommand {
    * tc-cr4dz: set by the cold-start profile applicator after substitution.
    */
   readonly shellCommand?: string;
+  /**
+   * Environment variables to set in the new pane.
+   * Each entry is compiled to a repeated `-e NAME=value` flag on `split-window`.
+   * Additive optional field — non-breaking per the versioning policy.
+   * tc-gjdx.2: floor is tmux 3.0 (CHANGES FROM 2.9 TO 3.0) = MINIMUM_TMUX_VERSION,
+   * so no capability gate is required.
+   */
+  readonly env?: Record<string, string>;
 }
 
 /**

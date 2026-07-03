@@ -112,6 +112,11 @@ export function deriveCapabilities(version) {
         readOnlyFlag: gte("3.2"),
         pauseAfterFlag: gte("3.2"),
         activePaneFlag: gte("3.2"),
+        // tc-gjdx.2: new-session -e flag landed in 3.2 (CHANGES FROM 3.1c TO 3.2).
+        // The same flag for new-window / split-window landed earlier in 3.0
+        // (CHANGES FROM 2.9 TO 3.0) and needs no separate capability entry since
+        // 3.0 == MINIMUM_TMUX_VERSION.
+        newSessionEnvFlag: gte("3.2"),
         scrollOnClear: gte("3.3"),
         noDetachOnDestroy: gte("3.6"),
     };

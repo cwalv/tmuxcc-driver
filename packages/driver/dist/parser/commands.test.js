@@ -278,6 +278,33 @@ describe("newWindow", () => {
     it("includes shell command as trailing argument", () => {
         assert.equal(newWindow({ name: "srv", shellCommand: "bash" }), "new-window -n srv bash");
     });
+    // tc-gjdx.2: env → repeated -e NAME=value flags (floor 3.0 = MINIMUM)
+    it("env: single variable → -e NAME=value before shellCommand", () => {
+        assert.equal(newWindow({ env: { MY_VAR: "hello" } }), "new-window -e MY_VAR=hello");
+    });
+    it("env: multiple variables → repeated -e flags in insertion order", () => {
+        const cmd = newWindow({ env: { FOO: "1", BAR: "2" } });
+        assert.ok(cmd.includes("-e FOO=1"), `Expected -e FOO=1 in: ${cmd}`);
+        assert.ok(cmd.includes("-e BAR=2"), `Expected -e BAR=2 in: ${cmd}`);
+    });
+    it("env: value with spaces is quoted", () => {
+        const cmd = newWindow({ env: { MSG: "hello world" } });
+        assert.ok(cmd.includes("-e 'MSG=hello world'"), `Expected quoted value in: ${cmd}`);
+    });
+    it("env: placed before shellCommand in the command", () => {
+        const cmd = newWindow({ env: { X: "1" }, shellCommand: "bash" });
+        const envIdx = cmd.indexOf("-e X=1");
+        const shellIdx = cmd.indexOf("bash");
+        assert.ok(envIdx !== -1, `Expected -e X=1 in: ${cmd}`);
+        assert.ok(shellIdx !== -1, `Expected bash in: ${cmd}`);
+        assert.ok(envIdx < shellIdx, `env flag must appear before shellCommand in: ${cmd}`);
+    });
+    it("env: combined with printIds and name", () => {
+        assert.equal(newWindow({ printIds: true, name: "win", env: { K: "v" }, shellCommand: "sh" }), "new-window -P -F '#{pane_id} #{window_id}' -n win -e K=v sh");
+    });
+    it("env: empty map → no -e flags emitted", () => {
+        assert.equal(newWindow({ env: {} }), "new-window");
+    });
 });
 // ---------------------------------------------------------------------------
 // split-window
@@ -325,6 +352,29 @@ describe("splitWindow", () => {
     it("printIds adds -P -F EFFECT_IDS_FORMAT (tc-ozk.1)", () => {
         assert.equal(splitWindow(3, "horizontal", { printIds: true }), "split-window -h -t %3 -P -F '#{pane_id} #{window_id}'");
         assert.equal(splitWindow(undefined, "vertical", { printIds: true }), "split-window -v -P -F '#{pane_id} #{window_id}'");
+    });
+    // tc-gjdx.2: env → repeated -e NAME=value flags (floor 3.0 = MINIMUM)
+    it("env: single variable → -e NAME=value before shellCommand", () => {
+        assert.equal(splitWindow(3, "horizontal", { env: { MY_VAR: "hello" } }), "split-window -h -t %3 -e MY_VAR=hello");
+    });
+    it("env: multiple variables → repeated -e flags", () => {
+        const cmd = splitWindow(3, "horizontal", { env: { A: "1", B: "2" } });
+        assert.ok(cmd.includes("-e A=1"), `Expected -e A=1 in: ${cmd}`);
+        assert.ok(cmd.includes("-e B=2"), `Expected -e B=2 in: ${cmd}`);
+    });
+    it("env: placed before shellCommand in the command", () => {
+        const cmd = splitWindow(3, "vertical", { env: { X: "1" }, shellCommand: "bash" });
+        const envIdx = cmd.indexOf("-e X=1");
+        const shellIdx = cmd.indexOf("bash");
+        assert.ok(envIdx !== -1, `Expected -e X=1 in: ${cmd}`);
+        assert.ok(shellIdx !== -1, `Expected bash in: ${cmd}`);
+        assert.ok(envIdx < shellIdx, `env flag must appear before shellCommand in: ${cmd}`);
+    });
+    it("env: combined with printIds and startDirectory", () => {
+        assert.equal(splitWindow(5, "horizontal", { printIds: true, startDirectory: "/tmp", env: { K: "v" } }), "split-window -h -t %5 -P -F '#{pane_id} #{window_id}' -c /tmp -e K=v");
+    });
+    it("env: empty map → no -e flags emitted", () => {
+        assert.equal(splitWindow(3, "horizontal", { env: {} }), "split-window -h -t %3");
     });
 });
 // ---------------------------------------------------------------------------

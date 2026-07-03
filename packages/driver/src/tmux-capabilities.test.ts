@@ -176,6 +176,21 @@ describe("deriveCapabilities", () => {
     assert.equal(deriveCapabilities("3.6").noDetachOnDestroy, true);
   });
 
+  // tc-gjdx.2: newSessionEnvFlag — CHANGES FROM 3.1c TO 3.2
+  // -e on new-session landed in 3.2; -e on new-window/split-window landed
+  // earlier in 3.0 (= MINIMUM) and needs no separate capability entry.
+  it("newSessionEnvFlag is false below 3.2", () => {
+    assert.equal(deriveCapabilities("3.1").newSessionEnvFlag, false);
+    assert.equal(deriveCapabilities("3.1c").newSessionEnvFlag, false);
+  });
+  it("newSessionEnvFlag is true at 3.2", () => {
+    assert.equal(deriveCapabilities("3.2").newSessionEnvFlag, true);
+  });
+  it("newSessionEnvFlag is true above 3.2", () => {
+    assert.equal(deriveCapabilities("3.3").newSessionEnvFlag, true);
+    assert.equal(deriveCapabilities("3.6").newSessionEnvFlag, true);
+  });
+
   it("all capabilities true on a future version", () => {
     const caps = deriveCapabilities("99.0");
     assert.equal(caps.windowSize, true);
@@ -185,6 +200,7 @@ describe("deriveCapabilities", () => {
     assert.equal(caps.readOnlyFlag, true);
     assert.equal(caps.pauseAfterFlag, true);
     assert.equal(caps.activePaneFlag, true);
+    assert.equal(caps.newSessionEnvFlag, true);
     assert.equal(caps.scrollOnClear, true);
     assert.equal(caps.noDetachOnDestroy, true);
   });
@@ -198,6 +214,7 @@ describe("deriveCapabilities", () => {
     assert.equal(caps.readOnlyFlag, false);
     assert.equal(caps.pauseAfterFlag, false);
     assert.equal(caps.activePaneFlag, false);
+    assert.equal(caps.newSessionEnvFlag, false);
     assert.equal(caps.scrollOnClear, false);
     assert.equal(caps.noDetachOnDestroy, false);
   });

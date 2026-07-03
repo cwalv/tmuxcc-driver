@@ -147,8 +147,14 @@ export interface SessionClaimer {
      * If a claim for `name` is already in flight, the returned promise joins
      * that in-flight claim and always resolves with `created: false` (tc-3y8.2:
      * only the initiating claim reports `created: true`).
+     *
+     * tc-gjdx.2: `env` is forwarded to `createSession` when provided and the
+     * session must be created (not already present).  Requires tmux >= 3.2
+     * (`newSessionEnvFlag`); throws with `code: "tmux.capability-required"` when
+     * the probed version does not support it.  Ignored (not an error) if the
+     * session already exists and `env` would have been a no-op.
      */
-    claim(name: string): Promise<ClaimSessionResult>;
+    claim(name: string, env?: Record<string, string>): Promise<ClaimSessionResult>;
     /**
      * Whether a claim for `name` is currently in flight.
      *

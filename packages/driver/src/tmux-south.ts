@@ -571,9 +571,34 @@ export async function createSession(
   socketName: string,
   name: string,
   capabilities?: TmuxCapabilityMap,
+  env?: Record<string, string>,
 ): Promise<{ tmuxId: string }> {
+  // tc-gjdx.2: gate -e on new-session at 3.2 (CHANGES FROM 3.1c TO 3.2).
+  // This flag is NOT available in the 3.0 base where new-window/split-window's
+  // -e flag landed. An env-carrying create against tmux < 3.2 is an error.
+  if (env !== undefined && Object.keys(env).length > 0) {
+    if (capabilities !== undefined && !capabilities.newSessionEnvFlag) {
+      throw Object.assign(
+        new Error(
+          `new-session -e (capability newSessionEnvFlag) requires tmux >= 3.2. ` +
+          `The probed tmux version does not support this flag. ` +
+          `Upgrade tmux to >= 3.2 or omit env from session.create.`,
+        ),
+        { code: "tmux.capability-required", capability: "newSessionEnvFlag" },
+      );
+    }
+  }
+
+  // Build the env flags for the new-session command.
+  const envFlags: string[] = [];
+  if (env !== undefined) {
+    for (const [k, v] of Object.entries(env)) {
+      envFlags.push("-e", `${k}=${v}`);
+    }
+  }
+
   const result = await runTmux(
-    ["-L", socketName, "new-session", "-d", "-s", name, "-P", "-F", "#{session_id}"],
+    ["-L", socketName, "new-session", "-d", "-s", name, ...envFlags, "-P", "-F", "#{session_id}"],
     10_000,
   );
   if (result.status !== 0 || result.error) {

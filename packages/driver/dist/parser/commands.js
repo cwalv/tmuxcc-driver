@@ -376,6 +376,11 @@ export function newWindow(opts) {
     if (opts?.startDirectory !== undefined) {
         parts.push(`-c ${quoteArg(opts.startDirectory)}`);
     }
+    if (opts?.env !== undefined) {
+        for (const [name, value] of Object.entries(opts.env)) {
+            parts.push(`-e ${quoteArg(`${name}=${value}`)}`);
+        }
+    }
     if (opts?.shellCommand !== undefined) {
         parts.push(quoteArg(opts.shellCommand));
     }
@@ -584,6 +589,11 @@ export function splitWindow(paneId, orientation, opts) {
     }
     if (opts?.startDirectory !== undefined) {
         parts.push(`-c ${quoteArg(opts.startDirectory)}`);
+    }
+    if (opts?.env !== undefined) {
+        for (const [name, value] of Object.entries(opts.env)) {
+            parts.push(`-e ${quoteArg(`${name}=${value}`)}`);
+        }
     }
     if (opts?.shellCommand !== undefined) {
         parts.push(quoteArg(opts.shellCommand));

@@ -278,7 +278,7 @@ export declare function listSessionTopology(socketName: string, sessionName: str
  * session-proxy will start; the session just won't appear in the attach-picker until
  * the marker is applied on the next claim.
  */
-export declare function createSession(socketName: string, name: string, capabilities?: TmuxCapabilityMap): Promise<{
+export declare function createSession(socketName: string, name: string, capabilities?: TmuxCapabilityMap, env?: Record<string, string>): Promise<{
     tmuxId: string;
 }>;
 /**

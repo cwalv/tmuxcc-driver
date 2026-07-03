@@ -1728,10 +1728,12 @@ class ServerProxyImpl implements ServerProxyHandle {
           payload = await this._claimer.claim(command.name);
           break;
         case "session.create":
-          payload = await this._createSession(command.name);
+          // tc-gjdx.2: forward env so the claim path can pass -e flags to new-session.
+          payload = await this._createSession(command.name, command.env);
           break;
         case "session.createUnique":
-          payload = await this._createUniqueSession(command.baseName, command.workspaceUri);
+          // tc-gjdx.2: forward env similarly for unique-create.
+          payload = await this._createUniqueSession(command.baseName, command.workspaceUri, command.env);
           break;
         case "session.destroy":
           payload = await this._destroySession(command.sessionId);
@@ -1911,6 +1913,7 @@ class ServerProxyImpl implements ServerProxyHandle {
 
   private async _createSession(
     name: string,
+    env?: Record<string, string>,
   ): Promise<{ sessionId: SessionId; created: boolean }> {
     await this._refreshSessions();
 
@@ -1926,7 +1929,9 @@ class ServerProxyImpl implements ServerProxyHandle {
     }
 
     // Use claim semantics — create then spawn session-proxy.
-    const result = await this._claimer.claim(name);
+    // tc-gjdx.2: env is forwarded to the claimer, which passes it to
+    // createSession for the -e NAME=value new-session flags.
+    const result = await this._claimer.claim(name, env);
 
     // tc-3y8.2: enforce mint-or-fail.  The checks above close the in-process
     // races, but another tmux client (outside this serverProxy) can still mint the
@@ -1983,6 +1988,7 @@ class ServerProxyImpl implements ServerProxyHandle {
   private async _createUniqueSession(
     baseName: string,
     workspaceUri?: string,
+    env?: Record<string, string>,
   ): Promise<{ sessionId: SessionId; created: boolean; name: string }> {
     // Normalise: empty / whitespace-only baseName → "tmuxcc".
     const base = (baseName ?? "").trim() || "tmuxcc";
@@ -2005,7 +2011,8 @@ class ServerProxyImpl implements ServerProxyHandle {
       // Attempt to claim the candidate.  If another concurrent caller beats
       // us (race between the check above and _claimer.claim below), the claim
       // resolves with created=false — that means the name was taken; loop.
-      const result = await this._claimer.claim(candidate);
+      // tc-gjdx.2: env is forwarded so new-session receives the -e flags.
+      const result = await this._claimer.claim(candidate, env);
       if (result.created) {
         // S4: stamp the workspace identity on the just-minted session so reopen
         // matches by option, not by the (human, non-unique) name.  Also mirror
