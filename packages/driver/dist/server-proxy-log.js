@@ -86,7 +86,7 @@ export function openServerProxyLog(logPath) {
  *
  * After tc-2x3.3 collapsed the per-session session-proxy INTO the server-proxy
  * process, the session-proxy's own routine diagnostics (e.g. the flow-control
- * `[flow-control] DRAIN CLAMPED` warning, boundary-trip / crash notices) now run
+ * `[flow-control] COMMAND FAILED` warning, boundary-trip / crash notices) now run
  * in THIS process and fire post-READY — i.e. AFTER the original stderr fd was
  * destroyed.  Forwarding those writes to the detached fd raises EPIPE (or EBADF):
  *   - SYNCHRONOUSLY (origWrite throws), and/or

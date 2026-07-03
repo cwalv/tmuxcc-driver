@@ -290,8 +290,19 @@ class FlowControllerImpl {
         if (byteCount <= 0)
             return;
         const client = this._resolveClient(clientKey);
-        const inner = this._innerFor(paneId);
-        const prev = inner.get(client) ?? 0;
+        const inner = this._buffered.get(paneId);
+        const prev = inner?.get(client);
+        if (inner === undefined || prev === undefined) {
+            // A drain credit for a (pane × client) sub-ledger that does not exist:
+            // the client was never credited a byte for this pane, or was already
+            // removed (removeClient discards a dead client's sub-ledgers; the
+            // production draining wrapper suppresses post-close credits —
+            // tc-76m8.27). Either way there is nothing to debit: witness the FC-1
+            // violation via the tripwire, and do NOT materialize an entry for the
+            // unknown/dead key (that would leak it in the pane's sub-ledger map).
+            this._metrics.onDrainClamped?.(paneId, byteCount);
+            return;
+        }
         if (byteCount > prev) {
             // FC-1 violation absorbed by the clamp — expected never (tc-d7i). Now a
             // per-client check: the structural multi-client over-credit is gone, so
@@ -373,9 +384,12 @@ class FlowControllerImpl {
     }
     /**
      * Resolve a `noteDrained` client key to the sub-ledger it debits. An omitted
-     * key (direct-drive callers) maps to DEFAULT_CLIENT; an explicit key debits
-     * its own sub-ledger even if it was never registered via addClient (the
-     * draining-wrapper credit can legitimately race the onClose removeClient).
+     * key (direct-drive callers) maps to DEFAULT_CLIENT. An explicit key must
+     * name a sub-ledger that has actually been credited: the production
+     * draining wrapper (session-proxy.ts) suppresses credits once the client's
+     * transport has closed, so a credit arriving for a removed client's key is
+     * an accounting bug — noteDrained witnesses it via onDrainClamped and
+     * debits nothing (tc-76m8.27).
      */
     _resolveClient(clientKey) {
         return clientKey ?? DEFAULT_CLIENT;

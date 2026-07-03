@@ -31,7 +31,7 @@
  * | `flow_panes_paused` | gauge | — | Number of panes currently paused by the flow controller (FIFO refcount-style — pairs with `session_paused_seconds_total`). EXPECT returns to 0 after every firehose drains; drift = a pane stuck gated, "the terminal went dead" symptom (tc-3si.5). |
  * | `flow_pane_pauses_total` | counter | — | Total pane pause transitions (0→paused). Balances with `flow_pane_resumes_total` over time. Imbalance = a pane stuck paused (tc-3si.5). |
  * | `flow_pane_resumes_total` | counter | — | Total pane resume transitions (paused→0). Balances with `flow_pane_pauses_total` over time. Imbalance = paused panes leak (tc-3si.5). |
- * | `flow_drain_clamped_total` | counter | — | Times `noteDrained`'s clamp-at-zero clipped — a drain credit exceeded the buffered total. **Expected-zero tripwire**: every increment is an FC-1 accounting bug (double credit / drain-for-dead-pane) the clamp would otherwise absorb into silent drift. ALERT (tc-d7i). |
+ * | `flow_drain_clamped_total` | counter | — | Times `noteDrained` could not debit what a drain credit claimed (credit exceeded the sub-ledger, or named a nonexistent one). **Expected-zero tripwire**: every increment is an FC-1 accounting bug (double credit / drain for a dead pane or client); the session-proxy wiring counts it and then THROWS (pre-alpha fail-loud, tc-76m8.27). ALERT (tc-d7i). |
  * | `flow_bytes_while_paused_total` | counter | — | Bytes accounted while the pane was already paused — the FC-5 in-flight window (output tmux flushed before honoring the pause). EXPECT small bounded bursts at each pause edge (~one socket flush, observed ~2730-byte chunks in tc-cbh); sustained growth = tmux not honoring `refresh-client -A pause` (tc-d7i). |
  * | `flow_commands_failed_total` | counter | `kind` | `%error` replies to flow-control `refresh-client -A` commands (`kind=pause\|continue`). **Expected-zero tripwire**; `kind=continue` is the worst UX failure in this plane — tmux keeps holding the pane's output (frozen terminal) with no other witness. Correlator rejections at teardown are NOT counted. ALERT (tc-d7i). |
  * | `resyncs_total` | counter | `cause` | Resync events handled by `serve.ts`, attributed by `cause` (`gap`: the client detected a seq gap and asked for a snapshot — legitimate under packet loss / drop tests; `escalation`: a second resync request from the same client within a short window — the previous snapshot didn't heal the gap). EXPECT ~0 on in-process transports (in-memory pairs are lossless); `escalation` is **expected-zero tripwire** universally — it means the wire's sequence invariant is broken (tc-3si.5). ALERT on escalation. |
@@ -486,11 +486,12 @@ export interface SessionProxyRegistry {
   /**
    * Increment `flow_drain_clamped_total` (tc-d7i).
    *
-   * Called (via the flow controller's metrics hooks) when `noteDrained`'s
-   * clamp-at-zero clipped — a drain credit exceeded the buffered total.
+   * Called (via the flow controller's metrics hooks) when `noteDrained`
+   * could not debit what a drain credit claimed — the credit exceeded the
+   * crediting client's sub-ledger, or named a nonexistent one.
    * Expected-zero tripwire: every increment is an FC-1 accounting bug
-   * (double credit / drain-for-dead-pane) that the clamp would otherwise
-   * absorb into silent drift. The wiring caller ALSO loud-logs to stderr.
+   * (double credit / drain for a dead pane or client). The wiring caller
+   * counts this and then THROWS (pre-alpha fail-loud, tc-76m8.27).
    */
   noteFlowDrainClamped(): void;
 
@@ -908,8 +909,8 @@ export function createSessionProxyRegistry(): SessionProxyRegistry {
   const flowDrainClampedTotal = new Counter({
     name: "flow_drain_clamped_total",
     help:
-      "Times noteDrained's clamp-at-zero clipped (drain credit exceeded buffered bytes). " +
-      "Expected-zero tripwire: every increment is an accounting bug the clamp absorbed.",
+      "Times noteDrained could not debit what a drain credit claimed (credit exceeded the sub-ledger, or named a nonexistent one). " +
+      "Expected-zero tripwire: every increment is an FC-1 accounting bug; the session-proxy wiring throws on it (tc-76m8.27).",
     registers: [reg],
   });
 

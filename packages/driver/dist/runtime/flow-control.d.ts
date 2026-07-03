@@ -183,12 +183,16 @@ export type ClientKey = object;
  */
 export interface FlowControllerMetricsHooks {
     /**
-     * `noteDrained`'s clamp-at-zero clipped: a drain credit exceeded the
-     * crediting client's per-pane sub-ledger (an FC-1 violation the clamp
-     * absorbed). Expected never — every call is an accounting bug (double credit,
-     * drain for a dead pane/client). Per-client ledgers (tc-0wtb) make the
-     * old multi-client structural over-credit impossible, so this stays a
-     * genuine expected-zero tripwire.
+     * `noteDrained` could not debit what a drain credit claimed: the credit
+     * exceeded the crediting client's per-pane sub-ledger (clamped at 0), or
+     * named a (pane × client) sub-ledger that does not exist at all (nothing
+     * debited, no entry materialized). Expected never — every call is an FC-1
+     * accounting bug (double credit, drain for a dead pane/client). Per-client
+     * ledgers (tc-0wtb) make the old multi-client structural over-credit
+     * impossible, and the draining wrapper suppresses the deferred credits an
+     * abrupt client death releases (tc-76m8.27), so this is a genuine
+     * expected-zero tripwire — the production wiring (session-proxy.ts) fails
+     * loud (throws) on it.
      */
     onDrainClamped?(paneId: PaneId, excessBytes: number): void;
     /**

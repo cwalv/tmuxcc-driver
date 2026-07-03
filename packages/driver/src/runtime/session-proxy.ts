@@ -416,9 +416,19 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
     metrics: {
       onDrainClamped: (paneId, excessBytes) => {
         metricsRegistry.noteFlowDrainClamped();
-        process.stderr.write(
+        // PRE-ALPHA FAIL-LOUD (tc-76m8.27): an FC-1 accounting violation must
+        // crash, not self-heal — the clamp used to absorb it into a stderr
+        // warning that no test failed on (the abrupt-death credit bug lived
+        // as ignorable log noise until tc-76m8.23 read the logs). The
+        // invariant now holds by construction (the draining wrapper
+        // suppresses post-close credits), so every remaining trip is a real
+        // bug. Sync path: lands in the pipeline's per-session error boundary
+        // (tc-2x3.4). Deferred path: an unhandled rejection → supervisor
+        // respawn (tc-crnt.14). The metric is counted first so the
+        // expected-zero counter still witnesses the trip.
+        throw new Error(
           `[flow-control] DRAIN CLAMPED: pane ${paneId as string} drain credit exceeded buffered bytes by ${excessBytes}. ` +
-            `Expected never — an FC-1 accounting bug (double credit / drain-for-dead-pane) absorbed by the clamp.\n`,
+            `Expected never — an FC-1 accounting bug (double credit / drain for a dead pane or client).`,
         );
       },
       onBytesWhilePaused: (_paneId, byteCount) => {
@@ -955,8 +965,21 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
       //    resume path (fc.noteDrained → below low-water → _resume) never fires
       //    because nothing decrements the counter.
       //
+      //    tc-76m8.27: `closed` suppresses drain credits once this transport's
+      //    close handler (step 4 below) has run.  SocketTransport's close path
+      //    resolves the shared drain promise (to release awaiters) and THEN
+      //    fires its close handlers synchronously, so the deferred `.then`
+      //    credits below run as microtasks strictly AFTER fc.removeClient has
+      //    discarded this client's sub-ledgers.  Bytes that died in the send
+      //    queue were never drained by anyone — removeClient IS the
+      //    reconciliation for a dead client — so crediting them would debit a
+      //    discarded ledger: one FC-1 "DRAIN CLAMPED" tripwire hit per queued
+      //    chunk on every abrupt client death (SIGSTOP+flood+SIGKILL).  A
+      //    credit released by the close path is not a drain; drop it.
+      //
       //    We wrap only sendData; all other Transport methods are forwarded
       //    unchanged so the demux sees a fully-conforming Transport.
+      let closed = false;
       const drainingTransport: Transport = {
         ...transport,
         sendData(pid: PaneId, bytes: Uint8Array): void | Promise<void> {
@@ -970,11 +993,18 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
           // until the underlying socket reports drain.
           if (result !== undefined && typeof (result as Promise<void>).then === "function") {
             return (result as Promise<void>).then(() => {
+              // Checked at settle time: a promise released by the transport's
+              // close path (not a real socket drain) must not credit.
+              if (closed) return;
               fc.noteDrained(pid, bytes.length, transport);
             });
           }
           // void: kernel send buffer accepted the bytes immediately.  Credit
-          // drain synchronously — there's no further wait.
+          // drain synchronously — there's no further wait.  Unless the
+          // transport already closed: then the underlying sendData no-opped
+          // (dual guard on _closed/destroyed) and the bytes went nowhere —
+          // e.g. a hydration queue flush racing client death.
+          if (closed) return undefined;
           fc.noteDrained(pid, bytes.length, transport);
           return undefined;
         },
@@ -1298,6 +1328,10 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
 
       // 4. Clean up data plane when the transport closes.
       transport.onClose(() => {
+        // tc-76m8.27: flip BEFORE removeClient so the deferred drain credits
+        // this close releases (they run as microtasks after these synchronous
+        // handlers) see the flag and drop — see the drainingTransport comment.
+        closed = true;
         detach();
         // tc-0wtb: drop this client's FC-1 sub-ledger and re-evaluate every
         // paused pane's max. Detaching the slowest consumer can itself drop the

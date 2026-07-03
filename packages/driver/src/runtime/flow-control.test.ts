@@ -744,6 +744,41 @@ describe("createFlowController — metrics hooks (tc-d7i)", () => {
     assert.equal(clamps[1]!.excess, 10);
   });
 
+  it("a drain credit for a removed client trips the tripwire and debits nothing (tc-76m8.27)", () => {
+    // The production draining wrapper suppresses post-close credits, so this
+    // path is expected never — but if a caller does credit a removed client's
+    // key, noteDrained must witness the full amount as an FC-1 violation and
+    // must NOT resurrect a sub-ledger entry for the dead key (removeClient's
+    // reconciliation stands; bufferedBytes stays governed by live clients).
+    const { send } = makeFakeSend();
+    const demux = createOutputDemux();
+    const clamps: Array<{ pane: PaneId; excess: number }> = [];
+    const fc = createFlowController(send, demux, {
+      highWaterBytes: 1_000,
+      lowWaterBytes: 200,
+      metrics: {
+        onDrainClamped: (pane, excess) => clamps.push({ pane, excess }),
+      },
+    });
+
+    const dead = { id: "dead" };
+    const live = { id: "live" };
+    fc.addClient(dead);
+    fc.addClient(live);
+    fc.onPaneBytes(P3, 500); // both owe 500
+    fc.removeClient(dead); // discards dead's sub-ledger — the reconciliation
+
+    fc.noteDrained(P3, 500, dead); // a stale deferred credit for the dead client
+    assert.equal(clamps.length, 1, "stale credit for a removed client must trip the tripwire");
+    assert.equal(clamps[0]!.pane, P3);
+    assert.equal(clamps[0]!.excess, 500, "the full undrainable credit is the excess");
+    assert.equal(fc.bufferedBytes(P3), 500, "the live client's ledger is untouched");
+
+    fc.noteDrained(P3, 500, live); // the live client's credit still debits normally
+    assert.equal(clamps.length, 1, "live credit must not trip");
+    assert.equal(fc.bufferedBytes(P3), 0, "live client drained to 0");
+  });
+
   it("onBytesWhilePaused fires only for bytes arriving while paused (FC-4/FC-5)", () => {
     const { send } = makeFakeSend();
     const demux = createOutputDemux();
