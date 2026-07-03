@@ -1514,8 +1514,23 @@ class ServerProxyImpl implements ServerProxyHandle {
       return;
     }
 
-    // Refresh the session table so a recently-created session is visible.
-    this._refreshSessions();
+    // Refresh the session table so the attach decision is made against CURRENT
+    // tmux truth, not a stale table (tc-62k9).  AWAITED: `_refreshSessions` is
+    // coalesced+serialized precisely so an awaiting caller's resolve reflects
+    // its reconcile — un-awaited (the previous shape) the lookup below read the
+    // OLD table, so a session created just before the attach could be
+    // spuriously refused and a just-died one mis-admitted.  session.attach is
+    // the system's ATTACH-ONLY decision point (it can never create), so this
+    // read is what the client-side phantom-immunity contract stands on.
+    await this._refreshSessions();
+    // tc-9r2y (re-check): shutdown may have BEGUN during the awaited refresh —
+    // the supervisor is reaped by then, so spawning a fresh session-proxy below
+    // would leak one (the same two-live-full-CC hazard the pre-await check
+    // guards).
+    if (this._shutdownPromise !== null) {
+      try { transport.close(); } catch { /* ignore */ }
+      return;
+    }
     const entry = this._sessions.get(msg.sessionId);
     if (entry === undefined) {
       // Unknown session — surface a fail-loud error then close the connection;
