@@ -210,6 +210,18 @@
         "origin": {
           "$ref": "tmuxcc:shared/primitives#/$defs/Origin",
           "description": "Causality tag (tc-ozk.2). PRESENT when this pane was created by a wire verb (split-pane / open-window): names the connection + requestId that caused it. ABSENT when foreign (native client, script). Additive optional field; supersedes the bare `created` flag (tc-3y8.2). A client compares origin.connectionId against its own connectionId to decide whether this pane is its own."
+        },
+        "bound": {
+          "type": "boolean",
+          "description": "Durable binding intent (tc-i9aq.1, cold-start.md §4.A) when this pane is born already carrying @tmuxcc-bound — e.g. a cold attach that observes a pane a previous session marked. Absent means no intent. Additive optional field."
+        },
+        "detach": {
+          "enum": ["detach", "kill"],
+          "description": "RESOLVED detach-on-close policy (tc-i9aq.1) when this pane is born carrying a @tmuxcc-detach policy at any scope. Absent means inherit. Additive optional field."
+        },
+        "icon": {
+          "type": "string",
+          "description": "Durable icon policy (tc-i9aq.1) when this pane is born carrying @tmuxcc-icon. Absent means no policy. Additive optional field."
         }
       },
       "additionalProperties": false
@@ -272,6 +284,10 @@
         "exitCode": {
           "type": "integer",
           "description": "Exit code of the pane's process, if known. Carried through from a dead corpse's pane_dead_status when the closed pane was previously observed dead; absent when unknowable (non-breaking optional field)."
+        },
+        "cause": {
+          "$ref": "tmuxcc:shared/primitives#/$defs/Origin",
+          "description": "Causality tag (tc-u7cu.6). PRESENT when this pane was closed by a wire verb (close-pane / kill-window): names the connection + requestId that caused the close. ABSENT when the close was unsolicited (shell exit, external kill-pane). Additive optional field; mirrors origin on pane.opened."
         }
       },
       "additionalProperties": false

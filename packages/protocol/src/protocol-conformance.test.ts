@@ -387,6 +387,33 @@ describe("protocol schema conformance", () => {
       assert.strictEqual(valid, false, "origin with extra property should fail validation");
     });
 
+    it("rejects pane.opened with invalid detach value — tc-i9aq.1", () => {
+      const bad = {
+        type: "pane.opened",
+        seq: 1,
+        paneId: "p0",
+        windowId: "w0",
+        cols: 80,
+        rows: 24,
+        active: true,
+        detach: "stay",
+      };
+      const valid = validateSessionProxyMsg(bad);
+      assert.strictEqual(valid, false, "detach must be 'detach' | 'kill'");
+    });
+
+    it("rejects pane.closed whose cause is missing requestId — tc-u7cu.6", () => {
+      const bad = {
+        type: "pane.closed",
+        seq: 4,
+        paneId: "p0",
+        windowId: "w0",
+        cause: { connectionId: "conn1" },
+      };
+      const valid = validateSessionProxyMsg(bad);
+      assert.strictEqual(valid, false, "cause missing requestId should fail validation");
+    });
+
     it("rejects input message with non-string data", () => {
       const bad = {
         type: "input",
@@ -669,6 +696,58 @@ describe("protocol schema conformance", () => {
         seq: 4,
         paneId: P0,
         windowId: W0,
+      };
+      assert.ok(validateSessionProxyMsg(msg as SessionProxyMessage), JSON.stringify(validateSessionProxyMsg.errors));
+    });
+
+    it("PaneClosedMessage (with wire-verb cause) — tc-u7cu.6", () => {
+      const msg: PaneClosedMessage = {
+        type: "pane.closed",
+        seq: 4,
+        paneId: P0,
+        windowId: W0,
+        cause: { connectionId: C0, requestId: "42" },
+      };
+      assert.ok(validateSessionProxyMsg(msg as SessionProxyMessage), JSON.stringify(validateSessionProxyMsg.errors));
+    });
+
+    it("PaneClosedMessage (foreign close — no cause) — tc-u7cu.6", () => {
+      const msg: PaneClosedMessage = {
+        type: "pane.closed",
+        seq: 4,
+        paneId: P0,
+        windowId: W0,
+      };
+      assert.ok(validateSessionProxyMsg(msg as SessionProxyMessage), JSON.stringify(validateSessionProxyMsg.errors));
+    });
+
+    it("PaneOpenedMessage (with bound/detach/icon — cold attach) — tc-i9aq.1", () => {
+      const msg: PaneOpenedMessage = {
+        type: "pane.opened",
+        seq: 3,
+        paneId: P0,
+        windowId: W0,
+        cols: 80,
+        rows: 24,
+        active: true,
+        bound: true,
+        detach: "detach",
+        icon: "$(terminal)",
+      };
+      assert.ok(validateSessionProxyMsg(msg as SessionProxyMessage), JSON.stringify(validateSessionProxyMsg.errors));
+    });
+
+    it("PaneOpenedMessage (bound:false, detach:kill) — tc-i9aq.1", () => {
+      const msg: PaneOpenedMessage = {
+        type: "pane.opened",
+        seq: 3,
+        paneId: P0,
+        windowId: W0,
+        cols: 80,
+        rows: 24,
+        active: false,
+        bound: false,
+        detach: "kill",
       };
       assert.ok(validateSessionProxyMsg(msg as SessionProxyMessage), JSON.stringify(validateSessionProxyMsg.errors));
     });
