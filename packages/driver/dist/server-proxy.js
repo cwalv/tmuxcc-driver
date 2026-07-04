@@ -50,13 +50,13 @@ import { serverProxySocketPath, removeSocket, restrictSocket, classifySocketOwne
 import { createServerProxyMetrics } from "./metrics.js";
 import { mergeMetricsText } from "./metrics-exposition.js";
 import { parseMetricsHttpBind, bindMetricsHttp } from "./metrics-http.js";
-import { listSessions, killSession, checkSessionPresence, createTmuxWatcher, probeTmuxLiveness, getTmuxServerPid, countTmuxccClientsBySession, listSessionTopology, setSessionWorkspace } from "./tmux-south.js";
+import { listSessions, killSession, checkSessionPresence, createTmuxWatcher, probeTmuxLiveness, getTmuxServerPid, countTmuxccClientsBySession, listSessionTopology, setSessionWorkspace, listSessionForFreeze } from "./tmux-south.js";
 import { probeTmuxCapabilities, MINIMUM_TMUX_VERSION } from "./tmux-capabilities.js";
 import { createSessionProxySupervisor } from "./session-proxy-supervisor.js";
 import { createSessionClaimer } from "./claim-session.js";
 import { compileTemplate } from "./template/compile.js";
 import { applyCompiledTemplate } from "./template/apply.js";
-import { templateDiff } from "./template/diff.js";
+import { buildFrozenTemplate } from "./template/freeze.js";
 /**
  * Thrown by `start()` when a LIVE broker already owns the server-proxy socket
  * (tc-kyq4.1).
@@ -1402,20 +1402,9 @@ class ServerProxyImpl {
                     payload = { topology: await this._querySessionTopology(command.sessionId, state.identity?.id) };
                     break;
                 case "session.applyTemplate":
-                    // tc-gjdx.4: apply-to-live merge-diff + preview.  Diffs the template
-                    // against the live session's windows (merge key: window name) and
-                    // creates only the missing ones.  dryRun returns the would-create set
-                    // WITHOUT creating; a real apply creates exactly that set and returns
-                    // the did-create set.  Both paths share templateDiff so they can't
-                    // drift (preview-equals-apply AC).
-                    payload = { applyTemplate: await this._applyTemplateLive(command.sessionId, command.template, command.dryRun ?? false) };
-                    break;
-                case "session.freezeTemplate":
-                    // tc-gjdx.1 declares this verb; the driver-side handler lands in
-                    // tc-gjdx.5 (freeze).  Until then, fail loud rather than silently
-                    // accepting — a client feature-detects the missing handler via the
-                    // additive-compat convention (protocol.unknown-message), exactly as it
-                    // would against an older driver.
+                    // tc-gjdx.4 (apply-to-live merge-diff) — handler not yet landed.
+                    // Fails loud so a client feature-detects the missing handler via the
+                    // additive-compat convention (protocol.unknown-message).
                     this._sendResponse(state, {
                         correlationId,
                         result: {
@@ -1425,6 +1414,12 @@ class ServerProxyImpl {
                         },
                     });
                     return;
+                case "session.freezeTemplate":
+                    // tc-gjdx.5: freeze a live session into a schema-valid template.
+                    payload = {
+                        frozenTemplate: await this._freezeTemplate(command.sessionId, command.name),
+                    };
+                    break;
                 default: {
                     const _exhaustive = command;
                     void _exhaustive;
@@ -1534,6 +1529,31 @@ class ServerProxyImpl {
                 icon: p.icon,
             })),
         };
+    }
+    // ---------------------------------------------------------------------------
+    // tc-gjdx.5: session freeze
+    // ---------------------------------------------------------------------------
+    /**
+     * Freeze a live session into a schema-valid {@link SessionTemplate}.
+     *
+     * Looks up the session name, runs the two tmux queries via
+     * {@link listSessionForFreeze}, and converts the raw data to a template via
+     * {@link buildFrozenTemplate}.
+     *
+     * Fails loud (throws) when the session is not in the registry or the tmux
+     * queries fail — surfaced as `result.ok=false` by the surrounding catch in
+     * `_handleCommand`.
+     */
+    async _freezeTemplate(sessionId, name) {
+        const entry = this._sessions.get(sessionId);
+        if (entry === undefined) {
+            throw Object.assign(new Error(`session ${sessionId} not found`), { code: "session.not-found" });
+        }
+        const data = await listSessionForFreeze(this._opts.socketName, entry.name);
+        if (data === null) {
+            throw new Error(`freeze: tmux queries failed for session ${entry.name}`);
+        }
+        return buildFrozenTemplate(data, name);
     }
     // ---------------------------------------------------------------------------
     // Command implementations
@@ -1696,62 +1716,6 @@ class ServerProxyImpl {
         const sessionProxy = await this._supervisor.ensureSessionProxy(sessionId, sessionName, this._opts.socketName);
         await applyCompiledTemplate((cmd) => sessionProxy.send(cmd), plan, sessionName);
         await this._refreshSessions();
-    }
-    // ---------------------------------------------------------------------------
-    // tc-gjdx.4: apply-to-live merge-diff + preview
-    // ---------------------------------------------------------------------------
-    /**
-     * Apply a session template to a LIVE session (tc-gjdx.4).
-     *
-     * Computes the safe-direction merge-diff — the subset of `template.windows`
-     * whose names are absent in the live session — and either returns the
-     * would-create set (`dryRun: true`) or creates exactly that set and returns
-     * the did-create set (`dryRun: false`).  A re-apply of a satisfied template
-     * is a no-op (empty diff).
-     *
-     * Shared diff function: both dryRun and real apply call {@link templateDiff},
-     * so they are guaranteed to agree on the would-create / did-create set (the
-     * preview-equals-apply AC).
-     *
-     * Partial-failure semantics (tc-gjdx.3): the apply path uses the SAME
-     * applicator machinery as apply-at-create, with `killInitialWindow: false`
-     * (the session already has real user windows).  A mid-transaction tmux
-     * refusal throws {@link TemplateApplyError} (code "template.invalid"); the
-     * caller's catch maps it to a loud `result.ok=false` with no rollback.
-     */
-    async _applyTemplateLive(sessionId, template, dryRun) {
-        const entry = this._sessions.get(sessionId);
-        if (entry === undefined) {
-            throw Object.assign(new Error(`Session '${sessionId}' not found`), { code: "session.not-found" });
-        }
-        // Query the live window names to compute the diff.  Fall back to an empty
-        // set on topology failure (listSessionTopology returns null when the session
-        // is unreachable) so the diff treats all template windows as missing — the
-        // applicator will then fail loud on the first creating verb.
-        const topology = await listSessionTopology(this._opts.socketName, entry.name);
-        const liveWindowNames = new Set((topology?.windows ?? []).map((w) => w.name));
-        // The would-create set: template windows absent from the live session.
-        // Shared between dryRun and real apply — they cannot drift.
-        const missingWindows = templateDiff(template, liveWindowNames);
-        if (dryRun) {
-            return { dryRun: true, windows: missingWindows };
-        }
-        if (missingWindows.length === 0) {
-            // The template is already satisfied — re-apply is a no-op (empty diff).
-            return { dryRun: false, windows: [] };
-        }
-        // Build a sub-template from the missing windows and apply it via the SAME
-        // tc-gjdx.3 applicator machinery.  killInitialWindow: false — the session
-        // already has real user windows; never kill any of them.
-        const subTemplate = {
-            ...(template.name !== undefined ? { name: template.name } : {}),
-            windows: missingWindows,
-        };
-        const plan = compileTemplate(subTemplate);
-        const sessionProxy = await this._supervisor.ensureSessionProxy(sessionId, entry.name, this._opts.socketName);
-        await applyCompiledTemplate((cmd) => sessionProxy.send(cmd), plan, entry.name, { killInitialWindow: false });
-        await this._refreshSessions();
-        return { dryRun: false, windows: missingWindows };
     }
     async _destroySession(sessionId) {
         const entry = this._sessions.get(sessionId);

@@ -45,6 +45,7 @@
  * @module tmux-south
  */
 import type { TmuxCapabilityMap } from "@tmuxcc/protocol";
+import type { FreezeSessionData } from "./template/freeze.js";
 /** Handler invoked when session state may have changed. */
 export type SessionsChangedHandler = () => void;
 /**
@@ -263,6 +264,24 @@ export interface SessionTopologyResult {
  * Returns `null` if the session cannot be found or the commands fail.
  */
 export declare function listSessionTopology(socketName: string, sessionName: string, clientId?: string): Promise<SessionTopologyResult | null>;
+/**
+ * Run `tmux list-windows` + `tmux list-panes` to capture the data needed for
+ * a session freeze (tc-gjdx.5 — "save current session as template").
+ *
+ * Captures:
+ *   - Per-window: window id, name, and `window_layout` string (the "visible"
+ *     form that includes pane IDs, used by the freeze converter to derive the
+ *     desired-geometry tree).
+ *   - Per-pane: pane id number (integer part of `%N`), window id, and
+ *     `pane_current_path` (the cwd for the TemplatePane leaf).
+ *
+ * Returns `null` when the session is not found or a tmux call fails.
+ *
+ * `pane_start_command` is intentionally NOT captured — it does not faithfully
+ * round-trip (see tc-gjdx.5 bead comment for the first-hand evidence; OMIT
+ * rationale in template/freeze.ts module doc).
+ */
+export declare function listSessionForFreeze(socketName: string, sessionName: string): Promise<FreezeSessionData | null>;
 /**
  * Run `tmux -L <socketName> new-session -d -s <name> -P -F '#{session_id}'`
  * to create a detached session and authoritatively return its newly-minted
