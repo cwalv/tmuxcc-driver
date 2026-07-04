@@ -98,13 +98,33 @@ export declare class TemplateApplyError extends Error {
     created: TemplateApplyOutcome);
 }
 /**
+ * Options for {@link applyCompiledTemplate}.
+ */
+export interface ApplyCompiledTemplateOptions {
+    /**
+     * When true (the default — apply-at-create path), the applicator identifies
+     * the session's initial throwaway window before applying template windows
+     * and kills it after the last template window is created.
+     *
+     * Set to false for apply-to-live (tc-gjdx.4): the session already has user
+     * windows, there is no throwaway initial window, and no existing window
+     * must be killed.
+     */
+    killInitialWindow?: boolean;
+}
+/**
  * Apply a {@link CompiledTemplate} to the session `send` is bound to.
  *
  * `sessionName` targets the `@tmuxcc-template` awareness option (tmux
  * `set-option -t <name>` — the session-proxy is bound to exactly one session).
  *
+ * `opts.killInitialWindow` (default `true`): the apply-at-create path kills
+ * the throwaway initial window after creating all template windows.  Pass
+ * `{ killInitialWindow: false }` for the apply-to-live path, where the
+ * session already has real user windows.
+ *
  * Resolves with the created topology on success; rejects with
  * {@link TemplateApplyError} on the first failure (no rollback).
  */
-export declare function applyCompiledTemplate(send: TemplateApplySend, plan: CompiledTemplate, sessionName: string): Promise<TemplateApplyOutcome>;
+export declare function applyCompiledTemplate(send: TemplateApplySend, plan: CompiledTemplate, sessionName: string, opts?: ApplyCompiledTemplateOptions): Promise<TemplateApplyOutcome>;
 //# sourceMappingURL=apply.d.ts.map

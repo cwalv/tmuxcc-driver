@@ -96,7 +96,8 @@ import { createSessionClaimer } from "./claim-session.js";
 import type { SessionClaimer } from "./claim-session.js";
 import { compileTemplate } from "./template/compile.js";
 import { applyCompiledTemplate } from "./template/apply.js";
-import type { SessionTemplate } from "@tmuxcc/protocol";
+import { templateDiff } from "./template/diff.js";
+import type { SessionTemplate, TemplateApplyResult, WindowTemplate } from "@tmuxcc/protocol";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -1742,7 +1743,7 @@ class ServerProxyImpl implements ServerProxyHandle {
     const rpcStartMs = Date.now();
 
     try {
-      let payload: { sessionId?: SessionId; created?: boolean; ok?: true; info?: ServerProxyInfoPayload; topology?: SessionTopologyPayload; name?: string; metricsHttp?: MetricsHttpStatePayload };
+      let payload: { sessionId?: SessionId; created?: boolean; ok?: true; info?: ServerProxyInfoPayload; topology?: SessionTopologyPayload; name?: string; metricsHttp?: MetricsHttpStatePayload; applyTemplate?: TemplateApplyResult };
 
       switch (command.kind) {
         case "session.claim":
@@ -1781,10 +1782,17 @@ class ServerProxyImpl implements ServerProxyHandle {
           payload = { topology: await this._querySessionTopology(command.sessionId, state.identity?.id) };
           break;
         case "session.applyTemplate":
+          // tc-gjdx.4: apply-to-live merge-diff + preview.  Diffs the template
+          // against the live session's windows (merge key: window name) and
+          // creates only the missing ones.  dryRun returns the would-create set
+          // WITHOUT creating; a real apply creates exactly that set and returns
+          // the did-create set.  Both paths share templateDiff so they can't
+          // drift (preview-equals-apply AC).
+          payload = { applyTemplate: await this._applyTemplateLive(command.sessionId, command.template, command.dryRun ?? false) };
+          break;
         case "session.freezeTemplate":
-          // tc-gjdx.1 declares these verbs in the protocol; the driver-side
-          // handlers land in tc-gjdx.4 (apply-to-live merge-diff) and tc-gjdx.5
-          // (freeze).  Until they do, the driver fails loud rather than silently
+          // tc-gjdx.1 declares this verb; the driver-side handler lands in
+          // tc-gjdx.5 (freeze).  Until then, fail loud rather than silently
           // accepting — a client feature-detects the missing handler via the
           // additive-compat convention (protocol.unknown-message), exactly as it
           // would against an older driver.
@@ -2112,6 +2120,88 @@ class ServerProxyImpl implements ServerProxyHandle {
     );
     await applyCompiledTemplate((cmd) => sessionProxy.send(cmd), plan, sessionName);
     await this._refreshSessions();
+  }
+
+  // ---------------------------------------------------------------------------
+  // tc-gjdx.4: apply-to-live merge-diff + preview
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Apply a session template to a LIVE session (tc-gjdx.4).
+   *
+   * Computes the safe-direction merge-diff — the subset of `template.windows`
+   * whose names are absent in the live session — and either returns the
+   * would-create set (`dryRun: true`) or creates exactly that set and returns
+   * the did-create set (`dryRun: false`).  A re-apply of a satisfied template
+   * is a no-op (empty diff).
+   *
+   * Shared diff function: both dryRun and real apply call {@link templateDiff},
+   * so they are guaranteed to agree on the would-create / did-create set (the
+   * preview-equals-apply AC).
+   *
+   * Partial-failure semantics (tc-gjdx.3): the apply path uses the SAME
+   * applicator machinery as apply-at-create, with `killInitialWindow: false`
+   * (the session already has real user windows).  A mid-transaction tmux
+   * refusal throws {@link TemplateApplyError} (code "template.invalid"); the
+   * caller's catch maps it to a loud `result.ok=false` with no rollback.
+   */
+  private async _applyTemplateLive(
+    sessionId: SessionId,
+    template: SessionTemplate,
+    dryRun: boolean,
+  ): Promise<TemplateApplyResult> {
+    const entry = this._sessions.get(sessionId);
+    if (entry === undefined) {
+      throw Object.assign(
+        new Error(`Session '${sessionId}' not found`),
+        { code: "session.not-found" },
+      );
+    }
+
+    // Query the live window names to compute the diff.  Fall back to an empty
+    // set on topology failure (listSessionTopology returns null when the session
+    // is unreachable) so the diff treats all template windows as missing — the
+    // applicator will then fail loud on the first creating verb.
+    const topology = await listSessionTopology(this._opts.socketName, entry.name);
+    const liveWindowNames = new Set(
+      (topology?.windows ?? []).map((w) => w.name),
+    );
+
+    // The would-create set: template windows absent from the live session.
+    // Shared between dryRun and real apply — they cannot drift.
+    const missingWindows: readonly WindowTemplate[] = templateDiff(template, liveWindowNames);
+
+    if (dryRun) {
+      return { dryRun: true, windows: missingWindows };
+    }
+
+    if (missingWindows.length === 0) {
+      // The template is already satisfied — re-apply is a no-op (empty diff).
+      return { dryRun: false, windows: [] };
+    }
+
+    // Build a sub-template from the missing windows and apply it via the SAME
+    // tc-gjdx.3 applicator machinery.  killInitialWindow: false — the session
+    // already has real user windows; never kill any of them.
+    const subTemplate: SessionTemplate = {
+      ...(template.name !== undefined ? { name: template.name } : {}),
+      windows: missingWindows,
+    };
+    const plan = compileTemplate(subTemplate);
+    const sessionProxy = await this._supervisor.ensureSessionProxy(
+      sessionId,
+      entry.name,
+      this._opts.socketName,
+    );
+    await applyCompiledTemplate(
+      (cmd) => sessionProxy.send(cmd),
+      plan,
+      entry.name,
+      { killInitialWindow: false },
+    );
+    await this._refreshSessions();
+
+    return { dryRun: false, windows: missingWindows };
   }
 
   private async _destroySession(

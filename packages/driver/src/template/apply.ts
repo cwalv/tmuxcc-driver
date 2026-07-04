@@ -125,10 +125,31 @@ function describeCreated(outcome: TemplateApplyOutcome): string {
 // ---------------------------------------------------------------------------
 
 /**
+ * Options for {@link applyCompiledTemplate}.
+ */
+export interface ApplyCompiledTemplateOptions {
+  /**
+   * When true (the default — apply-at-create path), the applicator identifies
+   * the session's initial throwaway window before applying template windows
+   * and kills it after the last template window is created.
+   *
+   * Set to false for apply-to-live (tc-gjdx.4): the session already has user
+   * windows, there is no throwaway initial window, and no existing window
+   * must be killed.
+   */
+  killInitialWindow?: boolean;
+}
+
+/**
  * Apply a {@link CompiledTemplate} to the session `send` is bound to.
  *
  * `sessionName` targets the `@tmuxcc-template` awareness option (tmux
  * `set-option -t <name>` — the session-proxy is bound to exactly one session).
+ *
+ * `opts.killInitialWindow` (default `true`): the apply-at-create path kills
+ * the throwaway initial window after creating all template windows.  Pass
+ * `{ killInitialWindow: false }` for the apply-to-live path, where the
+ * session already has real user windows.
  *
  * Resolves with the created topology on success; rejects with
  * {@link TemplateApplyError} on the first failure (no rollback).
@@ -137,7 +158,9 @@ export async function applyCompiledTemplate(
   send: TemplateApplySend,
   plan: CompiledTemplate,
   sessionName: string,
+  opts?: ApplyCompiledTemplateOptions,
 ): Promise<TemplateApplyOutcome> {
+  const killInitialWindow = opts?.killInitialWindow ?? true;
   const created: AppliedWindow[] = [];
   const outcome = (): TemplateApplyOutcome => ({ windows: created.slice() });
 
@@ -182,12 +205,16 @@ export async function applyCompiledTemplate(
   };
 
   // Identify the throwaway initial window BEFORE creating any template window,
-  // so we can kill it at the end. A freshly-minted session has exactly one.
-  const initialWindowNum = await query(
-    "list-windows",
-    "list-windows -F '#{window_id}'",
-  );
-  const initialWindowId = firstLine(initialWindowNum); // e.g. "@0"
+  // so we can kill it at the end.  Only needed on the apply-at-create path —
+  // apply-to-live has real user windows and must not kill any of them.
+  let initialWindowId: string | null = null;
+  if (killInitialWindow) {
+    const initialWindowNum = await query(
+      "list-windows",
+      "list-windows -F '#{window_id}'",
+    );
+    initialWindowId = firstLine(initialWindowNum); // e.g. "@0"
+  }
 
   // Awareness FIRST: record provenance so a later partial failure still stamps
   // "created from template X" onto the persisted (partial) session.
@@ -203,8 +230,8 @@ export async function applyCompiledTemplate(
   }
 
   // Kill the throwaway initial window LAST — the session already has ≥1
-  // template window, so it is never emptied.
-  if (initialWindowId !== null) {
+  // template window, so it is never emptied.  Apply-to-live skips this.
+  if (killInitialWindow && initialWindowId !== null) {
     const num = tmuxNum(initialWindowId);
     if (num !== null) {
       await run("kill-window", killWindow(num));
