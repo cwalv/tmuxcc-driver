@@ -768,6 +768,11 @@
         "correlationId": {
           "type": "string",
           "description": "If set, ties this error to a prior SessionProxyCommandRequestMessage. Absent for fully unsolicited errors."
+        },
+        "cause": {
+          "type": "string",
+          "description": "tc-fah2: for code:\"session.unavailable\" — the cause of the session ending. \"pane-exit\" means the session death was the tail of the last bound pane's process exit cascade (user performed the exit); downstream can silence all attribution toasts. \"external\" means the server/session died without an attributed pane-exit cascade heading it (external teardown, kill-server, etc.); downstream shows the one explanatory toast. Absent for other error codes and for backward compatibility.",
+          "enum": ["pane-exit", "external"]
         }
       },
       "additionalProperties": false

@@ -858,6 +858,28 @@ describe("protocol schema conformance", () => {
       assert.ok(validateSessionProxyMsg(msg as SessionProxyMessage), JSON.stringify(validateSessionProxyMsg.errors));
     });
 
+    it("ErrorMessage (session.unavailable with cause pane-exit) — tc-fah2", () => {
+      const msg: ErrorMessage = {
+        type: "error",
+        seq: 13,
+        code: "session.unavailable",
+        message: "The tmux session has exited unexpectedly.",
+        cause: "pane-exit",
+      };
+      assert.ok(validateSessionProxyMsg(msg as SessionProxyMessage), JSON.stringify(validateSessionProxyMsg.errors));
+    });
+
+    it("ErrorMessage (session.unavailable with cause external) — tc-fah2", () => {
+      const msg: ErrorMessage = {
+        type: "error",
+        seq: 14,
+        code: "session.unavailable",
+        message: "The tmux session has exited unexpectedly.",
+        cause: "external",
+      };
+      assert.ok(validateSessionProxyMsg(msg as SessionProxyMessage), JSON.stringify(validateSessionProxyMsg.errors));
+    });
+
     it("InputMessage", () => {
       const msg: InputMessage = {
         type: "input",

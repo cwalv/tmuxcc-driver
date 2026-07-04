@@ -616,10 +616,13 @@ describe(
           // Capture control messages arriving on the second client AFTER the
           // handshake.  Install the handler AFTER runClientHandshake so we don't
           // clobber the handler that runClientHandshake's settle() installs.
-          const received: Array<{ type: string; code?: string }> = [];
+          const received: Array<{ type: string; code?: string; cause?: string }> = [];
           ct2.onControl((msg) => {
-            const m = msg as { type: string; code?: string };
-            received.push({ type: m.type, code: m.code });
+            const m = msg as unknown as Record<string, string>;
+            const entry: { type: string; code?: string; cause?: string } = { type: m.type! };
+            if (m.code !== undefined) entry.code = m.code;
+            if (m.cause !== undefined) entry.cause = m.cause;
+            received.push(entry);
           });
 
           // Kill the tmux server — triggers host.onExit inside the session-proxy.
@@ -650,6 +653,13 @@ describe(
             errMsg.code,
             "session.unavailable",
             `error code must be "session.unavailable"; got "${errMsg.code}"`,
+          );
+          // tc-fah2: kill-server is an external death — no pane exit preceded it,
+          // so the farewell cause must be "external" (not "pane-exit").
+          assert.equal(
+            (errMsg as { cause?: string }).cause,
+            "external",
+            `kill-server farewell must have cause:"external" (tc-fah2); got: ${JSON.stringify(errMsg)}`,
           );
         } finally {
           await session.teardown();

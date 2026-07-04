@@ -1675,6 +1675,10 @@ export type WireErrorCode =
  * (e.g. the session died mid-execution). If absent, the error is fully
  * unsolicited (e.g. protocol parse failure on an unrelated frame).
  *
+ * `cause` (optional): for `code: "session.unavailable"` only — "pane-exit" when the session
+ * death was headed by the last bound pane's process exit cascade (S7 interactive exit, tc-fah2);
+ * "external" when the server/session died for an unattributed reason. Absent for other codes.
+ *
  * Clients SHOULD display or log the `message` and MAY use `code` to trigger
  * specific recovery logic. After "protocol.version-mismatch" or
  * "session.unavailable", the client should consider the connection dead.
@@ -1686,6 +1690,8 @@ export interface ErrorMessage extends MessageBase {
   readonly message: string;
   /** If set, ties this error to a prior SessionProxyCommandRequestMessage. */
   readonly correlationId?: string;
+  /** tc-fah2: for code "session.unavailable" only — the cause of the session ending. */
+  readonly cause?: "pane-exit" | "external";
 }
 
 // ---------------------------------------------------------------------------

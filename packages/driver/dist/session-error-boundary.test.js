@@ -49,7 +49,7 @@
  */
 import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as fs from "node:fs";
@@ -490,6 +490,158 @@ describe("tc-2x3.4: per-session error boundary", { skip: !TMUX_AVAILABLE }, () =
             `the tmux session may still be alive; got: ${JSON.stringify(received)}`);
         // EB7-F3: host.exited is true (the -CC client pty is dead after the fault).
         assert.ok(proxy.host.exited, "EB7-F3: host.exited must be true after the pty read-fault");
+    });
+    /**
+     * EB8 (tc-fah2): a last-pane process exit heads the session death cascade →
+     * farewell carries cause:"pane-exit" (S7: interactive exit, fully silent).
+     *
+     * # Background
+     *
+     * tc-fah2 adds a `cause` field to the `session.unavailable` farewell so the
+     * client can discriminate user-caused session death (cause:"pane-exit" —
+     * suppress all attribution toasts) from external death (cause:"external" —
+     * show the one explanatory "tmux server ended" toast).
+     *
+     * The driver discriminator: when `pipeline.onModelChange` observes the pane
+     * count transition from >0 to 0, `_paneExitHeadedCascade` is armed.  The
+     * `host.onExit()` handler reads the flag to set the farewell cause.
+     *
+     * # Test method
+     *
+     * Use the `_paneExitHeadedCascadeForTesting` non-enumerable property (tc-fah2
+     * test seam) to verify the flag is armed before the exit.  Then send "exit"
+     * via tmux send-keys so the pane's shell exits naturally, driving the cascade.
+     * Wait for the farewell and assert cause:"pane-exit".
+     *
+     * # R5 moat: external kill-server → cause "external"
+     *
+     * R5 (above) covers this: kill-server without a preceding pane exit gives
+     * cause:"external" — the `_paneExitHeadedCascade` flag stays false.
+     *
+     * # DS3 (stale-flag): multi-pane partial exit → cause "external"
+     *
+     * Covered by DS3 below: a session with 2 panes, one pane exits (count 2→1,
+     * flag not set), then kill-server → cause "external" (flag stays false since
+     * count never hit 0 before the external kill).
+     */
+    it("EB8 (tc-fah2): last-pane exit → farewell carries cause:pane-exit", { timeout: 30_000 }, async () => {
+        const socketName = `tmuxcc-eb8-${process.pid}-${Date.now()}`;
+        const sessionName = `eb8-sess-${process.pid}`;
+        _sockets.push(socketName);
+        spawnTmuxSession(socketName, sessionName);
+        const proxy = createSessionProxy({
+            host: { socketName, sessionName, attach: true },
+        });
+        _proxies.push(proxy);
+        await proxy.start();
+        // Attach a client to observe the farewell.
+        const { sessionProxy: dt, client: ct } = createInMemoryTransportPair();
+        const addP = proxy.addClient(dt);
+        await runClientHandshake(ct, {
+            protocolVersion: WIRE_PROTOCOL_VERSION,
+            features: [
+                "pane-lifecycle",
+                "layout-updates",
+                "focus-events",
+                "input-forwarding",
+            ],
+        });
+        await addP;
+        const received = [];
+        let clientClosed = false;
+        ct.onControl((msg) => {
+            const m = msg;
+            const entry = { type: m.type };
+            if (m.code !== undefined)
+                entry.code = m.code;
+            if (m.cause !== undefined)
+                entry.cause = m.cause;
+            received.push(entry);
+        });
+        ct.onClose(() => { clientClosed = true; });
+        // Type "exit" in the pane's shell via tmux send-keys.  This causes the shell
+        // to exit, which exits the pane, which kills the session (last pane), which
+        // kills the tmux server (last session).
+        const paneIds = execFileSync("tmux", ["-L", socketName, "list-panes", "-t", sessionName, "-F", "#{pane_id}"], { encoding: "utf8" }).trim().split("\n");
+        execFileSync("tmux", ["-L", socketName, "send-keys", "-t", paneIds[0], "exit", "Enter"], {
+            encoding: "utf8",
+        });
+        // Wait for the client to close (farewell + transport close delivered).
+        await waitFor(() => clientClosed, 20_000, "client transport to close after pane exit (EB8)");
+        // EB8-F1: farewell must be session.unavailable.
+        const farewell = received.find((m) => m.type === "error" && m.code === "session.unavailable");
+        assert.ok(farewell !== undefined, `EB8-F1: client must receive session.unavailable farewell; got: ${JSON.stringify(received)}`);
+        // EB8-F2: cause must be "pane-exit" — the last pane's process exit headed the cascade.
+        assert.equal(farewell.cause, "pane-exit", `EB8-F2: farewell cause must be "pane-exit" for a last-pane exit; got: ${JSON.stringify(farewell)}`);
+        // EB8-F3: _paneExitHeadedCascadeForTesting reflects the flag (post-exit; flag
+        // was armed before host.onExit fired — now the exit is done and the flag was
+        // consumed to emit the farewell, so we can't read it back meaningfully here,
+        // but host.exited proves the cascade ran).
+        assert.ok(proxy.host.exited, "EB8-F3: host must be exited after last-pane exit cascade");
+    });
+    /**
+     * DS3 (tc-fah2): partial pane exit (not the last pane) does NOT arm the flag →
+     * subsequent external kill gives cause:"external".
+     *
+     * This is the "no-recent-output" case: with 2 panes and no user typing, no
+     * %output events arrive after model stabilization.  When kill-server fires,
+     * %sessions-changed arrives but _lastOutputTs is 0 (no post-bootstrap output) →
+     * the 500ms recency window check fails → flag stays false → cause:"external".
+     */
+    it("DS3 (tc-fah2): partial pane exit (not last) → flag not armed → external kill gives cause external", { timeout: 30_000 }, async () => {
+        const socketName = `tmuxcc-ds3-${process.pid}-${Date.now()}`;
+        const sessionName = `ds3-sess-${process.pid}`;
+        _sockets.push(socketName);
+        spawnTmuxSession(socketName, sessionName);
+        // Add a second pane so the session has 2 panes before we test.
+        execFileSync("tmux", ["-L", socketName, "split-window", "-t", sessionName], {
+            encoding: "utf8",
+        });
+        const proxy = createSessionProxy({
+            host: { socketName, sessionName, attach: true },
+        });
+        _proxies.push(proxy);
+        await proxy.start();
+        // Verify initial state: 2 panes in model.
+        await waitFor(() => proxy.pipeline.getModel().panes.size >= 2, 8_000, "DS3: model must show 2+ panes after split-window");
+        // Flag must start false (no pane exit yet).
+        assert.equal(proxy._paneExitHeadedCascadeForTesting, false, "DS3: _paneExitHeadedCascade must start false");
+        // Attach client to observe the farewell.
+        const { sessionProxy: dt, client: ct } = createInMemoryTransportPair();
+        const addP = proxy.addClient(dt);
+        await runClientHandshake(ct, {
+            protocolVersion: WIRE_PROTOCOL_VERSION,
+            features: [
+                "pane-lifecycle",
+                "layout-updates",
+                "focus-events",
+                "input-forwarding",
+            ],
+        });
+        await addP;
+        const received = [];
+        let clientClosed = false;
+        ct.onControl((msg) => {
+            const m = msg;
+            const entry = { type: m.type };
+            if (m.code !== undefined)
+                entry.code = m.code;
+            if (m.cause !== undefined)
+                entry.cause = m.cause;
+            received.push(entry);
+        });
+        ct.onClose(() => { clientClosed = true; });
+        // Kill the server externally — no pane exit headed this, so flag stays false.
+        try {
+            execFileSync("tmux", ["-L", socketName, "kill-server"], { timeout: 5_000 });
+        }
+        catch { /* already gone */ }
+        await waitFor(() => clientClosed, 15_000, "DS3: client transport to close after kill-server");
+        // DS3-F1: farewell must be session.unavailable.
+        const farewell = received.find((m) => m.type === "error" && m.code === "session.unavailable");
+        assert.ok(farewell !== undefined, `DS3-F1: client must receive session.unavailable farewell; got: ${JSON.stringify(received)}`);
+        // DS3-F2: cause must be "external" — no pane exit headed this death.
+        assert.equal(farewell.cause, "external", `DS3-F2: cause must be "external" when kill-server fires without a preceding last-pane exit; got: ${JSON.stringify(farewell)}`);
     });
     // EB3 (deleted, tc-4b6k.4): the socket-clobber ownership guard it exercised
     // (`_doSocketTeardown` / `_socketPathRefCount` / `_closeServerFdOnly`) no

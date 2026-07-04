@@ -87,7 +87,7 @@ export function createSessionProxy(opts) {
     // tc-u7cu.6: close-cause registry — records which panes were closed by a
     // wire verb (close-pane / kill-window) so pane.closed deltas carry `cause`.
     // Recorded by the per-transport verb responder in addClient (at %end time,
-    // which always arrives before %window-close / requery in tmux control mode);
+    // which always arrives before a topology requery in tmux control mode);
     // consumed (one-shot) by diffModel when emitting pane.closed; cleared
     // defensively when a pane leaves the model (in case the consume path was missed).
     const closeCauses = createCloseCauseRegistry();
@@ -211,6 +211,44 @@ export function createSessionProxy(opts) {
     //    fires only at live-notification time (after start()), so serverRef is
     //    always non-null by then.
     let serverRef = null;
+    // tc-fah2: discriminate user-caused session death from external/unattributed death.
+    //
+    // We want to set _paneExitHeadedCascade = true ONLY when the session dies because
+    // the last pane's process exited naturally (e.g. user typed `exit`), NOT because of
+    // an external kill (kill-server, kill-session, SIGTERM to the tmux server).
+    //
+    // WHAT TMUX ACTUALLY SENDS (empirically confirmed, tmux 3.4):
+    //   Natural death (pane exits → session dies): %output... %sessions-changed %exit
+    //   External kill (kill-server):               %sessions-changed %exit
+    //
+    //   Both paths produce %sessions-changed then %exit.  tmux does NOT send %window-close
+    //   to the CC client of the dying session: by the time the async command queue fires
+    //   control_notify_window_unlinked(), c->session is already NULL (set in
+    //   server_destroy_session), so the %window-close write is skipped.  Similarly,
+    //   %pane-exited is a HOOK (not a CC notification) and requires remain-on-exit.
+    //
+    // THE DISCRIMINATOR (output-recency heuristic):
+    //   When the user types `exit`, the shell echoes back the command and possibly prints
+    //   a logout message — producing %output events within ~100ms of %sessions-changed.
+    //   External kills produce no pane output just before %sessions-changed.
+    //
+    //   So: if a %output/%extended-output event arrived within 500ms of %sessions-changed,
+    //   it is very likely a pane-exit cascade.  If no recent output, it is external.
+    //
+    //   The 500ms window is intentionally short: normal typing produces output well
+    //   before the session closes, and external kills arrive without prior output.
+    //
+    // STARTUP GUARD (_modelStabilized):
+    //   The %output events from shell prompts during session startup are excluded by only
+    //   tracking output AFTER the first onModelChange fires (model bootstrapped).  This
+    //   prevents startup prompts from polluting the kill-server discrimination.
+    //
+    // Declared here (before createRuntimePipeline) so the onTopologyNotify callback
+    // below can reference it at closure-creation time (even though it's a let — the
+    // callback is only CALLED after start(), by which point the variable is initialized).
+    let _paneExitHeadedCascade = false;
+    let _lastOutputTs = 0; // timestamp of most recent %output/%extended-output event
+    let _modelStabilized = false; // true after first onModelChange (bootstrap done)
     const pipeline = createRuntimePipeline(host, {
         buffers: accountingStore,
         sessionName: opts.host.sessionName,
@@ -265,6 +303,16 @@ export function createSessionProxy(opts) {
             // try/catch in host.onData — this is intentional (the throw is the
             // fault-injection path).
             opts.onTopologyNotify?.(kind);
+            // tc-fah2: output-recency discriminator for pane-exit vs external death.
+            //
+            // %sessions-changed fires for BOTH natural pane-exit death AND external
+            // kill-server.  We distinguish them by whether recent pane %output arrived
+            // within the 500ms window (see the comment above the let declarations for
+            // the full rationale).  The flag is rewritten on every %sessions-changed so
+            // the last value before host.onExit fires is always current.
+            if (kind === "sessions-changed") {
+                _paneExitHeadedCascade = _lastOutputTs > 0 && Date.now() - _lastOutputTs < 500;
+            }
         },
         onSwitchClientDetected: (outcome) => {
             if (outcome === "reattach") {
@@ -296,6 +344,25 @@ export function createSessionProxy(opts) {
     //     fire after pipeline.start() resolves, so the slot/write wiring is
     //     always live by then (tc-3si.1).
     pipelineRef = pipeline;
+    // 5b. tc-fah2: arm the output-recency tracker for the pane-exit discriminator.
+    //
+    //     We subscribe to onNotification to track %output/%extended-output events.
+    //     The _modelStabilized gate excludes startup shell prompts (which arrive before
+    //     the first onModelChange / bootstrap) from the signal; only post-bootstrap
+    //     output (i.e. interactive user activity) counts toward the 500ms window.
+    //
+    //     onModelChange is also used in step 8 for the pane-close latch; these are
+    //     independent subscribers — the pipeline supports multiple.
+    pipeline.onModelChange(() => {
+        _modelStabilized = true;
+    });
+    pipeline.onNotification((event) => {
+        if (!_modelStabilized)
+            return;
+        if (event.kind === "output" || event.kind === "extended-output") {
+            _lastOutputTs = Date.now();
+        }
+    });
     // 6. Control-plane server.
     //
     // tc-3si.6: thread the metrics registry so the server can increment
@@ -557,7 +624,7 @@ export function createSessionProxy(opts) {
             });
         }
     }
-    return {
+    const sessionProxyHandle = {
         host: hostView,
         demux,
         pipeline,
@@ -622,35 +689,52 @@ export function createSessionProxy(opts) {
             // Subscribe to host.onExit so that when tmux dies unexpectedly the
             // session-proxy tears down its pipeline and notifies all connected clients.
             host.onExit(() => {
+                // tc-fah2: SIGCHLD (which fires term.onExit in node-pty) can race the
+                // delivery of remaining pty data (e.g. the %sessions-changed notification
+                // that updates _paneExitHeadedCascade via the output-recency discriminator).
+                // Defer the teardown and farewell by one event-loop turn so that any pending
+                // onData events (which fire in the same "poll" phase libuv iteration) have a
+                // chance to be processed by the pipeline's onData handler before we stop it.
+                // setImmediate fires in the "check" phase, after the current poll-phase I/O.
+                //
                 // Mirror stop() — except host.stop(), since we're already in the exit
                 // handler. tc-3si.11: the alarm and registry metronomes MUST stop
                 // here too; this path used to stop only the pipeline, and the leaked
                 // 1s alarm tick pinned any embedding process forever (wedged the
                 // vscode unit suite at exit; would be a timer leak in the collapsed
                 // single-process server after tc-2x3 Stage 2).
-                stormAlarm.stop();
-                metricsRegistry.stop();
-                pipeline.stop();
-                sizeOwnership.dispose();
-                // tc-zcqr / tc-1a9d: push farewell AND close client transports.
-                // The transport close is the wire-level signal the extension's
-                // `ServerProxySessionProxyHandle.onDisconnect` watches — without it,
-                // `handleTransportDisconnect` never fires after a tmux kill-server, so
-                // `showReconnectNotification` ("tmuxcc: connection lost.") doesn't run.
-                // The "switch-client" outcome="unavailable" branch above already uses
-                // broadcastErrorAndClose for the same reason; the tmux-death path matches.
-                //
-                // tc-yhxm: choose the farewell code based on the discriminator flag:
-                //   - pty read-fault (onError fired first): "internal" — unexpected
-                //     proxy-side error; clients keep toast + [Reconnect] recovery.
-                //   - genuine session death: "session.unavailable" — S7 silence;
-                //     the C1 sessions.removed drain owns teardown (tc-76m8.38).
-                server.broadcastErrorAndClose({
-                    type: "error",
-                    code: _exitCausedByReadFault ? "internal" : "session.unavailable",
-                    message: _exitCausedByReadFault
-                        ? "The session-proxy hit an internal error; the tmux session may still be running."
-                        : "The tmux session has exited unexpectedly.",
+                setImmediate(() => {
+                    stormAlarm.stop();
+                    metricsRegistry.stop();
+                    pipeline.stop();
+                    sizeOwnership.dispose();
+                    // tc-zcqr / tc-1a9d: push farewell AND close client transports.
+                    // The transport close is the wire-level signal the extension's
+                    // `ServerProxySessionProxyHandle.onDisconnect` watches — without it,
+                    // `handleTransportDisconnect` never fires after a tmux kill-server, so
+                    // `showReconnectNotification` ("tmuxcc: connection lost.") doesn't run.
+                    // The "switch-client" outcome="unavailable" branch above already uses
+                    // broadcastErrorAndClose for the same reason; the tmux-death path matches.
+                    //
+                    // tc-yhxm: choose the farewell code based on the discriminator flag:
+                    //   - pty read-fault (onError fired first): "internal" — unexpected
+                    //     proxy-side error; clients keep toast + [Reconnect] recovery.
+                    //   - genuine session death: "session.unavailable" — S7 silence;
+                    //     the C1 sessions.removed drain owns teardown (tc-76m8.38).
+                    // tc-fah2: include the causation tag on session.unavailable farewells so the
+                    // client can discriminate user-caused death (pane-exit → silence) from external
+                    // death (external → one explanatory toast).  Not applicable to "internal" faults
+                    // (the tmux session may still be alive; causation is about the proxy itself).
+                    server.broadcastErrorAndClose({
+                        type: "error",
+                        code: _exitCausedByReadFault ? "internal" : "session.unavailable",
+                        message: _exitCausedByReadFault
+                            ? "The session-proxy hit an internal error; the tmux session may still be running."
+                            : "The tmux session has exited unexpectedly.",
+                        ...(!_exitCausedByReadFault ? {
+                            cause: _paneExitHeadedCascade ? "pane-exit" : "external",
+                        } : {}),
+                    });
                 });
             });
         },
@@ -963,7 +1047,7 @@ export function createSessionProxy(opts) {
                 //
                 // For kill-window we snapshot the current model's panes for that window
                 // synchronously (before the command is sent). The %end arrives before
-                // %window-close / requery, so the panes are still in the model at this
+                // the topology requery, so the panes are still in the model at this
                 // point — this is the correct snapshot window.
                 //
                 // We capture the connectionId here too (synchronously), so the closure
@@ -983,7 +1067,7 @@ export function createSessionProxy(opts) {
                             const reqId = msg.correlationId;
                             // Snapshot which panes belong to this window RIGHT NOW (synchronous,
                             // before the command is issued). This is safe because %end arrives
-                            // before %window-close / requery (tmux sends %end for a command
+                            // before the topology requery (tmux sends %end for a command
                             // before emitting the corresponding topology notifications).
                             const affectedPanes = [];
                             for (const pane of pipeline.getModel().panes.values()) {
@@ -1032,7 +1116,7 @@ export function createSessionProxy(opts) {
                             //
                             // tc-u7cu.6: if this was a close-pane or kill-window verb, record
                             // the close cause now that tmux has ACKed (%end). The %end always
-                            // arrives before %window-close / requery in tmux control mode, so
+                            // arrives before the topology requery in tmux control mode, so
                             // the pane.closed delta has not yet been emitted.
                             closeCauseCapture?.();
                             server.sendCommandResponse(transport, correlationId, {});
@@ -1099,5 +1183,15 @@ export function createSessionProxy(opts) {
             host.kill();
         },
     };
+    // tc-fah2: test seam — expose _paneExitHeadedCascade for EB8/DS tests so
+    // they can verify the flag transitions (pane count 0 → true; back to >0 → false).
+    // Non-enumerable, not in SessionProxy interface.
+    // Tests access via: (proxy as any)._paneExitHeadedCascadeForTesting
+    Object.defineProperty(sessionProxyHandle, "_paneExitHeadedCascadeForTesting", {
+        get: () => _paneExitHeadedCascade,
+        enumerable: false,
+        configurable: false,
+    });
+    return sessionProxyHandle;
 }
 //# sourceMappingURL=session-proxy.js.map
