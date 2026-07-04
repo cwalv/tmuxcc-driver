@@ -161,9 +161,98 @@
       "additionalProperties": false
     },
 
+    "SessionTopologyWindow": {
+      "type": "object",
+      "description": "One window row in a session.topology response (tc-i9aq.2). Carries only session-level window METADATA — no pane content, no south-side vocabulary.",
+      "required": ["windowId", "name", "active"],
+      "properties": {
+        "windowId": {
+          "type": "string",
+          "description": "tmux window id string, e.g. \"@1\"."
+        },
+        "name": {
+          "type": "string",
+          "description": "tmux window display name."
+        },
+        "active": {
+          "type": "boolean",
+          "description": "True when this window is the active window in its session."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "SessionTopologyPane": {
+      "type": "object",
+      "description": "One pane row in a session.topology response (tc-i9aq.2). Carries pane identity and durable @tmuxcc-* metadata — no pane content or south-side vocabulary.",
+      "required": ["paneId", "windowId", "bound"],
+      "properties": {
+        "paneId": {
+          "type": "string",
+          "description": "tmux pane id string, e.g. \"%1\"."
+        },
+        "windowId": {
+          "type": "string",
+          "description": "tmux window id this pane belongs to, e.g. \"@1\"."
+        },
+        "bound": {
+          "type": "boolean",
+          "description": "Durable binding intent (@tmuxcc-bound): true when the pane carries the option set to \"1\" (tc-i9aq.1 / cold-start.md §4.A)."
+        },
+        "detach": {
+          "enum": ["detach", "kill"],
+          "description": "RESOLVED detach-on-close policy (@tmuxcc-detach): the effective first-wins pane→window→session value. Absent means no scope set it."
+        },
+        "icon": {
+          "type": "string",
+          "description": "Durable icon policy (@tmuxcc-icon). Absent means no policy."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "SessionTopologyPayload": {
+      "type": "object",
+      "description": "Payload of a successful session.topology response (tc-i9aq.2).",
+      "required": ["windows", "panes"],
+      "properties": {
+        "windows": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/SessionTopologyWindow" },
+          "description": "All windows in the named session at query time."
+        },
+        "panes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/SessionTopologyPane" },
+          "description": "All panes across all windows in the named session at query time."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "MetricsHttpStatePayload": {
+      "type": "object",
+      "description": "Result payload for a server-proxy.set-metrics-http response (tc-44u4.4). Reports the listener state AFTER the toggle was applied.",
+      "required": ["enabled", "address"],
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether a metrics-HTTP listener is bound after the toggle."
+        },
+        "address": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ],
+          "description": "The bound address when enabled is true: an absolute unix socket path or a host:port string. null when no listener is bound."
+        }
+      },
+      "additionalProperties": false
+    },
+
     "ServerProxyCommandOkPayload": {
       "type": "object",
-      "description": "Successful server-proxy command result payload. Per-kind: session.claim/session.create → {sessionId, created}; session.createUnique → {sessionId, name, created:true}; session.destroy → {}; session.applyTemplate → {applyTemplate}; session.freezeTemplate → {frozenTemplate}; server-proxy.info → {info}. D5 (tc-4b6k.4): there is NO endpoint field — the client binds a connection to a session with session.attach, not by dialing a per-session socket path.",
+      "description": "Successful server-proxy command result payload. Per-kind: session.claim/session.create → {sessionId, created}; session.createUnique → {sessionId, name, created:true}; session.destroy → {}; session.applyTemplate → {applyTemplate}; session.freezeTemplate → {frozenTemplate}; server-proxy.info → {info}; session.topology → {topology}; server-proxy.set-metrics-http → {metricsHttp}. D5 (tc-4b6k.4): there is NO endpoint field — the client binds a connection to a session with session.attach, not by dialing a per-session socket path.",
       "properties": {
         "sessionId": { "$ref": "tmuxcc:shared/primitives#/$defs/SessionId" },
         "created": {
@@ -181,6 +270,14 @@
         "frozenTemplate": {
           "$ref": "tmuxcc:shared/session-template#/$defs/SessionTemplate",
           "description": "The schema-valid template captured by a session.freezeTemplate response (tc-gjdx.5). Absent on all other command kinds."
+        },
+        "topology": {
+          "$ref": "#/$defs/SessionTopologyPayload",
+          "description": "Session topology for a session.topology response (tc-i9aq.2). Absent on all other command kinds."
+        },
+        "metricsHttp": {
+          "$ref": "#/$defs/MetricsHttpStatePayload",
+          "description": "Post-toggle metrics-HTTP listener state for a server-proxy.set-metrics-http response (tc-44u4.4). Absent on all other command kinds."
         },
         "info": {
           "type": "object",

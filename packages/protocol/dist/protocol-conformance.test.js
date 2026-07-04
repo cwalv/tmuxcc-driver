@@ -1493,5 +1493,136 @@ describe("protocol schema conformance", () => {
             assert.strictEqual(validateServerProxyClientMsg(bad), false, "env values must be strings — additionalProperties:{type:string}");
         });
     });
+    // -------------------------------------------------------------------------
+    // 10. session.topology + server-proxy.set-metrics-http verbs — tc-usln
+    // -------------------------------------------------------------------------
+    describe("session.topology + server-proxy.set-metrics-http verbs (tc-usln)", () => {
+        // --- session.topology request ---
+        it("accepts a session.topology command request", () => {
+            const cmd = { kind: "session.topology", sessionId: sessionId("s0") };
+            const msg = {
+                type: "command.request",
+                seq: 30,
+                correlationId: "topo-1",
+                command: cmd,
+            };
+            assert.ok(validateServerProxyClientMsg(msg), JSON.stringify(validateServerProxyClientMsg.errors));
+        });
+        it("rejects session.topology missing sessionId", () => {
+            const bad = {
+                type: "command.request",
+                seq: 31,
+                correlationId: "topo-bad",
+                command: { kind: "session.topology" },
+            };
+            assert.strictEqual(validateServerProxyClientMsg(bad), false, "sessionId is required on session.topology");
+        });
+        // --- session.topology ok-response payload ---
+        it("accepts a command.response carrying a topology payload (windows + panes)", () => {
+            const topology = {
+                windows: [
+                    { windowId: "@1", name: "editor", active: true },
+                    { windowId: "@2", name: "shell", active: false },
+                ],
+                panes: [
+                    { paneId: "%1", windowId: "@1", bound: true, detach: "detach", icon: "$(terminal)" },
+                    { paneId: "%2", windowId: "@1", bound: false, detach: "kill", icon: undefined },
+                    { paneId: "%3", windowId: "@2", bound: false, detach: undefined, icon: undefined },
+                ],
+            };
+            const msg = {
+                type: "command.response",
+                seq: 32,
+                correlationId: "topo-1",
+                result: { ok: true, payload: { topology } },
+            };
+            assert.ok(validateServerProxyMsg(msg), JSON.stringify(validateServerProxyMsg.errors));
+        });
+        it("accepts a command.response carrying an empty topology payload (no windows)", () => {
+            const topology = { windows: [], panes: [] };
+            const msg = {
+                type: "command.response",
+                seq: 33,
+                correlationId: "topo-empty",
+                result: { ok: true, payload: { topology } },
+            };
+            assert.ok(validateServerProxyMsg(msg), JSON.stringify(validateServerProxyMsg.errors));
+        });
+        // --- server-proxy.set-metrics-http request ---
+        it("accepts a server-proxy.set-metrics-http command (enable with bind omitted)", () => {
+            const cmd = { kind: "server-proxy.set-metrics-http", enabled: true };
+            const msg = {
+                type: "command.request",
+                seq: 34,
+                correlationId: "metrics-1",
+                command: cmd,
+            };
+            assert.ok(validateServerProxyClientMsg(msg), JSON.stringify(validateServerProxyClientMsg.errors));
+        });
+        it("accepts a server-proxy.set-metrics-http command (enable with explicit bind)", () => {
+            const cmd = {
+                kind: "server-proxy.set-metrics-http",
+                enabled: true,
+                bind: "127.0.0.1:9090",
+            };
+            const msg = {
+                type: "command.request",
+                seq: 35,
+                correlationId: "metrics-2",
+                command: cmd,
+            };
+            assert.ok(validateServerProxyClientMsg(msg), JSON.stringify(validateServerProxyClientMsg.errors));
+        });
+        it("accepts a server-proxy.set-metrics-http command (disable — bind ignored)", () => {
+            const cmd = { kind: "server-proxy.set-metrics-http", enabled: false };
+            const msg = {
+                type: "command.request",
+                seq: 36,
+                correlationId: "metrics-off",
+                command: cmd,
+            };
+            assert.ok(validateServerProxyClientMsg(msg), JSON.stringify(validateServerProxyClientMsg.errors));
+        });
+        it("rejects server-proxy.set-metrics-http missing enabled", () => {
+            const bad = {
+                type: "command.request",
+                seq: 37,
+                correlationId: "metrics-bad",
+                command: { kind: "server-proxy.set-metrics-http" },
+            };
+            assert.strictEqual(validateServerProxyClientMsg(bad), false, "enabled is required on set-metrics-http");
+        });
+        // --- server-proxy.set-metrics-http ok-response payload ---
+        it("accepts a command.response carrying a metricsHttp payload (listener bound)", () => {
+            const metricsHttp = { enabled: true, address: "/run/tmuxcc/default/metrics-http.sock" };
+            const msg = {
+                type: "command.response",
+                seq: 38,
+                correlationId: "metrics-1",
+                result: { ok: true, payload: { metricsHttp } },
+            };
+            assert.ok(validateServerProxyMsg(msg), JSON.stringify(validateServerProxyMsg.errors));
+        });
+        it("accepts a command.response carrying a metricsHttp payload (listener unbound, address null)", () => {
+            const metricsHttp = { enabled: false, address: null };
+            const msg = {
+                type: "command.response",
+                seq: 39,
+                correlationId: "metrics-off",
+                result: { ok: true, payload: { metricsHttp } },
+            };
+            assert.ok(validateServerProxyMsg(msg), JSON.stringify(validateServerProxyMsg.errors));
+        });
+        it("accepts a command.response carrying a metricsHttp payload (TCP bind address)", () => {
+            const metricsHttp = { enabled: true, address: "127.0.0.1:9090" };
+            const msg = {
+                type: "command.response",
+                seq: 40,
+                correlationId: "metrics-2",
+                result: { ok: true, payload: { metricsHttp } },
+            };
+            assert.ok(validateServerProxyMsg(msg), JSON.stringify(validateServerProxyMsg.errors));
+        });
+    });
 });
 //# sourceMappingURL=protocol-conformance.test.js.map

@@ -130,6 +130,35 @@
       "additionalProperties": false
     },
 
+    "ServerProxySetMetricsHttpCommand": {
+      "type": "object",
+      "description": "Runtime toggle of the server-proxy's /metrics (+ /info) HTTP exposition (tc-44u4.4). Flip the Prometheus scrape surface on or off WITHOUT restarting the server-proxy. bind selects where the HTTP listener binds when enabled is true: \"unix\" (or omitted) = per-user unix-domain socket at <runtime>/<socketName>/metrics-http.sock (secure default); \"unix:/abs/path.sock\" = unix-domain at explicit path; \"127.0.0.1:<port>\" = loopback TCP (not per-user isolated). When enabled is false the listener is unbound and bind is ignored. Additive — older server-proxies respond with protocol.unknown-message.",
+      "required": ["kind", "enabled"],
+      "properties": {
+        "kind": { "const": "server-proxy.set-metrics-http" },
+        "enabled": {
+          "type": "boolean",
+          "description": "Bind a listener (true) or unbind the current one (false)."
+        },
+        "bind": {
+          "type": "string",
+          "description": "Bind address when enabled is true. Omit for the secure unix-socket default. Ignored when enabled is false."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "SessionTopologyCommand": {
+      "type": "object",
+      "description": "One-shot topology query for a discovered-but-unclaimed session (tc-i9aq.2). Runs tmux list-windows + list-panes for the named session without claiming it or spawning a session-proxy. The response carries the full window/pane topology including @tmuxcc-* fields so the extension can render unbound nodes with their durable intent. Read-only; nothing is mutated. Additive — older server-proxies respond with protocol.unknown-message.",
+      "required": ["kind", "sessionId"],
+      "properties": {
+        "kind": { "const": "session.topology" },
+        "sessionId": { "$ref": "tmuxcc:shared/primitives#/$defs/SessionId" }
+      },
+      "additionalProperties": false
+    },
+
     "ServerProxyCommand": {
       "oneOf": [
         { "$ref": "#/$defs/SessionClaimCommand" },
@@ -138,7 +167,9 @@
         { "$ref": "#/$defs/SessionDestroyCommand" },
         { "$ref": "#/$defs/SessionApplyTemplateCommand" },
         { "$ref": "#/$defs/SessionFreezeTemplateCommand" },
-        { "$ref": "#/$defs/ServerProxyInfoCommand" }
+        { "$ref": "#/$defs/ServerProxyInfoCommand" },
+        { "$ref": "#/$defs/ServerProxySetMetricsHttpCommand" },
+        { "$ref": "#/$defs/SessionTopologyCommand" }
       ],
       "description": "Discriminated union of all server-proxy commands a client may issue via command.request. Narrow on `kind`. (session.attach is a top-level message, not a command — see SessionAttachMessage.)"
     },
