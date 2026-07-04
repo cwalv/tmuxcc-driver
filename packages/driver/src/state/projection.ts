@@ -387,12 +387,19 @@ export function diffModel(
   }
 
   // -------------------------------------------------------------------------
-  // 3. layout.updated — changed window layouts (for existing windows)
+  // 3. layout.updated — window layout changes (new windows and existing)
+  //
+  // For NEW windows: `window.added` carries no layout; if the window arrives
+  // with a non-null layout in the same diff cycle (e.g. `new-window` and
+  // `split-window` batched into one requery), the client would otherwise be
+  // stuck with the placeholder (`root.kind = "pane"`) forever because no
+  // second requery fires.  Emit `layout.updated` for new windows too when
+  // their layout is non-null.
   // -------------------------------------------------------------------------
   for (const [id, win] of next.windows) {
     const prevWin = prev.windows.get(id);
-    if (!prevWin) continue; // already handled in window.added
-    if (!layoutsEqual(prevWin.layout, win.layout) && win.layout !== null) {
+    const prevLayout = prevWin?.layout ?? null;
+    if (!layoutsEqual(prevLayout, win.layout) && win.layout !== null) {
       const msg: LayoutUpdatedMessage = {
         type: "layout.updated",
         seq: SEQ,

@@ -1603,6 +1603,12 @@ export interface SessionProxyCommandOkPayload {
    * other command kinds.
    */
   readonly applyTemplate?: import("./session-template.js").TemplateApplyResult;
+  /**
+   * tc-gjdx.8: frozen template for a `session.freezeTemplate` response.
+   * The schema-valid SessionTemplate captured from the live session. Absent on
+   * all other command kinds.
+   */
+  readonly frozenTemplate?: import("./session-template.js").SessionTemplate;
 }
 
 /**

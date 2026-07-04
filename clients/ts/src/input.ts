@@ -61,7 +61,7 @@
  * # NO DOM, NO vscode, NO host API, NO Pseudoterminal
  */
 
-import type { PaneId, WindowId, InputMessage, ResizeRequestMessage, CommandRequestMessage, WireCommand, SessionProxyCommandResponseMessage, PaneAttachMessage, ClientFocusMessage, TemplateApplyResult } from "@tmuxcc/protocol";
+import type { PaneId, WindowId, InputMessage, ResizeRequestMessage, CommandRequestMessage, WireCommand, SessionProxyCommandResponseMessage, PaneAttachMessage, ClientFocusMessage, TemplateApplyResult, SessionTemplate } from "@tmuxcc/protocol";
 import { EDH_TRACE_ENABLED, edhTrace } from "./edh-trace.js";
 
 // ---------------------------------------------------------------------------
@@ -105,6 +105,12 @@ export type VerbResult =
        * `session.applyTemplate` verb). Absent for all other verb kinds.
        */
       readonly applyTemplate?: TemplateApplyResult;
+      /**
+       * tc-gjdx.8: frozen template for a `session.freezeTemplate` response.
+       * Present only when the response carried `payload.frozenTemplate` (i.e. a
+       * `session.freezeTemplate` verb). Absent for all other verb kinds.
+       */
+      readonly frozenTemplate?: SessionTemplate;
     }
   | {
       readonly ok: false;
@@ -563,9 +569,12 @@ export function createInputApi(
           // whether newPaneId/newWindowId are present.
           // tc-gjdx.7: thread through the applyTemplate payload when present
           // (session.applyTemplate response carries it for dryRun preview/apply).
+          // tc-gjdx.8: thread through frozenTemplate when present
+          // (session.freezeTemplate response carries it).
           deferred.resolve({
             ok: true,
             ...(payload?.applyTemplate !== undefined ? { applyTemplate: payload.applyTemplate } : {}),
+            ...(payload?.frozenTemplate !== undefined ? { frozenTemplate: payload.frozenTemplate } : {}),
           });
         } else {
           // ok=true but ONLY ONE id present — session-proxy contract violation.

@@ -2141,6 +2141,13 @@ class ServerProxyImpl implements ServerProxyHandle {
     );
     await applyCompiledTemplate((cmd) => sessionProxy.send(cmd), plan, sessionName);
     await this._refreshSessions();
+    // tc-gjdx.8: push the updated @tmuxcc-template to connected clients.
+    // _broadcastAdded was called with template=undefined (template not yet
+    // applied at registration time); _refreshSessions updates entry.template
+    // in the internal table but sends no delta.  A full snapshot broadcast
+    // here ensures every client's SocketStore learns the templateName before
+    // the session.createUnique response arrives on the keepalive.
+    this._broadcastSnapshot();
   }
 
   // ---------------------------------------------------------------------------
