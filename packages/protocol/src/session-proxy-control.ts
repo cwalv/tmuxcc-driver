@@ -1597,6 +1597,12 @@ export interface SessionProxyCommandOkPayload {
    * Present only in `pane.capture` command responses; absent otherwise.
    */
   readonly text?: string;
+  /**
+   * tc-gjdx.7: apply-to-live result for a `session.applyTemplate` response.
+   * The would-create set (dryRun) / did-create set (real apply). Absent on all
+   * other command kinds.
+   */
+  readonly applyTemplate?: import("./session-template.js").TemplateApplyResult;
 }
 
 /**

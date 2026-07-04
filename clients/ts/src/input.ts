@@ -61,7 +61,7 @@
  * # NO DOM, NO vscode, NO host API, NO Pseudoterminal
  */
 
-import type { PaneId, WindowId, InputMessage, ResizeRequestMessage, CommandRequestMessage, WireCommand, SessionProxyCommandResponseMessage, PaneAttachMessage, ClientFocusMessage } from "@tmuxcc/protocol";
+import type { PaneId, WindowId, InputMessage, ResizeRequestMessage, CommandRequestMessage, WireCommand, SessionProxyCommandResponseMessage, PaneAttachMessage, ClientFocusMessage, TemplateApplyResult } from "@tmuxcc/protocol";
 import { EDH_TRACE_ENABLED, edhTrace } from "./edh-trace.js";
 
 // ---------------------------------------------------------------------------
@@ -99,6 +99,12 @@ export type VerbResult =
       readonly newPaneId?: PaneId;
       /** Wire id of the window the new pane lives in (`w<N>`). Present only for creating verbs. */
       readonly newWindowId?: WindowId;
+      /**
+       * tc-gjdx.7: apply-to-live result for a `session.applyTemplate` response.
+       * Present only when the response carried `payload.applyTemplate` (i.e. a
+       * `session.applyTemplate` verb). Absent for all other verb kinds.
+       */
+      readonly applyTemplate?: TemplateApplyResult;
     }
   | {
       readonly ok: false;
@@ -555,7 +561,12 @@ export function createInputApi(
           // rename-session, etc.): ok=true with no pane/window ids.
           // Resolve as simple success — the caller distinguishes by checking
           // whether newPaneId/newWindowId are present.
-          deferred.resolve({ ok: true });
+          // tc-gjdx.7: thread through the applyTemplate payload when present
+          // (session.applyTemplate response carries it for dryRun preview/apply).
+          deferred.resolve({
+            ok: true,
+            ...(payload?.applyTemplate !== undefined ? { applyTemplate: payload.applyTemplate } : {}),
+          });
         } else {
           // ok=true but ONLY ONE id present — session-proxy contract violation.
           // Surface as a failure rather than a half-populated success.
