@@ -85,7 +85,7 @@ import type { ServerProxyMetrics } from "./metrics.js";
 import { mergeMetricsText } from "./metrics-exposition.js";
 import { parseMetricsHttpBind, bindMetricsHttp } from "./metrics-http.js";
 import type { MetricsHttpListener } from "./metrics-http.js";
-import { listSessions, killSession, checkSessionPresence, createTmuxWatcher, probeTmuxLiveness, getTmuxServerPid, countTmuxccClientsBySession, listSessionTopology, setSessionWorkspace } from "./tmux-south.js";
+import { listSessions, killSession, checkSessionPresence, createTmuxWatcher, probeTmuxLiveness, getTmuxServerPid, countTmuxccClientsBySession, listSessionTopology, setSessionWorkspace, listSessionForFreeze } from "./tmux-south.js";
 import type { TmuxWatcher, TmuxAvailabilityOut } from "./tmux-south.js";
 import { probeTmuxCapabilities, MINIMUM_TMUX_VERSION } from "./tmux-capabilities.js";
 import type { TmuxCapabilityState } from "./tmux-capabilities.js";
@@ -97,6 +97,7 @@ import type { SessionClaimer } from "./claim-session.js";
 import { compileTemplate } from "./template/compile.js";
 import { applyCompiledTemplate } from "./template/apply.js";
 import { templateDiff } from "./template/diff.js";
+import { buildFrozenTemplate } from "./template/freeze.js";
 import type { SessionTemplate, TemplateApplyResult, WindowTemplate } from "@tmuxcc/protocol";
 
 // ---------------------------------------------------------------------------
@@ -1743,7 +1744,7 @@ class ServerProxyImpl implements ServerProxyHandle {
     const rpcStartMs = Date.now();
 
     try {
-      let payload: { sessionId?: SessionId; created?: boolean; ok?: true; info?: ServerProxyInfoPayload; topology?: SessionTopologyPayload; name?: string; metricsHttp?: MetricsHttpStatePayload; applyTemplate?: TemplateApplyResult };
+      let payload: { sessionId?: SessionId; created?: boolean; ok?: true; info?: ServerProxyInfoPayload; topology?: SessionTopologyPayload; name?: string; metricsHttp?: MetricsHttpStatePayload; applyTemplate?: TemplateApplyResult; frozenTemplate?: SessionTemplate };
 
       switch (command.kind) {
         case "session.claim":
@@ -1791,20 +1792,11 @@ class ServerProxyImpl implements ServerProxyHandle {
           payload = { applyTemplate: await this._applyTemplateLive(command.sessionId, command.template, command.dryRun ?? false) };
           break;
         case "session.freezeTemplate":
-          // tc-gjdx.1 declares this verb; the driver-side handler lands in
-          // tc-gjdx.5 (freeze).  Until then, fail loud rather than silently
-          // accepting — a client feature-detects the missing handler via the
-          // additive-compat convention (protocol.unknown-message), exactly as it
-          // would against an older driver.
-          this._sendResponse(state, {
-            correlationId,
-            result: {
-              ok: false,
-              code: "protocol.unknown-message",
-              message: `${command.kind} is declared but not yet handled by this driver`,
-            },
-          });
-          return;
+          // tc-gjdx.5: freeze a live session into a schema-valid template.
+          payload = {
+            frozenTemplate: await this._freezeTemplate(command.sessionId, command.name),
+          };
+          break;
         default: {
           const _exhaustive: never = command;
           void _exhaustive;
@@ -1925,6 +1917,35 @@ class ServerProxyImpl implements ServerProxyHandle {
         icon: p.icon,
       })),
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  // tc-gjdx.5: session freeze
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Freeze a live session into a schema-valid {@link SessionTemplate}.
+   *
+   * Looks up the session name, runs the two tmux queries via
+   * {@link listSessionForFreeze}, and converts the raw data to a template via
+   * {@link buildFrozenTemplate}.
+   *
+   * Fails loud (throws) when the session is not in the registry or the tmux
+   * queries fail — surfaced as `result.ok=false` by the surrounding catch in
+   * `_handleCommand`.
+   */
+  private async _freezeTemplate(sessionId: SessionId, name?: string): Promise<SessionTemplate> {
+    const entry = this._sessions.get(sessionId);
+    if (entry === undefined) {
+      throw Object.assign(new Error(`session ${sessionId} not found`), { code: "session.not-found" });
+    }
+
+    const data = await listSessionForFreeze(this._opts.socketName, entry.name);
+    if (data === null) {
+      throw new Error(`freeze: tmux queries failed for session ${entry.name}`);
+    }
+
+    return buildFrozenTemplate(data, name);
   }
 
   // ---------------------------------------------------------------------------

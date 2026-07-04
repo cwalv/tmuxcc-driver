@@ -50,6 +50,7 @@ import { createTmuxHost } from "./runtime/tmux-host.js";
 import { paneBoundOptionName } from "./state/bootstrap.js";
 import type { TmuxHost } from "./runtime/tmux-host.js";
 import type { TmuxCapabilityMap } from "@tmuxcc/protocol";
+import type { FreezeSessionData } from "./template/freeze.js";
 
 // ---------------------------------------------------------------------------
 // Async one-shot spawn (D6 / tc-4b6k.6)
@@ -551,6 +552,76 @@ export async function listSessionTopology(
         : undefined,
       icon: (iconRaw ?? "").trim() || undefined,
     });
+  }
+
+  return { windows, panes };
+}
+
+// ---------------------------------------------------------------------------
+// Session freeze query (tc-gjdx.5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Run `tmux list-windows` + `tmux list-panes` to capture the data needed for
+ * a session freeze (tc-gjdx.5 — "save current session as template").
+ *
+ * Captures:
+ *   - Per-window: window id, name, and `window_layout` string (the "visible"
+ *     form that includes pane IDs, used by the freeze converter to derive the
+ *     desired-geometry tree).
+ *   - Per-pane: pane id number (integer part of `%N`), window id, and
+ *     `pane_current_path` (the cwd for the TemplatePane leaf).
+ *
+ * Returns `null` when the session is not found or a tmux call fails.
+ *
+ * `pane_start_command` is intentionally NOT captured — it does not faithfully
+ * round-trip (see tc-gjdx.5 bead comment for the first-hand evidence; OMIT
+ * rationale in template/freeze.ts module doc).
+ */
+export async function listSessionForFreeze(
+  socketName: string,
+  sessionName: string,
+): Promise<FreezeSessionData | null> {
+  // list-windows: window_id, window_name, window_layout
+  const WIN_FMT = "#{window_id}\t#{window_name}\t#{window_layout}";
+  const winResult = await runTmux(
+    ["-L", socketName, "list-windows", "-t", sessionName, "-F", WIN_FMT],
+    5_000,
+  );
+  if (winResult.status !== 0 || winResult.error) return null;
+
+  const windows: FreezeSessionData["windows"][number][] = [];
+  for (const line of (winResult.stdout ?? "").trim().split("\n")) {
+    if (!line) continue;
+    const tab1 = line.indexOf("\t");
+    const tab2 = line.indexOf("\t", tab1 + 1);
+    if (tab1 < 0 || tab2 < 0) continue;
+    const windowId = line.slice(0, tab1);
+    const name = line.slice(tab1 + 1, tab2);
+    const layoutString = line.slice(tab2 + 1);
+    if (!windowId || !layoutString) continue;
+    windows.push({ windowId, name, layoutString });
+  }
+
+  // list-panes -s: pane_id, window_id, pane_current_path.
+  // `-s -t <session>` lists every pane in the target session across windows.
+  const PANE_FMT = "#{pane_id}\t#{window_id}\t#{pane_current_path}";
+  const paneResult = await runTmux(
+    ["-L", socketName, "list-panes", "-s", "-t", sessionName, "-F", PANE_FMT],
+    5_000,
+  );
+  if (paneResult.status !== 0 || paneResult.error) return null;
+
+  const panes: FreezeSessionData["panes"][number][] = [];
+  for (const line of (paneResult.stdout ?? "").trim().split("\n")) {
+    if (!line) continue;
+    const [paneIdRaw, windowId, cwd] = line.split("\t");
+    if (!paneIdRaw || !windowId) continue;
+    // pane_id is "%N" — extract the integer N.
+    const m = /^%(\d+)$/.exec((paneIdRaw ?? "").trim());
+    if (m === null) continue;
+    const paneNum = parseInt(m[1]!, 10);
+    panes.push({ paneNum, windowId, cwd: (cwd ?? "").trim() });
   }
 
   return { windows, panes };
