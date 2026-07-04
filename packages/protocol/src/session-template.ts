@@ -68,9 +68,9 @@ export interface TemplatePane {
 
 /**
  * A horizontal split: children arranged side-by-side (left → right).
- * Mirrors {@link import("./layout.js").LayoutHSplit} and tmux's "[…]"
- * notation, expressed semantically. A DESIRED split — no `rect`; `sizes` are
- * proportional, not absolute.
+ * Mirrors {@link import("./layout.js").LayoutHSplit} and tmux's "{…}"
+ * (LAYOUT_LEFTRIGHT) notation, expressed semantically. A DESIRED split — no
+ * `rect`; `sizes` are proportional, not absolute.
  */
 export interface TemplateHSplit {
   readonly kind: "hsplit";
@@ -88,9 +88,9 @@ export interface TemplateHSplit {
 
 /**
  * A vertical split: children stacked top-to-bottom. Mirrors
- * {@link import("./layout.js").LayoutVSplit} and tmux's "{…}" notation. A
- * DESIRED split — no `rect`; `sizes` are proportional. See
- * {@link TemplateHSplit.sizes}.
+ * {@link import("./layout.js").LayoutVSplit} and tmux's "[…]"
+ * (LAYOUT_TOPBOTTOM) notation. A DESIRED split — no `rect`; `sizes` are
+ * proportional. See {@link TemplateHSplit.sizes}.
  */
 export interface TemplateVSplit {
   readonly kind: "vsplit";

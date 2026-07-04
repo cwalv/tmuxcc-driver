@@ -30,7 +30,7 @@
 
     "TemplateHSplit": {
       "type": "object",
-      "description": "A horizontal split node: children are arranged side-by-side (left to right). Mirrors shared/layout.json's LayoutHSplit and tmux's '[…]' notation, expressed semantically. A DESIRED split — no Rect; sizes are proportional, not absolute.",
+      "description": "A horizontal split node: children are arranged side-by-side (left to right). Mirrors shared/layout.json's LayoutHSplit and tmux's '{…}' (LAYOUT_LEFTRIGHT) notation, expressed semantically. A DESIRED split — no Rect; sizes are proportional, not absolute.",
       "required": ["kind", "children"],
       "properties": {
         "kind": { "const": "hsplit" },
@@ -52,7 +52,7 @@
 
     "TemplateVSplit": {
       "type": "object",
-      "description": "A vertical split node: children are stacked top-to-bottom. Mirrors shared/layout.json's LayoutVSplit and tmux's '{…}' notation, expressed semantically. A DESIRED split — no Rect; sizes are proportional, not absolute.",
+      "description": "A vertical split node: children are stacked top-to-bottom. Mirrors shared/layout.json's LayoutVSplit and tmux's '[…]' (LAYOUT_TOPBOTTOM) notation, expressed semantically. A DESIRED split — no Rect; sizes are proportional, not absolute.",
       "required": ["kind", "children"],
       "properties": {
         "kind": { "const": "vsplit" },

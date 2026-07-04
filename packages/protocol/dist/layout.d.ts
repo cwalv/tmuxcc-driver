@@ -32,8 +32,8 @@ export interface LayoutPane {
 }
 /**
  * A horizontal split: children are arranged side-by-side (left → right).
- * The split direction matches tmux's "[…]" (horizontal) notation but is
- * expressed as a semantic tag, not a tmux character.
+ * The split direction matches tmux's "{…}" (LAYOUT_LEFTRIGHT, horizontal)
+ * notation but is expressed as a semantic tag, not a tmux character.
  */
 export interface LayoutHSplit {
     readonly kind: "hsplit";
@@ -42,7 +42,7 @@ export interface LayoutHSplit {
 }
 /**
  * A vertical split: children are stacked top-to-bottom.
- * Matches tmux's "{…}" (vertical) notation, expressed semantically.
+ * Matches tmux's "[…]" (LAYOUT_TOPBOTTOM, vertical) notation, expressed semantically.
  */
 export interface LayoutVSplit {
     readonly kind: "vsplit";
