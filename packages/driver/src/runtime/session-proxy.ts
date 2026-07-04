@@ -777,6 +777,17 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
     get exited() { return host.exited; },
   };
 
+  // tc-yhxm: test seam — make the raw TmuxHost reachable from hostView for
+  // pty-error injection in EB7 (session-error-boundary.test.ts).
+  // Non-enumerable, non-writable; not in the SessionProxyHostView interface.
+  // Tests access via: (proxy.host as any)._rawHost._pty.emit("error", ...)
+  Object.defineProperty(hostView, "_rawHost", {
+    value: host,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
+
   // ---------------------------------------------------------------------------
   // tc-295a.8 / tc-295a.9 — per-pane attach + hydration helpers.
   //
@@ -904,6 +915,35 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
         void pipeline.send("set-option -g bell-action none");
       }
 
+      // tc-yhxm: discriminate pty read-fault exits from genuine session deaths.
+      //
+      // A tc-crnt.14-class pty read-fault fires host.onError() BEFORE
+      // host.onExit(): tmux-host.ts's ptyEmitter.on("error", ...) calls
+      // _emitError(err) synchronously (setting _exited=true and firing all
+      // _errorHandlers), while term.onExit only fires later when the tmux
+      // process actually terminates.  We latch this ordering in a flag so the
+      // host.onExit() handler can emit the right farewell code.
+      //
+      // Farewell vocabulary (WireErrorCode / tc-76m8.38):
+      //   "session.unavailable" = the session has gone away (S7 silence —
+      //     the C1 sessions.removed drain owns teardown; clients stand down
+      //     their crash reaction).
+      //   "internal" = unexpected proxy-side error (keep toast + [Reconnect]
+      //     recovery — the session may still be alive).
+      // A pty read-fault while the tmux session survives is the latter, not the
+      // former; before this fix it was mis-attributed as "session.unavailable"
+      // (leaving a silent dead tab: missing toast + lingering tab, tc-yhxm).
+      let _exitCausedByReadFault = false;
+      host.onError((_err: Error) => {
+        // Any error reaching this point is already non-EIO/EAGAIN: tmux-host.ts
+        // filters benign pty-close codes before calling _emitError, so this
+        // handler only fires for genuine pty read-socket faults (tc-crnt.14
+        // class: EBADF, etc.).  Spawn failures also route here, but they never
+        // produce a host.onExit() follow-up, so the flag is harmless in that
+        // path.
+        _exitCausedByReadFault = true;
+      });
+
       // Subscribe to host.onExit so that when tmux dies unexpectedly the
       // session-proxy tears down its pipeline and notifies all connected clients.
       host.onExit(() => {
@@ -918,18 +958,25 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
         pipeline.stop();
         sizeOwnership.dispose();
 
-        // tc-zcqr / tc-1a9d: push session.unavailable AND close client
-        // transports.  The transport close is the wire-level signal the
-        // extension's `ServerProxySessionProxyHandle.onDisconnect` watches —
-        // without it, `handleTransportDisconnect` never fires after a tmux
-        // kill-server, so `showReconnectNotification` ("tmuxcc: connection
-        // lost.") doesn't run.  The "switch-client" outcome="unavailable"
-        // branch above (line ~399) already uses broadcastErrorAndClose for
-        // the same reason; the tmux-death path now matches.
+        // tc-zcqr / tc-1a9d: push farewell AND close client transports.
+        // The transport close is the wire-level signal the extension's
+        // `ServerProxySessionProxyHandle.onDisconnect` watches — without it,
+        // `handleTransportDisconnect` never fires after a tmux kill-server, so
+        // `showReconnectNotification` ("tmuxcc: connection lost.") doesn't run.
+        // The "switch-client" outcome="unavailable" branch above already uses
+        // broadcastErrorAndClose for the same reason; the tmux-death path matches.
+        //
+        // tc-yhxm: choose the farewell code based on the discriminator flag:
+        //   - pty read-fault (onError fired first): "internal" — unexpected
+        //     proxy-side error; clients keep toast + [Reconnect] recovery.
+        //   - genuine session death: "session.unavailable" — S7 silence;
+        //     the C1 sessions.removed drain owns teardown (tc-76m8.38).
         server.broadcastErrorAndClose({
           type: "error",
-          code: "session.unavailable",
-          message: "The tmux session has exited unexpectedly.",
+          code: _exitCausedByReadFault ? "internal" : "session.unavailable",
+          message: _exitCausedByReadFault
+            ? "The session-proxy hit an internal error; the tmux session may still be running."
+            : "The tmux session has exited unexpectedly.",
         });
       });
     },

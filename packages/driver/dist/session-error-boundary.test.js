@@ -384,6 +384,113 @@ describe("tc-2x3.4: per-session error boundary", { skip: !TMUX_AVAILABLE }, () =
         // point of the discrimination).
         assert.ok(!proxy.host.exited, "EB6: tmux host must still be alive after the boundary trip");
     });
+    /**
+     * EB7 (tc-yhxm): a pty read-fault (tc-crnt.14 class) farewells connected
+     * clients with the FAULT code ("internal"), NOT the designed session-death
+     * goodbye ("session.unavailable").
+     *
+     * # Background
+     *
+     * tc-76m8.38 introduced farewell-code discrimination: "session.unavailable"
+     * suppresses the 'connection lost' toast (S7 silence — session is gone, the
+     * C1 sessions.removed drain owns teardown), while "internal" keeps toast +
+     * [Reconnect] (unexpected proxy-side error — session may still be alive).
+     * The boundary-fault path (EB6) was fixed in tc-76m8.38 to farewell "internal".
+     *
+     * But a tc-crnt.14-class pty read-fault (non-EIO/EAGAIN error on the pty
+     * read socket routed via tmux-host.ts's second 'error' listener) still went
+     * through host.onExit → broadcastErrorAndClose{code:"session.unavailable"},
+     * leaving a silent dead tab (missing toast + lingering tab).
+     *
+     * # Discriminator (tc-yhxm)
+     *
+     * A pty read-fault fires host.onError() SYNCHRONOUSLY before host.onExit()
+     * (the error listener fires immediately; term.onExit fires only when the
+     * tmux process actually terminates).  session-proxy.ts's start() registers
+     * a host.onError() handler that sets _exitCausedByReadFault=true; host.onExit()
+     * then checks the flag to choose "internal" vs "session.unavailable".
+     *
+     * # Test method
+     *
+     * Inject the pty read-fault via the test seam: (proxy.host as any)._rawHost._pty
+     * (the non-enumerable _rawHost property attached to hostView by createSessionProxy
+     * for this purpose).  Emit a synthetic EBADF 'error' event on the pty terminal,
+     * which fires the registered listeners synchronously and sets the discriminator
+     * flag.  Then kill the tmux -CC process directly via rawHost._pty.kill() (bypassing
+     * TmuxHost.kill()'s _exited guard) so term.onExit fires → host.onExit() →
+     * broadcastErrorAndClose with the correct "internal" code.
+     *
+     * # R5 moat: genuine session death still farewells "session.unavailable"
+     *
+     * The _exitCausedByReadFault flag starts false.  If host.onExit() fires without
+     * a preceding host.onError() (genuine kill-server or session death), the flag
+     * stays false and the farewell is "session.unavailable" (S7 intact).
+     */
+    it("EB7 (tc-yhxm): pty read-fault farewells clients with code 'internal', not 'session.unavailable'", { timeout: 25_000 }, async () => {
+        const socketName = `tmuxcc-eb7-${process.pid}-${Date.now()}`;
+        const sessionName = `eb7-sess-${process.pid}`;
+        _sockets.push(socketName);
+        spawnTmuxSession(socketName, sessionName);
+        const proxy = createSessionProxy({
+            host: { socketName, sessionName, attach: true },
+        });
+        _proxies.push(proxy);
+        await proxy.start();
+        // Attach a client with the full production wiring so the farewell
+        // broadcast + transport close are observable.
+        const { sessionProxy: dt, client: ct } = createInMemoryTransportPair();
+        const addP = proxy.addClient(dt);
+        await runClientHandshake(ct, {
+            protocolVersion: WIRE_PROTOCOL_VERSION,
+            features: [
+                "pane-lifecycle",
+                "layout-updates",
+                "focus-events",
+                "input-forwarding",
+            ],
+        });
+        await addP;
+        // Capture control messages + close AFTER the handshake settles.
+        const received = [];
+        let clientClosed = false;
+        ct.onControl((msg) => {
+            const m = msg;
+            received.push({ type: m.type, code: m.code });
+        });
+        ct.onClose(() => { clientClosed = true; });
+        // ── Inject the pty read-fault via the test seam ──────────────────────────
+        //
+        // (proxy.host as any)._rawHost is the TmuxHostImpl, attached non-enumerably
+        // to hostView by createSessionProxy (tc-yhxm test seam).
+        // _pty is the node-pty IPty; .emit("error", ...) fires its 'error' listeners:
+        //   1. node-pty's own listener — no-op because listeners("error").length >= 2
+        //      (tmux-host.ts registered a 2nd listener in the tc-crnt.14 fix)
+        //   2. tmux-host.ts's listener — sets _exited=true, calls _emitError(err)
+        //   3. session-proxy's inner host.onError() (registered in start()) — sets
+        //      _exitCausedByReadFault=true
+        //
+        // All three listeners fire synchronously in this call, so _exitCausedByReadFault
+        // is guaranteed set before we proceed.
+        const rawHost = proxy.host._rawHost;
+        const fault = Object.assign(new Error("simulated pty read fault — tc-yhxm EB7"), { code: "EBADF" });
+        rawHost._pty.emit("error", fault);
+        // Kill the tmux -CC process directly via node-pty (TmuxHost.kill() is a no-op
+        // at this point since _exited=true).  This causes term.onExit to fire, which
+        // fires _exitHandlers including session-proxy's host.onExit() → farewell.
+        rawHost._pty.kill("SIGKILL");
+        // Wait for the farewell to propagate to the client transport.
+        await waitFor(() => clientClosed, 8_000, "client transport to close after pty read-fault farewell (EB7)");
+        // EB7-F1: farewell MUST be error{code:"internal"}.
+        const faultFarewell = received.find((m) => m.type === "error" && m.code === "internal");
+        assert.ok(faultFarewell !== undefined, `EB7-F1: client must receive the fault farewell error{code:"internal"} for a pty read-fault; ` +
+            `got: ${JSON.stringify(received)}`);
+        // EB7-F2: farewell MUST NOT be error{code:"session.unavailable"}.
+        const misattributed = received.find((m) => m.type === "error" && m.code === "session.unavailable");
+        assert.equal(misattributed, undefined, `EB7-F2: a pty read-fault must NOT emit the session-death goodbye (session.unavailable) — ` +
+            `the tmux session may still be alive; got: ${JSON.stringify(received)}`);
+        // EB7-F3: host.exited is true (the -CC client pty is dead after the fault).
+        assert.ok(proxy.host.exited, "EB7-F3: host.exited must be true after the pty read-fault");
+    });
     // EB3 (deleted, tc-4b6k.4): the socket-clobber ownership guard it exercised
     // (`_doSocketTeardown` / `_socketPathRefCount` / `_closeServerFdOnly`) no
     // longer exists — the single-socket wire collapse (D5) removed the per-session
