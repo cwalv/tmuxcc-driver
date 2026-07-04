@@ -1,6 +1,6 @@
 {
   "$schema": "../schemas/session-proxy/server-push.json",
-  "description": "Conformance transcript (tc-ozk.4): full session-proxy wire conversation — handshake, snapshot (with the client's own connectionId), input, an open-window verb (returns effect ids paneId/windowId per tc-ozk.1; emits origin-tagged window.added + pane.opened + focus.changed per tc-ozk.2), and pane.capture (success with text + failure pane.not-found per tc-295a.11). Replayed against BOTH the SDK parser/mirror and the real session-proxy daemon.",
+  "description": "Conformance transcript (tc-ozk.4): full session-proxy wire conversation — handshake, snapshot (with the client's own connectionId), input, an open-window verb (returns effect ids paneId/windowId per tc-ozk.1; emits origin-tagged window.added + pane.opened + layout.updated + focus.changed per tc-ozk.2 + tc-gjdx.8), and pane.capture (success with text + failure pane.not-found per tc-295a.11). Replayed against BOTH the SDK parser/mirror and the real session-proxy daemon.",
 
   "protocolVersion": 3,
 
@@ -176,12 +176,27 @@
     {
       "direction": "session-proxy→client",
       "step": 9,
+      "label": "layout.updated — new window w1 gets its initial single-pane layout (tc-gjdx.8: projection now emits layout.updated for new windows when layout is non-null, so clients receive the concrete layout in the same diff cycle as the creation deltas)",
+      "message": {
+        "type": "layout.updated",
+        "seq": 6,
+        "windowId": "w1",
+        "layout": {
+          "cols": 80,
+          "rows": 24,
+          "root": { "kind": "pane", "paneId": "p2", "rect": { "x": 0, "y": 0, "cols": 80, "rows": 24 } }
+        }
+      }
+    },
+    {
+      "direction": "session-proxy→client",
+      "step": 10,
       "label": "focus.changed to the new pane",
-      "message": { "type": "focus.changed", "seq": 6, "paneId": "p2", "windowId": "w1" }
+      "message": { "type": "focus.changed", "seq": 7, "paneId": "p2", "windowId": "w1" }
     },
     {
       "direction": "client→session-proxy",
-      "step": 10,
+      "step": 11,
       "label": "client captures pane p0 scrollback (pane.capture verb, tc-295a.11)",
       "message": {
         "type": "command.request",
@@ -192,18 +207,18 @@
     },
     {
       "direction": "session-proxy→client",
-      "step": 11,
+      "step": 12,
       "label": "pane.capture success — command.response carries {ok:true, payload:{text}} (tc-295a.11)",
       "message": {
         "type": "command.response",
-        "seq": 7,
+        "seq": 8,
         "correlationId": "req-002",
         "result": { "ok": true, "payload": { "text": "$ ls -la\ntotal 8\ndrwxr-xr-x 2 user user 4096 Jan  1 00:00 .\n" } }
       }
     },
     {
       "direction": "client→session-proxy",
-      "step": 12,
+      "step": 13,
       "label": "client captures a vanished pane p9 (pane.capture verb, tc-295a.11)",
       "message": {
         "type": "command.request",
@@ -214,11 +229,11 @@
     },
     {
       "direction": "session-proxy→client",
-      "step": 13,
+      "step": 14,
       "label": "pane.capture failure — command.response {ok:false, code:pane.not-found} (FAIL-LOUD, tc-295a.11)",
       "message": {
         "type": "command.response",
-        "seq": 8,
+        "seq": 9,
         "correlationId": "req-003",
         "result": { "ok": false, "code": "pane.not-found", "message": "Pane p9 is not present in the session model." }
       }
