@@ -258,4 +258,118 @@ export function dumpLayout(layout) {
     const prefix = csum.toString(16).padStart(4, "0");
     return `${prefix},${body}`;
 }
+/**
+ * Distribute `total` cells across `n` children by proportional `weights`,
+ * returning integer sizes that sum EXACTLY to `total`, each at least 1 (when
+ * `total >= n`).
+ *
+ * `total` is the space available for the panes THEMSELVES — the caller has
+ * already subtracted the (n-1) inter-pane separator cells. Every pane gets a
+ * baseline 1 cell, then the remainder is apportioned by weight using the
+ * largest-remainder method so the sum stays exact and the split is stable.
+ *
+ * Degenerate: when `total < n` (a window too small to give each pane a cell)
+ * we fall back to an as-even-as-possible non-negative split whose sum is still
+ * exactly `total`. The resulting layout may then be rejected by tmux's
+ * `layout_check` — a loud, correct failure (fail-loud, no silent clamp).
+ */
+function distributeSizes(total, weights) {
+    const n = weights.length;
+    if (n === 0)
+        return [];
+    if (n === 1)
+        return [total];
+    if (total < n) {
+        // Too tight to guarantee >= 1 per pane; even split with exact sum.
+        const each = Math.floor(total / n);
+        const out = new Array(n).fill(each);
+        let rem = total - each * n;
+        for (let i = 0; i < n && rem > 0; i++, rem--)
+            out[i] = out[i] + 1;
+        return out;
+    }
+    // Normalise weights: non-positive / non-finite weights fall back to equal.
+    const norm = weights.map((w) => (Number.isFinite(w) && w > 0 ? w : 0));
+    const weightSum = norm.reduce((a, b) => a + b, 0);
+    const effective = weightSum > 0 ? norm : new Array(n).fill(1);
+    const effSum = weightSum > 0 ? weightSum : n;
+    const remaining = total - n; // baseline 1 per pane
+    const exact = effective.map((w) => (remaining * w) / effSum);
+    const floors = exact.map((e) => Math.floor(e));
+    const assigned = floors.reduce((a, b) => a + b, 0);
+    const leftover = remaining - assigned; // 0..n-1
+    // Largest fractional remainder gets the leftover +1s.
+    const order = exact
+        .map((e, i) => ({ i, frac: e - Math.floor(e) }))
+        .sort((a, b) => b.frac - a.frac);
+    const out = effective.map((_, i) => 1 + floors[i]);
+    for (let k = 0; k < leftover; k++) {
+        const idx = order[k].i;
+        out[idx] = out[idx] + 1;
+    }
+    return out;
+}
+/** Equal weights when `sizes` is omitted; otherwise the provided weights. */
+function weightsFor(childCount, sizes) {
+    if (sizes === undefined || sizes.length !== childCount) {
+        return new Array(childCount).fill(1);
+    }
+    return sizes.slice();
+}
+/**
+ * Convert a desired-geometry {@link TemplateNode} into a concrete
+ * {@link LayoutCell} occupying the rectangle `(xoff, yoff, sx, sy)`.
+ *
+ * Sizes are distributed integer-exact so the resulting tree passes tmux's
+ * `layout_check`. Leaves carry `paneId: null` (positional assignment — see the
+ * module note above).
+ */
+function geometryToCell(node, sx, sy, xoff, yoff) {
+    if (node.kind === "pane") {
+        return { type: "leaf", width: sx, height: sy, x: xoff, y: yoff, paneId: null };
+    }
+    const horizontal = node.kind === "hsplit";
+    const children = node.children;
+    const n = children.length;
+    const weights = weightsFor(n, node.sizes);
+    if (horizontal) {
+        // Split the WIDTH; each child spans the full height. n-1 separator columns.
+        const widths = distributeSizes(sx - (n - 1), weights);
+        let cx = xoff;
+        const cells = children.map((child, i) => {
+            const cell = geometryToCell(child, widths[i], sy, cx, yoff);
+            cx += widths[i] + 1;
+            return cell;
+        });
+        return { type: "split", orientation: "horizontal", width: sx, height: sy, x: xoff, y: yoff, children: cells };
+    }
+    // Vertical: split the HEIGHT; each child spans the full width. n-1 separators.
+    const heights = distributeSizes(sy - (n - 1), weights);
+    let cy = yoff;
+    const cells = children.map((child, i) => {
+        const cell = geometryToCell(child, sx, heights[i], xoff, cy);
+        cy += heights[i] + 1;
+        return cell;
+    });
+    return { type: "split", orientation: "vertical", width: sx, height: sy, x: xoff, y: yoff, children: cells };
+}
+/**
+ * Serialize a desired-geometry {@link TemplateNode} into a concrete tmux layout
+ * string (checksum prefix + body), sized against `size` (the current window),
+ * suitable for `select-layout '<string>'` (tc-gjdx.3).
+ *
+ * The panes must already exist in the window in the same depth-first order as
+ * the tree's leaves (the compiler guarantees this by creating them in order);
+ * `select-layout` then tiles them positionally into the cells this produces.
+ *
+ * Round-trips with {@link parseLayout}: `parseLayout(serializeGeometry(node,
+ * size))` yields the same geometry (orientation + structure + integer-exact
+ * sizes), which is how the serializer is verified against the parser.
+ */
+export function serializeGeometry(node, size) {
+    const root = geometryToCell(node, size.cols, size.rows, 0, 0);
+    // dumpLayout recomputes the checksum from the body, so the placeholder
+    // checksum fields here are ignored.
+    return dumpLayout({ checksum: 0, computedChecksum: 0, root });
+}
 //# sourceMappingURL=layout-string.js.map

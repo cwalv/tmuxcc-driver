@@ -102,6 +102,19 @@ export interface ServerProxySessionInfo {
      * `session-name.workspaceIdentity` to reattach by identity rather than name.
      */
     readonly workspaceUri?: string;
+    /**
+     * Applied session-template identity carried on the session as the
+     * `@tmuxcc-template` user-option (tc-gjdx.3), or `undefined` when the session
+     * carries no such option (created outside a template, an inline/ad-hoc
+     * template, or a pre-tc-gjdx session).  Sourced from `#{@tmuxcc-template}`.
+     *
+     * The driver-owned "created from template X" awareness: it lives on the tmux
+     * session (set once at apply, tc-gjdx.3) so it survives reattach and driver
+     * restarts with no driver-side state to go stale.  Consumed by the session
+     * row / picker to render provenance.  Snapshot-time static, like the other
+     * enriched fields here.
+     */
+    readonly template?: string;
 }
 /**
  * Full session-list snapshot, sent once by the server-proxy immediately after the
@@ -174,6 +187,15 @@ export interface ServerProxySessionAddedMessage extends MessageBase {
      * tc-76m8.6).  Same field as {@link ServerProxySessionInfo.workspaceUri}.
      */
     readonly workspaceUri?: string;
+    /**
+     * Applied session-template identity (`@tmuxcc-template`), or `undefined` when
+     * unset (tc-gjdx.3).  Same field as {@link ServerProxySessionInfo.template}.
+     * NOTE: `sessions.added` fires at session REGISTRATION, which precedes
+     * apply-at-create, so a template-carrying session's `added` delta typically
+     * omits this — it surfaces on the next `sessions.snapshot` (snapshot-time
+     * static, like the other enriched fields).
+     */
+    readonly template?: string;
 }
 /**
  * A session has disappeared from the server-proxy.

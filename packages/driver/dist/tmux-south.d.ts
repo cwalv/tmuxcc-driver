@@ -93,6 +93,16 @@ export interface TmuxSessionRow {
      * `#{@tmuxcc-workspace}` format variable (empty string → `undefined`).
      */
     workspaceUri?: string;
+    /**
+     * Applied session-template identity carried on the session as the
+     * `@tmuxcc-template` user-option (tc-gjdx.3), or `undefined` when unset
+     * (created outside a template, an inline/ad-hoc template, or a pre-tc-gjdx
+     * session).  Sourced from tmux's `#{@tmuxcc-template}` format variable (empty
+     * string → `undefined`).  This is the driver-owned "created from template X"
+     * awareness: it lives on the tmux session so it survives reattach and driver
+     * restarts with no driver-side state to go stale.
+     */
+    template?: string;
 }
 /**
  * Optional out-parameter for {@link listSessions} reporting whether the tmux

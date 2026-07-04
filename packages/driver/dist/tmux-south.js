@@ -150,10 +150,11 @@ function runTmux(args, timeoutMs) {
  */
 export async function listSessions(socketName, out) {
     // Fields: session_id  session_name  session_windows  session_attached
-    //         @tmuxcc  session_activity  @tmuxcc-workspace
+    //         @tmuxcc  session_activity  @tmuxcc-workspace  @tmuxcc-template
     // Delimiter: tab (\t) avoids accidental splits on spaces in session names.
     // @tmuxcc-workspace values are URIs / "|"-joined URIs — never contain tabs.
-    const FORMAT = "#{session_id}\t#{session_name}\t#{session_windows}\t#{session_attached}\t#{@tmuxcc}\t#{session_activity}\t#{@tmuxcc-workspace}";
+    // @tmuxcc-template is a template config-key name — never contains tabs.
+    const FORMAT = "#{session_id}\t#{session_name}\t#{session_windows}\t#{session_attached}\t#{@tmuxcc}\t#{session_activity}\t#{@tmuxcc-workspace}\t#{@tmuxcc-template}";
     const result = await runTmux(["-L", socketName, "list-sessions", "-F", FORMAT], 5_000);
     // tc-295a.35: classify the binary-missing case.  `runTmux` sets
     // `result.error.code === "ENOENT"` iff the `tmux` executable could not be
@@ -185,9 +186,10 @@ export async function listSessions(socketName, out) {
         .split("\n")
         .filter(Boolean)
         .map((line) => {
-        const [tmuxId, name, windows, attached, marker, activity, workspaceUri] = line.split("\t");
+        const [tmuxId, name, windows, attached, marker, activity, workspaceUri, template] = line.split("\t");
         const id = tmuxId ?? "";
         const ws = (workspaceUri ?? "").trim();
+        const tmpl = (template ?? "").trim();
         return {
             tmuxId: id,
             name: name ?? "",
@@ -197,6 +199,7 @@ export async function listSessions(socketName, out) {
             paneCount: paneCounts.get(id) ?? 0,
             lastActivity: parseInt(activity ?? "0", 10) || 0,
             ...(ws.length > 0 ? { workspaceUri: ws } : {}),
+            ...(tmpl.length > 0 ? { template: tmpl } : {}),
         };
     });
 }

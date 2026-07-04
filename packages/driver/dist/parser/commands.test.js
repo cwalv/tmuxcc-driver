@@ -17,7 +17,9 @@ import { sendKeysHex, refreshClientSize, refreshClientWindowSize, refreshClientF
 // tc-1a8z: per-pane user-option builders (durable pane name).
 setOptionForPane, showOptionsForPane, 
 // tc-zna.3: managed-window resize builders.
-setWindowSizeManual, resizeWindow, resizePane, LIST_WINDOWS_DEFAULT_FORMAT, LIST_PANES_DEFAULT_FORMAT, } from "./commands.js";
+setWindowSizeManual, resizeWindow, resizePane, 
+// tc-gjdx.3: template-compiler command builders.
+selectLayout, killWindow, LIST_WINDOWS_DEFAULT_FORMAT, LIST_PANES_DEFAULT_FORMAT, } from "./commands.js";
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -562,6 +564,39 @@ describe("resizePane", () => {
     });
     it("works for pane %0", () => {
         assert.equal(resizePane(0, 80, 24), "resize-pane -t %0 -x 80 -y 24");
+    });
+});
+describe("selectLayout (tc-gjdx.3)", () => {
+    it("emits select-layout -t @<N> with a single-quoted layout string", () => {
+        assert.equal(selectLayout(2, "6d61,200x50,0,0[200x16,0,0,200x16,0,17,200x16,0,34]"), "select-layout -t @2 '6d61,200x50,0,0[200x16,0,0,200x16,0,17,200x16,0,34]'");
+    });
+    it("single-quotes a layout string containing `{`/`,` (never bare)", () => {
+        assert.equal(selectLayout(0, "1f24,200x50,0,0{100x50,0,0,49x50,101,0}"), "select-layout -t @0 '1f24,200x50,0,0{100x50,0,0,49x50,101,0}'");
+    });
+});
+describe("killWindow (tc-gjdx.3)", () => {
+    it("emits kill-window -t @<N>", () => {
+        assert.equal(killWindow(0), "kill-window -t @0");
+        assert.equal(killWindow(12), "kill-window -t @12");
+    });
+});
+describe("newWindow / splitWindow env (tc-gjdx.2, consumed by the tc-gjdx.3 compiler)", () => {
+    it("newWindow compiles env to repeated -e NAME=value (no capability gate)", () => {
+        const cmd = newWindow({ printIds: true, env: { FOO: "bar", BAZ: "qux value" } });
+        assert.ok(cmd.includes("-e FOO=bar"), cmd);
+        assert.ok(cmd.includes("-e 'BAZ=qux value'"), cmd);
+    });
+    it("splitWindow carries cwd + shellCommand + env together", () => {
+        const cmd = splitWindow(3, "horizontal", {
+            printIds: true,
+            startDirectory: "/tmp/wd",
+            env: { A: "1" },
+            shellCommand: "htop",
+        });
+        assert.ok(cmd.startsWith("split-window -h -t %3 -P -F "), cmd);
+        assert.ok(cmd.includes("-c /tmp/wd"), cmd);
+        assert.ok(cmd.includes("-e A=1"), cmd);
+        assert.ok(cmd.endsWith(" htop"), cmd);
     });
 });
 //# sourceMappingURL=commands.test.js.map

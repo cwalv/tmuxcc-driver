@@ -42,6 +42,7 @@
  *
  * @module parser/layout-string
  */
+import type { TemplateNode } from "@tmuxcc/protocol";
 /**
  * A leaf cell — corresponds to LAYOUT_WINDOWPANE in tmux.
  * Represents a single pane at a fixed position and size.
@@ -136,4 +137,23 @@ export declare function parseLayout(s: string): ParsedLayout;
  * @returns The wire-format layout string, e.g. `"bb62,159x48,0,0,4"`.
  */
 export declare function dumpLayout(layout: ParsedLayout): string;
+/** A window's cell size, in terminal columns × rows. */
+export interface LayoutSize {
+    readonly cols: number;
+    readonly rows: number;
+}
+/**
+ * Serialize a desired-geometry {@link TemplateNode} into a concrete tmux layout
+ * string (checksum prefix + body), sized against `size` (the current window),
+ * suitable for `select-layout '<string>'` (tc-gjdx.3).
+ *
+ * The panes must already exist in the window in the same depth-first order as
+ * the tree's leaves (the compiler guarantees this by creating them in order);
+ * `select-layout` then tiles them positionally into the cells this produces.
+ *
+ * Round-trips with {@link parseLayout}: `parseLayout(serializeGeometry(node,
+ * size))` yields the same geometry (orientation + structure + integer-exact
+ * sizes), which is how the serializer is verified against the parser.
+ */
+export declare function serializeGeometry(node: TemplateNode, size: LayoutSize): string;
 //# sourceMappingURL=layout-string.d.ts.map

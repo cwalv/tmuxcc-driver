@@ -54,6 +54,8 @@ import { listSessions, killSession, checkSessionPresence, createTmuxWatcher, pro
 import { probeTmuxCapabilities, MINIMUM_TMUX_VERSION } from "./tmux-capabilities.js";
 import { createSessionProxySupervisor } from "./session-proxy-supervisor.js";
 import { createSessionClaimer } from "./claim-session.js";
+import { compileTemplate } from "./template/compile.js";
+import { applyCompiledTemplate } from "./template/apply.js";
 /**
  * Thrown by `start()` when a LIVE broker already owns the server-proxy socket
  * (tc-kyq4.1).
@@ -1004,6 +1006,8 @@ class ServerProxyImpl {
                     lastActivity: row.lastActivity,
                     // S4 (tc-76m8.6): workspace identity option, when set on the session.
                     ...(row.workspaceUri !== undefined ? { workspaceUri: row.workspaceUri } : {}),
+                    // tc-gjdx.3: applied-template awareness option, when set.
+                    ...(row.template !== undefined ? { template: row.template } : {}),
                 };
                 this._sessions.set(sessionId, entry);
                 this._byName.set(row.name, entry);
@@ -1023,6 +1027,11 @@ class ServerProxyImpl {
                     existing.workspaceUri = row.workspaceUri;
                 else
                     delete existing.workspaceUri;
+                // tc-gjdx.3: keep the applied-template awareness current (set or clear).
+                if (row.template !== undefined)
+                    existing.template = row.template;
+                else
+                    delete existing.template;
                 this._byName.set(row.name, existing);
                 this._broadcastRenamed(existing.sessionId, row.name);
             }
@@ -1039,6 +1048,11 @@ class ServerProxyImpl {
                     existing.workspaceUri = row.workspaceUri;
                 else
                     delete existing.workspaceUri;
+                // tc-gjdx.3: keep the applied-template awareness current (set or clear).
+                if (row.template !== undefined)
+                    existing.template = row.template;
+                else
+                    delete existing.template;
             }
         }
         // tc-x6l: update the sessions-active gauge after each refresh.
@@ -1237,6 +1251,8 @@ class ServerProxyImpl {
                 lastActivity: entry.lastActivity,
                 // S4 (tc-76m8.6): workspace identity option, when set.
                 ...(entry.workspaceUri !== undefined ? { workspaceUri: entry.workspaceUri } : {}),
+                // tc-gjdx.3: applied-template awareness option, when set.
+                ...(entry.template !== undefined ? { template: entry.template } : {}),
             });
         }
         // tc-295a.35: canonical tmux-availability flag carried in every snapshot.
@@ -1414,6 +1430,29 @@ class ServerProxyImpl {
                     });
                     return;
                 }
+            }
+            // tc-gjdx.3: apply-at-create.  A template carried on a CREATING claim verb
+            // (session.claim / session.create / session.createUnique) is applied by
+            // the driver EXACTLY ONCE, iff THIS command minted the session
+            // (created:true — the tc-3y8.2 exactly-once contract; the broker serialises
+            // per name, so exactly one claimant observes it).  NEVER on bind / adopt /
+            // reattach / reconnect (those never mint, so never see created:true).
+            //
+            // Runs BEFORE the response so the client learns the outcome: on success the
+            // ok payload is unchanged (sessionId/created/name); on failure the thrown
+            // TemplateValidationError / TemplateApplyError (both code "template.invalid")
+            // is mapped by the catch below to a loud result.ok=false naming the failed
+            // verb + created-so-far — with NO rollback (the partial session persists).
+            if (payload.created === true &&
+                payload.sessionId !== undefined &&
+                (command.kind === "session.claim" ||
+                    command.kind === "session.create" ||
+                    command.kind === "session.createUnique") &&
+                command.template !== undefined) {
+                const sessionName = command.kind === "session.createUnique"
+                    ? payload.name
+                    : command.name;
+                await this._applyTemplateAtCreate(payload.sessionId, sessionName, command.template);
             }
             this._sendResponse(state, {
                 correlationId,
@@ -1622,6 +1661,34 @@ class ServerProxyImpl {
             // Name was taken by a concurrent caller — try the next suffix.
         }
     }
+    /**
+     * Apply a session template at CREATE time (tc-gjdx.3).
+     *
+     * Called by `_handleCommand` gated on `created:true` for the creating claim
+     * verbs — the tc-3y8.2 exactly-once contract, so this runs at most once per
+     * session creation.  The flow:
+     *   1. COMPILE the concrete template to an ordered transaction (pure).  A
+     *      structurally-valid-but-semantically-broken template fails HERE
+     *      (TemplateValidationError, code "template.invalid") before any tmux
+     *      command runs.
+     *   2. Fetch the live session-proxy (idempotent with the claim path's
+     *      `ensureSessionProxy` single-flight — it is already live for a
+     *      just-minted session) and run the transaction through its slotted,
+     *      correlated `send` path.  A verb tmux refuses mid-transaction throws
+     *      TemplateApplyError (fail-loud, no rollback).
+     *   3. Reconcile the broker's session table so the `@tmuxcc-template`
+     *      awareness option + the new window count surface on the next snapshot.
+     *
+     * Both error types carry code "template.invalid"; the command handler's catch
+     * maps them to a loud `result.ok=false` response naming the failed verb and
+     * the created-so-far state.
+     */
+    async _applyTemplateAtCreate(sessionId, sessionName, template) {
+        const plan = compileTemplate(template);
+        const sessionProxy = await this._supervisor.ensureSessionProxy(sessionId, sessionName, this._opts.socketName);
+        await applyCompiledTemplate((cmd) => sessionProxy.send(cmd), plan, sessionName);
+        await this._refreshSessions();
+    }
     async _destroySession(sessionId) {
         const entry = this._sessions.get(sessionId);
         if (!entry) {
@@ -1659,6 +1726,9 @@ class ServerProxyImpl {
             lastActivity: entry.lastActivity,
             // S4 (tc-76m8.6): workspace identity option, when set.
             ...(entry.workspaceUri !== undefined ? { workspaceUri: entry.workspaceUri } : {}),
+            // tc-gjdx.3: applied-template awareness option, when set (usually unset at
+            // registration — apply-at-create runs after; surfaces on the next snapshot).
+            ...(entry.template !== undefined ? { template: entry.template } : {}),
         };
         this._broadcastToAll(delta);
     }

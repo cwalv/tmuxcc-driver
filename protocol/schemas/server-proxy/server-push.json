@@ -54,6 +54,10 @@
         "workspaceUri": {
           "type": "string",
           "description": "Workspace identity carried on the session as the @tmuxcc-workspace user-option (S4 / tc-76m8.6), or absent when unset (folderless-window, foreign, or pre-S4 sessions). Sourced from #{@tmuxcc-workspace}."
+        },
+        "template": {
+          "type": "string",
+          "description": "Applied session-template identity carried on the session as the @tmuxcc-template user-option (tc-gjdx.3), or absent when unset (created outside a template, an inline/ad-hoc template, or a pre-tc-gjdx session). Sourced from #{@tmuxcc-template}."
         }
       },
       "additionalProperties": false
@@ -98,6 +102,10 @@
         "workspaceUri": {
           "type": "string",
           "description": "Workspace identity (@tmuxcc-workspace) at add time, or absent when unset (S4 / tc-76m8.6)."
+        },
+        "template": {
+          "type": "string",
+          "description": "Applied session-template identity (@tmuxcc-template), or absent when unset (tc-gjdx.3). sessions.added fires at registration (before apply-at-create), so a template session's added delta typically omits this; it surfaces on the next sessions.snapshot."
         }
       },
       "additionalProperties": false

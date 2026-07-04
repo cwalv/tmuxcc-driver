@@ -209,6 +209,16 @@ export interface TmuxSessionRow {
    * `#{@tmuxcc-workspace}` format variable (empty string → `undefined`).
    */
   workspaceUri?: string;
+  /**
+   * Applied session-template identity carried on the session as the
+   * `@tmuxcc-template` user-option (tc-gjdx.3), or `undefined` when unset
+   * (created outside a template, an inline/ad-hoc template, or a pre-tc-gjdx
+   * session).  Sourced from tmux's `#{@tmuxcc-template}` format variable (empty
+   * string → `undefined`).  This is the driver-owned "created from template X"
+   * awareness: it lives on the tmux session so it survives reattach and driver
+   * restarts with no driver-side state to go stale.
+   */
+  template?: string;
 }
 
 /**
@@ -266,10 +276,11 @@ export async function listSessions(
   out?: TmuxAvailabilityOut,
 ): Promise<TmuxSessionRow[] | null> {
   // Fields: session_id  session_name  session_windows  session_attached
-  //         @tmuxcc  session_activity  @tmuxcc-workspace
+  //         @tmuxcc  session_activity  @tmuxcc-workspace  @tmuxcc-template
   // Delimiter: tab (\t) avoids accidental splits on spaces in session names.
   // @tmuxcc-workspace values are URIs / "|"-joined URIs — never contain tabs.
-  const FORMAT = "#{session_id}\t#{session_name}\t#{session_windows}\t#{session_attached}\t#{@tmuxcc}\t#{session_activity}\t#{@tmuxcc-workspace}";
+  // @tmuxcc-template is a template config-key name — never contains tabs.
+  const FORMAT = "#{session_id}\t#{session_name}\t#{session_windows}\t#{session_attached}\t#{@tmuxcc}\t#{session_activity}\t#{@tmuxcc-workspace}\t#{@tmuxcc-template}";
   const result = await runTmux(
     ["-L", socketName, "list-sessions", "-F", FORMAT],
     5_000,
@@ -309,9 +320,11 @@ export async function listSessions(
     .split("\n")
     .filter(Boolean)
     .map((line) => {
-      const [tmuxId, name, windows, attached, marker, activity, workspaceUri] = line.split("\t");
+      const [tmuxId, name, windows, attached, marker, activity, workspaceUri, template] =
+        line.split("\t");
       const id = tmuxId ?? "";
       const ws = (workspaceUri ?? "").trim();
+      const tmpl = (template ?? "").trim();
       return {
         tmuxId: id,
         name: name ?? "",
@@ -321,6 +334,7 @@ export async function listSessions(
         paneCount: paneCounts.get(id) ?? 0,
         lastActivity: parseInt(activity ?? "0", 10) || 0,
         ...(ws.length > 0 ? { workspaceUri: ws } : {}),
+        ...(tmpl.length > 0 ? { template: tmpl } : {}),
       };
     });
 }

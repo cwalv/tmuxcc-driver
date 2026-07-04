@@ -830,6 +830,61 @@ export function splitWindow(
 }
 
 // ---------------------------------------------------------------------------
+// select-layout — apply a concrete geometry (tc-gjdx.3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Serialize a `select-layout -t @<windowId> '<layoutString>'` command.
+ *
+ * Applies a concrete tmux layout string (checksum prefix + geometry body, from
+ * {@link import("./layout-string.js").serializeGeometry}) to a window. tmux
+ * assigns the window's EXISTING panes to the layout's leaf cells POSITIONALLY
+ * (layout-custom.c `layout_assign` walks the window's pane list in order and
+ * ignores the pane ids in the string), so the compiler must have created the
+ * panes in the same depth-first order as the layout's leaves.
+ *
+ * Documented constraint (layout_parse): the window must not have MORE panes
+ * than the layout defines cells ("have N panes but need M") — hence the
+ * compile order create-all-panes-THEN-select-layout (the tmuxp trick).
+ *
+ * The layout string is single-quoted: it contains `{`/`[`/`,` and a numeric
+ * checksum prefix, none of which should reach the shell/quoteArg's "safe" set
+ * unquoted. `select-layout` is available across the supported tmux floor.
+ *
+ * @param windowId      Numeric window id (the N in `@N`).
+ * @param layoutString  Concrete layout string, e.g.
+ *                      `6d61,200x50,0,0[200x16,0,0,200x16,0,17,200x16,0,34]`.
+ * @returns             e.g. `select-layout -t @2 '6d61,200x50,0,0[…]'`
+ */
+export function selectLayout(windowId: number, layoutString: string): string {
+  const quoted = `'${layoutString.replace(/'/g, "'\\''")}'`;
+  return `select-layout -t @${windowId} ${quoted}`;
+}
+
+// ---------------------------------------------------------------------------
+// kill-window — destroy the throwaway initial window (tc-gjdx.3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Serialize a `kill-window -t @<windowId>` command.
+ *
+ * Used by the apply-at-create compiler (tc-gjdx.3): a freshly-minted session
+ * always carries one default window whose single pane started with the
+ * session's default shell/cwd/env — it cannot carry the template's first
+ * window's per-pane cwd/command/env (those only apply at pane CREATION). The
+ * applicator therefore creates EVERY template window fresh (via new-window /
+ * split-window, honouring cwd/command/env) and then kills this throwaway
+ * initial window. Killing it runs LAST, after ≥1 template window exists, so the
+ * session is never emptied (which would kill the session).
+ *
+ * @param windowId  Numeric window id (the N in `@N`).
+ * @returns         e.g. `kill-window -t @0`
+ */
+export function killWindow(windowId: number): string {
+  return `kill-window -t @${windowId}`;
+}
+
+// ---------------------------------------------------------------------------
 // break-pane
 // ---------------------------------------------------------------------------
 
