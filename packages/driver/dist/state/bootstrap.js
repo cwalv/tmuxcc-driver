@@ -40,18 +40,22 @@
  *
  *   `#{session_id}\t#{session_name}\t#{window_id}\t#{window_name}\t` +
  *   `#{window_width}\t#{window_height}\t#{window_layout}\t` +
- *   `#{window_flags}\t#{?window_active,1,0}`
+ *   `#{window_flags}\t#{?window_active,1,0}\t` +
+ *   `#{?synchronize-panes,1,0}\t#{?monitor-activity,1,0}\t#{monitor-silence}`
  *
- * Fields (tab-separated, 9 per line):
- *   [0] session_id    — `$N`  (e.g. "$0")
- *   [1] session_name  — human name
- *   [2] window_id     — `@N`  (e.g. "@1")
- *   [3] window_name   — human name
- *   [4] window_width  — integer columns
- *   [5] window_height — integer rows
- *   [6] window_layout — layout string (e.g. "b25d,80x24,0,0,0")
- *   [7] window_flags  — flag chars (e.g. "*", "-", "!")
- *   [8] window_active — "1" if this is the session's active window, "0" otherwise
+ * Fields (tab-separated, 12 per line):
+ *   [0]  session_id         — `$N`  (e.g. "$0")
+ *   [1]  session_name       — human name
+ *   [2]  window_id          — `@N`  (e.g. "@1")
+ *   [3]  window_name        — human name
+ *   [4]  window_width       — integer columns
+ *   [5]  window_height      — integer rows
+ *   [6]  window_layout      — layout string (e.g. "b25d,80x24,0,0,0")
+ *   [7]  window_flags       — flag chars (e.g. "*", "-", "!")
+ *   [8]  window_active      — "1" if this is the session's active window, "0" otherwise
+ *   [9]  synchronize-panes  — "1" if on, "0" if off (tc-pqb4: re-read on every requery)
+ *   [10] monitor-activity   — "1" if on, "0" if off (tc-pqb4: re-read on every requery)
+ *   [11] monitor-silence    — integer seconds (0 = off) (tc-pqb4: re-read on every requery)
  *
  * ## BOOTSTRAP_PANES_FORMAT
  *
@@ -182,7 +186,11 @@ export const TMUXCC_ICON_OPTION = "@tmuxcc-icon";
  */
 export const BOOTSTRAP_WINDOWS_FORMAT = "#{session_id}\t#{session_name}\t#{window_id}\t#{window_name}\t" +
     "#{window_width}\t#{window_height}\t#{window_layout}\t" +
-    "#{window_flags}\t#{?window_active,1,0}";
+    "#{window_flags}\t#{?window_active,1,0}\t" +
+    // tc-pqb4: per-window durable options re-read on every requery so they
+    // survive a driver restart and are never clobbered back to defaults by a
+    // topology-triggered requery cycle.
+    "#{?synchronize-panes,1,0}\t#{?monitor-activity,1,0}\t#{monitor-silence}";
 /**
  * Format string for `list-panes` during bootstrap.
  */
@@ -257,6 +265,13 @@ function mintSessionId(n) {
  *
  * Each non-empty line is one window, tab-separated in BOOTSTRAP_WINDOWS_FORMAT
  * order. Lines with wrong field count are silently skipped (defensive).
+ *
+ * tc-pqb4: fields [9]–[11] (synchronize-panes / monitor-activity /
+ * monitor-silence) are read defensively — absent on legacy replies (or in
+ * tests that only supply the original 9 fields). Missing fields use the
+ * bootstrap defaults: synchronizePanes=false, monitorActivity=true (the
+ * global `-wg monitor-activity on` the pipeline sets at bootstrap makes this
+ * the effective default for every window), monitorSilence=0.
  */
 export function parseWindowsReply(body) {
     const text = new TextDecoder().decode(body);
@@ -277,6 +292,16 @@ export function parseWindowsReply(body) {
         const layoutStr = parts[6];
         const flags = parts[7];
         const active = parts[8].trim() === "1";
+        // tc-pqb4: per-window durable options (fields [9]–[11]). Read defensively
+        // so that legacy replies and tests that omit them still parse correctly.
+        //   [9]  #{?synchronize-panes,1,0} — "1"=on, "0"=off; default false.
+        //   [10] #{?monitor-activity,1,0}  — "1"=on, "0"=off; default true
+        //                                    (global `-wg monitor-activity on`).
+        //   [11] #{monitor-silence}        — seconds (0=off); default 0.
+        const synchronizePanes = (parts[9] ?? "").trim() === "1";
+        const monitorActivity = (parts[10] ?? "1").trim() !== "0"; // default true
+        const monitorSilenceRaw = parseInt((parts[11] ?? "0").trim(), 10);
+        const monitorSilence = isNaN(monitorSilenceRaw) ? 0 : monitorSilenceRaw;
         // Parse tmux sigil ids: $N → N, @N → N
         const tmuxSessionId = parseSigilId(sessIdStr, "$");
         const tmuxWindowId = parseSigilId(winIdStr, "@");
@@ -294,6 +319,9 @@ export function parseWindowsReply(body) {
             layoutString: layoutStr,
             flags,
             active,
+            synchronizePanes,
+            monitorActivity,
+            monitorSilence,
         });
     }
     return rows;
@@ -445,9 +473,14 @@ export function buildInitialModel(windowRows, paneRows) {
             paneIds: [], // filled in step 4
             activePaneId,
             layout,
-            synchronizePanes: false, // optimistic-update path patches this; first sync-watch tick overrides
-            monitorActivity: true,
-            monitorSilence: 0,
+            // tc-pqb4: per-window durable options re-read from the tmux reply on every
+            // requery so their values survive a driver restart and are never clobbered
+            // back to defaults by a topology-triggered requery cycle. Previously these
+            // were hardcoded to defaults here, causing EDH-reload to report
+            // synchronizePanes=false for all windows even when tmux had sync ON.
+            synchronizePanes: row.synchronizePanes,
+            monitorActivity: row.monitorActivity,
+            monitorSilence: row.monitorSilence,
         };
         model = addWindow(model, win);
     }

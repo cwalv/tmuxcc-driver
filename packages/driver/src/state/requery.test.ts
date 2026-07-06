@@ -52,10 +52,10 @@ import type { SessionProxyMessage } from "@tmuxcc/protocol";
 // ---------------------------------------------------------------------------
 // Test fixtures: synthetic list-windows / list-panes reply bodies.
 //
-// BOOTSTRAP_WINDOWS_FORMAT fields (tab-separated, 9):
-//   $sess  name  @win  name  w   h   layout                  flags  active
-// BOOTSTRAP_PANES_FORMAT fields (tab-separated, 14):
-//   %pane  @win  $sess  idx  w   h   top  left  active  pid   cmd  dead  deadStatus  @tmuxcc_label
+// BOOTSTRAP_WINDOWS_FORMAT fields (tab-separated, 12):
+//   $sess  name  @win  name  w   h   layout  flags  active  syncPanes  monAct  monSil
+// BOOTSTRAP_PANES_FORMAT fields (tab-separated, 16):
+//   %pane  @win  $sess  idx  w   h   top  left  active  pid  cmd  dead  deadStatus  @tmuxcc_label  @tmuxcc-detach  @tmuxcc-icon
 // ---------------------------------------------------------------------------
 
 const ENC = new TextEncoder();
@@ -79,6 +79,12 @@ function winLine(args: {
   layout: string;
   flags?: string;
   active?: boolean;
+  /** tc-pqb4: synchronize-panes option. Defaults false. */
+  synchronizePanes?: boolean;
+  /** tc-pqb4: monitor-activity option. Defaults true (global -wg default). */
+  monitorActivity?: boolean;
+  /** tc-pqb4: monitor-silence seconds. Defaults 0 (off). */
+  monitorSilence?: number;
 }): string {
   return [
     `$${args.sessNum}`,
@@ -90,6 +96,10 @@ function winLine(args: {
     args.layout,
     args.flags ?? "-",
     args.active ? "1" : "0",
+    // tc-pqb4: per-window durable options (fields [9]–[11])
+    args.synchronizePanes ? "1" : "0",
+    args.monitorActivity === false ? "0" : "1",
+    String(args.monitorSilence ?? 0),
   ].join("\t") + "\n";
 }
 
@@ -2617,5 +2627,127 @@ describe("RequeryEngine: id-based session targeting (tc-0v59)", () => {
       logText.includes("list-windows"),
       `loud line should name which reply failed; got: ${logText}`,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// tc-pqb4: per-window durable options re-read on every requery
+//
+// Regression guard: before this fix, synchronizePanes / monitorActivity /
+// monitorSilence were hardcoded to defaults (false/true/0) in buildInitialModel,
+// so a topology-triggered requery after an optimistic toggle would diff the new
+// model against the previous one and emit spurious `window.sync.changed: false`
+// deltas, resetting the extension's UI back to the default value.
+//
+// The fix: BOOTSTRAP_WINDOWS_FORMAT now includes fields [9]–[11], and
+// parseWindowsReply + buildInitialModel read them from the tmux reply.
+// ---------------------------------------------------------------------------
+
+describe("requeryDiff: durable window options — synchronizePanes/monitorActivity/monitorSilence (tc-pqb4)", () => {
+  const pane1 = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true });
+
+  it("bootstrap re-reads synchronizePanes=true into the model (survives a driver restart)", () => {
+    const win = winLine({
+      sessNum: 0, sessName: "main", winNum: 1, winName: "shell",
+      layout: SINGLE_PANE_LAYOUT(1), active: true,
+      synchronizePanes: true,
+    });
+    const { next } = requeryDiff(emptyModel(), okResult(win), okResult(pane1));
+    assert.equal(
+      next.windows.get(windowId("w1"))!.synchronizePanes,
+      true,
+      "synchronizePanes=true re-read from tmux reply on bootstrap",
+    );
+  });
+
+  it("requery does NOT clobber synchronizePanes=true back to false (regression: EDH-reload loses sync state)", () => {
+    // Step 1: prior model has sync ON (as if set by optimistic-update)
+    const winSyncOff = winLine({
+      sessNum: 0, sessName: "main", winNum: 1, winName: "shell",
+      layout: SINGLE_PANE_LAYOUT(1), active: true,
+      synchronizePanes: false,
+    });
+    const prev = requeryDiff(emptyModel(), okResult(winSyncOff), okResult(pane1)).next;
+    // Simulate the optimistic-update patch (as _applySyncWatchPatch does in the driver):
+    const patchedWin = prev.windows.get(windowId("w1"))!;
+    const prevPatched = {
+      ...prev,
+      windows: new Map(prev.windows).set(windowId("w1"), { ...patchedWin, synchronizePanes: true }),
+    };
+
+    // Step 2: a new topology-triggered requery arrives; tmux still reports sync=ON
+    const winSyncOn = winLine({
+      sessNum: 0, sessName: "main", winNum: 1, winName: "shell",
+      layout: SINGLE_PANE_LAYOUT(1), active: true,
+      synchronizePanes: true,
+    });
+    const { next, deltas } = requeryDiff(prevPatched, okResult(winSyncOn), okResult(pane1));
+
+    assert.equal(
+      next.windows.get(windowId("w1"))!.synchronizePanes,
+      true,
+      "synchronizePanes must still be true after requery — no clobbering",
+    );
+    const syncDeltas = deltas.filter((d) => d.type === "window.sync.changed");
+    assert.equal(
+      syncDeltas.length,
+      0,
+      "no spurious window.sync.changed delta when tmux and model agree",
+    );
+  });
+
+  it("requery emits window.sync.changed when tmux disagrees with optimistic model (toggle raced a requery)", () => {
+    // Rare case: optimistic patch set sync=ON but tmux reports OFF (e.g. the
+    // set-option didn't land before the next cycle). The requery wins — diffModel
+    // emits a corrective delta.
+    const winSyncOff = winLine({
+      sessNum: 0, sessName: "main", winNum: 1, winName: "shell",
+      layout: SINGLE_PANE_LAYOUT(1), active: true,
+      synchronizePanes: false,
+    });
+    const prev = requeryDiff(emptyModel(), okResult(winSyncOff), okResult(pane1)).next;
+    const patchedWin = prev.windows.get(windowId("w1"))!;
+    const prevPatched = {
+      ...prev,
+      windows: new Map(prev.windows).set(windowId("w1"), { ...patchedWin, synchronizePanes: true }),
+    };
+
+    // Requery still returns sync=OFF (set-option lost the race)
+    const { next, deltas } = requeryDiff(prevPatched, okResult(winSyncOff), okResult(pane1));
+
+    assert.equal(next.windows.get(windowId("w1"))!.synchronizePanes, false, "tmux wins");
+    const syncDeltas = deltas.filter((d) => d.type === "window.sync.changed");
+    assert.equal(syncDeltas.length, 1, "one corrective window.sync.changed delta emitted");
+    assert.equal((syncDeltas[0] as { on: boolean }).on, false);
+  });
+
+  it("bootstrap re-reads monitorActivity=false and monitorSilence=30 from tmux", () => {
+    const win = winLine({
+      sessNum: 0, sessName: "main", winNum: 1, winName: "shell",
+      layout: SINGLE_PANE_LAYOUT(1), active: true,
+      monitorActivity: false,
+      monitorSilence: 30,
+    });
+    const { next } = requeryDiff(emptyModel(), okResult(win), okResult(pane1));
+    const w = next.windows.get(windowId("w1"))!;
+    assert.equal(w.monitorActivity, false, "monitorActivity=false re-read from tmux");
+    assert.equal(w.monitorSilence, 30, "monitorSilence=30 re-read from tmux");
+  });
+
+  it("requery does NOT clobber monitorSilence=30 back to 0", () => {
+    // Prior model has monitorSilence=30 (after an optimistic update or prev bootstrap)
+    const winSil = winLine({
+      sessNum: 0, sessName: "main", winNum: 1, winName: "shell",
+      layout: SINGLE_PANE_LAYOUT(1), active: true,
+      monitorSilence: 30,
+    });
+    const prev = requeryDiff(emptyModel(), okResult(winSil), okResult(pane1)).next;
+    assert.equal(prev.windows.get(windowId("w1"))!.monitorSilence, 30);
+
+    // Another requery still reports monitorSilence=30
+    const { next, deltas } = requeryDiff(prev, okResult(winSil), okResult(pane1));
+    assert.equal(next.windows.get(windowId("w1"))!.monitorSilence, 30, "no clobbering");
+    const monDeltas = deltas.filter((d) => d.type === "window.monitor.silence.changed");
+    assert.equal(monDeltas.length, 0, "no spurious window.monitor.silence.changed delta");
   });
 });

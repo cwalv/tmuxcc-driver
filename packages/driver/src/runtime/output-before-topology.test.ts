@@ -442,7 +442,8 @@ function makeBootstrapStream(paneNum: number): Uint8Array {
   const wid = "@1";
   const pid_ = `%${paneNum}`;
   const layoutStr = `aaaa,80x24,0,0,${paneNum}`;
-  const winBody = `${sid}\ttestsession\t${wid}\ttestwin\t80\t24\t${layoutStr}\t*\t1\n`;
+  // tc-pqb4: include fields [9]–[11] (synchronize-panes / monitor-activity / monitor-silence)
+  const winBody = `${sid}\ttestsession\t${wid}\ttestwin\t80\t24\t${layoutStr}\t*\t1\t0\t1\t0\n`;
   const paneBody = `${pid_}\t${wid}\t${sid}\t0\t80\t24\t0\t0\t1\t1234\tbash\n`;
   const winBlock = `%begin ${ts} 100 1\r\n${winBody}%end ${ts} 100 1\r\n`;
   const paneBlock = `%begin ${ts} 101 1\r\n${paneBody}%end ${ts} 101 1\r\n`;

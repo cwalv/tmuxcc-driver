@@ -130,7 +130,8 @@ function buildBootstrapReplies(opts = {}) {
     const cols = opts.cols ?? 80;
     const rows = opts.rows ?? 24;
     const layoutStr = `aaaa,${cols}x${rows},0,0,${parseInt(pid_.slice(1), 10)}`;
-    const windowsBody = `${sid}\t${sname}\t${wid}\t${wname}\t${cols}\t${rows}\t${layoutStr}\t*\t1\n`;
+    // tc-pqb4: include fields [9]–[11] (synchronize-panes / monitor-activity / monitor-silence)
+    const windowsBody = `${sid}\t${sname}\t${wid}\t${wname}\t${cols}\t${rows}\t${layoutStr}\t*\t1\t0\t1\t0\n`;
     const panesBody = `${pid_}\t${wid}\t${sid}\t0\t${cols}\t${rows}\t0\t0\t1\t1234\tbash\n`;
     const stream = makeCommandBlock(nextCmdNum(), windowsBody) +
         makeCommandBlock(nextCmdNum(), panesBody);
@@ -142,8 +143,9 @@ function buildBootstrapReplies(opts = {}) {
  */
 function buildTwoWindowReplies(opts = {}) {
     const sname = opts.sessionName ?? "bootsession";
-    const winBody = `$0\t${sname}\t@1\twin1\t80\t24\taaaa,80x24,0,0,1\t*\t1\n` +
-        `$0\t${sname}\t@2\twin2\t80\t24\tbbbb,80x24,0,0,2\t-\t0\n`;
+    // tc-pqb4: include fields [9]–[11] (synchronize-panes / monitor-activity / monitor-silence)
+    const winBody = `$0\t${sname}\t@1\twin1\t80\t24\taaaa,80x24,0,0,1\t*\t1\t0\t1\t0\n` +
+        `$0\t${sname}\t@2\twin2\t80\t24\tbbbb,80x24,0,0,2\t-\t0\t0\t1\t0\n`;
     const paneBody = `%1\t@1\t$0\t0\t80\t24\t0\t0\t1\t1234\tbash\n` +
         `%2\t@2\t$0\t0\t80\t24\t0\t0\t1\t5678\tbash\n`;
     return bytes(makeCommandBlock(nextCmdNum(), winBody) +

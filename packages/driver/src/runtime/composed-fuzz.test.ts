@@ -246,10 +246,11 @@ function worldToReplyBodies(w: World): { winBody: string; paneBody: string } {
   let paneBody = "";
   for (const win of w.windows) {
     const layout = `aaaa,${win.cols}x${win.rows},0,0,${win.paneNum}`;
+    // tc-pqb4: include fields [9]–[11] (synchronize-panes / monitor-activity / monitor-silence)
     winBody +=
       `$0\t${w.sessionName}\t@${win.windowNum}\t${win.name}\t` +
       `${win.cols}\t${win.rows}\t${layout}\t${win.active ? "*" : "-"}\t` +
-      `${win.active ? "1" : "0"}\n`;
+      `${win.active ? "1" : "0"}\t0\t1\t0\n`;
     paneBody +=
       `%${win.paneNum}\t@${win.windowNum}\t$0\t0\t` +
       `${win.cols}\t${win.rows}\t0\t0\t${win.active ? "1" : "0"}\t1234\tbash\n`;

@@ -86,8 +86,8 @@ function makeBootstrapBytes(opts = {}) {
     const rows = opts.rows ?? 24;
     const ts = 1_000_000;
     const layoutStr = `aaaa,${cols}x${rows},0,0,${parseInt(pid_.slice(1), 10)}`;
-    // list-windows -a reply (BOOTSTRAP_WINDOWS_FORMAT)
-    const windowsBody = `${sid}\t${sname}\t${wid}\t${wname}\t${cols}\t${rows}\t${layoutStr}\t*\t1\n`;
+    // list-windows -a reply (BOOTSTRAP_WINDOWS_FORMAT; tc-pqb4: includes fields [9]–[11])
+    const windowsBody = `${sid}\t${sname}\t${wid}\t${wname}\t${cols}\t${rows}\t${layoutStr}\t*\t1\t0\t1\t0\n`;
     // list-panes -a reply (BOOTSTRAP_PANES_FORMAT)
     const panesBody = `${pid_}\t${wid}\t${sid}\t0\t${cols}\t${rows}\t0\t0\t1\t1234\tbash\n`;
     const preNotif = opts.noPreNotif === true ? "" : `%session-changed ${sid} ${sname}\r\n`;
@@ -148,7 +148,8 @@ function createScriptedHost(bootstrapOpts = {}) {
         const rows = opts.rows ?? 24;
         const layoutStr = `aaaa,${cols}x${rows},0,0,${parseInt(pid_.slice(1), 10)}`;
         const body = cmdType === "windows"
-            ? `${sid}\t${sname}\t${wid}\t${wname}\t${cols}\t${rows}\t${layoutStr}\t*\t1\n`
+            // tc-pqb4: include fields [9]–[11] (synchronize-panes / monitor-activity / monitor-silence)
+            ? `${sid}\t${sname}\t${wid}\t${wname}\t${cols}\t${rows}\t${layoutStr}\t*\t1\t0\t1\t0\n`
             : cmdType === "panes"
                 ? `${pid_}\t${wid}\t${sid}\t0\t${cols}\t${rows}\t0\t0\t1\t1234\tbash\n`
                 : "";

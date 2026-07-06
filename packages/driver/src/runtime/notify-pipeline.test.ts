@@ -62,7 +62,8 @@ class FakeHost implements TmuxHost {
 
 /** One-session, one-window, one-pane (%1) bootstrap reply pair. */
 function bootstrapReplies(): Uint8Array {
-  const winBody = `$0\tsess\t@1\twin\t80\t24\taaaa,80x24,0,0,1\t*\t1\n`;
+  // tc-pqb4: include fields [9]–[11] (synchronize-panes / monitor-activity / monitor-silence)
+  const winBody = `$0\tsess\t@1\twin\t80\t24\taaaa,80x24,0,0,1\t*\t1\t0\t1\t0\n`;
   const paneBody = `%1\t@1\t$0\t0\t80\t24\t0\t0\t1\t1234\tbash\n`;
   return b(cmdBlock(nextCmdNum(), winBody) + cmdBlock(nextCmdNum(), paneBody));
 }

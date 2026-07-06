@@ -40,18 +40,22 @@
  *
  *   `#{session_id}\t#{session_name}\t#{window_id}\t#{window_name}\t` +
  *   `#{window_width}\t#{window_height}\t#{window_layout}\t` +
- *   `#{window_flags}\t#{?window_active,1,0}`
+ *   `#{window_flags}\t#{?window_active,1,0}\t` +
+ *   `#{?synchronize-panes,1,0}\t#{?monitor-activity,1,0}\t#{monitor-silence}`
  *
- * Fields (tab-separated, 9 per line):
- *   [0] session_id    — `$N`  (e.g. "$0")
- *   [1] session_name  — human name
- *   [2] window_id     — `@N`  (e.g. "@1")
- *   [3] window_name   — human name
- *   [4] window_width  — integer columns
- *   [5] window_height — integer rows
- *   [6] window_layout — layout string (e.g. "b25d,80x24,0,0,0")
- *   [7] window_flags  — flag chars (e.g. "*", "-", "!")
- *   [8] window_active — "1" if this is the session's active window, "0" otherwise
+ * Fields (tab-separated, 12 per line):
+ *   [0]  session_id         — `$N`  (e.g. "$0")
+ *   [1]  session_name       — human name
+ *   [2]  window_id          — `@N`  (e.g. "@1")
+ *   [3]  window_name        — human name
+ *   [4]  window_width       — integer columns
+ *   [5]  window_height      — integer rows
+ *   [6]  window_layout      — layout string (e.g. "b25d,80x24,0,0,0")
+ *   [7]  window_flags       — flag chars (e.g. "*", "-", "!")
+ *   [8]  window_active      — "1" if this is the session's active window, "0" otherwise
+ *   [9]  synchronize-panes  — "1" if on, "0" if off (tc-pqb4: re-read on every requery)
+ *   [10] monitor-activity   — "1" if on, "0" if off (tc-pqb4: re-read on every requery)
+ *   [11] monitor-silence    — integer seconds (0 = off) (tc-pqb4: re-read on every requery)
  *
  * ## BOOTSTRAP_PANES_FORMAT
  *
@@ -217,6 +221,25 @@ export interface WindowsReplyRow {
     readonly layoutString: string;
     readonly flags: string;
     readonly active: boolean;
+    /**
+     * tc-pqb4: current `synchronize-panes` state for this window, re-read on
+     * every requery so the value survives a driver restart and is never clobbered
+     * back to the bootstrap default by a topology-triggered requery cycle.
+     * Defaults false on legacy replies that don't carry field [9].
+     */
+    readonly synchronizePanes: boolean;
+    /**
+     * tc-pqb4: current `monitor-activity` state for this window, re-read on
+     * every requery.  Defaults true on legacy replies (the global `-wg
+     * monitor-activity on` that the pipeline issues at bootstrap means the
+     * effective value is `on` for all windows without a per-window override).
+     */
+    readonly monitorActivity: boolean;
+    /**
+     * tc-pqb4: current `monitor-silence` threshold in seconds (0 = off), re-read
+     * on every requery.  Defaults 0 on legacy replies that don't carry field [11].
+     */
+    readonly monitorSilence: number;
 }
 /**
  * Parsed record from one line of a `list-panes` reply.
@@ -262,6 +285,13 @@ export interface PanesReplyRow {
  *
  * Each non-empty line is one window, tab-separated in BOOTSTRAP_WINDOWS_FORMAT
  * order. Lines with wrong field count are silently skipped (defensive).
+ *
+ * tc-pqb4: fields [9]–[11] (synchronize-panes / monitor-activity /
+ * monitor-silence) are read defensively — absent on legacy replies (or in
+ * tests that only supply the original 9 fields). Missing fields use the
+ * bootstrap defaults: synchronizePanes=false, monitorActivity=true (the
+ * global `-wg monitor-activity on` the pipeline sets at bootstrap makes this
+ * the effective default for every window), monitorSilence=0.
  */
 export declare function parseWindowsReply(body: Uint8Array): WindowsReplyRow[];
 /**

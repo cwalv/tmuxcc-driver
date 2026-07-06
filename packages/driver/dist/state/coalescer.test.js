@@ -91,6 +91,11 @@ function winLine(args) {
         `0000,80x24,0,0,${args.paneIdInLayout}`,
         "-",
         "1",
+        // tc-pqb4: per-window durable options (fields [9]–[11]). Tests here
+        // don't exercise window-option state so use defaults: false/true/0.
+        "0",
+        "1",
+        "0",
     ].join("\t") + "\n";
 }
 /** A panes-reply line for one pane. */
