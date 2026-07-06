@@ -95,24 +95,61 @@ export function metricsHttpSocketPath(socketName, opts = {}) {
     return path.join(dir, "metrics-http.sock");
 }
 /**
- * Create a directory if it does not exist, set its permissions.
- * Does NOT recurse — parent must exist.
+ * Create a directory if it does not exist, then verify it is safe to use as a
+ * runtime directory.
+ *
+ * "Safe" means: owned by the current user, no group/other permission bits, and
+ * a real directory (not a symlink).  Any failure aborts loudly — silently
+ * proceeding into a directory we do not own is a pre-creation hijack vector on
+ * world-writable /tmp fallback paths (tc-idlp).
+ *
+ * Parent directory must already exist; this function does not create
+ * intermediate path components.
  */
 function ensureDir(dir, mode) {
     try {
-        fs.mkdirSync(dir, { recursive: true, mode });
+        fs.mkdirSync(dir, { mode });
     }
     catch (err) {
-        // Ignore EEXIST — directory already exists
         if (err.code !== "EEXIST")
             throw err;
+        // Directory already existed — fall through to ownership/mode verification.
     }
-    // Always set mode in case the directory pre-existed with different perms
+    verifyRuntimeDir(dir);
+}
+/**
+ * Verify that `dir` is safe to use as a runtime directory:
+ *   1. A real directory, not a symlink.
+ *   2. Owned by the current user (uid match).
+ *   3. No group or other permission bits (mode & 0o077 === 0).
+ *
+ * Throws a descriptive Error if any invariant is violated.  Applied to every
+ * runtime dir — both the /tmp fallback (where the attack surface is
+ * world-writable /tmp) and the XDG path (cheap defense-in-depth).
+ */
+function verifyRuntimeDir(dir) {
+    let stat;
     try {
-        fs.chmodSync(dir, mode);
+        stat = fs.lstatSync(dir);
     }
-    catch {
-        // Non-fatal — best effort
+    catch (err) {
+        throw new Error(`tmuxcc: runtime dir ${dir}: lstat failed: ${String(err)}`);
+    }
+    // lstatSync does not follow symlinks, so isSymbolicLink() is authoritative.
+    if (stat.isSymbolicLink()) {
+        throw new Error(`tmuxcc: runtime dir ${dir} is a symlink — refusing to use it (possible hijack)`);
+    }
+    if (!stat.isDirectory()) {
+        throw new Error(`tmuxcc: runtime dir ${dir} exists but is not a directory`);
+    }
+    if (typeof process.getuid === "function") {
+        const uid = process.getuid();
+        if (stat.uid !== uid) {
+            throw new Error(`tmuxcc: runtime dir ${dir} is owned by uid ${stat.uid}, expected ${uid} — possible pre-creation hijack`);
+        }
+    }
+    if ((stat.mode & 0o077) !== 0) {
+        throw new Error(`tmuxcc: runtime dir ${dir} has unsafe permissions 0${(stat.mode & 0o777).toString(8)} — must be mode 0700 (no group/other access)`);
     }
 }
 /**

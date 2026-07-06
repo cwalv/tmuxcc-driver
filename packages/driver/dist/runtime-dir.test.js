@@ -1,5 +1,6 @@
 /**
- * runtime-dir.test.ts — unit tests for the GC sweep (tc-s1sm).
+ * runtime-dir.test.ts — unit tests for the GC sweep (tc-s1sm) and runtime-dir
+ * security hardening (tc-idlp).
  *
  * Tests use tmpdir-based runtime dirs and `tmuxcc-test-*` socket names to
  * avoid any interaction with the production `/run/user/<uid>/tmuxcc/tmuxcc/`
@@ -13,7 +14,7 @@ import * as fs from "node:fs";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import { gcStaleRuntimeDirs, probeLiveSocket } from "./runtime-dir.js";
+import { gcStaleRuntimeDirs, probeLiveSocket, resolveBaseRuntimeDir } from "./runtime-dir.js";
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -245,6 +246,107 @@ describe("gcStaleRuntimeDirs (tc-s1sm)", () => {
         finally {
             fs.rmSync(baseDir, { recursive: true, force: true });
         }
+    });
+});
+// ---------------------------------------------------------------------------
+// resolveBaseRuntimeDir security hardening tests (tc-idlp)
+//
+// These tests exercise ensureDir + verifyRuntimeDir via the public API:
+// resolveBaseRuntimeDir({ runtimeDir: <controlled path> }).
+// ---------------------------------------------------------------------------
+describe("resolveBaseRuntimeDir — security: hijack detection (tc-idlp)", () => {
+    it("succeeds when the dir does not exist yet (creates fresh 0700 dir)", () => {
+        const base = fs.mkdtempSync(path.join(os.tmpdir(), "tmuxcc-test-rtd-parent-"));
+        const freshDir = path.join(base, "fresh-runtime-dir");
+        try {
+            // Must not throw.
+            const result = resolveBaseRuntimeDir({ runtimeDir: freshDir });
+            assert.equal(result, freshDir, "returns the requested runtimeDir path");
+            const stat = fs.lstatSync(freshDir);
+            assert.ok(stat.isDirectory(), "created path must be a directory");
+            assert.equal(stat.mode & 0o077, 0, "freshly created dir must have no group/other bits");
+        }
+        finally {
+            fs.rmSync(base, { recursive: true, force: true });
+        }
+    });
+    it("succeeds when the dir already exists with safe 0700 permissions owned by us", () => {
+        const base = fs.mkdtempSync(path.join(os.tmpdir(), "tmuxcc-test-rtd-parent-"));
+        const ownedDir = path.join(base, "owned-runtime-dir");
+        fs.mkdirSync(ownedDir, { mode: 0o700 });
+        try {
+            // A pre-existing 0700 dir owned by us must be accepted without throwing.
+            assert.doesNotThrow(() => resolveBaseRuntimeDir({ runtimeDir: ownedDir }), "a pre-existing safe 0700 dir must be accepted");
+        }
+        finally {
+            fs.rmSync(base, { recursive: true, force: true });
+        }
+    });
+    it("throws for a pre-existing group-readable dir (mode 0750)", () => {
+        const base = fs.mkdtempSync(path.join(os.tmpdir(), "tmuxcc-test-rtd-parent-"));
+        const groupReadable = path.join(base, "group-readable");
+        fs.mkdirSync(groupReadable, { mode: 0o750 });
+        // Forcibly set the mode to bypass any umask that already stripped the group bits.
+        fs.chmodSync(groupReadable, 0o750);
+        try {
+            assert.throws(() => resolveBaseRuntimeDir({ runtimeDir: groupReadable }), /unsafe permissions/, "group-readable dir must cause abort with 'unsafe permissions' message");
+        }
+        finally {
+            fs.rmSync(base, { recursive: true, force: true });
+        }
+    });
+    it("throws for a pre-existing world-readable dir (mode 0755)", () => {
+        const base = fs.mkdtempSync(path.join(os.tmpdir(), "tmuxcc-test-rtd-parent-"));
+        const worldReadable = path.join(base, "world-readable");
+        fs.mkdirSync(worldReadable, { mode: 0o755 });
+        fs.chmodSync(worldReadable, 0o755);
+        try {
+            assert.throws(() => resolveBaseRuntimeDir({ runtimeDir: worldReadable }), /unsafe permissions/, "world-readable dir must cause abort with 'unsafe permissions' message");
+        }
+        finally {
+            fs.rmSync(base, { recursive: true, force: true });
+        }
+    });
+    it("throws when the path is a symlink to a directory", () => {
+        const base = fs.mkdtempSync(path.join(os.tmpdir(), "tmuxcc-test-rtd-parent-"));
+        const realTarget = path.join(base, "real-target");
+        const symlinkPath = path.join(base, "symlink");
+        fs.mkdirSync(realTarget, { mode: 0o700 });
+        fs.symlinkSync(realTarget, symlinkPath);
+        try {
+            assert.throws(() => resolveBaseRuntimeDir({ runtimeDir: symlinkPath }), /symlink/, "a symlink to a directory must cause abort");
+        }
+        finally {
+            fs.rmSync(base, { recursive: true, force: true });
+        }
+    });
+    it("throws when the path is a dangling symlink", () => {
+        const base = fs.mkdtempSync(path.join(os.tmpdir(), "tmuxcc-test-rtd-parent-"));
+        const symlinkPath = path.join(base, "dangling");
+        fs.symlinkSync(path.join(base, "nonexistent-target"), symlinkPath);
+        try {
+            assert.throws(() => resolveBaseRuntimeDir({ runtimeDir: symlinkPath }), 
+            // mkdirSync on a dangling symlink target path throws ENOENT (the
+            // dangling symlink does not count as EEXIST), so mkdirSync errors
+            // first.  Either way the call must throw rather than proceed.
+            (err) => err instanceof Error, "a dangling symlink must cause abort");
+        }
+        finally {
+            fs.rmSync(base, { recursive: true, force: true });
+        }
+    });
+    it("throws when the path is owned by another user (uses /tmp as foreign-owned dir)", () => {
+        // /tmp is owned by root (uid 0).  On any non-root test environment,
+        // passing it as runtimeDir must abort with an ownership error.
+        if (typeof process.getuid !== "function") {
+            // getuid not available on this platform — skip.
+            return;
+        }
+        if (process.getuid() === 0) {
+            // Running as root — cannot test foreign-ownership; skip.
+            return;
+        }
+        assert.throws(() => resolveBaseRuntimeDir({ runtimeDir: os.tmpdir() }), /owned by uid|unsafe permissions/, "/tmp must be rejected as a runtime dir (wrong owner or unsafe permissions)");
     });
 });
 //# sourceMappingURL=runtime-dir.test.js.map

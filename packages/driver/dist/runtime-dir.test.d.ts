@@ -1,5 +1,6 @@
 /**
- * runtime-dir.test.ts — unit tests for the GC sweep (tc-s1sm).
+ * runtime-dir.test.ts — unit tests for the GC sweep (tc-s1sm) and runtime-dir
+ * security hardening (tc-idlp).
  *
  * Tests use tmpdir-based runtime dirs and `tmuxcc-test-*` socket names to
  * avoid any interaction with the production `/run/user/<uid>/tmuxcc/tmuxcc/`

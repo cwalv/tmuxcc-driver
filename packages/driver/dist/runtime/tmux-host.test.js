@@ -383,8 +383,8 @@ describe("TmuxHost — real tmux 3.4", { skip: !tmuxAvailable ? "tmux not found 
         assert.equal(exitFired, true, "onExit handler must fire");
         // Regression guard: a clean detach-client completes in tens of ms.
         // If stop() takes >= 1000ms it hit the SIGKILL fallback (3s), not the
-        // graceful detach path.  1000ms gives ample margin for slow CI while
-        // still catching the regression.
+        // graceful detach path.  1000ms lies between the two ranges (tens of ms
+        // vs 3 s) and catches the regression on any host.
         assert.ok(elapsed < 1000, `stop() must detach cleanly (< 1000ms), not fall through to SIGKILL; elapsed=${elapsed}ms`);
     });
     it("kill() terminates with SIGKILL and onExit fires", async () => {
@@ -560,6 +560,21 @@ describe("TmuxHost — real tmux 3.4", { skip: !tmuxAvailable ? "tmux not found 
     // tmux SERVER holds a dup of the client tty and keeps draining it even
     // while the -CC client is stopped.)
     // -------------------------------------------------------------------------
+    // Both tests verify behavior that lives in the node-pty patch
+    // (projects/tmuxcc/patches/node-pty+1.1.0.patch, applied to node_modules by
+    // patch-package's root postinstall) — not in this repo's source.  A stale
+    // node_modules whose node-pty predates the patch reproduces both failures
+    // below deterministically, on any host at any load (tc-qmld: byte-identical
+    // EBADF drop + recycled-fd injection, once misread as "host fd/pty
+    // pressure").  Check the premise via the patch's structural marker — the
+    // `_disposed` field it adds to CustomWriteStream — so patch ABSENCE fails
+    // fast with the actual cause.  Deliberately an existence check, not
+    // `_disposed === true`: a patched-but-regressed dispose path must still
+    // fail the behavioral assertions as a product bug, not be excused as
+    // environment.
+    function assertFdLifecyclePatchApplied(writeStream) {
+        assert.ok("_disposed" in writeStream, "premise: the loaded node-pty lacks the fd-lifecycle patch (projects/tmuxcc/patches/node-pty+1.1.0.patch) — stale node_modules? npm install from the workspace root, then re-run");
+    }
     it("a stale write stream is retired on pty death — no EBADF queue drop (tc-76m8.20)", async () => {
         const sock = sockName("wac-ebadf");
         after(() => killServer(sock));
@@ -570,6 +585,7 @@ describe("TmuxHost — real tmux 3.4", { skip: !tmuxAvailable ? "tmux not found 
         await host.start();
         await waitFor(chunks, (all) => all.indexOf(DCS_INTRO) >= 0, 5000, "DCS intro timeout");
         const ptyInternals = host._pty;
+        assertFdLifecyclePatchApplied(ptyInternals._writeStream);
         host.kill();
         await new Promise((r) => { host.onExit(() => r()); });
         // node-pty emits 'exit' only after the read socket has closed, so the
@@ -606,6 +622,7 @@ describe("TmuxHost — real tmux 3.4", { skip: !tmuxAvailable ? "tmux not found 
         await hostA.start();
         await waitFor(chunksA, (all) => all.indexOf(DCS_INTRO) >= 0, 5000, "A: DCS intro timeout");
         const ptyA = hostA._pty;
+        assertFdLifecyclePatchApplied(ptyA._writeStream);
         const fdA = ptyA.fd;
         hostA.kill();
         await new Promise((r) => { hostA.onExit(() => r()); });
