@@ -630,8 +630,9 @@ describe(
           const lineNumbers = rawLineNumbers.filter((n) => n >= 1 && n <= SEQ_COUNT);
 
           // Must have received at least a significant portion of lines.
-          // With continuous draining + a 500-line loop we expect all 500,
-          // but accept ≥ 50 to be robust against slow CI.
+          // waitForOutput above gates on "line499" arriving, so with continuous
+          // draining we expect close to all 500 to reach the hook; ≥ 50 is a
+          // loose floor that asserts the hook delivery path is non-empty.
           assert.ok(
             lineNumbers.length >= 50,
             `Too few "lineN" entries in delivered output: ` +

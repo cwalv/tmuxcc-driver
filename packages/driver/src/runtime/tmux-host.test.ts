@@ -466,8 +466,8 @@ describe("TmuxHost — real tmux 3.4", { skip: !tmuxAvailable ? "tmux not found 
     assert.equal(exitFired, true, "onExit handler must fire");
     // Regression guard: a clean detach-client completes in tens of ms.
     // If stop() takes >= 1000ms it hit the SIGKILL fallback (3s), not the
-    // graceful detach path.  1000ms gives ample margin for slow CI while
-    // still catching the regression.
+    // graceful detach path.  1000ms lies between the two ranges (tens of ms
+    // vs 3 s) and catches the regression on any host.
     assert.ok(
       elapsed < 1000,
       `stop() must detach cleanly (< 1000ms), not fall through to SIGKILL; elapsed=${elapsed}ms`,
