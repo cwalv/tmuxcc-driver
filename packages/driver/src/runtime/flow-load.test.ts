@@ -629,13 +629,27 @@ describe(
           // Filter to only line numbers in [1, SEQ_COUNT] (exclude noise).
           const lineNumbers = rawLineNumbers.filter((n) => n >= 1 && n <= SEQ_COUNT);
 
-          // Must have received at least a significant portion of lines.
-          // waitForOutput above gates on "line499" arriving, so with continuous
-          // draining we expect close to all 500 to reach the hook; ≥ 50 is a
-          // loose floor that asserts the hook delivery path is non-empty.
+          // Mechanism-derived floor: all 500 lines must reach the hook.
+          //
+          // The total output is ~6 KiB (6,367 bytes measured).  The flow-control
+          // high-water mark is 256 KiB.  Because total output is ~40× below the
+          // pause threshold, the flow-control gate NEVER closes during this test:
+          // no gate-drop (FC-4), no buffered-but-not-yet-fanned-out bytes.
+          //
+          // Bytes are fanned out to the hook synchronously within the same Node.js
+          // event-loop callback that processes each tmux %output chunk.  After
+          // waitForOutput("line499") confirms line 499 is in tmux, we issue an
+          // explicit final drain + a 400 ms settle to absorb any in-flight fan-out
+          // for the last line (line 500).  At that point the delivery path is
+          // provably drained: the gate was never closed, so no bytes were
+          // gate-dropped, and 400 ms is ample for the final chunk to clear.
+          //
+          // lineNumbers is NON-deduped; since all 500 distinct values [1..500]
+          // are present (deduped.length == 500), lineNumbers.length >= 500.
           assert.ok(
-            lineNumbers.length >= 50,
-            `Too few "lineN" entries in delivered output: ` +
+            lineNumbers.length >= SEQ_COUNT,
+            `Expected all ${SEQ_COUNT} lines delivered to hook (gate never closed — ` +
+            `total output ~6 KiB << 256 KiB high-water): ` +
             `got ${lineNumbers.length} (from ${rawLineNumbers.length} raw matches), ` +
             `accumulated ${accumulated.length} bytes. ` +
             `Continuous draining should have kept the gate open.`,
