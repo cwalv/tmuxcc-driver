@@ -683,6 +683,25 @@ describe("TmuxHost — real tmux 3.4", { skip: !tmuxAvailable ? "tmux not found 
   // while the -CC client is stopped.)
   // -------------------------------------------------------------------------
 
+  // Both tests verify behavior that lives in the node-pty patch
+  // (projects/tmuxcc/patches/node-pty+1.1.0.patch, applied to node_modules by
+  // patch-package's root postinstall) — not in this repo's source.  A stale
+  // node_modules whose node-pty predates the patch reproduces both failures
+  // below deterministically, on any host at any load (tc-qmld: byte-identical
+  // EBADF drop + recycled-fd injection, once misread as "host fd/pty
+  // pressure").  Check the premise via the patch's structural marker — the
+  // `_disposed` field it adds to CustomWriteStream — so patch ABSENCE fails
+  // fast with the actual cause.  Deliberately an existence check, not
+  // `_disposed === true`: a patched-but-regressed dispose path must still
+  // fail the behavioral assertions as a product bug, not be excused as
+  // environment.
+  function assertFdLifecyclePatchApplied(writeStream: object): void {
+    assert.ok(
+      "_disposed" in writeStream,
+      "premise: the loaded node-pty lacks the fd-lifecycle patch (projects/tmuxcc/patches/node-pty+1.1.0.patch) — stale node_modules? npm install from the workspace root, then re-run",
+    );
+  }
+
   it("a stale write stream is retired on pty death — no EBADF queue drop (tc-76m8.20)", async () => {
     const sock = sockName("wac-ebadf");
     after(() => killServer(sock));
@@ -698,6 +717,7 @@ describe("TmuxHost — real tmux 3.4", { skip: !tmuxAvailable ? "tmux not found 
     const ptyInternals = (host as unknown as {
       _pty: { _writeStream: { write(data: string): void } };
     })._pty;
+    assertFdLifecyclePatchApplied(ptyInternals._writeStream);
 
     host.kill();
     await new Promise<void>((r) => { host.onExit(() => r()); });
@@ -749,6 +769,7 @@ describe("TmuxHost — real tmux 3.4", { skip: !tmuxAvailable ? "tmux not found 
     await waitFor(chunksA, (all) => all.indexOf(DCS_INTRO) >= 0, 5000, "A: DCS intro timeout");
 
     const ptyA = (hostA as unknown as { _pty: PtyInternals })._pty;
+    assertFdLifecyclePatchApplied(ptyA._writeStream);
     const fdA = ptyA.fd;
 
     hostA.kill();
