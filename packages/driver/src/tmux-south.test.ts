@@ -31,6 +31,7 @@ import {
   createSession,
   killSession,
   listSessions,
+  setGlobalScrollOnClear,
   setSessionMarker,
   setSessionWorkspace,
   probeTmuxLiveness,
@@ -762,5 +763,62 @@ describe("tmux-south @tmuxcc-workspace identity round-trip (S4/tc-76m8.6)", { sk
     assert.equal(a!.workspaceUri, "file:///home/alice/myproject");
     assert.equal(b!.workspaceUri, "file:///home/bob/myproject");
     assert.notEqual(a!.workspaceUri, b!.workspaceUri, "same basename → distinct identities");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// setGlobalScrollOnClear on externally-created session (tc-w3ir.5)
+//
+// Belt-and-suspenders: the claim seam now calls setGlobalScrollOnClear even
+// when the session was created directly (not via createSession).  This test
+// verifies that calling setGlobalScrollOnClear on a server that was NOT set up
+// by createSession() correctly stamps scroll-on-clear off — the exact edge
+// case covered by tc-w3ir.5.
+// ---------------------------------------------------------------------------
+
+describe("tmux-south setGlobalScrollOnClear on externally-created session (tc-w3ir.5)", { skip: !TMUX_AVAILABLE }, () => {
+  afterEach(() => {
+    for (const sock of [...liveSockets]) killServer(sock);
+  });
+
+  it("sets scroll-on-clear off on a server bootstrapped without createSession", async () => {
+    const socketName = nextSocketName();
+    try {
+      // Create a session DIRECTLY via tmux CLI — simulates a user session that
+      // was created outside of tmuxcc (the manually-created-then-attached edge).
+      const ns = spawnSync(
+        "tmux",
+        ["-L", socketName, "new-session", "-d", "-s", "ext-sess"],
+        { encoding: "utf8", timeout: 5_000 },
+      );
+      assert.equal(ns.status, 0, `direct new-session failed: ${ns.stderr}`);
+
+      // Apply setGlobalScrollOnClear — mirrors what the attach/claim seam now does.
+      await setGlobalScrollOnClear(socketName, false);
+
+      // The server-global must now be off.
+      const showAfter = spawnSync(
+        "tmux",
+        ["-L", socketName, "show-options", "-wg", "-v", "scroll-on-clear"],
+        { encoding: "utf8", timeout: 3_000 },
+      );
+      assert.equal(showAfter.status, 0, "global scroll-on-clear must be readable after setGlobalScrollOnClear");
+      assert.equal((showAfter.stdout ?? "").trim(), "off", "scroll-on-clear must be off after the claim-seam call");
+
+      // The externally-created session's window also inherits the global.
+      const showWindow = spawnSync(
+        "tmux",
+        ["-L", socketName, "show-options", "-A", "-w", "-t", "ext-sess"],
+        { encoding: "utf8", timeout: 3_000 },
+      );
+      assert.equal(showWindow.status, 0, "window options must be readable");
+      assert.match(
+        showWindow.stdout ?? "",
+        /scroll-on-clear\*?\s+off/,
+        `externally-created session window must inherit scroll-on-clear off, got:\n${showWindow.stdout}`,
+      );
+    } finally {
+      killServer(socketName);
+    }
   });
 });

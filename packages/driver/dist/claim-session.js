@@ -18,7 +18,7 @@
  * @module claim-session
  */
 import { phaseLog, phaseNow } from "./runtime/phase-timing.js";
-import { createSession, setSessionMarker } from "./tmux-south.js";
+import { createSession, setGlobalScrollOnClear, setSessionMarker } from "./tmux-south.js";
 /**
  * Create the per-server-proxy session claimer.
  *
@@ -117,6 +117,16 @@ export function createSessionClaimer(ctx) {
         // this stamps them as tmuxcc-managed so they will appear in
         // listTmuxccSessions on subsequent invocations.
         await setSessionMarker(ctx.socketName, entry.name);
+        // tc-w3ir.5: belt-and-suspenders — apply `scroll-on-clear off` at the
+        // attach/claim seam, mirroring the call already inside createSession().
+        // For sessions minted by createSession() the server-global is already set;
+        // this call is a no-op in that case (idempotent `-wg` set-option).  For
+        // sessions created directly on the tmuxcc dedicated socket and then attached
+        // via tmuxcc.attachToSession (the manually-created-session edge), this
+        // stamps the option before the session-proxy starts — ensuring the
+        // hydration-phantom fix (tc-kyq4.5) holds regardless of how the session
+        // was originally created.
+        await setGlobalScrollOnClear(ctx.socketName, false, ctx.getCapabilities());
         // tc-is5w: "claim" phase ends here — record its duration before the ensure
         // leg begins.
         const claimEnd = phaseNow();
