@@ -11,10 +11,9 @@ Category neighbors: LSP servers and DAP debug adapters.
 - `protocol/` — the wire protocol as a first-class, language-neutral artifact:
   schemas, docs, conformance material. Implementations validate against it
   (TS today) or generate from it (possible future Rust daemon).
-- `packages/server-proxy/` — per-server broker: owns the socket, supervises
-  session-proxies, multiplexes clients.
-- `packages/session-proxy/` — per-session adapter: speaks `tmux -CC`, holds
-  the fold, serves snapshot + deltas.
+- `packages/driver/` — `@tmuxcc/driver`: the combined in-process runtime;
+  per-server broker (socket, session table, supervisor) + per-session adapter
+  (speaks `tmux -CC`, holds the fold, serves snapshot + deltas).
 - `clients/ts/` — `@tmuxcc/client`, the TypeScript host SDK.
 
 SDKs version with the protocol and live here; hosts (e.g. tmuxcc-vscode)
@@ -22,12 +21,12 @@ version with their product and live in their own repos.
 
 ## Testing policy — real-tmux suites
 
-`packages/session-proxy/` contains timing-sensitive real-tmux suites
+`packages/driver/src/runtime/` contains timing-sensitive real-tmux suites
 (`flow-load.test.ts`, `resilience.test.ts`).  A flake in these suites is a
-**correctness signal, not noise**.  See
-[`packages/session-proxy/TESTING.md`](packages/session-proxy/TESTING.md)
-for the full policy, including the flake-is-a-bug rule and the `soak`
-N-run step.
+**correctness signal, not noise**.  The flake-is-a-bug rule: never mark a
+real-tmux failure as noise; find and fix the race.  Run with
+`--test-concurrency=1` for the `test:real-tmux` step; the `soak` script
+wraps N runs to surface intermittent failures.
 
 ## History
 

@@ -4,10 +4,10 @@ tmuxcc-driver is the stateful protocol adapter between tmux control-mode and
 any number of frontends. It owns two process roles (post-tc-2x3 collapse,
 one process per machine):
 
-- **server-proxy** (`packages/server-proxy/`) — per-server broker: unix socket
+- **server-proxy** (in `packages/driver/`) — per-server broker: unix socket
   listener, session table, session-proxy supervisor, watcher (`tmux -CC`
   north-side), idle/tmux-gone self-exit policy.
-- **session-proxy** (`packages/session-proxy/`) — per-session adapter: speaks
+- **session-proxy** (in `packages/driver/`) — per-session adapter: speaks
   `tmux -CC` attach, holds the fold (bootstrap + reducer), serves snapshot +
   ordered deltas to N clients over a per-session unix socket.
 
@@ -22,16 +22,15 @@ in each package reject non-root invocations):
 
 ```
 npm install          # from workspace root
-npm run build -w @tmuxcc/session-proxy && npm run build -w @tmuxcc/server-proxy
+npm run build -w @tmuxcc/driver
 ```
 
 Per-package test layers:
 
 | Package | Command | Notes |
 |---|---|---|
-| `@tmuxcc/server-proxy` | `npm run test -w @tmuxcc/server-proxy` | Unit + integration. |
-| `@tmuxcc/session-proxy` | `npm run test:unit -w @tmuxcc/session-proxy` | Unit only (no real tmux). |
-| `@tmuxcc/session-proxy` | `npm run test:real-tmux -w @tmuxcc/session-proxy` | Real-tmux suites — a flake is a **correctness signal, not noise**. Run with `--test-concurrency=1`. |
+| `@tmuxcc/driver` | `npm run test:unit -w @tmuxcc/driver` | Unit only (no real tmux). |
+| `@tmuxcc/driver` | `npm run test:real-tmux -w @tmuxcc/driver` | Real-tmux suites — a flake is a **correctness signal, not noise**. Run with `--test-concurrency=1`. |
 | `@tmuxcc/driver` | `npm run soak -w @tmuxcc/driver` | N-run soak for the real-tmux suites (`soak`). |
 
 The `ci` script in each package is `build + typecheck + test + lint:boundaries`.
@@ -44,14 +43,14 @@ Clients first connect to the server-proxy socket (capability handshake, then
 session snapshot + session-added/removed deltas, then command/response). For a
 claimed session they receive a per-session socket path and connect there for the
 session-proxy protocol (topology snapshot + deltas + data-plane frames). The
-authoritative shape is `protocol/` and `packages/session-proxy/SCHEMA.md`.
+authoritative shape is `protocol/` and `protocol/PROTOCOL.md`.
 
 ## Where things live
 
 - `docs/` — design docs (`observability.md`, `state-model.md`, `perf.md`).
 - `protocol/` — language-neutral wire protocol schemas and conformance material.
-- `packages/server-proxy/src/metrics.ts` — server-proxy prom-client registry.
-- `packages/session-proxy/src/metrics/registry.ts` — session-proxy registry
+- `packages/driver/src/metrics.ts` — server-proxy prom-client registry.
+- `packages/driver/src/metrics/registry.ts` — session-proxy registry
   (all per-session counters and histograms).
 
 ---
@@ -84,7 +83,7 @@ server-proxy process's own stderr.
 
 `server-proxy-entry.ts` `main()` installs a stderr→file **mirror** at startup
 (`openServerProxyLog(serverProxyLogPath(socketName, …))` +
-`installStderrMirror(log)`, both in `packages/server-proxy/src/`): it
+`installStderrMirror(log)`, both in `packages/driver/src/`): it
 monkey-patches `process.stderr.write` to tee every write — ISO-timestamped —
 into an append-only, mode-0600 file, then forwards to the original fd. The path
 is well-known and derivable by clients: `<runtime>/<socket>/server-proxy.log`

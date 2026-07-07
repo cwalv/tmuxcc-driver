@@ -214,7 +214,7 @@ detach → attach:
 ### Fix A — scroll-on-clear off (tc-w3ir.1)
 
 `setGlobalScrollOnClear(socketName, false)` is called inside `createSession()`
-in `packages/server-proxy/src/tmux-south.ts`, right after `new-session` succeeds.
+in `packages/driver/src/tmux-south.ts`, right after `new-session` succeeds.
 It issues `set-option -wg scroll-on-clear off` as a server-global window option
 on the dedicated tmux socket. Every managed pane inherits it; cleared-screen
 content is not scrolled into history.
@@ -241,7 +241,7 @@ data rather than relying on a flat byte stream + trim:
 1. Read grid facts in a `display-message` round-trip:
    `#{cursor_x},#{cursor_y},#{history_size},#{pane_height}` (see
    `PANE_GRID_FACTS_FORMAT` / `displayMessagePane` in
-   `packages/session-proxy/src/parser/commands.ts`).
+   `packages/driver/src/parser/commands.ts`).
 2. Deliver `CLEAR_AND_SCROLLBACK` + `lfToCrlf(stripOneTrailingLf(captureBody))`
    + `ESC[<cursor_y+1>;<cursor_x+1>H` (CUP cursor restore, 1-based).
 3. Writing the full captured grid (`history_size` + `pane_height` rows) into an

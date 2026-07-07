@@ -20,7 +20,7 @@
  * Tests cite these by number (`// verifies FC-3`); a failing assertion should
  * name the clause in dispute. Asserting anything STRONGER than these clauses
  * is a test bug, not a product bug (see tc-cbh, where a test assumed FC-5's
- * negation). Conventions: packages/session-proxy/TESTING.md.
+ * negation). See docs/test-portability-ledger.md for test conventions.
  *
  *   FC-1  Ledger. The ledger is (pane × client). One %output append for a pane
  *         fans into EVERY registered client's sub-ledger; a drain credit debits

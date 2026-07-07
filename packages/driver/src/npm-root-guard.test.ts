@@ -4,10 +4,10 @@ import assert from "node:assert/strict";
 // The workspace-root npm guard is a shared, committed script at the driver repo
 // root (referenced by every member's preinstall/prebuild). It lives outside any
 // member's src/, so we pin its pure decision function here, in the member that
-// the tc-rs99 false-positive originally took down (@tmuxcc/session-proxy).
+// the tc-rs99 false-positive originally took down (@tmuxcc/driver).
 import { isBlockedDirectSubdir } from "../../../scripts/npm-root-guard.mjs";
 
-const MEMBER = "/weave/github/cwalv/tmuxcc-driver/packages/session-proxy";
+const MEMBER = "/weave/github/cwalv/tmuxcc-driver/packages/driver";
 const ROOT = "/weave";
 
 describe("npm-root-guard discriminator (tc-rs99)", () => {

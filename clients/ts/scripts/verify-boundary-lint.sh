@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# verify-boundary-lint.sh — confirm the client-no-session-proxy-runtime rule CATCHES violations.
+# verify-boundary-lint.sh — confirm the client-no-driver-runtime rule CATCHES violations.
 #
 # This script is run via `npm run lint:boundaries:verify`.
 # It is NOT part of normal CI — it's a one-time verification helper for after
@@ -34,13 +34,13 @@ else
   fi
 fi
 
-# Write a deliberately-bad fixture: client importing session-proxy internal sub-path
+# Write a deliberately-bad fixture: client importing driver internal sub-path
 cat > "$FIXTURE" << 'EOF'
 // VERIFY FIXTURE — deliberately forbidden import.
-// client/src/ must only import from the @tmuxcc/session-proxy barrel, not sub-paths.
-// This file exists only to confirm the client-no-session-proxy-runtime lint rule is
+// client/src/ must only import from the @tmuxcc/driver barrel, not sub-paths.
+// This file exists only to confirm the client-no-driver-runtime lint rule is
 // active.  Never commit real code like this.
-import { createSessionProxy } from "@tmuxcc/session-proxy/src/runtime/session-proxy.js";
+import { createSessionProxy } from "@tmuxcc/driver/src/runtime/session-proxy.js";
 export { createSessionProxy };
 EOF
 
@@ -53,8 +53,8 @@ trap cleanup EXIT
 if "$DEPCRUISE" "$FIXTURE" \
     --config .dependency-cruiser.cjs \
     --output-type err 2>&1; then
-  echo "ERROR: lint:boundaries:verify FAILED — client-no-session-proxy-runtime rule did NOT catch the forbidden import." >&2
+  echo "ERROR: lint:boundaries:verify FAILED — client-no-driver-runtime rule did NOT catch the forbidden import." >&2
   exit 1
 else
-  echo "OK: client-no-session-proxy-runtime lint verified — forbidden client→session-proxy-subpath import was caught."
+  echo "OK: client-no-driver-runtime lint verified — forbidden client→driver-subpath import was caught."
 fi

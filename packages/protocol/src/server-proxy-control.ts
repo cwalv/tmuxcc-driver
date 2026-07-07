@@ -254,7 +254,7 @@ export interface ServerProxySessionRenamedMessage extends MessageBase {
 /**
  * Reasons the server-proxy may DESIGN-exit (broadcast in `server-proxy.exiting`).
  *
- * Mirrors `ServerProxySelfExitReason` in @tmuxcc/server-proxy's runtime; defined
+ * Mirrors `ServerProxySelfExitReason` in @tmuxcc/driver's runtime; defined
  * on the wire so clients can interpret an `exiting` announcement without
  * importing the runtime package.
  *

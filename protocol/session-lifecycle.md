@@ -32,7 +32,7 @@ non-zero, timeout, spawn error) leave the session table intact — no spurious r
 is emitted.
 
 **Implementation reference:**  
-`packages/server-proxy/src/server-proxy.ts` — `_refreshSessions()`: the
+`packages/driver/src/server-proxy.ts` — `_refreshSessions()`: the
 `listSessions` null-guard at the top of the function; session removal only on
 absent tmuxId.
 
@@ -144,7 +144,7 @@ The contract is exercised by:
   killed; the test asserts `sessions.removed` arrives and the C4 UDS closes in
   the correct order, with C4 events-in-flight handled gracefully.
 
-All tests in: `packages/server-proxy/src/session-removal-ordering.test.ts`
+All tests in: `packages/driver/src/session-removal-ordering.test.ts`
 
 ---
 

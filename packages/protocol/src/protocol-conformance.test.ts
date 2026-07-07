@@ -20,7 +20,7 @@
  *      agreement).
  *
  * Import note: ajv is a devDependency hoisted to the tmuxcc-driver workspace
- * root (package.json at packages/session-proxy/../../../ level). It is NOT
+ * root (package.json at packages/protocol/../../../ level). It is NOT
  * bundled into the production package — conformance tests only run in CI.
  */
 

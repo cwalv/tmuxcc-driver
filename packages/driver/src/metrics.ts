@@ -18,7 +18,7 @@
  *     the whole tmuxcc supervisor.
  *
  * This module is intentionally small. Per-session topology metrics live in the
- * per-session `SessionProxyRegistry` (packages/session-proxy/src/metrics/).
+ * per-session `SessionProxyRegistry` (packages/driver/src/metrics/).
  *
  * # Debug surface (tc-x6l)
  *

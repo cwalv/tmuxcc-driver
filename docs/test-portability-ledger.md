@@ -1,5 +1,7 @@
 # Test-suite portability ledger — tc-a88z
 
+> **Path note (post-tc-2x3):** paths below are pre-tc-2x3; read `packages/{session,server}-proxy/` as `packages/driver/`.
+
 **Purpose:** Audit the driver test suite for black-box / white-box portability;
 quantify the rewrite moat; enumerate the irreducible white-box set with effort
 estimates.  Feeds `tc-ni6f` (Rust rewrite decision).

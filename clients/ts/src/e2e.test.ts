@@ -47,7 +47,7 @@
  * then a layout.updated delta; asserts onLayoutChanged fires with geometry.
  *
  * Reuses E1's round-trip harness: createInMemoryTransportPair +
- * runSessionProxyHandshake from @tmuxcc/session-proxy.
+ * runSessionProxyHandshake from @tmuxcc/protocol.
  */
 
 import { describe, it } from "node:test";

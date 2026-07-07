@@ -38,7 +38,7 @@ Two layers run in CI:
 
 - **Schema conformance** — every wire message + golden transcript validates
   against the JSON Schemas:
-  `packages/session-proxy/src/wire/protocol-conformance.test.ts`
+  `packages/protocol/src/protocol-conformance.test.ts`
 - **Behavioral conformance** (tc-ozk.4) — the `transcripts/` are replayed against
   BOTH the SDK parser/mirror and the REAL session-proxy daemon (no live tmux):
   `clients/ts/src/harness/conformance.test.ts`. The harness lives in the SDK

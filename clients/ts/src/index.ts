@@ -61,8 +61,8 @@ export * from "./input.js";
 
 export * from "./render-hook.js";
 
-// WireCommand is re-exported from render-hook.js (imported from @tmuxcc/session-proxy).
-// Consumers can also import it directly from @tmuxcc/session-proxy if they need the
+// WireCommand is re-exported from render-hook.js (imported from @tmuxcc/protocol).
+// Consumers can also import it directly from @tmuxcc/protocol if they need the
 // full command type union (OpenWindowCommand, SplitPaneCommand, etc.).
 
 // ---------------------------------------------------------------------------

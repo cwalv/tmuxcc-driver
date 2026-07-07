@@ -53,7 +53,7 @@ belongs in tracing, not metrics.
 
 ## 3. Session-proxy registry
 
-Emitted from `packages/session-proxy/src/metrics/registry.ts`; surfaced
+Emitted from `packages/driver/src/metrics/registry.ts`; surfaced
 via the `session-proxy.info` debug command (the `metricsText` field of
 `SessionProxyInfoPayload`). Per-counter rationale lives in the JSDoc of
 the registry module.
@@ -156,7 +156,7 @@ a metric reader attached.
 
 ## 4. Server-proxy registry
 
-Emitted from `packages/server-proxy/src/metrics.ts`; surfaced via the
+Emitted from `packages/driver/src/metrics.ts`; surfaced via the
 `server-proxy.info` debug command (the `metricsText` field of
 `ServerProxyInfoPayload`). Same `collectDefaultMetrics` set as the
 session-proxy.

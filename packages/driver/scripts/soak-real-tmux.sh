@@ -7,7 +7,7 @@
 # across runs).
 #
 # A flake found here MUST be filed as a P2 bug before retrying to green.
-# See: packages/session-proxy/TESTING.md
+# See: docs/test-portability-ledger.md
 #
 # Wall-clock budget: N=3 runs × ~18 s/run = ~54 s typical; limit hard-coded
 # below prevents silent bloat.  Increase SOAK_BUDGET_SECS if suites grow.
@@ -121,7 +121,7 @@ log "Results: ${PASS_COUNT} pass, ${FAIL_COUNT} fail."
 if [ "${FAIL_COUNT}" -gt 0 ] && [ "${PASS_COUNT}" -gt 0 ]; then
   # Non-deterministic: some passed, some failed.
   fail "FLAKE DETECTED (non-deterministic): ${PASS_COUNT} pass, ${FAIL_COUNT} fail across ${SOAK_N} runs." \
-    $'\nPolicy: file a P2 bug before retrying to green. See packages/session-proxy/TESTING.md'
+    $'\nPolicy: file a P2 bug before retrying to green. See docs/test-portability-ledger.md'
 elif [ "${FAIL_COUNT}" -gt 0 ]; then
   fail "CONSISTENT FAILURE: ${FAIL_COUNT}/${SOAK_N} runs failed."
 fi

@@ -9,14 +9,14 @@
  *   byte 0 == 0xCC → data-plane frame (framing.ts DataFrame binary format)
  *   byte 0 != 0xCC → control-plane (newline-delimited JSON)
  *
- * This matches the contract in SCHEMA.md §"Data plane":
+ * This matches the contract in PROTOCOL.md §2.2 / schemas/data-plane-framing.json:
  *   "Control-plane and data-plane traffic are multiplexed on the same
  *    connection via a leading magic byte (data plane: 0xCC; control plane:
  *    JSON, never starts with 0xCC)."
  *
  * # Data-plane framing (framing.ts format)
  *
- * Data frames on the wire use the format defined in framing.ts / SCHEMA.md:
+ * Data frames on the wire use the format defined in framing.ts / PROTOCOL.md §2.2:
  *   [u8 MAGIC=0xCC][u32be SEQ][u32be PAYLEN][u16be IDLEN][PANEID UTF-8][PAYLOAD]
  *
  * Total frame size: 11 + IDLEN + PAYLEN bytes. The receive path parses the

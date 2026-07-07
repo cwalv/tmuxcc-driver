@@ -20,5 +20,5 @@ export {
 } from "./info.js";
 
 // Re-export the structured payload shapes so consumers get the typed surface
-// from one import path (they may also import them from @tmuxcc/session-proxy).
+// from one import path (they may also import them from @tmuxcc/protocol).
 export type { ServerProxyInfoPayload, SessionProxyInfoPayload } from "@tmuxcc/protocol";

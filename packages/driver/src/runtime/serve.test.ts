@@ -680,7 +680,7 @@ describe("createControlServer", () => {
 // ---------------------------------------------------------------------------
 // Multi-client snapshot fan-out (tc-j9c.7)
 //
-// Verifies the fan-out contract from SCHEMA.md "Multiple clients on one session-proxy":
+// Verifies the fan-out contract (multiple clients on one session-proxy):
 //   - Each connection receives its own independent snapshot (seq=1).
 //   - A single tmux event fans out as N session-proxy-wire deltas, one per client,
 //     each stamped with that client's per-connection seq counter (seq=2, 3, …).

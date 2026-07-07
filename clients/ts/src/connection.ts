@@ -205,7 +205,7 @@ export type StateChangeHandler = (state: ConnectionState) => void;
  * ```
  *
  * Transport is injected by the caller; the connection never creates one.
- * For tests use createInMemoryTransportPair() from @tmuxcc/session-proxy.
+ * For tests use createInMemoryTransportPair() from @tmuxcc/protocol.
  */
 export class SessionProxyConnection {
   // ── Injected transport ────────────────────────────────────────────────────

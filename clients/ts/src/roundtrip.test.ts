@@ -323,7 +323,7 @@ function jsonRoundTrip<T>(value: T): T {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe("wire round-trip — cross-package import from @tmuxcc/session-proxy", () => {
+describe("wire round-trip — cross-package import from @tmuxcc/protocol", () => {
   // ── Control plane: session-proxy→client ──────────────────────────────────────────
 
   describe("control plane — session-proxy→client JSON round-trips", () => {

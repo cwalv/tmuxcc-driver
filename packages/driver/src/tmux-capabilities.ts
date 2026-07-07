@@ -30,7 +30,7 @@
 import { spawnSync } from "node:child_process";
 import type { TmuxCapabilityMap } from "@tmuxcc/protocol";
 
-// Re-export the wire type so callers inside @tmuxcc/server-proxy can import
+// Re-export the wire type so callers inside @tmuxcc/driver can import
 // TmuxCapabilityMap from this module rather than going through @tmuxcc/protocol
 // directly (one import point, cleaner dependency graph).
 export type { TmuxCapabilityMap };

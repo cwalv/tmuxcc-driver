@@ -235,7 +235,7 @@ protocol/
 ## 10. Conformance
 
 TS implementations validate against these schemas in CI using ajv (v8).  
-See `packages/session-proxy/src/wire/protocol-conformance.test.ts`.
+See `packages/protocol/src/protocol-conformance.test.ts`.
 
 Future non-TS implementations MUST pass the same golden transcripts. The generation direction flips for non-TS daemons — they generate types FROM these schemas (tc-5ev.1 Rust-future decision record).
 

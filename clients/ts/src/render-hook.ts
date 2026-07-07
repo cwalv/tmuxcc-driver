@@ -258,7 +258,7 @@ export interface RenderHook {
    *
    * `exitCode` is the process exit code if the session-proxy captured it.  It is
    * absent when the underlying tmux notification did not carry exit status
-   * (the most common case — see PaneClosedMessage in @tmuxcc/session-proxy).
+   * (the most common case — see PaneClosedMessage in @tmuxcc/protocol).
    *
    * `cause` (tc-u7cu.6) is the close-cause tag — PRESENT when a wire verb from
    * a specific connection caused the close (close-pane / kill-window).  The
@@ -424,7 +424,7 @@ export interface RenderHook {
    * The layout of a window changed (panes added, removed, or resized).
    *
    * `layout` is the complete current geometry as a structured tree (see
-   * WindowLayout in @tmuxcc/session-proxy).  Renderers should apply the layout
+   * WindowLayout in @tmuxcc/protocol).  Renderers should apply the layout
    * ATOMICALLY: update all pane rects in one pass to avoid flicker.
    *
    * This callback fires both from snapshot replay (one call per window that

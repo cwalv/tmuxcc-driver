@@ -4,7 +4,7 @@
  * # Design
  *
  * The server-proxy holds ONE thin `tmux -L <socketName> -CC attach` connection
- * purely to receive `%sessions-changed` notifications. Per SCHEMA.md:
+ * purely to receive `%sessions-changed` notifications. Design rule:
  *   "Hold one thin `tmux -L <socketName> -CC attach` connection purely to
  *    receive `%sessions-changed` notifications. Do NOT process pane events."
  *
