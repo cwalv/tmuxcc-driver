@@ -171,8 +171,8 @@ classification, client identity on the wire, binding cardinality, the single-soc
 collapse, the tmux capability model — live in
 [`docs/ownership-seams-decisions.md`](docs/ownership-seams-decisions.md). The
 durable-state registry (the `@tmuxcc-*` option namespace and its ownership
-semantics) is the cross-repo contract in `protocol/state-ownership.md`
-([forward pointer — being written as bead tc-jxrv's A3](protocol/state-ownership.md)).
+semantics) is the cross-repo contract in
+[`protocol/state-ownership.md`](protocol/state-ownership.md).
 
 ## 7. Where the contract lives
 
@@ -184,8 +184,8 @@ that enforce it, so a contract change and its schema change land in one commit:
   versioning, and wire invariants.
 - [`protocol/session-lifecycle.md`](protocol/session-lifecycle.md) — the normative
   session create/claim/reap ordering contract.
-- `protocol/state-ownership.md` — the durable-state / ownership-semantics contract
-  (forward pointer, §6).
+- [`protocol/state-ownership.md`](protocol/state-ownership.md) — the durable-state
+  / ownership-semantics contract (§6).
 - `protocol/schemas/`, `protocol/golden/`, `protocol/transcripts/` — the JSON
   schemas, golden connect flows, and recorded transcripts that SDKs validate
   against (`protocol/PROTOCOL.md` §9).

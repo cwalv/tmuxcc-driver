@@ -293,8 +293,8 @@ in full elsewhere; this section is a set of **pointers**, not a restatement.
 - **Broker idle-exit.** The broker self-exits after an idle grace period
   (`--idle-exit-ms`, default 5 min) when no client is connected; a client must
   be prepared to re-launch/reconnect the broker rather than assume it is
-  permanently resident. → driver `ARCHITECTURE.md` (broker lifecycle;
-  forthcoming, A1).
+  permanently resident. → the tmuxcc-driver repo's `ARCHITECTURE.md` §4
+  ("Lifetime & exit").
 
 ---
 
