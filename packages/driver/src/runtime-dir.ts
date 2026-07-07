@@ -1,7 +1,7 @@
 /**
  * Runtime directory helpers — path resolution for server-proxy and session-proxy sockets.
  *
- * Follows SCHEMA.md "Trust and security model":
+ * Follows the repo-root ARCHITECTURE.md §"Runtime dirs & trust model":
  *   - Sockets live under $XDG_RUNTIME_DIR/tmuxcc/<socketName>/ (or
  *     /tmp/tmuxcc-<uid>/<socketName>/ as fallback) with directory mode 0700
  *     and socket mode 0600.

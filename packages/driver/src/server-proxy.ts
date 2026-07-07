@@ -1,5 +1,6 @@
 /**
- * ServerProxy — the per-socket discovery and lifecycle service (SCHEMA.md Stage 2).
+ * ServerProxy — the per-socket discovery and lifecycle service
+ * (repo-root ARCHITECTURE.md §"Process model").
  *
  * # Public API
  *
@@ -1212,7 +1213,8 @@ class ServerProxyImpl implements ServerProxyHandle {
    *
    * Client notification is session-scoped by construction: clients attached
    * to THAT session held connections to the dead session-proxy's socket, which the
-   * kernel closed when the process died.  Per SCHEMA.md ("SessionProxy errors"):
+   * kernel closed when the process died.  Per protocol/PROTOCOL.md §5
+   * (request/response correlation — ErrorMessage semantics):
    * after a session-proxy connection dies the client must consider it dead and
    * reconnect through the server-proxy — the connection close IS the wire-level
    * signal.  No server-proxy-wide message is sent; sibling sessions' session-proxies and
@@ -1490,7 +1492,7 @@ class ServerProxyImpl implements ServerProxyHandle {
       this._clients.delete(transport);
     });
 
-    // Send snapshot at seq=2 per SCHEMA.md handshake sequence:
+    // Send snapshot at seq=2 per protocol/PROTOCOL.md §3 handshake sequence (§3.2):
     //   server-proxy.capabilities (seq=1) → client.capabilities (seq=1) → sessions.snapshot (seq=2)
     const snapshot = this._buildSnapshot(state.nextSeq);
     state.nextSeq++;
