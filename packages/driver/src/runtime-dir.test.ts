@@ -16,7 +16,7 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { gcStaleRuntimeDirs, probeLiveSocket, resolveBaseRuntimeDir } from "./runtime-dir.js";
+import { gcStaleRuntimeDirs, probeLiveSocket, resolveBaseRuntimeDir, runtimeBasePath } from "./runtime-dir.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -446,5 +446,61 @@ describe("resolveBaseRuntimeDir — security: hijack detection (tc-idlp)", () =>
       /owned by uid|unsafe permissions/,
       "/tmp must be rejected as a runtime dir (wrong owner or unsafe permissions)",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runtimeBasePath tests (tc-ehzi.6)
+//
+// Verifies the pure formula (no fs calls).  Each case asserts on the
+// returned path and confirms the path was NOT created on disk.
+// ---------------------------------------------------------------------------
+
+describe("runtimeBasePath — pure formula, no fs calls (tc-ehzi.6)", () => {
+  it("returns the runtimeDir override unchanged without touching the filesystem", () => {
+    const override = path.join(os.tmpdir(), `tmuxcc-test-rbp-override-${Date.now()}`);
+    // Must not exist; any prior creation would invalidate the no-fs-calls assertion.
+    assert.ok(!fs.existsSync(override), "precondition: override dir must not exist");
+    const result = runtimeBasePath({ runtimeDir: override });
+    assert.equal(result, override, "returns the override path as-is");
+    assert.ok(!fs.existsSync(override), "must NOT create the directory (no fs calls)");
+  });
+
+  it("returns $XDG_RUNTIME_DIR/tmuxcc when XDG_RUNTIME_DIR is set, without creating it", () => {
+    const fakeXdg = path.join(os.tmpdir(), `tmuxcc-test-rbp-xdg-${Date.now()}`);
+    const prev = process.env["XDG_RUNTIME_DIR"];
+    process.env["XDG_RUNTIME_DIR"] = fakeXdg;
+    try {
+      assert.ok(!fs.existsSync(fakeXdg), "precondition: fake XDG dir must not exist");
+      const result = runtimeBasePath();
+      assert.equal(result, path.join(fakeXdg, "tmuxcc"), "returns XDG/tmuxcc");
+      assert.ok(!fs.existsSync(fakeXdg), "must NOT create any directories (no fs calls)");
+    } finally {
+      if (prev === undefined) {
+        delete process.env["XDG_RUNTIME_DIR"];
+      } else {
+        process.env["XDG_RUNTIME_DIR"] = prev;
+      }
+    }
+  });
+
+  it("returns os.tmpdir()/tmuxcc-<uid> when XDG_RUNTIME_DIR is unset, without creating it", () => {
+    const prev = process.env["XDG_RUNTIME_DIR"];
+    delete process.env["XDG_RUNTIME_DIR"];
+    try {
+      const uid = process.getuid?.() ?? "0";
+      const expected = path.join(os.tmpdir(), `tmuxcc-${uid}`);
+      const result = runtimeBasePath();
+      assert.equal(result, expected, "returns tmpdir/tmuxcc-<uid>");
+      // We cannot guarantee the fallback path does not already exist on a dev
+      // machine (it is created by the broker at startup).  We therefore only
+      // assert on the returned string, not on whether it exists.
+    } finally {
+      if (prev === undefined) {
+        delete process.env["XDG_RUNTIME_DIR"];
+      } else {
+        process.env["XDG_RUNTIME_DIR"] = prev;
+      }
+    }
   });
 });

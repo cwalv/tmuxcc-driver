@@ -27,19 +27,33 @@ export interface RuntimeDirOptions {
 }
 
 /**
+ * Compute the base tmuxcc runtime directory path without creating or
+ * verifying it on disk (pure formula, no fs calls).
+ *
+ * Formula:
+ *   $XDG_RUNTIME_DIR/tmuxcc  — when XDG_RUNTIME_DIR is set
+ *   /tmp/tmuxcc-<uid>         — fallback
+ *
+ * When opts.runtimeDir is provided it is returned as-is.  Use this
+ * function when you need the path for inspection or test fixtures
+ * without the side-effect of creating the directory.  Callers that
+ * need the directory to exist use resolveBaseRuntimeDir() instead.
+ */
+export function runtimeBasePath(opts: RuntimeDirOptions = {}): string {
+  if (opts.runtimeDir) {
+    return opts.runtimeDir;
+  }
+  const xdg = process.env["XDG_RUNTIME_DIR"];
+  return xdg
+    ? path.join(xdg, "tmuxcc")
+    : path.join(os.tmpdir(), `tmuxcc-${process.getuid?.() ?? "0"}`);
+}
+
+/**
  * Resolve the base tmuxcc runtime directory and ensure it exists at mode 0700.
  */
 export function resolveBaseRuntimeDir(opts: RuntimeDirOptions = {}): string {
-  if (opts.runtimeDir) {
-    ensureDir(opts.runtimeDir, 0o700);
-    return opts.runtimeDir;
-  }
-
-  const xdg = process.env["XDG_RUNTIME_DIR"];
-  const base = xdg
-    ? path.join(xdg, "tmuxcc")
-    : path.join(os.tmpdir(), `tmuxcc-${process.getuid?.() ?? "0"}`);
-
+  const base = runtimeBasePath(opts);
   ensureDir(base, 0o700);
   return base;
 }
