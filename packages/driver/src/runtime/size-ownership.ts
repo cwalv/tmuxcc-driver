@@ -43,11 +43,23 @@
  * No explicit "hold ownership" escape hatch is built (S3 defers it unless the
  * debounce proves insufficient in practice).
  *
- * ## Keying
+ * ## Keying and connection refcounting
  *
- * Clients are keyed by an opaque, caller-supplied string (the durable client
- * identity from D2 when present, else the connection id). The policy never
+ * Clients are keyed by an opaque, caller-supplied string: the durable client
+ * identity from D2 when present (else the connection id). The policy never
  * interprets the key; it only compares for equality.
+ *
+ * One window can hold SEVERAL connections under the same identity key at once —
+ * its main session connection, an auxiliary pane-scoped connection, and a
+ * transient old/new overlap across a reconnect all present the same durable
+ * identity. Candidacy is therefore REFCOUNTED per key: a key is a size candidate
+ * while >=1 of its live connections registered as a candidate. Only the count's
+ * 0->1 edge can make a key own (the first candidate), and only its 1->0 edge (the
+ * LAST candidate connection for a key closing) drops candidacy / hands off
+ * ownership. Without the refcount, one connection closing would strip a
+ * still-connected window's candidacy: `removeClient` fires once per transport, so
+ * an auxiliary or overlapping same-identity connection closing would delete the
+ * shared key out from under the connection still driving size.
  *
  * @module runtime/size-ownership
  */
@@ -85,19 +97,28 @@ export interface SizeOwnershipPolicyOptions {
  */
 export interface SizeOwnershipPolicy {
   /**
-   * Register a client. `candidate` is false for clients that can never own size
-   * (tmux `attach -r` parity: `ignore-size`/`read-only` attach flags) — they are
-   * tracked so removal is symmetric but never become owner. The first candidate
-   * registered becomes the owner immediately (no debounce — nothing to contend).
+   * Register a connection for `key`. `candidate` is false for connections that
+   * can never own size (tmux `attach -r` parity: `ignore-size`/`read-only` attach
+   * flags) — those are ignored entirely (not refcounted). A candidate connection
+   * increments `key`'s candidate refcount; the FIRST candidate for the session
+   * (an ownerless session's 0->1 edge) becomes the owner immediately (no debounce
+   * — nothing to contend). A further candidate connection — whether for a key
+   * already present or a second key — never steals ownership on connect (mere
+   * connection is not activity).
    */
   addClient(key: string, candidate: boolean): void;
 
   /**
-   * Deregister a client (transport closed). If the departing client was the
-   * owner, ownership passes immediately (no debounce) to the most-recently-active
-   * remaining candidate, or to `null` if none remain.
+   * Deregister a connection for `key` (transport closed). `wasCandidate` must
+   * match the `candidate` this connection registered with — a non-candidate
+   * connection closing is a no-op. Decrements `key`'s candidate refcount; only
+   * when the LAST candidate connection for `key` closes (its 1->0 edge) does the
+   * key stop being a candidate. If that key was the owner, ownership passes
+   * immediately (no debounce) to the most-recently-active remaining candidate, or
+   * to `null` if none remain. A key that still has other live candidate
+   * connections keeps its candidacy and ownership untouched.
    */
-  removeClient(key: string): void;
+  removeClient(key: string, wasCandidate: boolean): void;
 
   /**
    * Record an activity signal (`input` or `client.focus`) from a client. Only
@@ -129,9 +150,15 @@ export function createSizeOwnershipPolicy(
   const clock = opts.clock ?? realClock();
   const onOwnerChange = opts.onOwnerChange;
 
-  /** Clients eligible to own size (attached, not ignore-size/read-only). */
-  const candidates = new Set<string>();
-  /** Last activity timestamp per candidate — the tie-break on owner departure. */
+  /**
+   * Live candidate-connection count per key. A key is eligible to own size while
+   * this is >=1 (present in the map); an entry at 0 is deleted, so `.has(key)` is
+   * the candidacy test. Refcounting keeps one window's several same-identity
+   * connections (main + pane-scoped aux + reconnect overlap) from stripping each
+   * other's candidacy when any one of them closes.
+   */
+  const candidateRefs = new Map<string, number>();
+  /** Last activity timestamp per candidate key — the tie-break on owner departure. */
   const lastActivity = new Map<string, number>();
 
   let owner: string | null = null;
@@ -159,7 +186,7 @@ export function createSizeOwnershipPolicy(
     timer = null;
     const challenger = pending;
     pending = null;
-    if (challenger !== null && candidates.has(challenger)) {
+    if (challenger !== null && candidateRefs.has(challenger)) {
       setOwner(challenger);
     }
   }
@@ -167,7 +194,7 @@ export function createSizeOwnershipPolicy(
   function mostRecentCandidate(): string | null {
     let best: string | null = null;
     let bestAt = -Infinity;
-    for (const key of candidates) {
+    for (const key of candidateRefs.keys()) {
       const at = lastActivity.get(key) ?? -Infinity;
       if (best === null || at > bestAt) {
         best = key;
@@ -180,27 +207,43 @@ export function createSizeOwnershipPolicy(
   return {
     addClient(key: string, candidate: boolean): void {
       if (!candidate) return;
-      candidates.add(key);
+      const prev = candidateRefs.get(key) ?? 0;
+      candidateRefs.set(key, prev + 1);
+      // Owner only on the ownerless-session edge. `owner === null` implies no key
+      // is a candidate yet, so this is necessarily the session's first candidate;
+      // a second connection for this key (prev>0) or a rival key never contends
+      // on connect (mere connection is not activity).
       if (owner === null) {
-        // First candidate owns immediately — no contention to debounce.
         setOwner(key);
       }
     },
 
-    removeClient(key: string): void {
-      candidates.delete(key);
+    removeClient(key: string, wasCandidate: boolean): void {
+      if (!wasCandidate) return; // non-candidate connection: never refcounted
+      const remaining = (candidateRefs.get(key) ?? 0) - 1;
+      if (remaining > 0) {
+        // Other live candidate connections for this key remain: the key is still a
+        // candidate and, if it was, still the owner. Nothing changes.
+        candidateRefs.set(key, remaining);
+        return;
+      }
+      // The LAST candidate connection for this key closed — it is no longer a
+      // candidate. (A negative `remaining` from a spurious double-remove lands
+      // here too and is idempotent: delete of an absent key is a no-op.)
+      candidateRefs.delete(key);
       lastActivity.delete(key);
       if (pending === key) clearPending();
       if (owner === key) {
-        // Owner left: hand off immediately (no debounce — the departed owner
-        // cannot contest) to the most-recently-active remaining candidate.
+        // Owner's last connection left: hand off immediately (no debounce — the
+        // departed owner cannot contest) to the most-recently-active remaining
+        // candidate.
         clearPending();
         setOwner(mostRecentCandidate());
       }
     },
 
     noteActivity(key: string): void {
-      if (!candidates.has(key)) return; // non-candidate / unknown: not activity
+      if (!candidateRefs.has(key)) return; // non-candidate / unknown: not activity
       lastActivity.set(key, clock.now());
       if (key === owner) {
         // Owner reasserted — cancel any challenge in flight. This is what makes

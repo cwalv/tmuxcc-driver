@@ -1081,10 +1081,16 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
 
       // 1a'. Size-ownership registration (tc-76m8.3). Key by the durable client
       //      identity (D2) when present, else the connection id — both stable for
-      //      this transport's lifetime. A client is a size CANDIDATE unless it
+      //      this transport's lifetime. A connection is a size CANDIDATE unless it
       //      attached with `ignore-size` or `read-only` (tmux `attach -r` parity:
       //      those flags mean "never drive size"). The first candidate becomes
       //      owner immediately; thereafter ownership follows activity.
+      //
+      //      tc-51oo: one window presents ONE identity across all its connections
+      //      (main session + pane-scoped aux + reconnect overlap), so several
+      //      connections collapse to the same clientKey. Candidacy is refcounted
+      //      per key inside the policy (see size-ownership.ts) — closing one
+      //      connection never strips a still-connected same-identity candidate.
       const clientKey: string =
         server.clientIdentityFor(transport)?.id ??
         (server.connectionIdFor(transport) as unknown as string);
@@ -1511,10 +1517,14 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
         // paused pane's max. Detaching the slowest consumer can itself drop the
         // max to/below low-water and resume the pane for the remaining clients.
         fc.removeClient(transport);
-        // tc-76m8.3: drop this client from size-ownership. If it was the owner,
-        // ownership hands off immediately (no debounce) to the most-recently
-        // active remaining candidate, which re-applies that client's viewport.
-        sizeOwnership.removeClient(clientKey);
+        // tc-76m8.3 / tc-51oo: drop this CONNECTION from size-ownership. Candidacy
+        // is refcounted per identity key, so `wasCandidate` must match this
+        // connection's attach-time candidacy — a non-candidate (ignore-size /
+        // read-only) close is a no-op, and closing one same-identity connection
+        // never strips a still-connected candidate's candidacy. Only the last
+        // candidate connection for the key hands off (no debounce) to the
+        // most-recently-active remaining candidate, which re-applies its viewport.
+        sizeOwnership.removeClient(clientKey, isSizeCandidate);
         lastResizeByClient.delete(clientKey);
         server.removeClient(transport);
       });

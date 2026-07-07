@@ -23,6 +23,9 @@
  *       during simultaneous typing.
  *   T3. Single-client D4 mechanics unchanged — the sole client drives size; a
  *       client that attached with the `ignore-size` flag never does.
+ *   T4. Refcounted candidacy (tc-51oo) — a window's several same-identity
+ *       connections share one candidacy slot; closing an overlapping or auxiliary
+ *       connection never strips the still-connected candidate's ownership.
  *
  * @module runtime/size-ownership.e2e.test
  */
@@ -36,7 +39,7 @@ import {
   runClientHandshake,
   WIRE_PROTOCOL_VERSION,
 } from "@tmuxcc/protocol";
-import type { Transport, PaneId } from "@tmuxcc/protocol";
+import type { Transport, PaneId, ClientFlags } from "@tmuxcc/protocol";
 
 import { createSessionProxy } from "./session-proxy.js";
 import type { SessionProxy } from "./session-proxy.js";
@@ -183,11 +186,16 @@ interface Peer {
   resize(paneId: PaneId, cols: number, rows: number): void;
   input(paneId: PaneId): void;
   focus(): void;
+  close(): void;
 }
 
-async function attach(sessionProxy: SessionProxy, identityId: string): Promise<Peer> {
+async function attach(
+  sessionProxy: SessionProxy,
+  identityId: string,
+  flags?: ClientFlags,
+): Promise<Peer> {
   const { sessionProxy: dt, client: ct } = createInMemoryTransportPair();
-  const addP = sessionProxy.addClient(dt);
+  const addP = sessionProxy.addClient(dt, flags !== undefined ? { flags } : {});
   await runClientHandshake(ct, CLIENT_CAPS, "session-proxy.capabilities", { id: identityId });
   await addP;
   const peer: Peer = {
@@ -201,6 +209,9 @@ async function attach(sessionProxy: SessionProxy, identityId: string): Promise<P
     },
     focus() {
       ct.sendControl({ type: "client.focus", seq: ++peer.seq });
+    },
+    close() {
+      ct.close();
     },
   };
   return peer;
@@ -382,6 +393,97 @@ describe(
             // Geometry holds at the session's initial 80x24 — the ignore-size
             // client never drove `refresh-client -C` (D4 flag mechanics intact).
             await assertStaysSize(sock, session, 80, 24, 500, "ignore-size client never drives size");
+          } finally {
+            sessionProxy.kill();
+            killTmuxServer(sock);
+          }
+        }
+      },
+    );
+
+    it(
+      "T4: closing one same-identity connection never strips a still-connected candidate's ownership (tc-51oo)",
+      { timeout: 40_000 },
+      async () => {
+        // A window presents ONE durable identity across several connections. The
+        // policy refcounts candidacy per identity, so closing an overlapping or
+        // auxiliary same-identity connection must not strip the window's candidacy.
+        // Pre-fix (a non-refcounted Set + unconditional removeClient) this delete
+        // stripped the shared key, froze the surviving connection's viewport, and
+        // dropped every subsequent resize — exactly the S3/D4 residual this fixes.
+
+        // ── Scenario A: overlapping candidates (reconnect blip) ────────────────
+        // Two candidate connections share identity "win" (old + new across a
+        // reconnect overlap). Close the old one; the new one must still drive size.
+        {
+          const sock = sockName("overlap");
+          const session = "so-overlap";
+          after(() => killTmuxServer(sock));
+          const { clock } = makeManualClock();
+          const sessionProxy = createSessionProxy({
+            host: { socketName: sock, sessionName: session, cols: 80, rows: 24 },
+            sizeOwnership: { debounceMs: DEBOUNCE_MS, clock },
+          });
+          sessionProxy.host.onError(() => {});
+          await sessionProxy.start();
+          try {
+            const older = await attach(sessionProxy, "win"); // first candidate → owner
+            const newer = await attach(sessionProxy, "win"); // same identity → refcount 2
+            const pid = firstPaneId(sessionProxy);
+
+            older.resize(pid, 200, 50);
+            await waitForSize(sock, session, 200, 50, 15_000, "owner drives size");
+
+            // The old connection closes. The identity keeps a live candidate
+            // connection (newer), so it stays owner — newer's resize still reflows.
+            older.close();
+            newer.resize(pid, 111, 37);
+            await waitForSize(
+              sock,
+              session,
+              111,
+              37,
+              15_000,
+              "surviving same-identity connection still drives size after the overlap closed",
+            );
+          } finally {
+            sessionProxy.kill();
+            killTmuxServer(sock);
+          }
+        }
+
+        // ── Scenario B: auxiliary non-candidate (pane-scoped) close ────────────
+        // A candidate main connection + a same-identity ignore-size aux. Closing
+        // the aux is a no-op for candidacy; the main connection keeps ownership.
+        {
+          const sock = sockName("aux");
+          const session = "so-aux";
+          after(() => killTmuxServer(sock));
+          const { clock } = makeManualClock();
+          const sessionProxy = createSessionProxy({
+            host: { socketName: sock, sessionName: session, cols: 80, rows: 24 },
+            sizeOwnership: { debounceMs: DEBOUNCE_MS, clock },
+          });
+          sessionProxy.host.onError(() => {});
+          await sessionProxy.start();
+          try {
+            const main = await attach(sessionProxy, "win"); // candidate → owner
+            const aux = await attach(sessionProxy, "win", { ignoreSize: true }); // non-candidate
+            const pid = firstPaneId(sessionProxy);
+
+            main.resize(pid, 180, 48);
+            await waitForSize(sock, session, 180, 48, 15_000, "main connection owns and drives size");
+
+            aux.close(); // pane-scoped / aux connection closes — must not strip candidacy
+            main.resize(pid, 132, 40);
+            await waitForSize(
+              sock,
+              session,
+              132,
+              40,
+              15_000,
+              "main connection still drives size after the aux connection closed",
+            );
           } finally {
             sessionProxy.kill();
             killTmuxServer(sock);

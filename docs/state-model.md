@@ -302,9 +302,17 @@ two window sizes. Every flap triggers a `%layout-change`, a diff, and a
 session-proxy (D4, tc-4b6k.3) enforces two gates in its `transport.onControl`
 handler, before messages reach `input-path.ts`:
 
-- **ignoreSize gate**: if `flags.ignoreSize === true`, `resize.request` messages
-  from this connection are silently dropped. Only the owning (non-ignoreSize)
-  connection drives `refresh-client -C`.
+- **ignoreSize gate**: `ignoreSize` (and `readOnly`, which implies it) makes a
+  connection a size NON-CANDIDATE — it can never drive `refresh-client -C`. Among
+  the remaining CANDIDATES the size owner is elected by ACTIVITY, not by a static
+  flag (the `SizeOwnershipPolicy`, `runtime/size-ownership.ts`, tc-76m8.3):
+  ownership follows the most-recently-active candidate, debounced on
+  owner-silence, first-candidate-owns, immediate handoff on owner departure. A
+  `resize.request` from a non-owner — a non-candidate, or a candidate that is not
+  the current owner — is silently dropped. Candidacy is refcounted per client
+  identity (tc-51oo): a window's several same-identity connections share one
+  candidacy slot, so closing one (a pane-scoped aux, or a reconnect overlap) never
+  strips a still-connected candidate's candidacy.
 - **readOnly gate**: if `flags.readOnly === true`, `input` messages are silently
   dropped and mutating `command.request` verbs are rejected with
   `{ ok: false, code: "read-only" }`. Read-only queries (`pane.capture`,
@@ -313,34 +321,55 @@ handler, before messages reach `input-path.ts`:
 `ClientFlags` is stored on `ClientState` in `serve.ts` and surfaced in the
 `session-proxy.info` → `clients[].flags` field for observability.
 
-### Extension policy (current)
+### Extension policy (tc-51oo)
 
-The VS Code extension (D4, `server-proxy-connect.ts`) applies a simple ownership
-rule based on the `session.claim` response:
+Ordinary VS Code windows attach as size CANDIDATES (no size flags) and let the
+driver's activity policy elect the owner — the extension no longer pre-decides
+ownership from the `session.claim` `created` bit. A connection carries flags only
+where "never drives size" is semantically true of it: read-only observers,
+auxiliary pane-scoped connections, and the anonymous SDK reader (driver-admin),
+which all pass `ignoreSize`.
 
-| Path | `created` | flags sent |
+| Path (`server-proxy-connect.ts`, unless noted) | flags sent | size role |
 |---|---|---|
-| `connectServerProxyAndClaim` (session creator) | `true` | none (owner) |
-| `connectServerProxyAndClaim` (session joiner) | `false` | `{ ignoreSize: true }` |
-| `connectServerProxyAndAttachPane` | n/a | `{ ignoreSize: true }` |
+| `connectServerProxyAndClaim` (claim/join) | `{ pullHydration }` | candidate |
+| `connectServerProxyAndClaim` (read-only observe) | `{ ignoreSize, readOnly, pullHydration }` | observer |
+| `connectServerProxyAndAttachSession` (silent reattach) | none | candidate |
+| `connectServerProxyAndAttachSession` (read-only observe) | `{ ignoreSize, readOnly }` | observer |
+| `connectServerProxyAndCreateUnique` (mints a fresh session) | none | candidate (first → owner) |
+| `connectServerProxyAndAttachPane` (auxiliary pane-scoped) | `{ ignoreSize, pullHydration }` | non-candidate |
+| driver-admin `fetchSessionProxyInfo` (`driver-admin/src/info.ts`) | `{ ignoreSize }` | non-candidate |
 
-The `readOnly` flag is wired in the driver but not applied by the extension in
-this revision. The primary goal is **zero size flap** — `ignoreSize` achieves it.
+`created` no longer affects the flags a claim connection sends — creator and
+joiner both attach as candidates and the driver arbitrates by activity (the
+`created` bit still gates create-time-only template application, unrelated to
+size). The pane-scoped connection stays a non-candidate on SEMANTIC grounds — an
+auxiliary pane-targeted connection is not its window's geometry driver, the main
+session connection is; refcounted candidacy (not this flag) is what keeps closing
+the aux from stripping the window's candidacy.
+
+> Pre-existing pullHydration inconsistency (NOT a size concern, unchanged here):
+> `connectServerProxyAndAttachSession` and `connectServerProxyAndCreateUnique` do
+> not declare `pullHydration`, contra the tc-76m8.28 "every extension data
+> connection declares pullHydration" convention — the driver falls back to its
+> push-replay for them (degraded, never worse). Tracked separately; left as-is so
+> this size-candidacy change does not perturb hydration behavior.
 
 ### Future-facility seam: multi-client arbitration modes
 
-The `ClientFlags` wire slot and the driver gates are the _infrastructure_ for
-richer size arbitration. Planned modes (reserved, not yet implemented):
+The shipped policy is the **activity-elected owner** (D4 mechanism + tc-76m8.3
+policy, refcounted candidacy tc-51oo, described above). The `ClientFlags` wire
+slot and the driver gates are also the _infrastructure_ for richer arbitration
+modes that remain reserved (operator carve-out, not yet implemented):
 
 1. **Minimum-size** (tmux default): smallest viewport among all attached clients.
-   Currently bypassed by control-mode single-client architecture.
-2. **Owner-only** (current, D4): one designated client drives `refresh-client -C`;
-   others carry `ignoreSize: true`. The "owner" is whichever connection created
-   the session; ownership transfer on reconnect is TBD.
+   Currently bypassed by the control-mode single-client architecture.
+2. **Manual / owner-pin**: an operator-chosen client holds size regardless of
+   activity (an explicit "hold ownership" escape hatch above the activity policy).
 3. **Latest-sender** (S3, deleted): last `resize.request` wins regardless of
    source — the pre-D4 behavior, now gated out for non-owners.
 
-Owner-transfer across reconnects (a previous owner disconnects and reconnects
-with `created === false`) is left for a future bead: the newly reconnected window
-would need to re-acquire ownership via a separate signal (e.g. a
-`session.claim-ownership` server-proxy command).
+Owner-transfer across reconnects is no longer TBD: a reattaching window attaches
+as a candidate and — when it is the sole/most-recently-active candidate — owns via
+the activity policy (first-candidate-owns on an ownerless session, or handoff
+after owner-silence between windows). No `session.claim-ownership` verb is needed.

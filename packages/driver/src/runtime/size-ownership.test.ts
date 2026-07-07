@@ -193,14 +193,14 @@ describe("SizeOwnershipPolicy (tc-76m8.3)", () => {
     policy.noteActivity("B");
 
     // A (the owner) leaves → immediate handoff (no debounce) to B (most recent).
-    policy.removeClient("A");
+    policy.removeClient("A", true);
     assert.ok(policy.isSizeOwner("B"), "handoff to most-recently-active remaining peer");
     assert.deepEqual(changes, ["B"]);
 
     // Everyone leaves → each owner departure hands off, last one to null.
-    policy.removeClient("B"); // owner leaves → C (the only remaining) takes over
+    policy.removeClient("B", true); // owner leaves → C (the only remaining) takes over
     assert.ok(policy.isSizeOwner("C"));
-    policy.removeClient("C"); // last candidate leaves → no owner
+    policy.removeClient("C", true); // last candidate leaves → no owner
     assert.equal(policy.owner, null);
     assert.deepEqual(changes, ["B", "C", null]);
   });
@@ -219,7 +219,7 @@ describe("SizeOwnershipPolicy (tc-76m8.3)", () => {
 
     policy.noteActivity("B"); // B challenges; timer armed
     assert.equal(pending(), 1);
-    policy.removeClient("B"); // B disconnects before promotion
+    policy.removeClient("B", true); // B disconnects before promotion
     assert.equal(pending(), 0, "the pending timer was cleared");
     advance(DEBOUNCE * 2);
     assert.ok(policy.isSizeOwner("A"), "A keeps ownership; the vanished challenger never wins");
@@ -235,6 +235,51 @@ describe("SizeOwnershipPolicy (tc-76m8.3)", () => {
     policy.noteActivity("solo");
     advance(DEBOUNCE * 3);
     assert.ok(policy.isSizeOwner("solo"));
+  });
+
+  it("tc-51oo: candidacy is refcounted per key — closing one same-key connection keeps candidacy/ownership", () => {
+    const { clock } = makeFakeClock();
+    const changes: (string | null)[] = [];
+    const policy = createSizeOwnershipPolicy({
+      debounceMs: DEBOUNCE,
+      clock,
+      onOwnerChange: (o) => changes.push(o),
+    });
+
+    // One window presents ONE identity across TWO connections (e.g. an old/new
+    // reconnect overlap, or a main + pane-scoped connection both as candidates).
+    policy.addClient("win", true); // conn #1 → first candidate → owner
+    policy.addClient("win", true); // conn #2, same identity → no steal, refcount 2
+    assert.equal(policy.owner, "win");
+    assert.deepEqual(changes, ["win"]);
+
+    // Closing conn #1 must NOT strip the still-connected conn #2's candidacy.
+    policy.removeClient("win", true);
+    assert.ok(policy.isSizeOwner("win"), "key still owns while another candidate connection is live");
+    assert.deepEqual(changes, ["win"], "no owner change while a candidate connection remains");
+
+    // Only when the LAST candidate connection closes does the key stop owning.
+    policy.removeClient("win", true);
+    assert.equal(policy.owner, null);
+    assert.deepEqual(changes, ["win", null]);
+  });
+
+  it("tc-51oo: a non-candidate connection close is a no-op (never strips a same-key candidate)", () => {
+    const { clock, advance } = makeFakeClock();
+    const policy = createSizeOwnershipPolicy({ debounceMs: DEBOUNCE, clock });
+
+    policy.addClient("win", true); // candidate main connection → owner
+    policy.addClient("win", false); // non-candidate aux (ignore-size) — not refcounted
+    assert.ok(policy.isSizeOwner("win"));
+
+    // The aux connection closing must not touch the window's candidacy/ownership.
+    policy.removeClient("win", false);
+    assert.ok(policy.isSizeOwner("win"), "non-candidate close leaves the candidate untouched");
+
+    // And activity still flows to the still-owning key.
+    policy.noteActivity("win");
+    advance(DEBOUNCE * 2);
+    assert.ok(policy.isSizeOwner("win"));
   });
 
   it("dispose cancels any pending timer", () => {

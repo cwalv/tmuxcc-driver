@@ -275,6 +275,13 @@ export async function fetchSessionProxyInfo(
       type: "session.attach",
       seq: 1,
       sessionId: attachSessionId,
+      // tc-51oo: driver-admin is a flagless, anonymous SDK reader that never
+      // resizes. Attach with ignore-size so it is never a size candidate. Now
+      // that ordinary VS Code windows attach flagless (they ARE the size drivers),
+      // an unflagged admin connection to an ownerless session would transiently
+      // become its size owner — harmless (it issues no resize) but wrong intent;
+      // declaring ignore-size keeps size ownership exclusively with real windows.
+      flags: { ignoreSize: true },
     } as unknown as Parameters<typeof transport.sendControl>[0]);
   });
 
