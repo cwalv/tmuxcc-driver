@@ -43,6 +43,7 @@ import type {
 } from "@tmuxcc/protocol";
 import { parseLayout } from "./parser/layout-string.js";
 import type { LayoutCell } from "./parser/layout-string.js";
+import { mintSocket } from "./runtime/test-tmux-cleanup.js";
 
 // ---------------------------------------------------------------------------
 // Schema setup (ajv)
@@ -76,10 +77,6 @@ before(() => {
 // Harness
 // ---------------------------------------------------------------------------
 
-let counter = 0;
-function nextSocketName(): string {
-  return `tmuxcc-test-gjdx5-${process.pid}-${++counter}-${Date.now()}`;
-}
 
 function tmuxAvailable(): boolean {
   const r = spawnSync("tmux", ["-V"], { stdio: "ignore", timeout: 2_000 });
@@ -208,7 +205,7 @@ describe("freeze-roundtrip (tc-gjdx.5, real tmux)", () => {
 
   it("R1: managed strip session — freeze produces schema-valid template + topology matches", async (t) => {
     if (!haveTmux) return t.skip("tmux not available");
-    const socketName = nextSocketName();
+    const socketName = mintSocket("gjdx5");
     const runtimeDir = makeRuntimeDir();
     let broker: ServerProxyHandle | null = null;
     try {
@@ -268,7 +265,7 @@ describe("freeze-roundtrip (tc-gjdx.5, real tmux)", () => {
 
   it("R2: wild nested-tree session — freeze round-trips topology", async (t) => {
     if (!haveTmux) return t.skip("tmux not available");
-    const socketName = nextSocketName();
+    const socketName = mintSocket("gjdx5");
     const runtimeDir = makeRuntimeDir();
     let broker: ServerProxyHandle | null = null;
     try {
@@ -340,7 +337,7 @@ describe("freeze-roundtrip (tc-gjdx.5, real tmux)", () => {
 
   it("R3: freeze with optional name → name embedded in frozenTemplate", async (t) => {
     if (!haveTmux) return t.skip("tmux not available");
-    const socketName = nextSocketName();
+    const socketName = mintSocket("gjdx5");
     const runtimeDir = makeRuntimeDir();
     let broker: ServerProxyHandle | null = null;
     try {
@@ -375,7 +372,7 @@ describe("freeze-roundtrip (tc-gjdx.5, real tmux)", () => {
 
   it("R4: single-pane session — freeze captures cwd and round-trips", async (t) => {
     if (!haveTmux) return t.skip("tmux not available");
-    const socketName = nextSocketName();
+    const socketName = mintSocket("gjdx5");
     const runtimeDir = makeRuntimeDir();
     let broker: ServerProxyHandle | null = null;
     try {

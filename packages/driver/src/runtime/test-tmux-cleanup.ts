@@ -95,6 +95,9 @@ let hooksInstalled = false;
  */
 const SOCKET_PREFIX = "tmuxcc-test-";
 
+// Per-process counter for mintSocket — guarantees uniqueness within one process.
+let mintCounter = 0;
+
 /**
  * Full validation regex: name must start with `tmuxcc-test-` followed by
  * at least one digit (the owner PID) then a `-`.
@@ -158,6 +161,27 @@ export function trackSocket(sock: string): void {
  */
 export function forgetSocket(sock: string): void {
   tracked.delete(sock);
+}
+
+/**
+ * Mint a conforming `tmuxcc-test-<pid>-<label>-<n>` socket name and
+ * immediately register it with `trackSocket()` for global cleanup.
+ *
+ * This is the ONLY way test code should construct socket names.  Using this
+ * helper guarantees:
+ *   - The name matches `SOCKET_REGEX` (`/^tmuxcc-test-\d+-/`), so the boot
+ *     sweep can identify orphans by their owner PID.
+ *   - The socket is tracked for cleanup in the process-exit hook even if a
+ *     SIGKILL prevents per-test teardown from running.
+ *   - Names are unique within one process (via the monotonic `<n>` counter).
+ *
+ * @param label  Short human-readable tag identifying the test file / scenario.
+ *               Placed AFTER the pid: `tmuxcc-test-<pid>-<label>-<n>`.
+ */
+export function mintSocket(label: string): string {
+  const name = `tmuxcc-test-${process.pid}-${label}-${++mintCounter}`;
+  trackSocket(name);
+  return name;
 }
 
 /**

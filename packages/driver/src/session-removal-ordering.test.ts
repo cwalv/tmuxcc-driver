@@ -52,16 +52,11 @@ import type {
   MessageBase,
   Capabilities,
 } from "@tmuxcc/protocol";
+import { mintSocket } from "./runtime/test-tmux-cleanup.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-let testCounter = 0;
-
-function nextSocketName(): string {
-  return `tmuxcc-test-ord-${process.pid}-${++testCounter}-${Date.now()}`;
-}
 
 function tmuxAvailable(): boolean {
   const r = spawnSync("tmux", ["-V"], { stdio: "ignore", timeout: 2_000 });
@@ -286,7 +281,7 @@ describe("tc-295a.6 L1: sessions.removed ordering (requires tmux)", { skip: !TMU
   let runtimeDir: string;
 
   beforeEach(async () => {
-    socketName = nextSocketName();
+    socketName = mintSocket("ord");
     runtimeDir = makeRuntimeDir("l1");
     serverProxy = createServerProxy({ socketName, runtimeDir });
     await serverProxy.start();
@@ -375,7 +370,7 @@ describe("tc-295a.6 L2: post-destroy C4 reconnect fails (requires tmux)", { skip
   let runtimeDir: string;
 
   beforeEach(async () => {
-    socketName = nextSocketName();
+    socketName = mintSocket("ord");
     runtimeDir = makeRuntimeDir("l2");
     serverProxy = createServerProxy({ socketName, runtimeDir });
     await serverProxy.start();
@@ -462,7 +457,7 @@ describe("tc-295a.6 L3: kill-session-under-load ordering (requires tmux)", { ski
   let runtimeDir: string;
 
   beforeEach(async () => {
-    socketName = nextSocketName();
+    socketName = mintSocket("ord");
     runtimeDir = makeRuntimeDir("l3");
     serverProxy = createServerProxy({ socketName, runtimeDir });
     await serverProxy.start();
@@ -638,7 +633,7 @@ describe("tc-hfxb.19 L4: last-session kill empties the server but still broadcas
   let runtimeDir: string;
 
   beforeEach(async () => {
-    socketName = nextSocketName();
+    socketName = mintSocket("ord");
     runtimeDir = makeRuntimeDir("l4");
     // persistThroughTmuxGone: the long-lived (e2e) broker config — on tmux-gone
     // it re-enters watcher poll mode instead of self-exiting, so the

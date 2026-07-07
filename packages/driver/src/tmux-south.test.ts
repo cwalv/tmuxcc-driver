@@ -38,26 +38,17 @@ import {
   probeTmuxAlive,
   checkSessionPresence,
 } from "./tmux-south.js";
+import { mintSocket } from "./runtime/test-tmux-cleanup.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-let testCounter = 0;
-const liveSockets = new Set<string>();
-
-function nextSocketName(): string {
-  const name = `tmuxcc-test-south-${process.pid}-${++testCounter}-${Date.now()}`;
-  liveSockets.add(name);
-  return name;
-}
 
 function killServer(socketName: string): void {
   spawnSync("tmux", ["-L", socketName, "kill-server"], {
     stdio: "ignore",
     timeout: 5_000,
   });
-  liveSockets.delete(socketName);
 }
 
 function tmuxAvailable(): boolean {
@@ -72,13 +63,8 @@ const TMUX_AVAILABLE = tmuxAvailable();
 // ---------------------------------------------------------------------------
 
 describe("tmux-south createSession (tc-zcqr)", { skip: !TMUX_AVAILABLE }, () => {
-  afterEach(() => {
-    // Best-effort cleanup of any sockets the suite left running.
-    for (const sock of [...liveSockets]) killServer(sock);
-  });
-
   it("returns the authoritative tmux session id of the newly-created session", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("south");
     try {
       const result = await createSession(socketName, "alpha");
       assert.match(
@@ -108,7 +94,7 @@ describe("tmux-south createSession (tc-zcqr)", { skip: !TMUX_AVAILABLE }, () => 
   });
 
   it("creates the session with the @tmuxcc marker set", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("south");
     try {
       await createSession(socketName, "marked");
       const show = spawnSync(
@@ -124,7 +110,7 @@ describe("tmux-south createSession (tc-zcqr)", { skip: !TMUX_AVAILABLE }, () => 
   });
 
   it("sets the server-global scroll-on-clear off default (tc-w3ir.1)", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("south");
     try {
       await createSession(socketName, "soc");
 
@@ -174,7 +160,7 @@ describe("tmux-south createSession (tc-zcqr)", { skip: !TMUX_AVAILABLE }, () => 
   });
 
   it("rejects when the name is already taken (duplicate session)", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("south");
     try {
       await createSession(socketName, "dup");
       await assert.rejects(
@@ -188,7 +174,7 @@ describe("tmux-south createSession (tc-zcqr)", { skip: !TMUX_AVAILABLE }, () => 
 
   // tc-gjdx.2: real-tmux moat — env stored in the session environment (real tmux)
   it("tc-gjdx.2: env is stored in the session environment (real tmux)", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("south");
     try {
       await createSession(socketName, "env-test", undefined, { TMUXCC_TEST_ENV: "moat-value" });
 
@@ -344,12 +330,8 @@ describe("tmux-south createSession env capability gate (tc-gjdx.2)", () => {
 // ---------------------------------------------------------------------------
 
 describe("tmux-south checkSessionPresence (tc-hfxb.18.4)", () => {
-  afterEach(() => {
-    for (const sock of [...liveSockets]) killServer(sock);
-  });
-
   it("returns 'present' for an existing session on a live server", { skip: !TMUX_AVAILABLE }, async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("south");
     try {
       const { tmuxId } = await createSession(socketName, "present-sess");
       assert.equal(await checkSessionPresence(socketName, tmuxId), "present");
@@ -360,7 +342,7 @@ describe("tmux-south checkSessionPresence (tc-hfxb.18.4)", () => {
   });
 
   it("returns 'absent' for a non-existent session on a live server (server reachable, session gone)", { skip: !TMUX_AVAILABLE }, async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("south");
     try {
       // Bring the server up with one session, then ask about a DIFFERENT name.
       await createSession(socketName, "anchor");
@@ -376,7 +358,7 @@ describe("tmux-south checkSessionPresence (tc-hfxb.18.4)", () => {
     // pre-spawn window.  The socket is missing/unreachable, which is NOT positive
     // evidence of absence (the server may be coming up and publish the session
     // momentarily), so this MUST stay "inconclusive" (tc-hfxb.18.4).
-    const socketName = `tmuxcc-test-south-nosock-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const socketName = mintSocket("south-nosock");
     assert.equal(await checkSessionPresence(socketName, "whatever"), "inconclusive");
   });
 
@@ -390,7 +372,7 @@ describe("tmux-south checkSessionPresence (tc-hfxb.18.4)", () => {
     // touch the cold-boot transient, which is protected by the reconciliation
     // gate's hasSessionProxy fast-path and is "error connecting"/"present", never
     // "no server running".)
-    const socketName = nextSocketName();
+    const socketName = mintSocket("south");
     await createSession(socketName, "doomed");
     // Kill the only session — the server self-exits (no sessions left).
     await killSession(socketName, "doomed");
@@ -405,7 +387,7 @@ describe("tmux-south checkSessionPresence (tc-hfxb.18.4)", () => {
 describe("tmux-south listSessions (tc-zcqr)", () => {
   it("returns [] when no tmux server is running on the socket", async () => {
     // A randomly-named socket that no server is listening on.
-    const socketName = `tmuxcc-test-south-empty-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const socketName = mintSocket("south-empty");
     // Pre-condition check: this should NOT be a transient failure — it should
     // be the deterministic "no server running" branch.
     const rows = await listSessions(socketName);
@@ -420,7 +402,7 @@ describe("tmux-south listSessions (tc-zcqr)", () => {
     "returns the live session rows when sessions exist",
     { skip: !TMUX_AVAILABLE },
     async () => {
-      const socketName = nextSocketName();
+      const socketName = mintSocket("south");
       try {
         await createSession(socketName, "one");
         await createSession(socketName, "two");
@@ -457,7 +439,7 @@ describe("tmux-south listSessions tmux-availability (tc-295a.35)", () => {
   });
 
   it("reports binaryMissing=false when tmux is present (no-server socket)", async () => {
-    const socketName = `tmuxcc-test-south-avail-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const socketName = mintSocket("south-avail");
     const out = { binaryMissing: false };
     const rows = await listSessions(socketName, out);
     // No server on this fresh socket → [] (server has no sessions).  tmux IS
@@ -471,7 +453,7 @@ describe("tmux-south listSessions tmux-availability (tc-295a.35)", () => {
   });
 
   it("reports binaryMissing=true when the tmux binary is absent (ENOENT)", async () => {
-    const socketName = `tmuxcc-test-south-noenoent-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const socketName = mintSocket("south-noenoent");
     const savedPath = process.env.PATH;
     try {
       // Empty PATH ⇒ `spawn("tmux", …)` cannot find the binary ⇒ ENOENT.
@@ -493,7 +475,7 @@ describe("tmux-south listSessions tmux-availability (tc-295a.35)", () => {
   });
 
   it("does not require the out-param (null/[] contract unchanged for legacy callers)", async () => {
-    const socketName = `tmuxcc-test-south-noout-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const socketName = mintSocket("south-noout");
     // No out-param: behaviour identical to before tc-295a.35.
     const rows = await listSessions(socketName);
     assert.deepEqual(rows, [], "no-server socket must yield [] with no out-param supplied");
@@ -505,12 +487,8 @@ describe("tmux-south listSessions tmux-availability (tc-295a.35)", () => {
 // ---------------------------------------------------------------------------
 
 describe("tmux-south listSessions enriched fields (tc-295a.4)", { skip: !TMUX_AVAILABLE }, () => {
-  afterEach(() => {
-    for (const sock of [...liveSockets]) killServer(sock);
-  });
-
   it("tmuxccMarked is true for a session created by createSession (which stamps @tmuxcc 1)", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("south");
     try {
       await createSession(socketName, "marked-sess");
       const rows = await listSessions(socketName);
@@ -528,7 +506,7 @@ describe("tmux-south listSessions enriched fields (tc-295a.4)", { skip: !TMUX_AV
   });
 
   it("tmuxccMarked is false for a session created outside tmuxcc (no @tmuxcc option set)", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("south");
     try {
       // Create a session without the tmuxcc marker by calling tmux new-session directly.
       const r = spawnSync(
@@ -553,7 +531,7 @@ describe("tmux-south listSessions enriched fields (tc-295a.4)", { skip: !TMUX_AV
   });
 
   it("tmuxccMarked transitions to true after setSessionMarker is called on a foreign session", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("south");
     try {
       // Create a foreign session.
       const r = spawnSync(
@@ -587,7 +565,7 @@ describe("tmux-south listSessions enriched fields (tc-295a.4)", { skip: !TMUX_AV
   });
 
   it("paneCount is >= 1 for a newly-created session (at least 1 pane from new-session)", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("south");
     try {
       await createSession(socketName, "pane-sess");
       const rows = await listSessions(socketName);
@@ -604,7 +582,7 @@ describe("tmux-south listSessions enriched fields (tc-295a.4)", { skip: !TMUX_AV
   });
 
   it("lastActivity is a positive Unix epoch for a live session", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("south");
     try {
       const beforeEpoch = Math.floor(Date.now() / 1_000) - 2; // 2s slack for clock jitter
       await createSession(socketName, "activity-sess");
@@ -636,7 +614,7 @@ describe("tmux-south probeTmuxLiveness (tc-vw10)", () => {
   it('returns "gone" when the probe RUNS and finds no server (positive evidence)', { skip: !TMUX_AVAILABLE }, async () => {
     // A fresh, never-used socket name: `tmux ls` runs and exits non-zero with
     // "no server running on …" — a verdict, not a failure-to-run.
-    const socketName = `tmuxcc-test-south-probe-gone-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const socketName = mintSocket("south-probe-gone");
     const liveness = await probeTmuxLiveness(socketName, 5_000);
     assert.equal(
       liveness,
@@ -646,7 +624,7 @@ describe("tmux-south probeTmuxLiveness (tc-vw10)", () => {
   });
 
   it('returns "alive" when the tmux server is up', { skip: !TMUX_AVAILABLE }, async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("south");
     try {
       await createSession(socketName, "probe-alive");
       const liveness = await probeTmuxLiveness(socketName, 5_000);
@@ -661,7 +639,7 @@ describe("tmux-south probeTmuxLiveness (tc-vw10)", () => {
     // emits `error` (ENOENT).  The probe never ran: this is INCONCLUSIVE, the
     // same bucket a loaded-host spawn-TIMEOUT lands in.  The whole point of
     // tc-vw10 is that this is distinct from "gone".
-    const socketName = `tmuxcc-test-south-probe-inconc-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const socketName = mintSocket("south-probe-inconc");
     const savedPath = process.env.PATH;
     try {
       process.env.PATH = "";
@@ -684,10 +662,10 @@ describe("tmux-south probeTmuxLiveness (tc-vw10)", () => {
     // three-valued `probeTmuxLiveness` directly — never presume-gone on an
     // inconclusive probe — so this alias is no longer on that path; the test
     // pins the collapsing contract for any remaining boolean caller.)
-    const goneSocket = `tmuxcc-test-south-alias-gone-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const goneSocket = mintSocket("south-alias-gone");
     assert.equal(await probeTmuxAlive(goneSocket, 5_000), false, "no server ⇒ false");
 
-    const liveSocket = nextSocketName();
+    const liveSocket = mintSocket("south");
     try {
       await createSession(liveSocket, "alias-alive");
       assert.equal(await probeTmuxAlive(liveSocket, 5_000), true, "live server ⇒ true");
@@ -707,12 +685,8 @@ describe("tmux-south probeTmuxLiveness (tc-vw10)", () => {
 // ---------------------------------------------------------------------------
 
 describe("tmux-south @tmuxcc-workspace identity round-trip (S4/tc-76m8.6)", { skip: !TMUX_AVAILABLE }, () => {
-  afterEach(() => {
-    for (const sock of [...liveSockets]) killServer(sock);
-  });
-
   it("setSessionWorkspace stamps @tmuxcc-workspace; listSessions reads it back", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("south");
     // A human-readable name (no sha8) — this is what `tmux ls` shows for new sessions.
     await createSession(socketName, "myproject");
     await setSessionWorkspace(socketName, "myproject", "file:///home/user/myproject");
@@ -726,7 +700,7 @@ describe("tmux-south @tmuxcc-workspace identity round-trip (S4/tc-76m8.6)", { sk
   });
 
   it("a session with no @tmuxcc-workspace option → workspaceUri is undefined (pre-S4 / legacy)", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("south");
     await createSession(socketName, "legacy-sess");
     // Deliberately do NOT set @tmuxcc-workspace.
     const rows = await listSessions(socketName);
@@ -736,7 +710,7 @@ describe("tmux-south @tmuxcc-workspace identity round-trip (S4/tc-76m8.6)", { sk
   });
 
   it("preserves a multi-root identity value containing '|' and ':' verbatim", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("south");
     // workspaceIdentity joins multi-root folder URIs with '|'.
     const identity = "file:///ws/alpha|file:///ws/beta";
     await createSession(socketName, "multiroot");
@@ -750,7 +724,7 @@ describe("tmux-south @tmuxcc-workspace identity round-trip (S4/tc-76m8.6)", { sk
     // Distinct sessions (createUnique would mint `myproject` + `myproject-2`), each
     // stamped with its OWN workspace identity — the S4 replacement for the sha8
     // suffix's disambiguation.
-    const socketName = nextSocketName();
+    const socketName = mintSocket("south");
     await createSession(socketName, "myproject");
     await setSessionWorkspace(socketName, "myproject", "file:///home/alice/myproject");
     await createSession(socketName, "myproject-2");
@@ -777,12 +751,8 @@ describe("tmux-south @tmuxcc-workspace identity round-trip (S4/tc-76m8.6)", { sk
 // ---------------------------------------------------------------------------
 
 describe("tmux-south setGlobalScrollOnClear on externally-created session (tc-w3ir.5)", { skip: !TMUX_AVAILABLE }, () => {
-  afterEach(() => {
-    for (const sock of [...liveSockets]) killServer(sock);
-  });
-
   it("sets scroll-on-clear off on a server bootstrapped without createSession", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("south");
     try {
       // Create a session DIRECTLY via tmux CLI — simulates a user session that
       // was created outside of tmuxcc (the manually-created-then-attached edge).

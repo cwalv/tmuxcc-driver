@@ -53,16 +53,11 @@ import type {
   MessageBase,
   Capabilities,
 } from "@tmuxcc/protocol";
+import { mintSocket } from "./runtime/test-tmux-cleanup.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-let testCounter = 0;
-
-function nextSocketName(): string {
-  return `tmuxcc-test-sp-${process.pid}-${++testCounter}-${Date.now()}`;
-}
 
 function tmuxAvailable(): boolean {
   const r = spawnSync("tmux", ["-V"], { stdio: "ignore", timeout: 2_000 });
@@ -286,7 +281,7 @@ async function attachToSession(
 
 describe("server-proxy – unit (no tmux)", () => {
   it("U1: server-proxy starts and sends snapshot after handshake", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("sp");
     const serverProxy = createServerProxy({ socketName });
     await serverProxy.start();
 
@@ -302,7 +297,7 @@ describe("server-proxy – unit (no tmux)", () => {
   });
 
   it("U3 (tc-k6v): server-proxy.info returns identity fields without tmux", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("sp");
     const serverProxy = createServerProxy({ socketName });
     await serverProxy.start();
 
@@ -341,7 +336,7 @@ describe("server-proxy – unit (no tmux)", () => {
   });
 
   it("U3b (tc-bn7d): rpc_round_trip_seconds is observed in the live metricsText via _handleCommand", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("sp");
     const serverProxy = createServerProxy({ socketName });
     await serverProxy.start();
 
@@ -383,7 +378,7 @@ describe("server-proxy – unit (no tmux)", () => {
   });
 
   it("U4 (tc-k6v): server-proxy.info reports logPath verbatim when configured", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("sp");
     const serverProxy = createServerProxy({ socketName, logPath: "/tmp/some-server-proxy.log" });
     await serverProxy.start();
 
@@ -406,7 +401,7 @@ describe("server-proxy – unit (no tmux)", () => {
   // tc-7aqb.2: spawn-info provenance stamp round-trip tests.
 
   it("U5 (tc-7aqb.2): server-proxy.info echoes spawnInfo.buildId when opts.spawnInfo is set", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("sp");
     const spawnInfo = { buildId: "1.2.3+dev.1718886000000" };
     const serverProxy = createServerProxy({ socketName, spawnInfo });
     await serverProxy.start();
@@ -433,7 +428,7 @@ describe("server-proxy – unit (no tmux)", () => {
   });
 
   it("U6 (tc-7aqb.2): server-proxy.info omits spawnInfo when opts.spawnInfo is not set (backward-compat)", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("sp");
     const serverProxy = createServerProxy({ socketName }); // no spawnInfo
     await serverProxy.start();
 
@@ -463,7 +458,7 @@ describe("server-proxy – unit (no tmux)", () => {
     // serverProxy.endpoint() must equal the path that vscode computes via
     // serverProxySocketPath(serverProxySocketName) so that discovery works without
     // out-of-band communication.
-    const socketName = nextSocketName();
+    const socketName = mintSocket("sp");
     const runtimeDir = `/tmp/tmuxcc-test-u2-${process.pid}`;
     const serverProxy = createServerProxy({ socketName, runtimeDir });
     await serverProxy.start();
@@ -491,7 +486,7 @@ describe("server-proxy – unit (no tmux)", () => {
   // operator's real install is untouched.
 
   it("U5 (tc-295a.35): snapshot reports tmuxAvailable=true when tmux is present", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("sp");
     const serverProxy = createServerProxy({ socketName });
     await serverProxy.start();
     try {
@@ -509,7 +504,7 @@ describe("server-proxy – unit (no tmux)", () => {
   });
 
   it("U6 (tc-295a.35): broker stays up and snapshot reports tmuxAvailable=false when tmux is absent", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("sp");
     const savedPath = process.env.PATH;
     let serverProxy: ServerProxyHandle | undefined;
     try {
@@ -547,7 +542,7 @@ describe("server-proxy – integration (requires tmux)", { skip: !TMUX_AVAILABLE
   let socketName: string;
 
   beforeEach(async () => {
-    socketName = nextSocketName();
+    socketName = mintSocket("sp");
     serverProxy = createServerProxy({ socketName });
     await serverProxy.start();
   });
@@ -1006,7 +1001,7 @@ describe("tc-w61: @tmuxcc 1 marker set on spawn / claim", { skip: !TMUX_AVAILABL
   let socketName: string;
 
   beforeEach(async () => {
-    socketName = nextSocketName();
+    socketName = mintSocket("sp");
     serverProxy = createServerProxy({ socketName });
     await serverProxy.start();
   });
@@ -1121,7 +1116,7 @@ describe("server-proxy – race test (requires tmux)", { skip: !TMUX_AVAILABLE }
   let socketName: string;
 
   beforeEach(async () => {
-    socketName = nextSocketName();
+    socketName = mintSocket("sp");
     serverProxy = createServerProxy({ socketName });
     await serverProxy.start();
   });
@@ -1224,7 +1219,7 @@ describe("server-proxy – race test (requires tmux)", { skip: !TMUX_AVAILABLE }
 
 describe("server-proxy – self-exit: idle hysteresis (tc-3iv)", () => {
   it("S1: zero IPC clients past hysteresis → self-exit, socket unlinked, respawn works", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("sp");
     const runtimeDir = makeRuntimeDir("s1");
     // Injected short hysteresis — do NOT literally wait 5 minutes in tests.
     const serverProxy = createServerProxy({ socketName, runtimeDir, idleExitMs: 500 });
@@ -1274,7 +1269,7 @@ describe("server-proxy – self-exit: idle hysteresis (tc-3iv)", () => {
   });
 
   it("S2: connected-but-idle client keeps the server-proxy alive past the hysteresis window", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("sp");
     const runtimeDir = makeRuntimeDir("s2");
     const serverProxy = createServerProxy({ socketName, runtimeDir, idleExitMs: 400 });
     const exits: ServerProxySelfExitReason[] = [];
@@ -1325,7 +1320,7 @@ describe("server-proxy – self-exit: idle hysteresis (tc-3iv)", () => {
 // socket it does not own.
 describe("server-proxy – single-flight bind: double-spawn loser backs off (tc-kyq4.1)", () => {
   it("D1: a second broker on a LIVE socket loses the bind; the winner's socket survives the loser's idle window", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("sp");
     const runtimeDir = makeRuntimeDir("kyq4-1");
 
     // Winner: long idle window so it stays up for the whole test.
@@ -1385,7 +1380,7 @@ describe("server-proxy – single-flight bind: double-spawn loser backs off (tc-
   });
 
   it("D2: a DEFINITIVELY-stale leftover socket file is cleaned up + rebound (legit respawn still works)", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("sp");
     const runtimeDir = makeRuntimeDir("kyq4-2");
     const endpoint = serverProxySocketPath(socketName, { runtimeDir });
 
@@ -1435,7 +1430,7 @@ describe("server-proxy – single-flight bind: double-spawn loser backs off (tc-
 
 describe("server-proxy – self-exit: detached session does not block idle (tc-7aqb.1, requires tmux)", { skip: !TMUX_AVAILABLE }, () => {
   it("S5: claimed+detached session with zero IPC clients → idle-exit fires after the grace window", { timeout: 30_000 }, async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("sp");
     const runtimeDir = makeRuntimeDir("s5");
     const idleExitMs = 400;
 
@@ -1487,7 +1482,7 @@ describe("server-proxy – self-exit: detached session does not block idle (tc-7
 
 describe("server-proxy – self-exit: tmux death & watcher respawn (tc-3iv, requires tmux)", { skip: !TMUX_AVAILABLE }, () => {
   it("S3: tmux kill-server → server-proxy self-exits within 2s and unlinks its socket", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("sp");
     const runtimeDir = makeRuntimeDir("s3");
 
     // Seed a session FIRST so the server-proxy's thin -CC watcher can attach.
@@ -1530,7 +1525,7 @@ describe("server-proxy – self-exit: tmux death & watcher respawn (tc-3iv, requ
   });
 
   it("S4: watcher SIGKILLed while tmux alive → watcher respawned, server-proxy stays up", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("sp");
     const runtimeDir = makeRuntimeDir("s4");
 
     const seeded = spawnSync("tmux", ["-L", socketName, "new-session", "-d", "-s", "seed"], {
@@ -1593,7 +1588,7 @@ describe("server-proxy – self-exit: tmux death & watcher respawn (tc-3iv, requ
     // `probeTmuxLiveness` returns "inconclusive" (the same bucket a loaded-host
     // spawn-TIMEOUT lands in — see tmux-south.test.ts).  PATH is restored
     // before the respawn timer fires so the broker can re-attach normally.
-    const socketName = nextSocketName();
+    const socketName = mintSocket("sp");
     const runtimeDir = makeRuntimeDir("s5");
 
     const seeded = spawnSync("tmux", ["-L", socketName, "new-session", "-d", "-s", "seed"], {
@@ -1665,7 +1660,7 @@ describe("server-proxy – self-exit: tmux death & watcher respawn (tc-3iv, requ
 
 describe("server-proxy – tc-xnay / tc-ymxe: designed-exit announcement", () => {
   it("X1: idle self-exit broadcasts `server-proxy.exiting` with reason=idle to connected clients", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("sp");
     const runtimeDir = makeRuntimeDir("xnay-x1");
     // Short idle window so we don't wait the production 5 minutes.
     const serverProxy = createServerProxy({ socketName, runtimeDir, idleExitMs: 400 });
@@ -1756,7 +1751,7 @@ describe("server-proxy – tc-xnay / tc-ymxe: designed-exit announcement", () =>
   });
 
   it("X2 (requires tmux): tmux-gone self-exit broadcasts `server-proxy.exiting` with reason=tmux-gone to connected clients", { skip: !TMUX_AVAILABLE }, async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("sp");
     const runtimeDir = makeRuntimeDir("xnay-x2");
 
     // Seed a session so the watcher attaches.
@@ -1804,7 +1799,7 @@ describe("server-proxy – tc-xnay / tc-ymxe: designed-exit announcement", () =>
   });
 
   it("X3: explicit `shutdown()` (SIGTERM equivalent) does NOT broadcast — the launcher already knows it disposed", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("sp");
     const runtimeDir = makeRuntimeDir("xnay-x3");
 
     // Long idle window — the only path to exit in this test is the
@@ -1849,7 +1844,7 @@ describe("server-proxy – enriched session fields (tc-295a.4)", { skip: !TMUX_A
   let socketName: string;
 
   beforeEach(async () => {
-    socketName = nextSocketName();
+    socketName = mintSocket("sp");
     serverProxy = createServerProxy({ socketName });
     await serverProxy.start();
   });
@@ -1998,7 +1993,7 @@ describe("server-proxy – enriched session fields (tc-295a.4)", { skip: !TMUX_A
 
 describe("server-proxy – shutdown drain: handshake timeout + late-connect guard (tc-i1pg, tc-9r2y)", () => {
   it("tc-i1pg: wedge connection (no handshake) must not block shutdown() — fail-before/pass-after", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("sp");
     const runtimeDir = makeRuntimeDir("i1pg");
     // Inject a short handshake timeout so the test budget is bounded.
     const serverProxy = createServerProxy({ socketName, runtimeDir, handshakeTimeoutMs: 300 });
@@ -2027,7 +2022,7 @@ describe("server-proxy – shutdown drain: handshake timeout + late-connect guar
   });
 
   it("tc-9r2y: late handshake completing after shutdown is rejected — no snapshot, transport closed", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("sp");
     const runtimeDir = makeRuntimeDir("9r2y");
     // Long handshake timeout so the tc-9r2y guard fires first (not the timeout).
     const serverProxy = createServerProxy({ socketName, runtimeDir, handshakeTimeoutMs: 10_000 });

@@ -44,15 +44,11 @@ import type {
   ServerProxyCommandResponseMessage,
   MetricsHttpStatePayload,
 } from "@tmuxcc/protocol";
+import { mintSocket } from "./runtime/test-tmux-cleanup.js";
 
 function tmuxAvailable(): boolean {
   const r = spawnSync("tmux", ["-V"], { stdio: "ignore", timeout: 2_000 });
   return r.status === 0 && !r.error;
-}
-
-let counter = 0;
-function nextSocketName(): string {
-  return `tmuxcc-test-mhttp-${process.pid}-${++counter}-${Date.now()}`;
 }
 
 function makeRuntimeDir(): string {
@@ -158,7 +154,7 @@ describe("server-proxy metrics-HTTP exposition (tc-44u4.4)", () => {
   });
 
   it("M0: OFF by default — no listener, no socket file", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("mhttp");
     serverProxy = createServerProxy({ socketName, runtimeDir: runtimeDir!, idleExitMs: 60_000 });
     await serverProxy.start();
     assert.deepEqual(serverProxy.metricsHttpState(), { enabled: false, address: null });
@@ -166,7 +162,7 @@ describe("server-proxy metrics-HTTP exposition (tc-44u4.4)", () => {
   });
 
   it("M1: startup flag (metricsAddr) binds a unix listener; /metrics returns prom text", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("mhttp");
     serverProxy = createServerProxy({
       socketName,
       runtimeDir: runtimeDir!,
@@ -187,7 +183,7 @@ describe("server-proxy metrics-HTTP exposition (tc-44u4.4)", () => {
   });
 
   it("M2: runtime wire toggle binds then unbinds (PRIMARY no-restart path)", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("mhttp");
     serverProxy = createServerProxy({ socketName, runtimeDir: runtimeDir!, idleExitMs: 60_000 });
     await serverProxy.start();
     const client = await connectClient(serverProxy.endpoint());
@@ -214,7 +210,7 @@ describe("server-proxy metrics-HTTP exposition (tc-44u4.4)", () => {
   });
 
   it("M3: SIGUSR2 path (toggleMetricsHttp) binds the secure unix default, then off", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("mhttp");
     serverProxy = createServerProxy({ socketName, runtimeDir: runtimeDir!, idleExitMs: 60_000 });
     await serverProxy.start();
 
@@ -230,7 +226,7 @@ describe("server-proxy metrics-HTTP exposition (tc-44u4.4)", () => {
   });
 
   it("M4: unix socket is 0600; non-loopback TCP refused; loopback TCP accepted", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("mhttp");
     serverProxy = createServerProxy({ socketName, runtimeDir: runtimeDir!, idleExitMs: 60_000 });
     await serverProxy.start();
 
@@ -251,7 +247,7 @@ describe("server-proxy metrics-HTTP exposition (tc-44u4.4)", () => {
   });
 
   it("M5: /metrics includes a session-namespaced registry metric (tmux)", { skip: !tmuxAvailable() }, async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("mhttp");
     serverProxy = createServerProxy({ socketName, runtimeDir: runtimeDir!, idleExitMs: 60_000 });
     await serverProxy.start();
     const client = await connectClient(serverProxy.endpoint());

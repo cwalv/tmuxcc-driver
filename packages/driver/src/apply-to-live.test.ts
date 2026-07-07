@@ -44,15 +44,11 @@ import type {
   SessionTemplate,
   TemplateApplyResult,
 } from "@tmuxcc/protocol";
+import { mintSocket } from "./runtime/test-tmux-cleanup.js";
 
 // ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
-
-let counter = 0;
-function nextSocketName(): string {
-  return `tmuxcc-test-gjdx4-${process.pid}-${++counter}-${Date.now()}`;
-}
 
 function tmuxAvailable(): boolean {
   const r = spawnSync("tmux", ["-V"], { stdio: "ignore", timeout: 2_000 });
@@ -173,7 +169,7 @@ describe("apply-to-live (tc-gjdx.4, real tmux)", () => {
 
   it("T1: preview (dryRun) equals the subsequent apply's created set", async (t) => {
     if (!haveTmux) return t.skip("tmux not available");
-    const socketName = nextSocketName();
+    const socketName = mintSocket("gjdx4");
     const runtimeDir = makeRuntimeDir();
     const sp = createServerProxy({ socketName, runtimeDir });
     await sp.start();
@@ -257,7 +253,7 @@ describe("apply-to-live (tc-gjdx.4, real tmux)", () => {
 
   it("T2: name-matching windows are left alone — only missing windows are created", async (t) => {
     if (!haveTmux) return t.skip("tmux not available");
-    const socketName = nextSocketName();
+    const socketName = mintSocket("gjdx4");
     const runtimeDir = makeRuntimeDir();
     const sp = createServerProxy({ socketName, runtimeDir });
     await sp.start();
@@ -330,7 +326,7 @@ describe("apply-to-live (tc-gjdx.4, real tmux)", () => {
 
   it("T3: re-apply of the same template is a no-op (empty diff)", async (t) => {
     if (!haveTmux) return t.skip("tmux not available");
-    const socketName = nextSocketName();
+    const socketName = mintSocket("gjdx4");
     const runtimeDir = makeRuntimeDir();
     const sp = createServerProxy({ socketName, runtimeDir });
     await sp.start();
@@ -380,7 +376,7 @@ describe("apply-to-live (tc-gjdx.4, real tmux)", () => {
 
   it("T4: mid-apply failure is loud (failed verb + created-so-far) with NO rollback; existing windows untouched", async (t) => {
     if (!haveTmux) return t.skip("tmux not available");
-    const socketName = nextSocketName();
+    const socketName = mintSocket("gjdx4");
     const runtimeDir = makeRuntimeDir();
     const sp = createServerProxy({ socketName, runtimeDir });
     await sp.start();

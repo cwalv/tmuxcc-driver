@@ -63,6 +63,7 @@ import { fileURLToPath } from "node:url";
 import { connectSocketTransport, serverProxySocketPath, probeLiveSocket } from "./index.js";
 import { runClientHandshake, WIRE_PROTOCOL_VERSION } from "@tmuxcc/protocol";
 import type { Capabilities, ServerProxySnapshotMessage, ServerProxyCommandResponseMessage, MessageBase, ServerProxyInfoPayload } from "@tmuxcc/protocol";
+import { mintSocket } from "./runtime/test-tmux-cleanup.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -301,8 +302,7 @@ describe(
       "LC1: kill -9 server-proxy → tmux sessions survive → relaunch reattaches all bindings",
       { timeout: 60_000 },
       async () => {
-        const ts = Date.now();
-        const socketName = `tmuxcc-e2e-lc-${process.pid}-${ts}`;
+        const socketName = mintSocket("e2e-lc");
         const sessionName = `lc1-sess-${process.pid}`;
         const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), `tmuxcc-lc1-${process.pid}-`));
 
@@ -538,8 +538,7 @@ describe(
       "LC2: kill -9 with 2 sessions → both survive in tmux → relaunch reattaches both",
       { timeout: 90_000 },
       async () => {
-        const ts = Date.now();
-        const socketName = `tmuxcc-e2e-lc2-${process.pid}-${ts}`;
+        const socketName = mintSocket("e2e-lc2");
         const sessionNameA = `lc2-sess-a-${process.pid}`;
         const sessionNameB = `lc2-sess-b-${process.pid}`;
         const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), `tmuxcc-lc2-${process.pid}-`));

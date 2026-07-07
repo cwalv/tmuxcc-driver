@@ -218,9 +218,10 @@ describe("tc-bpn: sweepOrphanedSockets() — boot-sweep logic", () => {
   // -------------------------------------------------------------------------
 
   it("B6: sweep ignores entries not starting with 'tmuxcc-test-'", () => {
-    // Create a file that looks like a production socket name.
-    const prodName = "tmuxcc-vscode-12345-1700000000000";
-    const unrelatedName = "some-other-socket";
+    // Create files that look like production socket names.
+    // Unique per run (process.pid) to prevent concurrent-test collisions.
+    const prodName = `tmuxcc-vscode-${process.pid}-${Date.now()}`;
+    const unrelatedName = `some-other-socket-${process.pid}`;
 
     touchSocket(prodName);
     touchSocket(unrelatedName);

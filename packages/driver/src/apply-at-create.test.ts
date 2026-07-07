@@ -39,15 +39,11 @@ import type {
   SnapshotMessage,
   SessionTemplate,
 } from "@tmuxcc/protocol";
+import { mintSocket } from "./runtime/test-tmux-cleanup.js";
 
 // ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
-
-let counter = 0;
-function nextSocketName(): string {
-  return `tmuxcc-test-gjdx3-${process.pid}-${++counter}-${Date.now()}`;
-}
 
 function tmuxAvailable(): boolean {
   const r = spawnSync("tmux", ["-V"], { stdio: "ignore", timeout: 2_000 });
@@ -246,7 +242,7 @@ describe("apply-at-create (tc-gjdx.3, real tmux)", () => {
 
   it("T1: topology + geometry + cwd + env + @tmuxcc-template awareness + session-row surfacing", async (t) => {
     if (!haveTmux) return t.skip("tmux not available");
-    const socketName = nextSocketName();
+    const socketName = mintSocket("gjdx3");
     const runtimeDir = makeRuntimeDir();
     const dirA = fs.mkdtempSync(path.join(os.tmpdir(), "tmuxcc-gjdx3-cwd-"));
     const sp = createServerProxy({ socketName, runtimeDir });
@@ -350,7 +346,7 @@ describe("apply-at-create (tc-gjdx.3, real tmux)", () => {
 
   it("T2: exactly-once under racing claims (only the created:true claimant applies)", async (t) => {
     if (!haveTmux) return t.skip("tmux not available");
-    const socketName = nextSocketName();
+    const socketName = mintSocket("gjdx3");
     const runtimeDir = makeRuntimeDir();
     const sp = createServerProxy({ socketName, runtimeDir });
     await sp.start();
@@ -384,7 +380,7 @@ describe("apply-at-create (tc-gjdx.3, real tmux)", () => {
 
   it("T3: no apply on reattach — a re-claim of an existing session (created:false) does NOT apply", async (t) => {
     if (!haveTmux) return t.skip("tmux not available");
-    const socketName = nextSocketName();
+    const socketName = mintSocket("gjdx3");
     const runtimeDir = makeRuntimeDir();
     const sp = createServerProxy({ socketName, runtimeDir });
     await sp.start();
@@ -420,7 +416,7 @@ describe("apply-at-create (tc-gjdx.3, real tmux)", () => {
 
   it("T4: mid-transaction failure is loud (failed verb + created-so-far) with NO rollback", async (t) => {
     if (!haveTmux) return t.skip("tmux not available");
-    const socketName = nextSocketName();
+    const socketName = mintSocket("gjdx3");
     const runtimeDir = makeRuntimeDir();
     const sp = createServerProxy({ socketName, runtimeDir });
     await sp.start();
@@ -467,7 +463,7 @@ describe("apply-at-create (tc-gjdx.3, real tmux)", () => {
 
   it("T5: coalescer absorbs a many-window apply burst — model converges, no refuted-confirmation tripwire", async (t) => {
     if (!haveTmux) return t.skip("tmux not available");
-    const socketName = nextSocketName();
+    const socketName = mintSocket("gjdx3");
     const runtimeDir = makeRuntimeDir();
     const sp = createServerProxy({ socketName, runtimeDir });
     await sp.start();
