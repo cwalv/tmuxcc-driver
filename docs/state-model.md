@@ -447,4 +447,3 @@ forward wholesale, not per-field. `mode` (`#{pane_mode}`) and `paneTitle`
 (`#{pane_title}`) join the pane schema. These land in follow-on children of
 tc-mysc; the codec bead lands the schema/codec, strict parse, escalation
 routing, sanitizer, and the single fixture builder.
->>>>>>> 804290d (tc-mysc: land the reply-row schema codec (canonicality))
