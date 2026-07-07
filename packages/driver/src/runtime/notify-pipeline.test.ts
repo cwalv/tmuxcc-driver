@@ -20,6 +20,7 @@ import { createSessionProxyRegistry } from "../metrics/registry.js";
 import { createPaneBufferStore } from "../state/scrollback.js";
 import { encodeOutputPayload } from "../parser/output-codec.js";
 import { paneId } from "../state/model.js";
+import { WINDOWS_ROW, PANES_ROW } from "../state/bootstrap.js";
 import type { TmuxHost, DataHandler, ExitHandler, ErrorHandler } from "./tmux-host.js";
 
 // ---------------------------------------------------------------------------
@@ -62,9 +63,10 @@ class FakeHost implements TmuxHost {
 
 /** One-session, one-window, one-pane (%1) bootstrap reply pair. */
 function bootstrapReplies(): Uint8Array {
-  // tc-pqb4: include fields [9]–[11] (synchronize-panes / monitor-activity / monitor-silence)
-  const winBody = `$0\tsess\t@1\twin\t80\t24\taaaa,80x24,0,0,1\t*\t1\t0\t1\t0\n`;
-  const paneBody = `%1\t@1\t$0\t0\t80\t24\t0\t0\t1\t1234\tbash\n`;
+  const winBody = WINDOWS_ROW.fixtureBody([
+    { tmuxSessionId: 0, sessionName: "sess", tmuxWindowId: 1, name: "win", layoutString: "aaaa,80x24,0,0,1", active: true },
+  ]);
+  const paneBody = PANES_ROW.fixtureBody([{ tmuxPaneId: 1, tmuxWindowId: 1, tmuxSessionId: 0, active: true }]);
   return b(cmdBlock(nextCmdNum(), winBody) + cmdBlock(nextCmdNum(), paneBody));
 }
 

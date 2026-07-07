@@ -1,79 +1,62 @@
 /**
- * Bootstrap reply parsing + initial-model builder (tc-835, retained tc-128.4).
+ * Bootstrap reply schema/codec + initial-model builder (tc-835, retained
+ * tc-128.4; schema-derived tc-mysc).
  *
  * @module state/bootstrap
  *
- * # What this used to be
+ * # What it is (tc-128.4)
  *
- * In the per-event-reducer architecture (tc-5dd) this module also hosted a
- * `BootstrapCoordinator` class that drove an attach-time list-windows /
- * list-panes exchange, BUFFERED live notifications during the round-trip,
- * REPLAYED them through `reduce()` on completion, and then transitioned to
- * "live" reducer mode.
+ * `RequeryEngine` (state/requery.ts) owns the bootstrap path end-to-end.
+ * Bootstrap is just `engine.requery()` with the empty model as the previous:
+ * the diff against empty yields a full snapshot of deltas, and there's no
+ * separate "live vs bootstrapping" phase to coordinate. Notifications that
+ * arrive during the round-trip are demoted to a dirty bit by the coalescer,
+ * which schedules the next requery.
  *
- * # What it is now (tc-128.4)
+ * This module hosts the WIRE-LEVEL pieces the engine composes on every cycle:
  *
- * The §6 requery-on-event design (state-model.md) retired the reducer's
- * per-event interpretation; `RequeryEngine` (state/requery.ts) now owns the
- * bootstrap path end-to-end. Bootstrap is just `engine.requery()` with the
- * empty model as the previous: the diff against empty yields a full snapshot
- * of deltas, and there's no separate "live vs bootstrapping" phase to
- * coordinate. Notifications that arrive during the round-trip are demoted to
- * a dirty bit by the coalescer, which schedules the next requery — no
- * separate buffer-and-replay path is needed.
+ *   - {@link WINDOWS_ROW} / {@link PANES_ROW} — the two reply-row SCHEMAS. Each
+ *     is the SINGLE declaration of its reply's canonical fields; the tmux
+ *     format string, the strict parser, the row type, and the test fixture
+ *     builder are all DERIVED from it (see `state/reply-row.ts`). Adding a
+ *     canonical field is one edit — it is unrepresentable for the format and
+ *     the parser to disagree (this defines the tc-pqb4 clobber class out of
+ *     existence, rather than guarding against it).
+ *   - `BOOTSTRAP_WINDOWS_FORMAT` / `BOOTSTRAP_PANES_FORMAT` — the `-F` format
+ *     strings, DERIVED from the schemas (`WINDOWS_ROW.format` / `.format`).
+ *   - `bootstrapCommands(target?)` — builds the two `list-*` command lines.
+ *   - `buildInitialModel` — folds the parsed rows into a `SessionModel`.
  *
- * This module survives because the WIRE-LEVEL pieces are still used:
+ * # Strict parse replaces the defensive gates
  *
- *   - `BOOTSTRAP_WINDOWS_FORMAT` / `BOOTSTRAP_PANES_FORMAT` — the
- *     `display-message -F` format strings.
- *   - `bootstrapCommands(sessionName?)` — builds the two `list-*` command
- *     lines (engine calls this on every cycle).
- *   - `parseWindowsReply` / `parsePanesReply` — turn the command-reply
- *     bodies into typed rows.
- *   - `buildInitialModel` — folds the rows into a complete `SessionModel`.
+ * `WINDOWS_ROW.parse` / `PANES_ROW.parse` are STRICT: a wrong field count or a
+ * per-field decode failure THROWS a `ReplyCodecError` (routed to the session
+ * error boundary — see the coalescer). This replaces both the old
+ * `parts[i] ?? default` fallbacks AND the old `isNaN(width|height)` /
+ * `parts.length < 9` row-validity gates: because the format and the parser are
+ * the same artifact, a mismatch is by definition a bug (or an injected control
+ * char), not routine variation. The parse strips only a trailing `\r`, never
+ * `trim()` (a live pane row ends with empty option fields that `trim()` would
+ * eat, manufacturing a short row).
  *
- * The engine composes these in `requeryDiff` (state/requery.ts).
+ * # Free-text sanitization + newline policy (validated against tmux 3.4)
  *
- * # Format strings (validated against real tmux 3.4 output)
- *
- * ## BOOTSTRAP_WINDOWS_FORMAT
- *
- *   `#{session_id}\t#{session_name}\t#{window_id}\t#{window_name}\t` +
- *   `#{window_width}\t#{window_height}\t#{window_layout}\t` +
- *   `#{window_flags}\t#{?window_active,1,0}\t` +
- *   `#{?synchronize-panes,1,0}\t#{?monitor-activity,1,0}\t#{monitor-silence}`
- *
- * Fields (tab-separated, 12 per line):
- *   [0]  session_id         — `$N`  (e.g. "$0")
- *   [1]  session_name       — human name
- *   [2]  window_id          — `@N`  (e.g. "@1")
- *   [3]  window_name        — human name
- *   [4]  window_width       — integer columns
- *   [5]  window_height      — integer rows
- *   [6]  window_layout      — layout string (e.g. "b25d,80x24,0,0,0")
- *   [7]  window_flags       — flag chars (e.g. "*", "-", "!")
- *   [8]  window_active      — "1" if this is the session's active window, "0" otherwise
- *   [9]  synchronize-panes  — "1" if on, "0" if off (tc-pqb4: re-read on every requery)
- *   [10] monitor-activity   — "1" if on, "0" if off (tc-pqb4: re-read on every requery)
- *   [11] monitor-silence    — integer seconds (0 = off) (tc-pqb4: re-read on every requery)
- *
- * ## BOOTSTRAP_PANES_FORMAT
- *
- *   `#{pane_id}\t#{window_id}\t#{session_id}\t#{pane_index}\t` +
- *   `#{pane_width}\t#{pane_height}\t#{pane_top}\t#{pane_left}\t` +
- *   `#{?pane_active,1,0}\t#{pane_pid}\t#{pane_current_command}\t` +
- *   `#{?pane_dead,1,0}\t#{pane_dead_status}\t#{@tmuxcc_label}`
- *
- * Fields (tab-separated, 14 per line). Fields [11]/[12] are the dead-pane state
- * (tc-4bv2 / tc-295a.10 shared shape); [13] is the durable pane name (tc-1a8z):
- *   [11] pane_dead        — "1" if the pane's process has exited but the slot
- *                           survives (remain-on-exit corpse), "0" otherwise.
- *   [12] pane_dead_status — the exited process's status code; empty string when
- *                           the pane is alive or tmux has no status to report.
- *   [13] @tmuxcc_label    — the durable, driver-owned pane name (the per-pane
- *                           user-option set by the `rename-pane` verb); empty
- *                           string when no durable name is set.  Re-read on
- *                           every requery so the name survives a driver restart.
+ * A field value containing the TAB separator or a NEWLINE row separator would
+ * corrupt the tab/line split. Verified live:
+ *   - NAMES (`session_name`, `window_name`): tmux ESCAPES an embedded tab to a
+ *     2-char `\t` (never a raw tab → no shatter), so names are read PLAIN. tmux
+ *     emits an embedded NEWLINE RAW; a newline in a name is BOUNDED-THROW —
+ *     pathological input (automatic-rename and normal renames never produce
+ *     one) that the strict parser surfaces loudly rather than misparsing.
+ *     (`#{q:}` would collapse the newline but over-escapes normal names, and
+ *     POSIX `[[:...:]]` classes are unusable in `s///` — the `:` collides with
+ *     the modifier terminator.)
+ *   - USER OPTIONS (`@tmuxcc_label`, `@tmuxcc-icon`): tmux stores/emits RAW
+ *     tabs (the shipped footgun), so these are read through `tabSanitized(...)`
+ *     — an in-tmux `#{s/<TAB>/ /:var}` that maps every tab to a space (global,
+ *     preserves all other chars). Newlines in user options have no read-side
+ *     fix and are closed at the driver's single write point (the driver is the
+ *     sole writer of these options).
  *
  * # Id mapping convention
  *
@@ -82,7 +65,6 @@
  *   sessionId("s" + N) for tmux `$N`
  */
 
-import { createHash } from "node:crypto";
 import { parseLayout } from "../parser/layout-string.js";
 import { listWindows, listPanes } from "../parser/commands.js";
 import type { SessionModel, Session, Window, Pane } from "./model.js";
@@ -98,6 +80,19 @@ import {
   windowId,
   sessionId,
 } from "./model.js";
+import {
+  defineReplyRow,
+  field,
+  sigilId,
+  text,
+  int,
+  flag01,
+  emptyAsUndefined,
+  optionalKeyword,
+  tabSanitized,
+  type RowTypeOf,
+} from "./reply-row.js";
+import { createHash } from "node:crypto";
 import type { PaneId, WindowId, SessionId } from "@tmuxcc/protocol";
 
 // ---------------------------------------------------------------------------
@@ -201,40 +196,74 @@ export const TMUXCC_ICON_OPTION = "@tmuxcc-icon";
 // ---------------------------------------------------------------------------
 
 /**
- * Format string for `list-windows` during bootstrap.
+ * Reply-row schema for `list-windows` during bootstrap — the SINGLE
+ * declaration of the window reply's canonical fields (tc-mysc). Includes
+ * `session_id` and `session_name` so the engine can build Session entities
+ * from the windows reply alone (no separate `list-sessions` needed).
  *
- * Includes `session_id` and `session_name` so the engine can build Session
- * entities from the windows reply alone (no separate `list-sessions` needed).
+ * Deleted vs the pre-schema format (tc-mysc): `window_width`, `window_height`,
+ * `window_flags` — parsed and dropped every cycle, never reaching the model.
+ * Re-adding any of them is a one-line schema edit — the payoff that makes
+ * deletion safe.
  */
-export const BOOTSTRAP_WINDOWS_FORMAT =
-  "#{session_id}\t#{session_name}\t#{window_id}\t#{window_name}\t" +
-  "#{window_width}\t#{window_height}\t#{window_layout}\t" +
-  "#{window_flags}\t#{?window_active,1,0}\t" +
+export const WINDOWS_ROW = defineReplyRow("list-windows", {
+  tmuxSessionId: field("#{session_id}", sigilId("$"), 0),
+  // NAME fields read plain: tmux escapes their embedded tabs (verified 3.4).
+  sessionName: field("#{session_name}", text, "s0"),
+  tmuxWindowId: field("#{window_id}", sigilId("@"), 1),
+  name: field("#{window_name}", text, "win"),
+  layoutString: field("#{window_layout}", text, "aaaa,80x24,0,0,1"),
+  active: field("#{?window_active,1,0}", flag01, true),
   // tc-pqb4: per-window durable options re-read on every requery so they
   // survive a driver restart and are never clobbered back to defaults by a
   // topology-triggered requery cycle.
-  "#{?synchronize-panes,1,0}\t#{?monitor-activity,1,0}\t#{monitor-silence}";
+  synchronizePanes: field("#{?synchronize-panes,1,0}", flag01, false),
+  monitorActivity: field("#{?monitor-activity,1,0}", flag01, true),
+  monitorSilence: field("#{monitor-silence}", int, 0),
+});
 
 /**
- * Format string for `list-panes` during bootstrap.
+ * Reply-row schema for `list-panes` during bootstrap — the SINGLE declaration
+ * of the pane reply's canonical fields (tc-mysc).
+ *
+ * Deleted vs the pre-schema format (tc-mysc): `pane_index`, `pane_top`,
+ * `pane_left`, `pane_pid`, `pane_current_command` — parsed (or never even
+ * read) and dropped every cycle.
+ *
+ * `@tmuxcc-detach` (RESOLVED close policy; `#{@}` walks pane→window→session, so
+ * the value is the effective first-wins cascade) is an OPEN policy option, so
+ * it decodes leniently ("detach"|"kill"|else undefined). `@tmuxcc_label` /
+ * `@tmuxcc-icon` are USER OPTIONS that store RAW tabs, so they are read through
+ * `tabSanitized(...)` (see the module header). Binding intent (`@tmuxcc-bound`)
+ * is NOT read here: it is per-(pane,client) and reconstructed on connect
+ * (tc-4b6k.2), carried forward across cycles (model.ts `boundClients`).
  */
-export const BOOTSTRAP_PANES_FORMAT =
-  "#{pane_id}\t#{window_id}\t#{session_id}\t#{pane_index}\t" +
-  "#{pane_width}\t#{pane_height}\t#{pane_top}\t#{pane_left}\t" +
-  "#{?pane_active,1,0}\t#{pane_pid}\t#{pane_current_command}\t" +
-  "#{?pane_dead,1,0}\t#{pane_dead_status}\t#{@tmuxcc_label}\t" +
-  // tc-i9aq.1 (cold-start.md §4.A): durable per-pane policy.
-  //   [14] @tmuxcc-detach — RESOLVED close policy ("detach"|"kill"); empty =
-  //                         inherit. `#{@}` format walks pane→window→session,
-  //                         so this is the effective first-wins cascade value.
-  //   [15] @tmuxcc-icon   — durable icon policy string, else empty.
-  // Unset → empty string (no error; verified tmux 3.4, cold-start.md §9.3).
-  //
-  // tc-4b6k.2: binding intent is NO LONGER read here. It is per-(pane,client)
-  // (`@tmuxcc-bound-<key>`), and the bulk session-scoped requery has no notion
-  // of the client set — so each client's slot is read on connect and carried
-  // forward across requery cycles (model.ts `boundClients`), not rebuilt here.
-  "#{@tmuxcc-detach}\t#{@tmuxcc-icon}";
+export const PANES_ROW = defineReplyRow("list-panes", {
+  tmuxPaneId: field("#{pane_id}", sigilId("%"), 0),
+  tmuxWindowId: field("#{window_id}", sigilId("@"), 1),
+  tmuxSessionId: field("#{session_id}", sigilId("$"), 0),
+  cols: field("#{pane_width}", int, 80),
+  rows: field("#{pane_height}", int, 24),
+  active: field("#{?pane_active,1,0}", flag01, true),
+  // Dead-pane state (tc-4bv2 / tc-295a.10 shared shape). A dead pane's status
+  // may be empty (tmux reports no code) → exitCode undefined while dead stays.
+  dead: field("#{?pane_dead,1,0}", flag01, false),
+  exitCode: field("#{pane_dead_status}", emptyAsUndefined(int), undefined),
+  // Durable driver-owned pane name (tc-1a8z). Empty → undefined (unset).
+  label: field(tabSanitized("@tmuxcc_label"), emptyAsUndefined(text), undefined),
+  // Durable per-pane policy (tc-i9aq.1, cold-start.md §4.A). Unset → undefined.
+  detach: field("#{@tmuxcc-detach}", optionalKeyword(["detach", "kill"]), undefined),
+  icon: field(tabSanitized("@tmuxcc-icon"), emptyAsUndefined(text), undefined),
+});
+
+/**
+ * `list-windows -F` format string — DERIVED from {@link WINDOWS_ROW}. Kept as a
+ * named export for `bootstrapCommands` and external importers.
+ */
+export const BOOTSTRAP_WINDOWS_FORMAT = WINDOWS_ROW.format;
+
+/** `list-panes -F` format string — DERIVED from {@link PANES_ROW}. */
+export const BOOTSTRAP_PANES_FORMAT = PANES_ROW.format;
 
 // ---------------------------------------------------------------------------
 // Bootstrap command set
@@ -316,239 +345,19 @@ function mintSessionId(n: number): SessionId {
 }
 
 // ---------------------------------------------------------------------------
-// Reply parsers
+// Reply row types (derived from the schemas above)
 // ---------------------------------------------------------------------------
 
 /**
- * Parsed record from one line of a `list-windows` reply.
- * @internal
+ * One parsed `list-windows` row. Derived from {@link WINDOWS_ROW}: adding a
+ * field to that schema adds it here automatically. @internal
  */
-export interface WindowsReplyRow {
-  readonly tmuxSessionId: number;
-  readonly sessionName: string;
-  readonly tmuxWindowId: number;
-  readonly windowName: string;
-  readonly width: number;
-  readonly height: number;
-  readonly layoutString: string;
-  readonly flags: string;
-  readonly active: boolean;
-  /**
-   * tc-pqb4: current `synchronize-panes` state for this window, re-read on
-   * every requery so the value survives a driver restart and is never clobbered
-   * back to the bootstrap default by a topology-triggered requery cycle.
-   * Defaults false on legacy replies that don't carry field [9].
-   */
-  readonly synchronizePanes: boolean;
-  /**
-   * tc-pqb4: current `monitor-activity` state for this window, re-read on
-   * every requery.  Defaults true on legacy replies (the global `-wg
-   * monitor-activity on` that the pipeline issues at bootstrap means the
-   * effective value is `on` for all windows without a per-window override).
-   */
-  readonly monitorActivity: boolean;
-  /**
-   * tc-pqb4: current `monitor-silence` threshold in seconds (0 = off), re-read
-   * on every requery.  Defaults 0 on legacy replies that don't carry field [11].
-   */
-  readonly monitorSilence: number;
-}
+export type WindowsReplyRow = RowTypeOf<typeof WINDOWS_ROW>;
 
 /**
- * Parsed record from one line of a `list-panes` reply.
- * @internal
+ * One parsed `list-panes` row. Derived from {@link PANES_ROW}. @internal
  */
-export interface PanesReplyRow {
-  readonly tmuxPaneId: number;
-  readonly tmuxWindowId: number;
-  readonly tmuxSessionId: number;
-  readonly paneIndex: number;
-  readonly width: number;
-  readonly height: number;
-  readonly paneTop: number;
-  readonly paneLeft: number;
-  readonly active: boolean;
-  /** True when `pane_dead=1` (remain-on-exit corpse). Defaults false on legacy
-   *  replies that don't carry the field. */
-  readonly dead: boolean;
-  /** Exit status from `pane_dead_status` when dead and known, else undefined. */
-  readonly exitCode: number | undefined;
-  /**
-   * Durable, driver-owned pane name from the `@tmuxcc_label` pane user-option
-   * (tc-1a8z), or undefined when the option is unset/empty.  Re-read on every
-   * requery so the durable name survives a driver restart.
-   */
-  readonly label: string | undefined;
-  /**
-   * RESOLVED detach-on-close policy from the `@tmuxcc-detach` user-option
-   * (tc-i9aq.1, cold-start.md §4.A), read via a `#{@tmuxcc-detach}` format that
-   * walks pane→window→session, so this is the effective first-wins cascade
-   * value.  `"detach"` or `"kill"` when set at any scope; undefined when unset
-   * at every scope (the extension applies its default).
-   */
-  readonly detach: "detach" | "kill" | undefined;
-  /**
-   * Durable icon policy from the `@tmuxcc-icon` pane user-option (tc-i9aq.1,
-   * cold-start.md §4.A), or undefined when unset/empty.
-   */
-  readonly icon: string | undefined;
-}
-
-/**
- * Parse the body of a `list-windows` command reply.
- *
- * Each non-empty line is one window, tab-separated in BOOTSTRAP_WINDOWS_FORMAT
- * order. Lines with wrong field count are silently skipped (defensive).
- *
- * tc-pqb4: fields [9]–[11] (synchronize-panes / monitor-activity /
- * monitor-silence) are read defensively — absent on legacy replies (or in
- * tests that only supply the original 9 fields). Missing fields use the
- * bootstrap defaults: synchronizePanes=false, monitorActivity=true (the
- * global `-wg monitor-activity on` the pipeline sets at bootstrap makes this
- * the effective default for every window), monitorSilence=0.
- */
-export function parseWindowsReply(body: Uint8Array): WindowsReplyRow[] {
-  const text = new TextDecoder().decode(body);
-  const rows: WindowsReplyRow[] = [];
-
-  for (const line of text.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed === "") continue;
-
-    const parts = trimmed.split("\t");
-    if (parts.length < 9) continue; // defensive: skip malformed lines
-
-    const sessIdStr = parts[0]!; // e.g. "$0"
-    const sessName = parts[1]!;
-    const winIdStr = parts[2]!;  // e.g. "@1"
-    const winName = parts[3]!;
-    const width = parseInt(parts[4]!, 10);
-    const height = parseInt(parts[5]!, 10);
-    const layoutStr = parts[6]!;
-    const flags = parts[7]!;
-    const active = parts[8]!.trim() === "1";
-
-    // tc-pqb4: per-window durable options (fields [9]–[11]). Read defensively
-    // so that legacy replies and tests that omit them still parse correctly.
-    //   [9]  #{?synchronize-panes,1,0} — "1"=on, "0"=off; default false.
-    //   [10] #{?monitor-activity,1,0}  — "1"=on, "0"=off; default true
-    //                                    (global `-wg monitor-activity on`).
-    //   [11] #{monitor-silence}        — seconds (0=off); default 0.
-    const synchronizePanes = (parts[9] ?? "").trim() === "1";
-    const monitorActivity = (parts[10] ?? "1").trim() !== "0"; // default true
-    const monitorSilenceRaw = parseInt((parts[11] ?? "0").trim(), 10);
-    const monitorSilence = isNaN(monitorSilenceRaw) ? 0 : monitorSilenceRaw;
-
-    // Parse tmux sigil ids: $N → N, @N → N
-    const tmuxSessionId = parseSigilId(sessIdStr, "$");
-    const tmuxWindowId = parseSigilId(winIdStr, "@");
-    if (tmuxSessionId === null || tmuxWindowId === null) continue;
-    if (isNaN(width) || isNaN(height)) continue;
-
-    rows.push({
-      tmuxSessionId,
-      sessionName: sessName,
-      tmuxWindowId,
-      windowName: winName,
-      width,
-      height,
-      layoutString: layoutStr,
-      flags,
-      active,
-      synchronizePanes,
-      monitorActivity,
-      monitorSilence,
-    });
-  }
-
-  return rows;
-}
-
-/**
- * Parse the body of a `list-panes` command reply.
- */
-export function parsePanesReply(body: Uint8Array): PanesReplyRow[] {
-  const text = new TextDecoder().decode(body);
-  const rows: PanesReplyRow[] = [];
-
-  for (const line of text.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed === "") continue;
-
-    const parts = trimmed.split("\t");
-    if (parts.length < 9) continue; // need at least through pane_active
-
-    const paneIdStr = parts[0]!;   // e.g. "%2"
-    const winIdStr = parts[1]!;    // e.g. "@1"
-    const sessIdStr = parts[2]!;   // e.g. "$0"
-    const paneIndex = parseInt(parts[3]!, 10);
-    const width = parseInt(parts[4]!, 10);
-    const height = parseInt(parts[5]!, 10);
-    const paneTop = parseInt(parts[6]!, 10);
-    const paneLeft = parseInt(parts[7]!, 10);
-    const active = parts[8]!.trim() === "1";
-
-    // Dead-pane fields (tc-4bv2 / tc-295a.10). Read defensively: legacy replies
-    // (or tmux builds that drop the trailing empty field) may have fewer parts.
-    // pane_dead is at index 11; pane_dead_status at index 12. A dead pane's
-    // status may be an empty string (tmux reports no code), which yields an
-    // undefined exitCode while dead stays true.
-    const dead = (parts[11] ?? "").trim() === "1";
-    let exitCode: number | undefined;
-    if (dead) {
-      const statusStr = (parts[12] ?? "").trim();
-      if (statusStr !== "") {
-        const parsed = parseInt(statusStr, 10);
-        if (!isNaN(parsed)) exitCode = parsed;
-      }
-    }
-
-    // Durable pane name (tc-1a8z): the `@tmuxcc_label` user-option at field
-    // [13]. Read defensively — legacy replies (or panes that never had the
-    // option set) carry an empty string here, which maps to "no durable name"
-    // (undefined). We trim to drop the trailing line whitespace but otherwise
-    // preserve the value the user set.
-    const labelRaw = (parts[13] ?? "").trim();
-    const label = labelRaw === "" ? undefined : labelRaw;
-
-    // Durable per-pane policy (tc-i9aq.1, cold-start.md §4.A). Read
-    // defensively — legacy replies (or unset options) carry empty strings.
-    //   [14] @tmuxcc-detach → RESOLVED close policy (format walk gives the
-    //                         pane→window→session first-wins value).
-    //   [15] @tmuxcc-icon   → durable icon policy.
-    // tc-4b6k.2: binding intent is per-client and NOT in this bulk reply.
-    const detachRaw = (parts[14] ?? "").trim();
-    const detach: "detach" | "kill" | undefined =
-      detachRaw === "detach" || detachRaw === "kill" ? detachRaw : undefined;
-    const iconRaw = (parts[15] ?? "").trim();
-    const icon = iconRaw === "" ? undefined : iconRaw;
-
-    const tmuxPaneId = parseSigilId(paneIdStr, "%");
-    const tmuxWindowId = parseSigilId(winIdStr, "@");
-    const tmuxSessionId = parseSigilId(sessIdStr, "$");
-    if (tmuxPaneId === null || tmuxWindowId === null || tmuxSessionId === null) continue;
-    if (isNaN(width) || isNaN(height)) continue;
-
-    rows.push({
-      tmuxPaneId,
-      tmuxWindowId,
-      tmuxSessionId,
-      paneIndex,
-      width,
-      height,
-      paneTop,
-      paneLeft,
-      active,
-      dead,
-      exitCode,
-      label,
-      detach,
-      icon,
-    });
-  }
-
-  return rows;
-}
+export type PanesReplyRow = RowTypeOf<typeof PANES_ROW>;
 
 // ---------------------------------------------------------------------------
 // Model builder
@@ -560,8 +369,8 @@ export function parsePanesReply(body: Uint8Array): PanesReplyRow[] {
  * The requery engine calls this on every cycle: the model is the diff
  * baseline that `diffModel(prev, next)` turns into wire deltas.
  *
- * @param windowRows - Output of `parseWindowsReply`.
- * @param paneRows   - Output of `parsePanesReply`.
+ * @param windowRows - Output of `WINDOWS_ROW.parse`.
+ * @param paneRows   - Output of `PANES_ROW.parse`.
  */
 export function buildInitialModel(
   windowRows: WindowsReplyRow[],
@@ -624,7 +433,7 @@ export function buildInitialModel(
     const win: Window = {
       windowId: wid,
       sessionId: sid,
-      name: row.windowName,
+      name: row.name,
       paneIds: [], // filled in step 4
       activePaneId,
       layout,
@@ -660,12 +469,14 @@ export function buildInitialModel(
       paneId: pid,
       windowId: wid,
       sessionId: sid,
-      cols: row.width,
-      rows: row.height,
+      cols: row.cols,
+      rows: row.rows,
       mode: "normal",
       // Dead-pane state from the requery (tc-4bv2 / tc-295a.10 shared shape).
+      // exitCode is only meaningful for a dead corpse; a live pane's
+      // pane_dead_status is empty (→ undefined) so this guard is belt-and-braces.
       dead: row.dead,
-      exitCode: row.exitCode,
+      exitCode: row.dead ? row.exitCode : undefined,
       // Durable pane name from the @tmuxcc_label user-option (tc-1a8z).
       // Re-read on every requery → survives a driver restart for free.
       label: row.label,
@@ -706,23 +517,4 @@ export function buildInitialModel(
   }
 
   return model;
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Parse a tmux sigil-prefixed id string into a numeric id.
- *
- * @param s      - The raw field value (e.g. "$0", "@1", "%2").
- * @param sigil  - Expected leading character ("$", "@", or "%").
- * @returns The numeric id, or null if the string doesn't start with `sigil`
- *          or the remainder is not a valid non-negative integer.
- */
-function parseSigilId(s: string, sigil: string): number | null {
-  if (!s.startsWith(sigil)) return null;
-  const rest = s.slice(sigil.length);
-  if (rest === "" || !/^\d+$/.test(rest)) return null;
-  return parseInt(rest, 10);
 }

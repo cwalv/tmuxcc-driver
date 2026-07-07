@@ -182,13 +182,8 @@ import type { SessionModel } from "./model.js";
 import { emptyModel } from "./model.js";
 import { diffModel } from "./projection.js";
 import type { SessionProxyMessage } from "@tmuxcc/protocol";
-import {
-  bootstrapCommands,
-  buildInitialModel,
-  parsePanesReply,
-  parseWindowsReply,
-} from "./bootstrap.js";
-import type { SessionTarget } from "./bootstrap.js";
+import { bootstrapCommands, buildInitialModel, WINDOWS_ROW, PANES_ROW } from "./bootstrap.js";
+import type { SessionTarget, WindowsReplyRow, PanesReplyRow } from "./bootstrap.js";
 
 // ---------------------------------------------------------------------------
 // Pure core: parse two replies → fresh model → diff against prev
@@ -246,8 +241,8 @@ export function requeryDiff(
   windowsResult: CommandResult,
   panesResult: CommandResult,
 ): RequeryResult {
-  const windowRows = windowsResult.ok ? parseWindowsReply(windowsResult.body) : [];
-  const paneRows = panesResult.ok ? parsePanesReply(panesResult.body) : [];
+  const windowRows = windowsResult.ok ? WINDOWS_ROW.parse(windowsResult.body) : [];
+  const paneRows = panesResult.ok ? PANES_ROW.parse(panesResult.body) : [];
 
   const next = carryForwardBoundClients(prev, buildInitialModel(windowRows, paneRows));
   const deltas = diffModel(prev, next);
@@ -661,8 +656,8 @@ class RequeryEngineImpl implements RequeryEngine {
    * one id would silently narrow the scope.
    */
   private _captureSessionId(
-    windowRows: ReturnType<typeof parseWindowsReply>,
-    paneRows: ReturnType<typeof parsePanesReply>,
+    windowRows: readonly WindowsReplyRow[],
+    paneRows: readonly PanesReplyRow[],
   ): void {
     if (this._sessionId !== undefined) return;
     // Only bind when this engine is scoped to a single session. In the
@@ -787,8 +782,8 @@ class RequeryEngineImpl implements RequeryEngine {
       // write `this._model` yet — that's the commit-only-clean invariant.
       // If a mid-flight notification dirtied us, this candidate is
       // possibly-stale and must be discarded.
-      const windowRows = parseWindowsReply(winResult.body);
-      const paneRows = parsePanesReply(paneResult.body);
+      const windowRows = WINDOWS_ROW.parse(winResult.body);
+      const paneRows = PANES_ROW.parse(paneResult.body);
       // tc-4b6k.2: carry per-client binding intent forward — the bulk requery
       // does not read the per-client `@tmuxcc-bound-<key>` options, so a fresh
       // candidate pane's boundClients is empty; adopt the pre-call model's set

@@ -699,6 +699,29 @@ class RuntimePipelineImpl implements RuntimePipeline {
     this._tokenizer = new ControlTokenizer();
   }
 
+  /**
+   * Trip the per-session error boundary (tc-2x3.4): loud-log with the session
+   * name, STOP this pipeline so no further data is processed on a broken parse
+   * state, then delegate teardown + reattach to `onFatalError` (the supervisor
+   * recycles only THIS session; siblings are unaffected). If no handler is
+   * wired, the log line is the only signal (backward-compat for test setups).
+   *
+   * Reached from two paths: a synchronous throw out of the `host.onData`
+   * tokenizer→correlator stack, and — tc-mysc amendment 1 — a
+   * `ReplyCodecError` raised by the strict requery parser, which the coalescer
+   * routes here (via `onFatalError`) instead of the futile transient-retry loop.
+   */
+  private _triggerFatalBoundary(err: unknown, context: string): void {
+    const sessionLabel = this._opts.sessionName ?? "<unknown-session>";
+    process.stderr.write(
+      `[pipeline] FATAL: session "${sessionLabel}" ${context} — ` +
+        `triggering per-session error boundary (tc-2x3.4).\n` +
+        `  Error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`,
+    );
+    this.stop();
+    this._opts.onFatalError?.(err);
+  }
+
   // -------------------------------------------------------------------------
   // Public interface
   // -------------------------------------------------------------------------
@@ -733,20 +756,7 @@ class RuntimePipelineImpl implements RuntimePipeline {
       } catch (err) {
         // Do NOT re-throw: that would unwind out of the PTY data event and
         // into the shared event loop, crashing all sessions.
-        const sessionLabel = this._opts.sessionName ?? "<unknown-session>";
-        process.stderr.write(
-          `[pipeline] FATAL: session "${sessionLabel}" parser/reducer/pipeline threw an unhandled exception — ` +
-            `triggering per-session error boundary (tc-2x3.4).\n` +
-            `  Error: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`,
-        );
-        // Stop this pipeline immediately so we don't process further data on
-        // the now-broken parse state (tokenizer and correlator may be in an
-        // undefined mid-parse position).
-        this.stop();
-        // Delegate teardown + reattach to the supervisor (or whoever wired
-        // onFatalError). If no handler is wired, the log line above is the
-        // only signal — backward-compat for test setups.
-        this._opts.onFatalError?.(err);
+        this._triggerFatalBoundary(err, "parser/reducer/pipeline threw an unhandled exception");
       }
     });
 
@@ -880,6 +890,12 @@ class RuntimePipelineImpl implements RuntimePipeline {
       },
       onError: (err) => {
         console.warn("[pipeline] coalescer requery rejected:", err);
+      },
+      // tc-mysc amendment 1: a ReplyCodecError from the strict requery parser is
+      // deterministic — the coalescer suppresses its futile retry and routes it
+      // here, to the SAME per-session error boundary as a dispatch exception.
+      onFatalError: (err) => {
+        this._triggerFatalBoundary(err, "requery reply failed strict parse (ReplyCodecError)");
       },
     });
     this._coalescer = coalescer;

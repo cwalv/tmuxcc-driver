@@ -400,6 +400,7 @@ describe("OutputDemux: notifyPaneBound / notifyPaneClosed idempotency", () => {
 import { createRuntimePipeline } from "./pipeline.js";
 import type { TmuxHost } from "./tmux-host.js";
 import type { DataHandler as HostDataHandler } from "./tmux-host.js";
+import { WINDOWS_ROW, PANES_ROW } from "../state/bootstrap.js";
 
 /**
  * Build a minimal synthetic tmux host that lets us inject arbitrary bytes.
@@ -442,9 +443,12 @@ function makeBootstrapStream(paneNum: number): Uint8Array {
   const wid = "@1";
   const pid_ = `%${paneNum}`;
   const layoutStr = `aaaa,80x24,0,0,${paneNum}`;
-  // tc-pqb4: include fields [9]–[11] (synchronize-panes / monitor-activity / monitor-silence)
-  const winBody = `${sid}\ttestsession\t${wid}\ttestwin\t80\t24\t${layoutStr}\t*\t1\t0\t1\t0\n`;
-  const paneBody = `${pid_}\t${wid}\t${sid}\t0\t80\t24\t0\t0\t1\t1234\tbash\n`;
+  const winBody = WINDOWS_ROW.fixtureBody([
+    { tmuxSessionId: 0, sessionName: "testsession", tmuxWindowId: 1, name: "testwin", layoutString: layoutStr, active: true },
+  ]);
+  const paneBody = PANES_ROW.fixtureBody([
+    { tmuxPaneId: paneNum, tmuxWindowId: 1, tmuxSessionId: 0, active: true },
+  ]);
   const winBlock = `%begin ${ts} 100 1\r\n${winBody}%end ${ts} 100 1\r\n`;
   const paneBlock = `%begin ${ts} 101 1\r\n${paneBody}%end ${ts} 101 1\r\n`;
   return new TextEncoder().encode(winBlock + paneBlock);

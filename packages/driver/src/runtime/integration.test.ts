@@ -65,6 +65,7 @@ import { createFlowController } from "./flow-control.js";
 import { createSessionProxy } from "./session-proxy.js";
 import { createSessionProxyRegistry } from "../metrics/index.js";
 import type { Clock, TimeoutHandle } from "../state/coalescer.js";
+import { WINDOWS_ROW, PANES_ROW } from "../state/bootstrap.js";
 
 // ---------------------------------------------------------------------------
 // Wire utilities
@@ -157,10 +158,27 @@ function makeBootstrapBytes(opts: {
 
   const ts = 1_000_000;
   const layoutStr = `aaaa,${cols}x${rows},0,0,${parseInt(pid_.slice(1), 10)}`;
-  // list-windows -a reply (BOOTSTRAP_WINDOWS_FORMAT; tc-pqb4: includes fields [9]–[11])
-  const windowsBody = `${sid}\t${sname}\t${wid}\t${wname}\t${cols}\t${rows}\t${layoutStr}\t*\t1\t0\t1\t0\n`;
-  // list-panes -a reply (BOOTSTRAP_PANES_FORMAT)
-  const panesBody = `${pid_}\t${wid}\t${sid}\t0\t${cols}\t${rows}\t0\t0\t1\t1234\tbash\n`;
+  // list-windows / list-panes -a replies (schema-derived via WINDOWS_ROW / PANES_ROW).
+  const windowsBody = WINDOWS_ROW.fixtureBody([
+    {
+      tmuxSessionId: parseInt(sid.slice(1), 10),
+      sessionName: sname,
+      tmuxWindowId: parseInt(wid.slice(1), 10),
+      name: wname,
+      layoutString: layoutStr,
+      active: true,
+    },
+  ]);
+  const panesBody = PANES_ROW.fixtureBody([
+    {
+      tmuxPaneId: parseInt(pid_.slice(1), 10),
+      tmuxWindowId: parseInt(wid.slice(1), 10),
+      tmuxSessionId: parseInt(sid.slice(1), 10),
+      cols,
+      rows,
+      active: true,
+    },
+  ]);
 
   const preNotif = opts.noPreNotif === true ? "" : `%session-changed ${sid} ${sname}\r\n`;
   // flags=1 → user-command reply (real tmux uses 0 only for the implicit
@@ -227,10 +245,27 @@ function createScriptedHost(bootstrapOpts: Parameters<typeof makeBootstrapBytes>
     const layoutStr = `aaaa,${cols}x${rows},0,0,${parseInt(pid_.slice(1), 10)}`;
 
     const body = cmdType === "windows"
-      // tc-pqb4: include fields [9]–[11] (synchronize-panes / monitor-activity / monitor-silence)
-      ? `${sid}\t${sname}\t${wid}\t${wname}\t${cols}\t${rows}\t${layoutStr}\t*\t1\t0\t1\t0\n`
+      ? WINDOWS_ROW.fixtureBody([
+          {
+            tmuxSessionId: parseInt(sid.slice(1), 10),
+            sessionName: sname,
+            tmuxWindowId: parseInt(wid.slice(1), 10),
+            name: wname,
+            layoutString: layoutStr,
+            active: true,
+          },
+        ])
       : cmdType === "panes"
-        ? `${pid_}\t${wid}\t${sid}\t0\t${cols}\t${rows}\t0\t0\t1\t1234\tbash\n`
+        ? PANES_ROW.fixtureBody([
+            {
+              tmuxPaneId: parseInt(pid_.slice(1), 10),
+              tmuxWindowId: parseInt(wid.slice(1), 10),
+              tmuxSessionId: parseInt(sid.slice(1), 10),
+              cols,
+              rows,
+              active: true,
+            },
+          ])
         : "";
 
     const replyBytes = new TextEncoder().encode(

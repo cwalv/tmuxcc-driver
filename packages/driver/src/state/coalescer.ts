@@ -49,6 +49,7 @@
  */
 
 import type { RequeryEngine, RequeryResult } from "./requery.js";
+import { ReplyCodecError } from "./reply-row.js";
 import type { NotificationEvent } from "../parser/notifications.js";
 
 // ---------------------------------------------------------------------------
@@ -243,12 +244,25 @@ export interface CoalescerOptions {
   readonly onNotify?: (kind: TopologyEventKind | undefined) => void;
 
   /**
-   * Optional error sink for failures inside `requery()` (rejected Promises
-   * or unexpected throws). The coalescer always re-arms dirty + schedules a
-   * retry on failure; this hook is purely for logging/observability. Throws
-   * here are caught and ignored.
+   * Optional error sink for TRANSIENT failures inside `requery()` (rejected
+   * Promises or unexpected throws that are NOT {@link ReplyCodecError}s). The
+   * coalescer re-arms dirty + schedules a retry on such failures; this hook is
+   * purely for logging/observability. Throws here are caught and ignored.
    */
   readonly onError?: (err: unknown) => void;
+
+  /**
+   * Optional sink for FATAL, non-retriable failures inside `requery()` — a
+   * {@link ReplyCodecError} (a reply-shape / field-decode failure). Because the
+   * format string and the strict parser are the same artifact, a codec error
+   * is DETERMINISTIC: retrying re-issues the same command and re-parses the
+   * same shape, so the transient-retry path would serve a stale model forever
+   * at ~1 Hz (tc-mysc amendment 1). Instead the coalescer routes it here and
+   * does NOT re-arm/retry. The pipeline wires this to its per-session error
+   * boundary (tc-2x3.4) so only the broken session is recycled. If unset, the
+   * error is dropped after the loud-log (the retry is still suppressed).
+   */
+  readonly onFatalError?: (err: unknown) => void;
 
   /**
    * Optional sink invoked once per SUCCESSFUL `engine.requery()` completion,
@@ -366,6 +380,7 @@ class CoalescerImpl implements Coalescer {
   private readonly _heartbeatMs: number;
   private readonly _onNotify: ((kind: TopologyEventKind | undefined) => void) | undefined;
   private readonly _onError: ((err: unknown) => void) | undefined;
+  private readonly _onFatalError: ((err: unknown) => void) | undefined;
   private readonly _onDeltas: ((result: RequeryResult, meta: CycleMeta) => void) | undefined;
 
   /**
@@ -419,6 +434,7 @@ class CoalescerImpl implements Coalescer {
     this._heartbeatMs = opts.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
     this._onNotify = opts.onNotify;
     this._onError = opts.onError;
+    this._onFatalError = opts.onFatalError;
     this._onDeltas = opts.onDeltas;
   }
 
@@ -544,6 +560,22 @@ class CoalescerImpl implements Coalescer {
     this._inFlight = false;
 
     if (err !== undefined && err !== null) {
+      // tc-mysc amendment 1: a ReplyCodecError (reply-shape / field-decode
+      // failure from the strict parser) is FATAL, not transient. The format
+      // string and the parser are the same artifact, so the same reply
+      // re-parses the same way — retrying would re-issue the command and
+      // re-throw forever at ~1 Hz while serving a stale model. Route it to the
+      // session error boundary and do NOT re-arm/retry.
+      if (err instanceof ReplyCodecError) {
+        if (this._onFatalError !== undefined) {
+          try {
+            this._onFatalError(err);
+          } catch {
+            // Swallow observer errors.
+          }
+        }
+        return;
+      }
       if (this._onError !== undefined) {
         try {
           this._onError(err);

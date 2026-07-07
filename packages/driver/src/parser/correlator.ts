@@ -78,7 +78,7 @@ import type {
  * stripped by the tokenizer; there is no trailing `\n` after the last line).
  *
  * tc-fx4: the `\n` join is load-bearing — line-oriented body parsers
- * (bootstrap's `parseWindowsReply` / `parsePanesReply`, the pipeline's
+ * (bootstrap's `WINDOWS_ROW.parse` / `PANES_ROW.parse`, the pipeline's
  * %window-add layout reconcile) split on `\n` to recover the reply rows.
  */
 export interface CommandResult {
@@ -620,7 +620,7 @@ export class CommandCorrelator {
    * ("lines are joined by `\n`").  The previous implementation concatenated
    * chunks with NO separator, which glued multi-line replies together and
    * silently broke every line-oriented body parser: bootstrap's
-   * `parseWindowsReply` / `parsePanesReply` (multi-window / multi-pane
+   * `WINDOWS_ROW.parse` / `PANES_ROW.parse` (multi-window / multi-pane
    * sessions lost all rows after the first) and the pipeline's %window-add
    * layout reconcile.
    */

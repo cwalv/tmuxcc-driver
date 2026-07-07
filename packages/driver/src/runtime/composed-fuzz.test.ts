@@ -93,6 +93,7 @@ import {
   type SessionModel,
 } from "../state/model.js";
 import { diffModel, projectSnapshot } from "../state/projection.js";
+import { WINDOWS_ROW, PANES_ROW } from "../state/bootstrap.js";
 import type {
   SessionProxyMessage,
   SnapshotMessage,
@@ -242,19 +243,26 @@ function worldWindowsSnapshot(w: World): WorldWindow[] {
 
 /** Serialize the world into bootstrap-shape list-windows + list-panes bodies. */
 function worldToReplyBodies(w: World): { winBody: string; paneBody: string } {
-  let winBody = "";
-  let paneBody = "";
-  for (const win of w.windows) {
-    const layout = `aaaa,${win.cols}x${win.rows},0,0,${win.paneNum}`;
-    // tc-pqb4: include fields [9]–[11] (synchronize-panes / monitor-activity / monitor-silence)
-    winBody +=
-      `$0\t${w.sessionName}\t@${win.windowNum}\t${win.name}\t` +
-      `${win.cols}\t${win.rows}\t${layout}\t${win.active ? "*" : "-"}\t` +
-      `${win.active ? "1" : "0"}\t0\t1\t0\n`;
-    paneBody +=
-      `%${win.paneNum}\t@${win.windowNum}\t$0\t0\t` +
-      `${win.cols}\t${win.rows}\t0\t0\t${win.active ? "1" : "0"}\t1234\tbash\n`;
-  }
+  const winBody = WINDOWS_ROW.fixtureBody(
+    w.windows.map((win) => ({
+      tmuxSessionId: 0,
+      sessionName: w.sessionName,
+      tmuxWindowId: win.windowNum,
+      name: win.name,
+      layoutString: `aaaa,${win.cols}x${win.rows},0,0,${win.paneNum}`,
+      active: win.active,
+    })),
+  );
+  const paneBody = PANES_ROW.fixtureBody(
+    w.windows.map((win) => ({
+      tmuxPaneId: win.paneNum,
+      tmuxWindowId: win.windowNum,
+      tmuxSessionId: 0,
+      cols: win.cols,
+      rows: win.rows,
+      active: win.active,
+    })),
+  );
   return { winBody, paneBody };
 }
 

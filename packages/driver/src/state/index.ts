@@ -69,16 +69,17 @@ export { createPaneBufferStore, DEFAULT_CAP_BYTES } from "./scrollback.js";
 // this type was retired in tc-128.4).
 export type { SwitchClientOutcome } from "./switch-client.js";
 
-// tc-835: bootstrap reply parsing + initial-model builder. The
+// tc-835: bootstrap reply schema/codec + initial-model builder. The
 // `BootstrapCoordinator` (per-event reducer driver) was retired in tc-128.4;
-// the requery engine now owns the bootstrap path end-to-end.
+// the requery engine now owns the bootstrap path end-to-end. tc-mysc: the two
+// reply-row SCHEMAS derive their format string, strict parser, and fixtures.
 export {
+  WINDOWS_ROW,
+  PANES_ROW,
   BOOTSTRAP_WINDOWS_FORMAT,
   BOOTSTRAP_PANES_FORMAT,
   TMUXCC_LABEL_OPTION,
   bootstrapCommands,
-  parseWindowsReply,
-  parsePanesReply,
   buildInitialModel,
 } from "./bootstrap.js";
 export type {
@@ -86,6 +87,15 @@ export type {
   PanesReplyRow,
   SessionTarget,
 } from "./bootstrap.js";
+
+// tc-mysc: generic reply-row codec + its fail-loud error hierarchy.
+export {
+  defineReplyRow,
+  ReplyCodecError,
+  ReplyShapeError,
+  FieldDecodeError,
+} from "./reply-row.js";
+export type { ReplyRow, RowOf, FieldCodec, FieldSpec } from "./reply-row.js";
 
 // tc-128.1: requery engine + diff-to-deltas
 export { requeryDiff, createRequeryEngine } from "./requery.js";

@@ -373,3 +373,78 @@ Owner-transfer across reconnects is no longer TBD: a reattaching window attaches
 as a candidate and — when it is the sole/most-recently-active candidate — owns via
 the activity policy (first-candidate-owns on an ownerless session, or handoff
 after owner-silence between windows). No `session.claim-ownership` verb is needed.
+
+## 9. Canonicality: the reply-row codec (tc-mysc)
+
+§6's requery rebuilds the model from scratch every cycle out of two
+tab-separated tmux replies. A tmux-canonical field that is missing from the
+format is silently rebuilt from a hardcoded literal, and `diffModel` then emits
+a delta CLOBBERING any correct value that arrived by another path — this is the
+tc-pqb4 class (`synchronize-panes`/`monitor-*` were omitted from the format and
+hardcoded, so every topology requery undid the optimistic toggle).
+
+**Design (Design A): the format is derived from a typed schema, not hand-kept.**
+Each reply kind is declared ONCE as a field map — `WINDOWS_ROW` / `PANES_ROW`
+(`state/bootstrap.ts`), built on the generic codec in `state/reply-row.ts`. The
+tmux format string, the strict parser, the row type, and the test fixture
+builder are all DERIVED from that one declaration. Adding a canonical field is a
+single edit; it is *unrepresentable* for the format and the parser to disagree,
+for a row field to be untyped, or for a fixture to be missing a column. The
+schema-derived round-trip property test covers a new field the day it is
+declared — it is the test that would have caught tc-pqb4 at introduction. Eight
+dead format fields (`window_width/height/flags`, `pane_index/top/left/pid/
+current_command`) were parsed-and-dropped every cycle and are deleted; re-adding
+any is a one-line schema edit.
+
+The parse is STRICT and fail-loud: a wrong field count throws `ReplyShapeError`,
+a bad field throws `FieldDecodeError`. This replaces both the old
+`parts[i] ?? default` fallbacks and the `isNaN(width|height)` row-validity gate.
+It strips only a trailing `\r` — never `trim()`, which used to eat the empty
+trailing option columns of a live pane row and manufacture the very short row it
+then defended against.
+
+### The five load-bearing amendments (verified against tmux 3.4)
+
+1. **Escalation routing.** A steady-state `ReplyShapeError` is DETERMINISTIC
+   (format and parser are one artifact — the same reply re-parses identically),
+   so the coalescer's absorb-and-retry path would serve a stale model forever at
+   ~1 Hz. Reply-codec errors extend `ReplyCodecError`; the coalescer routes them
+   to `onFatalError` (the per-session error boundary, tc-2x3.4) and does NOT
+   retry — the same loud channel as a dispatch exception. Tested end-to-end in
+   `coalescer.test.ts` ("ReplyCodecError is fatal, not retried").
+2. **Sanitization target = user options, not names.** tmux ESCAPES a tab in a
+   window/session NAME to a 2-char `\t` (never a raw tab → no shatter), but
+   stores/emits RAW tabs in USER OPTIONS (`@tmuxcc_label`, `@tmuxcc-icon`) — the
+   actual shipped injection vector. Those fields are read through
+   `tabSanitized(...)` = an in-tmux `#{s/<TAB>/ /:var}`; names are read plain.
+3. **Literal-TAB pin.** The `s///` pattern is a real 0x09 byte
+   (`SANITIZE_TAB_PATTERN`), NOT the two-char `\t` — verified live, a two-char
+   pattern matches the LETTER `t` and leaves tabs intact. Pinned by a unit
+   assertion on the derived format AND a Layer-A test that a real `@tmuxcc_label`
+   containing a tab and 't's round-trips tab→space only.
+4. **Newline policy.** tmux emits an embedded newline RAW in both names and user
+   options; no read-side modifier removes it (`#{q:}` over-escapes names and is a
+   no-op on user options; POSIX `[[:...:]]` classes collide with the `:`
+   modifier terminator → empty output). Policy: names are BOUNDED-THROW — a
+   newline in a name is pathological (automatic-rename and normal renames never
+   produce one) and the strict parser surfaces it loudly (routed to the boundary)
+   rather than misparsing. For user options — the driver is the sole writer — the
+   durable fix is write-point sanitization; the read-side `s///` closes the tab
+   vector as defense-in-depth. Pinned by the Layer-A test.
+5. **`paneTitle` non-optional once format-backed.** When `paneTitle` becomes
+   format-backed (child bead), its projection defined→absent diff-guard
+   (`projection.ts`) and the tests codifying it MUST be deleted — a silent guard
+   for a state the schema makes unrepresentable is exactly the class this design
+   removes. (Recorded here; enacted by the paneTitle child.)
+
+### Canonical vs overlay (deferred to a child bead)
+
+The second half of the tc-pqb4 class — the hardcoded literal at construction —
+is closed by typing the model by provenance: canonical fields are a mechanical
+`Pick` of the row (a hardcoded literal for a listed field becomes unwritable),
+and client-local state (`boundClients`, the ownership-seams overlay) is carried
+forward wholesale, not per-field. `mode` (`#{pane_mode}`) and `paneTitle`
+(`#{pane_title}`) join the pane schema. These land in follow-on children of
+tc-mysc; the codec bead lands the schema/codec, strict parse, escalation
+routing, sanitizer, and the single fixture builder.
+>>>>>>> 804290d (tc-mysc: land the reply-row schema codec (canonicality))

@@ -26,6 +26,7 @@ import type {
   SubmitCommand,
   TeardownConfirmation,
 } from "./requery.js";
+import { WINDOWS_ROW, PANES_ROW } from "./bootstrap.js";
 import { diffModel } from "./projection.js";
 import {
   emptyModel,
@@ -52,10 +53,12 @@ import type { SessionProxyMessage } from "@tmuxcc/protocol";
 // ---------------------------------------------------------------------------
 // Test fixtures: synthetic list-windows / list-panes reply bodies.
 //
-// BOOTSTRAP_WINDOWS_FORMAT fields (tab-separated, 12):
-//   $sess  name  @win  name  w   h   layout  flags  active  syncPanes  monAct  monSil
-// BOOTSTRAP_PANES_FORMAT fields (tab-separated, 16):
-//   %pane  @win  $sess  idx  w   h   top  left  active  pid  cmd  dead  deadStatus  @tmuxcc_label  @tmuxcc-detach  @tmuxcc-icon
+// Field membership lives in ONE place — the WINDOWS_ROW / PANES_ROW schemas
+// (state/bootstrap.ts, tc-mysc). These helpers are thin adapters that map
+// friendly arg names onto `fixtureLine`, so a schema field change propagates
+// here for free. The `width`/`height`/`flags` window args and the
+// `idx`/`top`/`left`/`pid`/`cmd` pane args are NO LONGER wire fields (deleted
+// dead columns); they are accepted-and-ignored for call-site compatibility.
 // ---------------------------------------------------------------------------
 
 const ENC = new TextEncoder();
@@ -68,7 +71,7 @@ function errResult(n = 1): CommandResult {
   return { ok: false, commandNumber: n, body: new Uint8Array(0) };
 }
 
-/** A windows-reply line shaped to BOOTSTRAP_WINDOWS_FORMAT. */
+/** A windows-reply line (schema-derived via WINDOWS_ROW). */
 function winLine(args: {
   sessNum: number;
   sessName: string;
@@ -86,24 +89,22 @@ function winLine(args: {
   /** tc-pqb4: monitor-silence seconds. Defaults 0 (off). */
   monitorSilence?: number;
 }): string {
-  return [
-    `$${args.sessNum}`,
-    args.sessName,
-    `@${args.winNum}`,
-    args.winName,
-    String(args.width ?? 80),
-    String(args.height ?? 24),
-    args.layout,
-    args.flags ?? "-",
-    args.active ? "1" : "0",
-    // tc-pqb4: per-window durable options (fields [9]–[11])
-    args.synchronizePanes ? "1" : "0",
-    args.monitorActivity === false ? "0" : "1",
-    String(args.monitorSilence ?? 0),
-  ].join("\t") + "\n";
+  return (
+    WINDOWS_ROW.fixtureLine({
+      tmuxSessionId: args.sessNum,
+      sessionName: args.sessName,
+      tmuxWindowId: args.winNum,
+      name: args.winName,
+      layoutString: args.layout,
+      active: args.active ?? false,
+      synchronizePanes: args.synchronizePanes ?? false,
+      monitorActivity: args.monitorActivity !== false,
+      monitorSilence: args.monitorSilence ?? 0,
+    }) + "\n"
+  );
 }
 
-/** A panes-reply line shaped to BOOTSTRAP_PANES_FORMAT. */
+/** A panes-reply line (schema-derived via PANES_ROW). */
 function paneLine(args: {
   paneNum: number;
   winNum: number;
@@ -127,26 +128,21 @@ function paneLine(args: {
   /** tc-i9aq.1: @tmuxcc-icon durable icon policy. Empty string when unset. */
   icon?: string;
 }): string {
-  return [
-    `%${args.paneNum}`,
-    `@${args.winNum}`,
-    `$${args.sessNum}`,
-    String(args.idx ?? 0),
-    String(args.width ?? 80),
-    String(args.height ?? 24),
-    String(args.top ?? 0),
-    String(args.left ?? 0),
-    args.active ? "1" : "0",
-    String(args.pid ?? 9000),
-    args.cmd ?? "bash",
-    args.dead ? "1" : "0",
-    args.deadStatus !== undefined ? String(args.deadStatus) : "",
-    args.label ?? "",
-    // tc-i9aq.1 (cold-start.md §4.A): @tmuxcc-detach / -icon.
-    // tc-4b6k.2: @tmuxcc-bound is per-client and NOT read by the bulk requery.
-    args.detach ?? "",
-    args.icon ?? "",
-  ].join("\t") + "\n";
+  return (
+    PANES_ROW.fixtureLine({
+      tmuxPaneId: args.paneNum,
+      tmuxWindowId: args.winNum,
+      tmuxSessionId: args.sessNum,
+      cols: args.width ?? 80,
+      rows: args.height ?? 24,
+      active: args.active ?? false,
+      dead: args.dead ?? false,
+      exitCode: args.deadStatus,
+      label: args.label === "" ? undefined : args.label,
+      detach: args.detach,
+      icon: args.icon === "" ? undefined : args.icon,
+    }) + "\n"
+  );
 }
 
 // Standard single-pane layout strings (1 = pane id 1, etc.).
@@ -2639,8 +2635,9 @@ describe("RequeryEngine: id-based session targeting (tc-0v59)", () => {
 // model against the previous one and emit spurious `window.sync.changed: false`
 // deltas, resetting the extension's UI back to the default value.
 //
-// The fix: BOOTSTRAP_WINDOWS_FORMAT now includes fields [9]–[11], and
-// parseWindowsReply + buildInitialModel read them from the tmux reply.
+// The fix: the WINDOWS_ROW schema carries synchronizePanes/monitorActivity/
+// monitorSilence, and WINDOWS_ROW.parse + buildInitialModel read them from the
+// tmux reply.
 // ---------------------------------------------------------------------------
 
 describe("requeryDiff: durable window options — synchronizePanes/monitorActivity/monitorSilence (tc-pqb4)", () => {

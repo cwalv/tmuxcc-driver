@@ -25,6 +25,8 @@ import { createCoalescer } from "./coalescer.js";
 import type { Clock, TimeoutHandle } from "./coalescer.js";
 import { createRequeryEngine } from "./requery.js";
 import type { SubmitCommand } from "./requery.js";
+import { WINDOWS_ROW, PANES_ROW } from "./bootstrap.js";
+import { ReplyCodecError, ReplyShapeError } from "./reply-row.js";
 import type { CommandResult } from "../parser/correlator.js";
 
 // ---------------------------------------------------------------------------
@@ -112,53 +114,44 @@ function errResult(): CommandResult {
   return { ok: false, commandNumber: 0, body: new Uint8Array(0) };
 }
 
-/** A windows-reply line for one session/window with one pane. */
+/** A windows-reply line for one session/window (schema-derived via WINDOWS_ROW). */
 function winLine(args: {
   sessNum?: number;
   winNum: number;
   paneIdInLayout: number;
   winName?: string;
 }): string {
-  const sess = args.sessNum ?? 0;
-  return [
-    `$${sess}`,
-    "main",
-    `@${args.winNum}`,
-    args.winName ?? "shell",
-    "80",
-    "24",
-    `0000,80x24,0,0,${args.paneIdInLayout}`,
-    "-",
-    "1",
-    // tc-pqb4: per-window durable options (fields [9]–[11]). Tests here
-    // don't exercise window-option state so use defaults: false/true/0.
-    "0",
-    "1",
-    "0",
-  ].join("\t") + "\n";
+  return (
+    WINDOWS_ROW.fixtureLine({
+      tmuxSessionId: args.sessNum ?? 0,
+      sessionName: "main",
+      tmuxWindowId: args.winNum,
+      name: args.winName ?? "shell",
+      layoutString: `0000,80x24,0,0,${args.paneIdInLayout}`,
+      active: true,
+      // Tests here don't exercise window-option state; use defaults.
+      synchronizePanes: false,
+      monitorActivity: true,
+      monitorSilence: 0,
+    }) + "\n"
+  );
 }
 
-/** A panes-reply line for one pane. */
+/** A panes-reply line for one pane (schema-derived via PANES_ROW). */
 function paneLine(args: {
   paneNum: number;
   winNum: number;
   sessNum?: number;
   active?: boolean;
 }): string {
-  const sess = args.sessNum ?? 0;
-  return [
-    `%${args.paneNum}`,
-    `@${args.winNum}`,
-    `$${sess}`,
-    "0",
-    "80",
-    "24",
-    "0",
-    "0",
-    args.active ? "1" : "0",
-    "9000",
-    "bash",
-  ].join("\t") + "\n";
+  return (
+    PANES_ROW.fixtureLine({
+      tmuxPaneId: args.paneNum,
+      tmuxWindowId: args.winNum,
+      tmuxSessionId: args.sessNum ?? 0,
+      active: args.active ?? false,
+    }) + "\n"
+  );
 }
 
 /** Build a (windows, panes) reply pair for a list of windows, each with one pane. */
@@ -495,6 +488,55 @@ describe("coalescer: %error in steady state", () => {
 
     assert.equal(errors.length, 1, "onError was called once");
     assert.ok(errors[0] instanceof Error);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 5b. ReplyCodecError escalation routing (tc-mysc amendment 1)
+//
+// A steady-state reply-shape / decode error is DETERMINISTIC (the format
+// string and the strict parser are the same artifact — the same reply
+// re-parses the same way). The old absorb-and-retry path (onError → markDirty
+// → ~1 Hz retry) would serve a stale model forever. It must instead route to
+// onFatalError (the per-session error boundary) and NOT retry.
+// ---------------------------------------------------------------------------
+
+describe("coalescer: ReplyCodecError is fatal, not retried", () => {
+  it("routes a malformed reply to onFatalError and suppresses the retry", async () => {
+    const fake = makeFakeClock();
+    // Windows reply is OK at the transport layer but structurally malformed
+    // (wrong field count) → the strict parser throws ReplyShapeError inside
+    // engine.requery(), which rejects.
+    const script = scriptedSubmit(() => [
+      okResult("$0\tbroken-row\n"),
+      ...bothReplies([1]).slice(1),
+    ]);
+    const engine = createRequeryEngine({ submit: script.submit });
+    const transient: unknown[] = [];
+    const fatal: unknown[] = [];
+    const co = createCoalescer({
+      engine,
+      clock: fake.clock,
+      ceilingMs: 1000,
+      onError: (err) => transient.push(err),
+      onFatalError: (err) => fatal.push(err),
+    });
+
+    co.notify();
+    await fake.advance(0);
+
+    assert.equal(fatal.length, 1, "the codec error routed to onFatalError exactly once");
+    assert.ok(fatal[0] instanceof ReplyCodecError, "fatal payload is a ReplyCodecError");
+    assert.ok(fatal[0] instanceof ReplyShapeError, "specifically a shape error");
+    assert.equal(transient.length, 0, "onError (the transient-retry sink) was NOT called");
+
+    // Crucially: NO retry was scheduled and NO further cycle runs — the old
+    // behaviour would busy-retry at the ceiling forever on the same bad reply.
+    assert.equal(fake.pendingCount(), 0, "no retry timer armed after a fatal codec error");
+    const cyclesAfterFatal = script.requeryCount();
+    await fake.advance(10_000);
+    assert.equal(script.requeryCount(), cyclesAfterFatal, "no further requery cycles after the fatal trip");
+    assert.equal(fatal.length, 1, "onFatalError fired exactly once (not on a loop)");
   });
 });
 

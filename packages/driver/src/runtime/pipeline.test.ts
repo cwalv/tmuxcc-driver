@@ -40,6 +40,7 @@ import { createRuntimePipeline } from "./pipeline.js";
 import type { TmuxHost, DataHandler, ExitHandler, ErrorHandler } from "./tmux-host.js";
 import { createPaneBufferStore } from "../state/scrollback.js";
 import { checkInvariants, paneId, windowId, sessionId } from "../state/model.js";
+import { WINDOWS_ROW, PANES_ROW } from "../state/bootstrap.js";
 
 // ---------------------------------------------------------------------------
 // FakeTmuxHost — a TmuxHost that lets the test push bytes and write commands
@@ -159,11 +160,26 @@ function buildBootstrapReplies(opts: BootstrapStreamOpts = {}): Uint8Array {
   const rows = opts.rows ?? 24;
 
   const layoutStr = `aaaa,${cols}x${rows},0,0,${parseInt(pid_.slice(1), 10)}`;
-  // tc-pqb4: include fields [9]–[11] (synchronize-panes / monitor-activity / monitor-silence)
-  const windowsBody =
-    `${sid}\t${sname}\t${wid}\t${wname}\t${cols}\t${rows}\t${layoutStr}\t*\t1\t0\t1\t0\n`;
-  const panesBody =
-    `${pid_}\t${wid}\t${sid}\t0\t${cols}\t${rows}\t0\t0\t1\t1234\tbash\n`;
+  const windowsBody = WINDOWS_ROW.fixtureBody([
+    {
+      tmuxSessionId: parseInt(sid.slice(1), 10),
+      sessionName: sname,
+      tmuxWindowId: parseInt(wid.slice(1), 10),
+      name: wname,
+      layoutString: layoutStr,
+      active: true,
+    },
+  ]);
+  const panesBody = PANES_ROW.fixtureBody([
+    {
+      tmuxPaneId: parseInt(pid_.slice(1), 10),
+      tmuxWindowId: parseInt(wid.slice(1), 10),
+      tmuxSessionId: parseInt(sid.slice(1), 10),
+      cols,
+      rows,
+      active: true,
+    },
+  ]);
 
   const stream =
     makeCommandBlock(nextCmdNum(), windowsBody) +
@@ -178,13 +194,14 @@ function buildBootstrapReplies(opts: BootstrapStreamOpts = {}): Uint8Array {
  */
 function buildTwoWindowReplies(opts: { sessionName?: string } = {}): Uint8Array {
   const sname = opts.sessionName ?? "bootsession";
-  // tc-pqb4: include fields [9]–[11] (synchronize-panes / monitor-activity / monitor-silence)
-  const winBody =
-    `$0\t${sname}\t@1\twin1\t80\t24\taaaa,80x24,0,0,1\t*\t1\t0\t1\t0\n` +
-    `$0\t${sname}\t@2\twin2\t80\t24\tbbbb,80x24,0,0,2\t-\t0\t0\t1\t0\n`;
-  const paneBody =
-    `%1\t@1\t$0\t0\t80\t24\t0\t0\t1\t1234\tbash\n` +
-    `%2\t@2\t$0\t0\t80\t24\t0\t0\t1\t5678\tbash\n`;
+  const winBody = WINDOWS_ROW.fixtureBody([
+    { tmuxSessionId: 0, sessionName: sname, tmuxWindowId: 1, name: "win1", layoutString: "aaaa,80x24,0,0,1", active: true },
+    { tmuxSessionId: 0, sessionName: sname, tmuxWindowId: 2, name: "win2", layoutString: "bbbb,80x24,0,0,2", active: false },
+  ]);
+  const paneBody = PANES_ROW.fixtureBody([
+    { tmuxPaneId: 1, tmuxWindowId: 1, tmuxSessionId: 0, active: true },
+    { tmuxPaneId: 2, tmuxWindowId: 2, tmuxSessionId: 0, active: true },
+  ]);
   return bytes(
     makeCommandBlock(nextCmdNum(), winBody) +
       makeCommandBlock(nextCmdNum(), paneBody),
