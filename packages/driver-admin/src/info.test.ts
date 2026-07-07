@@ -15,7 +15,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { createInMemoryTransportPair } from "@tmuxcc/protocol";
+import { createInMemoryTransportPair, isCommandError } from "@tmuxcc/protocol";
 import type { MessageBase, ServerProxyCommandRequestMessage } from "@tmuxcc/protocol";
 
 import { runServerProxyCommand } from "./info.js";
@@ -45,6 +45,7 @@ test("runServerProxyCommand resolves with the correlated ok payload", async () =
 });
 
 test("runServerProxyCommand rejects on an ok:false result", async () => {
+  // tc-u4ny.3: runServerProxyCommand now throws CommandError with intact code+details.
   const { sessionProxy: serverProxy, client } = createInMemoryTransportPair();
 
   serverProxy.onControl((msg: MessageBase) => {
@@ -53,13 +54,39 @@ test("runServerProxyCommand rejects on an ok:false result", async () => {
       type: "command.response",
       seq: 1,
       correlationId: req.correlationId,
-      result: { ok: false, code: "protocol.unknown-message", message: "nope" },
+      result: {
+        ok: false,
+        code: "protocol.unknown-message",
+        message: "nope",
+        details: { hint: "test-details" },
+      },
     } as unknown as Parameters<typeof serverProxy.sendControl>[0]);
   });
 
-  await assert.rejects(
-    runServerProxyCommand(client, { kind: "server-proxy.info" }, "server-proxy.info"),
-    /server-proxy server-proxy\.info failed: \[protocol\.unknown-message\] nope/,
+  let rejection: unknown;
+  await runServerProxyCommand(
+    client,
+    { kind: "server-proxy.info" },
+    "server-proxy.info",
+  ).catch((e) => { rejection = e; });
+
+  assert.ok(
+    isCommandError(rejection),
+    `rejection must be a CommandError; got ${String(rejection)}`,
+  );
+  assert.equal(
+    (rejection as { code: string }).code,
+    "protocol.unknown-message",
+    "code must be intact",
+  );
+  assert.ok(
+    (rejection as { message: string }).message.includes("server-proxy.info failed: nope"),
+    "contextualized message must contain the contextLabel and original message",
+  );
+  assert.deepEqual(
+    (rejection as { details: unknown }).details,
+    { hint: "test-details" },
+    "details must be forwarded intact",
   );
 });
 

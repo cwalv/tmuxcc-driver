@@ -16,7 +16,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { paneId, sessionId, createInMemoryTransportPair, runSessionProxyHandshake, WIRE_PROTOCOL_VERSION } from "@tmuxcc/protocol";
+import { paneId, sessionId, createInMemoryTransportPair, runSessionProxyHandshake, WIRE_PROTOCOL_VERSION, isCommandError } from "@tmuxcc/protocol";
 import type { CommandRequestMessage, WireCommand, ClientMessage, SnapshotMessage, SessionProxyCommandResponseMessage } from "@tmuxcc/protocol";
 import { windowId } from "@tmuxcc/protocol";
 
@@ -204,6 +204,7 @@ describe("InputApi.sendPaneCapture — pane.capture wire round-trip (tc-295a.17)
   });
 
   it("rejects (fail-loud) when result.ok=false (pane.not-found)", async () => {
+    // tc-u4ny.3: pane.capture failure is now a CommandError with intact code+details.
     const messages: CommandRequestMessage[] = [];
     const sender: InputSender = {
       send(msg) { messages.push(msg as CommandRequestMessage); },
@@ -221,8 +222,12 @@ describe("InputApi.sendPaneCapture — pane.capture wire round-trip (tc-295a.17)
     });
 
     await assert.rejects(capturePromise, (err: unknown) => {
-      assert.ok(err instanceof Error);
-      assert.match(err.message, /pane\.not-found/);
+      assert.ok(isCommandError(err), `must be a CommandError, got ${String(err)}`);
+      assert.equal(err.code, "pane.not-found", "code must be intact");
+      assert.ok(
+        err.message.includes("Pane p99 not in model"),
+        "message must include the original message text",
+      );
       return true;
     });
   });

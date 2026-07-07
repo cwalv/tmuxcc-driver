@@ -51,7 +51,7 @@ import {
   serverProxySocketPath,
   connectSocketTransport,
 } from "@tmuxcc/driver";
-import { runClientHandshake, WIRE_PROTOCOL_VERSION } from "@tmuxcc/protocol";
+import { runClientHandshake, WIRE_PROTOCOL_VERSION, CommandError } from "@tmuxcc/protocol";
 import type { Transport, MessageBase, Capabilities, ServerProxyCommand, ServerProxyCommandOkPayload, ServerProxyCommandResponseMessage, ServerProxyInfoPayload, SessionProxyInfoPayload, SessionProxyCommandResponseMessage } from "@tmuxcc/protocol";
 import { SessionProxyConnection, markPreNegotiated } from "@tmuxcc/client";
 
@@ -133,8 +133,9 @@ export async function runServerProxyCommand(
   const response = await responsePromise;
 
   if (!response.result.ok) {
-    const { code, message } = response.result;
-    throw new Error(`server-proxy ${contextLabel} failed: [${code}] ${message}`);
+    const { code, message, details } = response.result;
+    // tc-u4ny.3: rehydrate as CommandError so callers see typed code+details.
+    throw new CommandError(code, `server-proxy ${contextLabel} failed: ${message}`, details);
   }
 
   return response.result.payload ?? {};
@@ -316,11 +317,12 @@ function sendSessionProxyInfo(
         return;
       }
       if (!m.result.ok) {
-        reject(
-          new Error(
-            `session-proxy.info failed: [${m.result.code}] ${m.result.message}`,
-          ),
-        );
+        // tc-u4ny.3: rehydrate as CommandError so callers see typed code+details.
+        reject(new CommandError(
+          m.result.code,
+          `session-proxy.info failed: ${m.result.message}`,
+          m.result.details,
+        ));
         return;
       }
       const info = m.result.payload?.info;

@@ -61,6 +61,7 @@
  * # NO DOM, NO vscode, NO host API, NO Pseudoterminal
  */
 
+import { CommandError } from "@tmuxcc/protocol";
 import type { PaneId, WindowId, InputMessage, ResizeRequestMessage, CommandRequestMessage, WireCommand, SessionProxyCommandResponseMessage, PaneAttachMessage, ClientFocusMessage, TemplateApplyResult, SessionTemplate } from "@tmuxcc/protocol";
 import { EDH_TRACE_ENABLED, edhTrace } from "./edh-trace.js";
 
@@ -527,8 +528,11 @@ export function createInputApi(
             ));
           }
         } else {
-          captureDeferred.reject(new Error(
-            `tmuxcc: pane.capture — ${msg.result.code}: ${msg.result.message}`,
+          // tc-u4ny.3: rehydrate as CommandError so callers see typed code+details.
+          captureDeferred.reject(new CommandError(
+            msg.result.code,
+            `tmuxcc: pane.capture — ${msg.result.message}`,
+            msg.result.details,
           ));
         }
         return;
