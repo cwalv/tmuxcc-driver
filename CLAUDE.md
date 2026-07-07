@@ -32,7 +32,7 @@ Per-package test layers:
 | `@tmuxcc/server-proxy` | `npm run test -w @tmuxcc/server-proxy` | Unit + integration. |
 | `@tmuxcc/session-proxy` | `npm run test:unit -w @tmuxcc/session-proxy` | Unit only (no real tmux). |
 | `@tmuxcc/session-proxy` | `npm run test:real-tmux -w @tmuxcc/session-proxy` | Real-tmux suites — a flake is a **correctness signal, not noise**. Run with `--test-concurrency=1`. |
-| `@tmuxcc/session-proxy` | `npm run test:soak -w @tmuxcc/session-proxy` | N-run soak for the real-tmux suites (`ci:soak`). |
+| `@tmuxcc/driver` | `npm run soak -w @tmuxcc/driver` | N-run soak for the real-tmux suites (`soak`). |
 
 The `ci` script in each package is `build + typecheck + test + lint:boundaries`.
 Boundary lint enforces the parser/runtime/state/wire layering (see

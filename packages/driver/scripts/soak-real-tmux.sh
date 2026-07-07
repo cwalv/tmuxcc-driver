@@ -28,7 +28,7 @@ SOAK_BUDGET_SECS=120   # 2 minutes — fail if wall clock exceeds this
 # Node.js test runner invocation.  The tsx import lets us run .test.ts files
 # directly without a prior tsc compile step (though dist/ must already exist
 # for the imports inside the test to resolve — run `npm run build` first, or
-# use `npm run ci:soak` which includes the build step).
+# use `npm run soak` which includes the build step).
 #
 # tc-3si.8: topology-canary.test.ts is the targeted canary for the slot-less
 # %end mis-bind that corrupts the committed topology snapshot — flow-load and

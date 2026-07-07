@@ -26,7 +26,7 @@ version with their product and live in their own repos.
 (`flow-load.test.ts`, `resilience.test.ts`).  A flake in these suites is a
 **correctness signal, not noise**.  See
 [`packages/session-proxy/TESTING.md`](packages/session-proxy/TESTING.md)
-for the full policy, including the flake-is-a-bug rule and the `ci:soak`
+for the full policy, including the flake-is-a-bug rule and the `soak`
 N-run step.
 
 ## History

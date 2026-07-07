@@ -17,7 +17,7 @@
 //   - a member lifecycle script that spawns a nested `npm run build`
 //     (e.g. `pretest: "npm run build"`): the nested npm RE-SETS INIT_CWD to the
 //     member dir, so INIT_CWD = cwd even though the user ran from the root.
-//     This false-positive RED'd the canonical gate (ci:fast). -> must ALLOW
+//     This false-positive RED'd the canonical gate (gate:fast). -> must ALLOW
 // `INIT_CWD === cwd` alone therefore cannot tell those two apart.
 //
 // DISCRIMINATOR (option b — root sentinel, the only documented-behavior one):
