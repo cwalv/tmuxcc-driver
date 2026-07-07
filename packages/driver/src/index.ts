@@ -138,7 +138,7 @@ export type { ServerProxyHandle, ServerProxyOptions, ServerProxySelfExitReason }
 export { createSocketTransport, connectSocketTransport, createSocketServer } from "./socket-transport.js";
 
 // Runtime directory helpers (useful for clients that need to compute socket paths)
-export { serverProxySocketPath, serverProxyLogPath, edhTraceLogPath, resolveBaseRuntimeDir, gcStaleRuntimeDirs, probeLiveSocket, classifySocketOwner } from "./runtime-dir.js";
+export { serverProxySocketPath, serverProxyLogPath, edhTraceLogPath, resolveBaseRuntimeDir, runtimeBasePath, gcStaleRuntimeDirs, probeLiveSocket, classifySocketOwner } from "./runtime-dir.js";
 
 // tmux-liveness probe (`tmux -L <socketName> ls`, hard-timeout). The broker
 // uses `probeTmuxAlive` for watcher-EOF disambiguation; the extension's
