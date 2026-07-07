@@ -208,7 +208,7 @@ describe("tmux-south createSession (tc-zcqr)", { skip: !TMUX_AVAILABLE }, () => 
   // this code and recovers (or throws "internal" if the session still cannot
   // be found), rather than re-wrapping the prose as "tmux.unavailable".
   it("throws CommandError tmux.duplicate-session when a session name is already taken", async () => {
-    const socketName = nextSocketName();
+    const socketName = mintSocket("south");
     try {
       // First create succeeds; second create on the same name must yield the
       // structured code, not a generic error.

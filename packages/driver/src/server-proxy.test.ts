@@ -1028,7 +1028,7 @@ describe("server-proxy — capability-required wire shape (tc-u4ny.2)", { skip: 
   it(
     "I-cap (tc-u4ny.2): session.create with env against below-3.2 caps → wire CommandFailure with details.capability",
     async () => {
-      const socketName = nextSocketName();
+      const socketName = mintSocket("sp");
       const capProxy = createServerProxy({
         socketName,
         idleExitMs: 60_000,
