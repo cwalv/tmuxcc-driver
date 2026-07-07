@@ -189,6 +189,12 @@ Both wires use a correlated command pattern:
 | 2 | Added `ResyncRequestMessage` (`resync.request`) | tc-7ml.4 |
 | 3 | ServerProxy wire introduced; session-proxy wire becomes single-session. Plural `sessions[]` → singular `session`. `sessionId` stripped from all deltas. `SessionAddedMessage`/`SessionChangedMessage` removed from session-proxy wire. `SessionClosedMessage` removed (destruction → `error{session.unavailable}`). Commands renamed with `SessionProxy` prefix. | tc-j9c |
 
+### Additive changes at version 3 (no version bump)
+
+| Change | Bead |
+|--------|------|
+| `CommandFailure` shared failure envelope: both wires' `result.ok=false` branches now use the shared `CommandFailure` type, adding an optional `details` slot. `CapabilityRequiredDetails {capability}` is the sole defined details contract — carried on code `"tmux.capability-required"`. `CommandError` + `isCommandError` (structural, dual-copy-safe) + `requiredCapability` + `toCommandFailure` added to the protocol package. `ServerProxyErrorCode` += `tmux.capability-required`, `metrics.bind-invalid`, `server-proxy.shutting-down`. New `SessionProxyCommandErrorCode` union: `verb.failed`, `verb.internal`, `verb.no-effect-ids`, `read-only`, `pane.not-found`, `internal`. `WireErrorCode` += `session.not-found`. | tc-u4ny.1 |
+
 ---
 
 ## 8. Wire invariants

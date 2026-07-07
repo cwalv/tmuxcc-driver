@@ -720,16 +720,21 @@
             },
             {
               "type": "object",
+              "description": "CommandFailure — shared failure branch (tc-u4ny.1). NOTE: this details-carrying golden/representative sample is the ONLY automated guard that a details-bearing failure actually round-trips the schema; the socket codec is bare JSON.parse and protocol-conformance.test.ts validates only goldens + representative TS messages, never live emissions.",
               "required": ["ok", "code", "message"],
               "properties": {
                 "ok": { "const": false },
                 "code": {
                   "type": "string",
-                  "description": "Error code. See WireErrorCode for known values."
+                  "description": "Error code. See SessionProxyCommandErrorCode for known command-response values: verb.failed, verb.internal, verb.no-effect-ids, read-only, pane.not-found, internal."
                 },
                 "message": {
                   "type": "string",
                   "description": "Human-readable error description."
+                },
+                "details": {
+                  "type": "object",
+                  "description": "Structured detail payload. Present only when the failure code defines a contract. Sole defined contract today: code 'tmux.capability-required' carries CapabilityRequiredDetails: {capability: string}. Wire-sourced via bare JSON.parse; not schema-validated on receipt."
                 }
               },
               "additionalProperties": false

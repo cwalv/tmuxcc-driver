@@ -39,6 +39,8 @@ import {
   windowId,
   sessionId,
   connectionId,
+  CommandError,
+  isCommandError,
 } from "./index.js";
 
 import type {
@@ -82,6 +84,8 @@ import type {
   ServerProxySetMetricsHttpCommand,
   SessionTopologyPayload,
   MetricsHttpStatePayload,
+  // tc-u4ny.1: typed command-failure envelope
+  CommandFailure,
 } from "./index.js";
 
 // ---------------------------------------------------------------------------
@@ -1957,6 +1961,118 @@ describe("protocol schema conformance", () => {
         result: { ok: true, payload: { metricsHttp } },
       };
       assert.ok(validateServerProxyMsg(msg as ServerProxyMessage), JSON.stringify(validateServerProxyMsg.errors));
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 11. CommandFailure with details — tc-u4ny.1
+  //
+  // IMPORTANT: this details-carrying sample is the ONLY automated guard that a
+  // details-bearing failure message actually round-trips correctly through both
+  // schemas. The socket codec is bare JSON.parse (no runtime schema validation),
+  // and protocol-conformance.test.ts validates only goldens + representative TS
+  // messages — never live emissions. Therefore these tests are load-bearing:
+  // if the schemas or types regress, only these tests catch it.
+  // -------------------------------------------------------------------------
+
+  describe("CommandFailure with details (tc-u4ny.1)", () => {
+    // Server-proxy wire: failure with details (tmux.capability-required)
+    it("server-proxy command.response failure with details validates against ServerProxyMessage schema", () => {
+      const failure: CommandFailure = {
+        ok: false,
+        code: "tmux.capability-required",
+        message: "Upgrade tmux to >= 3.2 or omit env from session.create.",
+        details: { capability: "newSessionEnvFlag" },
+      };
+      const msg: ServerProxyCommandResponseMessage = {
+        type: "command.response",
+        seq: 41,
+        correlationId: "cap-req-1",
+        result: failure,
+      };
+      assert.ok(
+        validateServerProxyMsg(msg as ServerProxyMessage),
+        JSON.stringify(validateServerProxyMsg.errors),
+      );
+    });
+
+    // Server-proxy wire: plain failure (no details) still validates
+    it("server-proxy command.response plain failure (no details) still validates", () => {
+      const failure: CommandFailure = {
+        ok: false,
+        code: "session.name-taken",
+        message: "A session named 'main' already exists.",
+      };
+      const msg: ServerProxyCommandResponseMessage = {
+        type: "command.response",
+        seq: 42,
+        correlationId: "name-taken-1",
+        result: failure,
+      };
+      assert.ok(
+        validateServerProxyMsg(msg as ServerProxyMessage),
+        JSON.stringify(validateServerProxyMsg.errors),
+      );
+    });
+
+    // Session-proxy wire: failure with details validates against SessionProxyMessage schema
+    it("session-proxy command.response failure with details validates against SessionProxyMessage schema", () => {
+      const failure: CommandFailure = {
+        ok: false,
+        code: "tmux.capability-required",
+        message: "Upgrade tmux to >= 3.2 or omit env from split-pane.",
+        details: { capability: "newSessionEnvFlag" },
+      };
+      const msg: SessionProxyCommandResponseMessage = {
+        type: "command.response",
+        seq: 20,
+        correlationId: "cap-req-sp-1",
+        result: failure,
+      };
+      assert.ok(
+        validateSessionProxyMsg(msg as SessionProxyMessage),
+        JSON.stringify(validateSessionProxyMsg.errors),
+      );
+    });
+
+    // Session-proxy wire: rejects failure with details that carries a non-object details value
+    it("session-proxy command.response rejects failure with non-object details", () => {
+      const bad = {
+        type: "command.response",
+        seq: 21,
+        correlationId: "bad-details-1",
+        result: { ok: false, code: "verb.failed", message: "tmux error", details: "a-string" },
+      };
+      const valid = validateSessionProxyMsg(bad);
+      assert.strictEqual(valid, false, "details must be an object when present");
+    });
+
+    // isCommandError structural check survives a simulated dual-package-copy
+    it("isCommandError discriminates structurally — survives dual-package-copy simulation", () => {
+      // A genuine CommandError from this copy
+      const err = new CommandError("tmux.capability-required", "too old", { capability: "newSessionEnvFlag" });
+      assert.ok(isCommandError(err), "genuine CommandError must be recognised");
+      assert.ok(isCommandError(err, "tmux.capability-required"), "code-specific check must pass");
+      assert.strictEqual(isCommandError(err, "internal"), false, "wrong code must return false");
+
+      // Simulate the dual-package-copy hazard: a plain object with the right shape.
+      // instanceof returns false for this (it came from a different bundle copy),
+      // but isCommandError checks name + code structurally and must return true.
+      const foreign = Object.assign(new Error("too old"), {
+        name: "CommandError",
+        code: "tmux.capability-required",
+        details: { capability: "newSessionEnvFlag" },
+      });
+      assert.ok(isCommandError(foreign), "structural check must pass for a foreign-copy CommandError");
+      assert.ok(isCommandError(foreign, "tmux.capability-required"), "code-specific structural check must pass");
+
+      // A plain Error must not match
+      const plainErr = new Error("oops");
+      assert.strictEqual(isCommandError(plainErr), false, "plain Error must not match");
+
+      // A non-object must not match
+      assert.strictEqual(isCommandError("string-error"), false, "string must not match");
+      assert.strictEqual(isCommandError(null), false, "null must not match");
     });
   });
 });

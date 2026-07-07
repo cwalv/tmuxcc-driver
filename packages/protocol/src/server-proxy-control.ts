@@ -47,6 +47,7 @@
  */
 
 import type { MessageBase, Capabilities, ClientIdentity, ClientFlags } from "./envelope.js";
+import type { CommandFailure } from "./errors.js";
 import type { PaneId, SessionId } from "./ids.js";
 import type { SessionTemplate, TemplateApplyResult } from "./session-template.js";
 
@@ -1005,7 +1006,7 @@ export interface ServerProxyCommandResponseMessage extends MessageBase {
   /** Discriminated result: success or failure. */
   readonly result:
     | { readonly ok: true; readonly payload?: ServerProxyCommandOkPayload }
-    | { readonly ok: false; readonly code: string; readonly message: string };
+    | CommandFailure;
 }
 
 // ---------------------------------------------------------------------------
@@ -1015,19 +1016,34 @@ export interface ServerProxyCommandResponseMessage extends MessageBase {
 /**
  * ServerProxy-wire error codes.
  *
- * "protocol.unknown-message"  — unknown message type received; message dropped.
- * "protocol.malformed"        — parse failure.
- * "protocol.version-mismatch" — handshake version mismatch.
- * "session.not-found"         — session.claim, session.destroy, or pane.attach
- *                               named an unknown session.
- * "session.name-taken"        — session.create requested a name already in use.
- * "template.invalid"          — session.applyTemplate / a template-carrying claim
- *                               (or session.freezeTemplate output) failed template
- *                               validation, or the apply transaction failed
- *                               mid-flight; the message names the failed verb and
- *                               the created-so-far state (tc-gjdx.3/.4 fail-loud).
- * "tmux.unavailable"          — underlying tmux server is gone or refusing commands.
- * "internal"                  — unexpected server-proxy-side error.
+ * Emission audit (grep-verifiable against packages/driver/src/):
+ *
+ * "protocol.unknown-message"   — server-proxy.ts: unknown command.request kind
+ *                                dropped with this code.
+ * "protocol.malformed"         — (reserved; parse failures today close the
+ *                                connection rather than emitting a code).
+ * "protocol.version-mismatch"  — handshake.ts: version mismatch.
+ * "session.not-found"          — server-proxy.ts: session.claim, session.destroy,
+ *                                session.attach, or session.topology named an
+ *                                unknown session.  Also emitted as unsolicited
+ *                                ErrorMessage on session.attach for unknown ids.
+ * "session.name-taken"         — server-proxy.ts: session.create requested a name
+ *                                already in use.
+ * "template.invalid"           — server-proxy.ts: session.applyTemplate /
+ *                                template-carrying claim failed template validation
+ *                                or the apply transaction failed mid-flight
+ *                                (tc-gjdx.3/.4 fail-loud).
+ * "tmux.unavailable"           — server-proxy.ts: underlying tmux server is gone
+ *                                or refusing commands.
+ * "tmux.capability-required"   — tmux-south.ts / claim-session.ts: the requested
+ *                                operation requires a tmux capability (e.g.
+ *                                newSessionEnvFlag) that the probed binary lacks.
+ *                                Carries CapabilityRequiredDetails in CommandFailure.details.
+ * "metrics.bind-invalid"       — metrics-http.ts: server-proxy.set-metrics-http
+ *                                specified a non-loopback TCP host.
+ * "server-proxy.shutting-down" — server-proxy.ts: a command arrived during
+ *                                graceful shutdown; rejected without execution.
+ * "internal"                   — server-proxy.ts: unexpected server-proxy-side error.
  *
  * The type is open-ended for forward compatibility.
  */
@@ -1039,6 +1055,9 @@ export type ServerProxyErrorCode =
   | "session.name-taken"
   | "template.invalid"
   | "tmux.unavailable"
+  | "tmux.capability-required"
+  | "metrics.bind-invalid"
+  | "server-proxy.shutting-down"
   | "internal"
   | (string & Record<never, never>);
 

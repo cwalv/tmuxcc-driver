@@ -50,16 +50,10 @@
  *   - `sessionId` dropped from OpenWindowCommand.
  *   - "session.closed" removed from WireErrorCode; "session.unavailable" remains.
  */
-
 import type { PaneId, WindowId, ConnectionId } from "./ids.js";
 import type { WindowLayout } from "./layout.js";
 import type { MessageBase, Capabilities, ClientIdentity, ClientFlags } from "./envelope.js";
 import type { CommandFailure } from "./errors.js";
-
-// ---------------------------------------------------------------------------
-// Causality tag for creation deltas (tc-ozk.2)
-// ---------------------------------------------------------------------------
-
 /**
  * The origin of a verb-caused creation delta (tc-ozk.2).
  *
@@ -77,19 +71,14 @@ import type { CommandFailure } from "./errors.js";
  * B sees client A's connectionId and correctly treats it as not-its-own).
  */
 export interface Origin {
-  /** The connection whose wire verb caused this creation. */
-  readonly connectionId: ConnectionId;
-  /**
-   * The `correlationId` of the originating `command.request` (echoed verbatim).
-   * Lets the causing client match the creation to the specific verb it issued.
-   */
-  readonly requestId: string;
+    /** The connection whose wire verb caused this creation. */
+    readonly connectionId: ConnectionId;
+    /**
+     * The `correlationId` of the originating `command.request` (echoed verbatim).
+     * Lets the causing client match the creation to the specific verb it issued.
+     */
+    readonly requestId: string;
 }
-
-// ---------------------------------------------------------------------------
-// SessionProxy → Client messages (server push)
-// ---------------------------------------------------------------------------
-
 /**
  * A new pane has been created.
  * direction: session-proxy→client
@@ -99,66 +88,65 @@ export interface Origin {
  * wire PaneId before sending; `%N` never appears here.
  */
 export interface PaneOpenedMessage extends MessageBase {
-  readonly type: "pane.opened";
-  readonly paneId: PaneId;
-  readonly windowId: WindowId;
-  /** Initial size of the pane in terminal cells. */
-  readonly cols: number;
-  readonly rows: number;
-  /**
-   * True if this pane is the active (focused) pane at the moment of opening.
-   * Clients MAY use this to avoid a separate focus event on startup.
-   */
-  readonly active: boolean;
-  /**
-   * True when this pane is already dead at the moment it enters the model
-   * (tc-4bv2 / tc-295a.10 shared pane-state shape). This happens when a
-   * requery (cold attach to a pre-existing session, or reconnect) observes a
-   * `remain-on-exit` corpse for the first time — the pane is born into the
-   * client's model already exited.
-   *
-   * Additive optional field — absent means false. Non-breaking per the
-   * versioning policy above.
-   */
-  readonly dead?: boolean;
-  /**
-   * Exit code of the pane's process when `dead` is true and the code is known
-   * (tmux `pane_dead_status`). Absent when the pane is alive or the code is
-   * unknowable. Additive optional field — non-breaking.
-   */
-  readonly exitCode?: number;
-  /**
-   * Durable, driver-owned pane name (tc-1a8z) when this pane is born already
-   * carrying a `@tmuxcc_label` user-option — e.g. a cold attach / reconnect
-   * that observes a pane a previous session renamed.  Absent/empty means no
-   * durable name.  See {@link SnapshotPane.label}.  Additive optional field.
-   */
-  readonly label?: string;
-  /**
-   * Durable binding intent (tc-i9aq.1, cold-start.md §4.A) when this pane is
-   * born already carrying `@tmuxcc-bound` — e.g. a cold attach that observes a
-   * pane a previous session marked.  Absent means no intent.  Additive optional.
-   */
-  readonly bound?: boolean;
-  /**
-   * RESOLVED detach-on-close policy (tc-i9aq.1) when this pane is born carrying
-   * a `@tmuxcc-detach` policy at any scope.  Absent means inherit.  Additive.
-   */
-  readonly detach?: "detach" | "kill";
-  /**
-   * Durable icon policy (tc-i9aq.1) when this pane is born carrying
-   * `@tmuxcc-icon`.  Absent means no policy.  Additive optional.
-   */
-  readonly icon?: string;
-  /**
-   * Causality tag (tc-ozk.2). PRESENT when this pane was created by a wire verb
-   * (split-pane / open-window): names the connection + requestId that caused
-   * it. ABSENT when foreign (native client, script). Additive optional field
-   * that supersedes the bare `created` flag (tc-3y8.2). See {@link Origin}.
-   */
-  readonly origin?: Origin;
+    readonly type: "pane.opened";
+    readonly paneId: PaneId;
+    readonly windowId: WindowId;
+    /** Initial size of the pane in terminal cells. */
+    readonly cols: number;
+    readonly rows: number;
+    /**
+     * True if this pane is the active (focused) pane at the moment of opening.
+     * Clients MAY use this to avoid a separate focus event on startup.
+     */
+    readonly active: boolean;
+    /**
+     * True when this pane is already dead at the moment it enters the model
+     * (tc-4bv2 / tc-295a.10 shared pane-state shape). This happens when a
+     * requery (cold attach to a pre-existing session, or reconnect) observes a
+     * `remain-on-exit` corpse for the first time — the pane is born into the
+     * client's model already exited.
+     *
+     * Additive optional field — absent means false. Non-breaking per the
+     * versioning policy above.
+     */
+    readonly dead?: boolean;
+    /**
+     * Exit code of the pane's process when `dead` is true and the code is known
+     * (tmux `pane_dead_status`). Absent when the pane is alive or the code is
+     * unknowable. Additive optional field — non-breaking.
+     */
+    readonly exitCode?: number;
+    /**
+     * Durable, driver-owned pane name (tc-1a8z) when this pane is born already
+     * carrying a `@tmuxcc_label` user-option — e.g. a cold attach / reconnect
+     * that observes a pane a previous session renamed.  Absent/empty means no
+     * durable name.  See {@link SnapshotPane.label}.  Additive optional field.
+     */
+    readonly label?: string;
+    /**
+     * Durable binding intent (tc-i9aq.1, cold-start.md §4.A) when this pane is
+     * born already carrying `@tmuxcc-bound` — e.g. a cold attach that observes a
+     * pane a previous session marked.  Absent means no intent.  Additive optional.
+     */
+    readonly bound?: boolean;
+    /**
+     * RESOLVED detach-on-close policy (tc-i9aq.1) when this pane is born carrying
+     * a `@tmuxcc-detach` policy at any scope.  Absent means inherit.  Additive.
+     */
+    readonly detach?: "detach" | "kill";
+    /**
+     * Durable icon policy (tc-i9aq.1) when this pane is born carrying
+     * `@tmuxcc-icon`.  Absent means no policy.  Additive optional.
+     */
+    readonly icon?: string;
+    /**
+     * Causality tag (tc-ozk.2). PRESENT when this pane was created by a wire verb
+     * (split-pane / open-window): names the connection + requestId that caused
+     * it. ABSENT when foreign (native client, script). Additive optional field
+     * that supersedes the bare `created` flag (tc-3y8.2). See {@link Origin}.
+     */
+    readonly origin?: Origin;
 }
-
 /**
  * A pane's dead state changed without the pane leaving the session
  * (tc-4bv2 / tc-295a.10 shared pane-state shape).
@@ -179,17 +167,16 @@ export interface PaneOpenedMessage extends MessageBase {
  * pane simply continues to render as live until the next snapshot).
  */
 export interface PaneDeadChangedMessage extends MessageBase {
-  readonly type: "pane.dead-changed";
-  readonly paneId: PaneId;
-  /** True when the pane is now dead; false when it returned to live. */
-  readonly dead: boolean;
-  /**
-   * Exit code when `dead` is true and known (tmux `pane_dead_status`); absent
-   * otherwise (alive, or code unknowable).
-   */
-  readonly exitCode?: number;
+    readonly type: "pane.dead-changed";
+    readonly paneId: PaneId;
+    /** True when the pane is now dead; false when it returned to live. */
+    readonly dead: boolean;
+    /**
+     * Exit code when `dead` is true and known (tmux `pane_dead_status`); absent
+     * otherwise (alive, or code unknowable).
+     */
+    readonly exitCode?: number;
 }
-
 /**
  * A pane has been closed (exited or killed).
  * direction: session-proxy→client
@@ -220,24 +207,23 @@ export interface PaneDeadChangedMessage extends MessageBase {
  * the versioning policy above). See {@link Origin}.
  */
 export interface PaneClosedMessage extends MessageBase {
-  readonly type: "pane.closed";
-  readonly paneId: PaneId;
-  readonly windowId: WindowId;
-  /**
-   * Exit code of the pane's process, if known.
-   * Absent when the session-proxy could not determine the exit code (most common case:
-   * tmux's %window-close notification does not include a per-pane exit status).
-   */
-  readonly exitCode?: number;
-  /**
-   * Causality tag (tc-u7cu.6). PRESENT when this pane was closed by a wire
-   * verb (close-pane / kill-window): names the connection + requestId that
-   * caused the close. ABSENT when the close was unsolicited (shell exit,
-   * external kill-pane). Additive optional field — see {@link Origin}.
-   */
-  readonly cause?: Origin;
+    readonly type: "pane.closed";
+    readonly paneId: PaneId;
+    readonly windowId: WindowId;
+    /**
+     * Exit code of the pane's process, if known.
+     * Absent when the session-proxy could not determine the exit code (most common case:
+     * tmux's %window-close notification does not include a per-pane exit status).
+     */
+    readonly exitCode?: number;
+    /**
+     * Causality tag (tc-u7cu.6). PRESENT when this pane was closed by a wire
+     * verb (close-pane / kill-window): names the connection + requestId that
+     * caused the close. ABSENT when the close was unsolicited (shell exit,
+     * external kill-pane). Additive optional field — see {@link Origin}.
+     */
+    readonly cause?: Origin;
 }
-
 /**
  * A pane's dimensions have changed (user resized the terminal or layout changed).
  * direction: session-proxy→client
@@ -246,12 +232,11 @@ export interface PaneClosedMessage extends MessageBase {
  * confirming the new size after the resize has taken effect.
  */
 export interface PaneResizedMessage extends MessageBase {
-  readonly type: "pane.resized";
-  readonly paneId: PaneId;
-  readonly cols: number;
-  readonly rows: number;
+    readonly type: "pane.resized";
+    readonly paneId: PaneId;
+    readonly cols: number;
+    readonly rows: number;
 }
-
 /**
  * A pane was RE-HOMED into a different window (tc-4gor).
  * direction: session-proxy→client
@@ -281,12 +266,11 @@ export interface PaneResizedMessage extends MessageBase {
  * snapshot).
  */
 export interface PaneMovedMessage extends MessageBase {
-  readonly type: "pane.moved";
-  readonly paneId: PaneId;
-  /** The pane's new owning window. */
-  readonly windowId: WindowId;
+    readonly type: "pane.moved";
+    readonly paneId: PaneId;
+    /** The pane's new owning window. */
+    readonly windowId: WindowId;
 }
-
 /**
  * A pane's durable, driver-owned name changed (tc-1a8z).
  * direction: session-proxy→client
@@ -306,12 +290,11 @@ export interface PaneMovedMessage extends MessageBase {
  * snapshot).
  */
 export interface PaneLabelChangedMessage extends MessageBase {
-  readonly type: "pane.label-changed";
-  readonly paneId: PaneId;
-  /** The new durable name, or absent when the name was cleared. */
-  readonly label?: string;
+    readonly type: "pane.label-changed";
+    readonly paneId: PaneId;
+    /** The new durable name, or absent when the name was cleared. */
+    readonly label?: string;
 }
-
 /**
  * The layout of a window has changed.
  * direction: session-proxy→client
@@ -324,11 +307,10 @@ export interface PaneLabelChangedMessage extends MessageBase {
  * re-rendering to avoid flickering.
  */
 export interface LayoutUpdatedMessage extends MessageBase {
-  readonly type: "layout.updated";
-  readonly windowId: WindowId;
-  readonly layout: WindowLayout;
+    readonly type: "layout.updated";
+    readonly windowId: WindowId;
+    readonly layout: WindowLayout;
 }
-
 /**
  * The active (focused) pane has changed.
  * direction: session-proxy→client
@@ -337,11 +319,10 @@ export interface LayoutUpdatedMessage extends MessageBase {
  * any reason. If no pane is active (e.g., no windows open), `paneId` is null.
  */
 export interface FocusChangedMessage extends MessageBase {
-  readonly type: "focus.changed";
-  readonly paneId: PaneId | null;
-  readonly windowId: WindowId | null;
+    readonly type: "focus.changed";
+    readonly paneId: PaneId | null;
+    readonly windowId: WindowId | null;
 }
-
 /**
  * The session-proxy's capabilities advertisement (sent once at handshake time).
  * direction: session-proxy→client
@@ -349,122 +330,114 @@ export interface FocusChangedMessage extends MessageBase {
  * The handshake sequence is defined by bead tc-auj; this is just the shape.
  */
 export interface SessionProxyCapabilitiesMessage extends MessageBase {
-  readonly type: "session-proxy.capabilities";
-  readonly capabilities: Capabilities;
+    readonly type: "session-proxy.capabilities";
+    readonly capabilities: Capabilities;
 }
-
-// ---------------------------------------------------------------------------
-// Snapshot (session-proxy→client, sent once on connect)
-// ---------------------------------------------------------------------------
-
 /**
  * The bound session as represented in a Snapshot.
  * Only carries identity — the session is always the bound session (always active).
  */
 export interface SnapshotSession {
-  readonly sessionId: import("./ids.js").SessionId;
-  readonly name: string;
+    readonly sessionId: import("./ids.js").SessionId;
+    readonly name: string;
 }
-
 /**
  * A window as represented in a Snapshot.
  */
 export interface SnapshotWindow {
-  readonly windowId: WindowId;
-  readonly name: string;
-  /** True if this is the active window in the session. */
-  readonly active: boolean;
-  /** Structured pane layout for this window. */
-  readonly layout: WindowLayout;
-  /**
-   * True when `synchronize-panes` is on for this window at snapshot time.
-   * tc-7xv.12: present in all snapshots; defaults to false.
-   */
-  readonly synchronizePanes: boolean;
-  /**
-   * True when `monitor-activity` is on for this window at snapshot time.
-   * tc-7xv.15: present in all snapshots; defaults to true (global default).
-   */
-  readonly monitorActivity: boolean;
-  /**
-   * Current `monitor-silence` threshold in seconds, or 0 when disabled.
-   * tc-7xv.15: present in all snapshots; defaults to 0 (off).
-   */
-  readonly monitorSilence: number;
+    readonly windowId: WindowId;
+    readonly name: string;
+    /** True if this is the active window in the session. */
+    readonly active: boolean;
+    /** Structured pane layout for this window. */
+    readonly layout: WindowLayout;
+    /**
+     * True when `synchronize-panes` is on for this window at snapshot time.
+     * tc-7xv.12: present in all snapshots; defaults to false.
+     */
+    readonly synchronizePanes: boolean;
+    /**
+     * True when `monitor-activity` is on for this window at snapshot time.
+     * tc-7xv.15: present in all snapshots; defaults to true (global default).
+     */
+    readonly monitorActivity: boolean;
+    /**
+     * Current `monitor-silence` threshold in seconds, or 0 when disabled.
+     * tc-7xv.15: present in all snapshots; defaults to 0 (off).
+     */
+    readonly monitorSilence: number;
 }
-
 /**
  * A pane as represented in a Snapshot.
  */
 export interface SnapshotPane {
-  readonly paneId: PaneId;
-  readonly windowId: WindowId;
-  /** Width in columns. */
-  readonly cols: number;
-  /** Height in rows. */
-  readonly rows: number;
-  /**
-   * True when the pane is dead at snapshot time (tc-4bv2 / tc-295a.10 shared
-   * pane-state shape): its process has exited but the pane slot survives
-   * (`remain-on-exit` corpse). A dead pane is part of the snapshot so the
-   * client can render it, inspect its scrollback, and kill/reap it.
-   *
-   * Additive optional field — absent means false. This is what lets an
-   * all-dead-pane session appear in the panel (the bead's core fix).
-   */
-  readonly dead?: boolean;
-  /**
-   * Exit code when `dead` is true and known (tmux `pane_dead_status`); absent
-   * when alive or the code is unknowable. Additive optional field.
-   */
-  readonly exitCode?: number;
-  /**
-   * Durable, driver-owned pane name (tc-1a8z) — the canonical user rename
-   * channel, stored in the per-pane `@tmuxcc_label` tmux user-option and set
-   * ONLY via the `rename-pane` command (never via a title escape).  Survives a
-   * driver restart (re-read from the user-option on every requery).
-   *
-   * DISTINCT from the live shell title `pane_title` (tc-2mn8): this is the
-   * out-of-band durable name the shell cannot clobber.  Render precedence
-   * (durable label > live title > paneId) is the consumer's concern (tc-asyq.6).
-   *
-   * Additive optional field — absent/empty means no durable name is set.
-   */
-  readonly label?: string;
-  /**
-   * Durable binding intent (tc-i9aq.1, cold-start.md §4.A) from the per-pane
-   * `@tmuxcc-bound` user-option.  True when the user wants a VS Code terminal
-   * recreated for this pane on attach.  Additive optional field — absent/false
-   * means no intent.
-   */
-  readonly bound?: boolean;
-  /**
-   * RESOLVED detach-on-close policy (tc-i9aq.1, cold-start.md §4.A) — the
-   * effective first-wins value of `@tmuxcc-detach` walked pane→window→session.
-   * "detach" keeps the tmux pane alive when the tab closes; "kill" exits it.
-   * Absent means no scope set a policy (the extension applies its default).
-   */
-  readonly detach?: "detach" | "kill";
-  /**
-   * Durable icon policy (tc-i9aq.1, cold-start.md §4.A) from the per-pane
-   * `@tmuxcc-icon` user-option.  Absent means no policy.
-   */
-  readonly icon?: string;
-  /**
-   * Live shell window title for this pane — the canonical `#{pane_title}`
-   * value (tc-2mn8; canonical source reworked in tc-s6ov.4). Sourced by the
-   * session-proxy from a control-mode `%*` `#{pane_title}` subscription, which
-   * catches every title source (shell OSC-0/2, another client's
-   * `select-pane -T`, automatic title from the current command), superseding
-   * the original OSC-0/2 `%output` sniff. Absent when no title has been
-   * observed yet (pane just opened, or shell has not set a title). Empty
-   * string means the title was explicitly cleared.
-   *
-   * Additive optional field — older clients that do not read it are unaffected.
-   */
-  readonly paneTitle?: string;
+    readonly paneId: PaneId;
+    readonly windowId: WindowId;
+    /** Width in columns. */
+    readonly cols: number;
+    /** Height in rows. */
+    readonly rows: number;
+    /**
+     * True when the pane is dead at snapshot time (tc-4bv2 / tc-295a.10 shared
+     * pane-state shape): its process has exited but the pane slot survives
+     * (`remain-on-exit` corpse). A dead pane is part of the snapshot so the
+     * client can render it, inspect its scrollback, and kill/reap it.
+     *
+     * Additive optional field — absent means false. This is what lets an
+     * all-dead-pane session appear in the panel (the bead's core fix).
+     */
+    readonly dead?: boolean;
+    /**
+     * Exit code when `dead` is true and known (tmux `pane_dead_status`); absent
+     * when alive or the code is unknowable. Additive optional field.
+     */
+    readonly exitCode?: number;
+    /**
+     * Durable, driver-owned pane name (tc-1a8z) — the canonical user rename
+     * channel, stored in the per-pane `@tmuxcc_label` tmux user-option and set
+     * ONLY via the `rename-pane` command (never via a title escape).  Survives a
+     * driver restart (re-read from the user-option on every requery).
+     *
+     * DISTINCT from the live shell title `pane_title` (tc-2mn8): this is the
+     * out-of-band durable name the shell cannot clobber.  Render precedence
+     * (durable label > live title > paneId) is the consumer's concern (tc-asyq.6).
+     *
+     * Additive optional field — absent/empty means no durable name is set.
+     */
+    readonly label?: string;
+    /**
+     * Durable binding intent (tc-i9aq.1, cold-start.md §4.A) from the per-pane
+     * `@tmuxcc-bound` user-option.  True when the user wants a VS Code terminal
+     * recreated for this pane on attach.  Additive optional field — absent/false
+     * means no intent.
+     */
+    readonly bound?: boolean;
+    /**
+     * RESOLVED detach-on-close policy (tc-i9aq.1, cold-start.md §4.A) — the
+     * effective first-wins value of `@tmuxcc-detach` walked pane→window→session.
+     * "detach" keeps the tmux pane alive when the tab closes; "kill" exits it.
+     * Absent means no scope set a policy (the extension applies its default).
+     */
+    readonly detach?: "detach" | "kill";
+    /**
+     * Durable icon policy (tc-i9aq.1, cold-start.md §4.A) from the per-pane
+     * `@tmuxcc-icon` user-option.  Absent means no policy.
+     */
+    readonly icon?: string;
+    /**
+     * Live shell window title for this pane — the canonical `#{pane_title}`
+     * value (tc-2mn8; canonical source reworked in tc-s6ov.4). Sourced by the
+     * session-proxy from a control-mode `%*` `#{pane_title}` subscription, which
+     * catches every title source (shell OSC-0/2, another client's
+     * `select-pane -T`, automatic title from the current command), superseding
+     * the original OSC-0/2 `%output` sniff. Absent when no title has been
+     * observed yet (pane just opened, or shell has not set a title). Empty
+     * string means the title was explicitly cleared.
+     *
+     * Additive optional field — older clients that do not read it are unaffected.
+     */
+    readonly paneTitle?: string;
 }
-
 /**
  * Full-state snapshot, sent once by the session-proxy immediately after the
  * capabilities handshake.
@@ -487,101 +460,89 @@ export interface SnapshotPane {
  * field to avoid scattering active-flag logic across two lists.
  */
 export interface SnapshotMessage extends MessageBase {
-  readonly type: "snapshot";
-  /** The session-proxy's bound session. */
-  readonly session: SnapshotSession;
-  /** All windows in the bound session. */
-  readonly windows: readonly SnapshotWindow[];
-  /** All panes across all windows. */
-  readonly panes: readonly SnapshotPane[];
-  /**
-   * Currently focused pane/window pair.
-   * Both are null if no pane is focused (e.g. no windows exist).
-   */
-  readonly focus: {
-    readonly paneId: PaneId | null;
-    readonly windowId: WindowId | null;
-  };
-  /**
-   * Number of session-proxy-protocol clients currently connected to the server at
-   * the moment the snapshot was built.
-   *
-   * tc-1elae (Phase 2 — §11.4 tooltip): used by the VS Code status bar to
-   * render "Attached clients: K". The value is static at snapshot time — it
-   * reflects the count when the snapshot was sent, NOT a live-updating counter.
-   * Live updates land in Phase 4 (tc-44wu0).
-   *
-   * Additive optional field — older clients that do not read this field are
-   * unaffected (non-breaking per the versioning policy above).
-   */
-  readonly attachedClientCount?: number;
-  /**
-   * THIS client's own connectionId, assigned by the session-proxy when the
-   * connection was accepted (tc-ozk.2).
-   *
-   * A client stores this and compares it against `origin.connectionId` on each
-   * `pane.opened` / `window.added` to decide whether a creation is its own
-   * (`===` ⇒ mine) versus foreign / another client's (`!==` or absent ⇒ not
-   * mine). This is what makes bind-on-provenance a FIELD CHECK rather than a
-   * stateful gate, including the multi-client case.
-   *
-   * Additive optional field — older clients that do not read it are unaffected.
-   * Re-sent on every snapshot (including resync) so a reconnecting client always
-   * re-learns its current connectionId.
-   */
-  readonly connectionId?: ConnectionId;
+    readonly type: "snapshot";
+    /** The session-proxy's bound session. */
+    readonly session: SnapshotSession;
+    /** All windows in the bound session. */
+    readonly windows: readonly SnapshotWindow[];
+    /** All panes across all windows. */
+    readonly panes: readonly SnapshotPane[];
+    /**
+     * Currently focused pane/window pair.
+     * Both are null if no pane is focused (e.g. no windows exist).
+     */
+    readonly focus: {
+        readonly paneId: PaneId | null;
+        readonly windowId: WindowId | null;
+    };
+    /**
+     * Number of session-proxy-protocol clients currently connected to the server at
+     * the moment the snapshot was built.
+     *
+     * tc-1elae (Phase 2 — §11.4 tooltip): used by the VS Code status bar to
+     * render "Attached clients: K". The value is static at snapshot time — it
+     * reflects the count when the snapshot was sent, NOT a live-updating counter.
+     * Live updates land in Phase 4 (tc-44wu0).
+     *
+     * Additive optional field — older clients that do not read this field are
+     * unaffected (non-breaking per the versioning policy above).
+     */
+    readonly attachedClientCount?: number;
+    /**
+     * THIS client's own connectionId, assigned by the session-proxy when the
+     * connection was accepted (tc-ozk.2).
+     *
+     * A client stores this and compares it against `origin.connectionId` on each
+     * `pane.opened` / `window.added` to decide whether a creation is its own
+     * (`===` ⇒ mine) versus foreign / another client's (`!==` or absent ⇒ not
+     * mine). This is what makes bind-on-provenance a FIELD CHECK rather than a
+     * stateful gate, including the multi-client case.
+     *
+     * Additive optional field — older clients that do not read it are unaffected.
+     * Re-sent on every snapshot (including resync) so a reconnecting client always
+     * re-learns its current connectionId.
+     */
+    readonly connectionId?: ConnectionId;
 }
-
-// ---------------------------------------------------------------------------
-// Additional Deltas — window lifecycle (session-proxy→client)
-// ---------------------------------------------------------------------------
-
 /**
  * A new window was added to the bound session.
  * direction: session-proxy→client
  */
 export interface WindowAddedMessage extends MessageBase {
-  readonly type: "window.added";
-  readonly windowId: WindowId;
-  readonly name: string;
-  /**
-   * True if the new window immediately became the active window in the session.
-   * Clients may use this to avoid a separate focus event.
-   */
-  readonly active: boolean;
-  /**
-   * Causality tag (tc-ozk.2). PRESENT when this window was created by a wire
-   * verb (open-window, or the new window break-pane re-homes a pane into):
-   * names the connection + requestId that caused it. ABSENT when foreign
-   * (native client, script). Additive optional field that supersedes the bare
-   * `created` flag (tc-3y8.2). See {@link Origin}.
-   */
-  readonly origin?: Origin;
+    readonly type: "window.added";
+    readonly windowId: WindowId;
+    readonly name: string;
+    /**
+     * True if the new window immediately became the active window in the session.
+     * Clients may use this to avoid a separate focus event.
+     */
+    readonly active: boolean;
+    /**
+     * Causality tag (tc-ozk.2). PRESENT when this window was created by a wire
+     * verb (open-window, or the new window break-pane re-homes a pane into):
+     * names the connection + requestId that caused it. ABSENT when foreign
+     * (native client, script). Additive optional field that supersedes the bare
+     * `created` flag (tc-3y8.2). See {@link Origin}.
+     */
+    readonly origin?: Origin;
 }
-
 /**
  * A window was closed (all its panes exited or it was explicitly destroyed).
  * direction: session-proxy→client
  */
 export interface WindowClosedMessage extends MessageBase {
-  readonly type: "window.closed";
-  readonly windowId: WindowId;
+    readonly type: "window.closed";
+    readonly windowId: WindowId;
 }
-
 /**
  * A window was renamed.
  * direction: session-proxy→client
  */
 export interface WindowRenamedMessage extends MessageBase {
-  readonly type: "window.renamed";
-  readonly windowId: WindowId;
-  readonly newName: string;
+    readonly type: "window.renamed";
+    readonly windowId: WindowId;
+    readonly newName: string;
 }
-
-// ---------------------------------------------------------------------------
-// Additional Deltas — synchronize-panes state (session-proxy→client, tc-7xv.12)
-// ---------------------------------------------------------------------------
-
 /**
  * The synchronize-panes state of a window has changed.
  * direction: session-proxy→client
@@ -600,16 +561,11 @@ export interface WindowRenamedMessage extends MessageBase {
  * fall through to the `default` branch in `applyDelta` and ignore it.
  */
 export interface WindowSyncChangedMessage extends MessageBase {
-  readonly type: "window.sync.changed";
-  readonly windowId: WindowId;
-  /** True when synchronize-panes is on for this window. */
-  readonly on: boolean;
+    readonly type: "window.sync.changed";
+    readonly windowId: WindowId;
+    /** True when synchronize-panes is on for this window. */
+    readonly on: boolean;
 }
-
-// ---------------------------------------------------------------------------
-// Additional Deltas — monitor-activity / monitor-silence state (tc-7xv.15)
-// ---------------------------------------------------------------------------
-
 /**
  * The monitor-activity state of a window has changed.
  * direction: session-proxy→client
@@ -624,12 +580,11 @@ export interface WindowSyncChangedMessage extends MessageBase {
  * fall through to the `default` branch in `applyDelta` and ignore it.
  */
 export interface WindowMonitorActivityChangedMessage extends MessageBase {
-  readonly type: "window.monitor.activity.changed";
-  readonly windowId: WindowId;
-  /** True when monitor-activity is on for this window. */
-  readonly on: boolean;
+    readonly type: "window.monitor.activity.changed";
+    readonly windowId: WindowId;
+    /** True when monitor-activity is on for this window. */
+    readonly on: boolean;
 }
-
 /**
  * The monitor-silence state of a window has changed.
  * direction: session-proxy→client
@@ -644,19 +599,14 @@ export interface WindowMonitorActivityChangedMessage extends MessageBase {
  * fall through to the `default` branch in `applyDelta` and ignore it.
  */
 export interface WindowMonitorSilenceChangedMessage extends MessageBase {
-  readonly type: "window.monitor.silence.changed";
-  readonly windowId: WindowId;
-  /**
-   * Silence threshold in seconds (positive = on), or 0 when disabled.
-   * Clients may treat 0 as "off" and any positive value as "on for N seconds".
-   */
-  readonly seconds: number;
+    readonly type: "window.monitor.silence.changed";
+    readonly windowId: WindowId;
+    /**
+     * Silence threshold in seconds (positive = on), or 0 when disabled.
+     * Clients may treat 0 as "off" and any positive value as "on for N seconds".
+     */
+    readonly seconds: number;
 }
-
-// ---------------------------------------------------------------------------
-// Additional Deltas — live pane title (session-proxy→client, tc-2mn8)
-// ---------------------------------------------------------------------------
-
 /**
  * The live shell window title of a pane has changed.
  * direction: session-proxy→client
@@ -679,12 +629,11 @@ export interface WindowMonitorSilenceChangedMessage extends MessageBase {
  * fall through to the `default` branch in `applyDelta` and ignore it.
  */
 export interface PaneTitleChangedMessage extends MessageBase {
-  readonly type: "pane.title-changed";
-  readonly paneId: PaneId;
-  /** The new live shell window title. Empty string means the shell cleared it. */
-  readonly title: string;
+    readonly type: "pane.title-changed";
+    readonly paneId: PaneId;
+    /** The new live shell window title. Empty string means the shell cleared it. */
+    readonly title: string;
 }
-
 /**
  * A pane's durable policy/intent (cold-start.md §4.A) changed.
  * direction: session-proxy→client
@@ -706,20 +655,15 @@ export interface PaneTitleChangedMessage extends MessageBase {
  * fall through to the `default` branch in `applyDelta` and ignore it.
  */
 export interface PanePolicyChangedMessage extends MessageBase {
-  readonly type: "pane.policy-changed";
-  readonly paneId: PaneId;
-  /** Binding intent: true when `@tmuxcc-bound` is set. */
-  readonly bound: boolean;
-  /** Resolved detach-on-close policy; absent when unset at every scope. */
-  readonly detach?: "detach" | "kill";
-  /** Durable icon policy; absent when unset. */
-  readonly icon?: string;
+    readonly type: "pane.policy-changed";
+    readonly paneId: PaneId;
+    /** Binding intent: true when `@tmuxcc-bound` is set. */
+    readonly bound: boolean;
+    /** Resolved detach-on-close policy; absent when unset at every scope. */
+    readonly detach?: "detach" | "kill";
+    /** Durable icon policy; absent when unset. */
+    readonly icon?: string;
 }
-
-// ---------------------------------------------------------------------------
-// Additional Deltas — client-count changes (session-proxy→client, tc-44wu0)
-// ---------------------------------------------------------------------------
-
 /**
  * The number of session-proxy-protocol clients connected to this session has changed.
  * direction: session-proxy→client
@@ -737,15 +681,10 @@ export interface PanePolicyChangedMessage extends MessageBase {
  * fall through to the `default` branch in `applyDelta` and ignore it.
  */
 export interface ClientCountChangedMessage extends MessageBase {
-  readonly type: "client-count.changed";
-  /** Authoritative number of connected session-proxy-protocol clients. */
-  readonly count: number;
+    readonly type: "client-count.changed";
+    /** Authoritative number of connected session-proxy-protocol clients. */
+    readonly count: number;
 }
-
-// ---------------------------------------------------------------------------
-// Additional Deltas — session lifecycle (session-proxy→client)
-// ---------------------------------------------------------------------------
-
 /**
  * The bound session was renamed.
  * direction: session-proxy→client
@@ -758,14 +697,9 @@ export interface ClientCountChangedMessage extends MessageBase {
  * destruction surfaces on the session-proxy wire as ErrorMessage{code:"session.unavailable"}.
  */
 export interface SessionProxySessionRenamedMessage extends MessageBase {
-  readonly type: "session.renamed";
-  readonly newName: string;
+    readonly type: "session.renamed";
+    readonly newName: string;
 }
-
-// ---------------------------------------------------------------------------
-// Additional Deltas — pane mode (session-proxy→client)
-// ---------------------------------------------------------------------------
-
 /**
  * Model-level pane mode.
  *
@@ -781,21 +715,15 @@ export interface SessionProxySessionRenamedMessage extends MessageBase {
  * position, etc.) are NOT represented here. This is a model-level signal only.
  */
 export type PaneMode = "normal" | "copy" | "view" | (string & Record<never, never>);
-
 /**
  * A pane entered or left a mode (e.g. entered copy mode, or returned to normal).
  * direction: session-proxy→client
  */
 export interface PaneModeChangedMessage extends MessageBase {
-  readonly type: "pane.mode-changed";
-  readonly paneId: PaneId;
-  readonly mode: PaneMode;
+    readonly type: "pane.mode-changed";
+    readonly paneId: PaneId;
+    readonly mode: PaneMode;
 }
-
-// ---------------------------------------------------------------------------
-// Pane attention/status notification (tc-76m8.1, user-stories.md S9)
-// ---------------------------------------------------------------------------
-
 /**
  * ConEmu OSC 9;4 progress state (tc-76m8.1). Mirrors the ConEmu numeric state
  * codes, mapped to readable strings:
@@ -806,13 +734,11 @@ export interface PaneModeChangedMessage extends MessageBase {
  *   4 → "paused"        (paused/warning; `progress` may be present)
  */
 export type PaneProgressState = "remove" | "set" | "error" | "indeterminate" | "paused";
-
 /**
  * Which escape carried an `osc9` desktop-notification (tc-76m8.1). Diagnostic
  * only — the extension routes all three to the same Tier-1 "Needs you" surface.
  */
 export type PaneNotifySource = "osc9" | "osc777";
-
 /**
  * The four attention/status signal kinds recognised on a pane's raw pty byte
  * stream (tc-76m8.1, user-stories.md S9 "Liveness budget"). Grouped by tier:
@@ -820,7 +746,6 @@ export type PaneNotifySource = "osc9" | "osc777";
  *   - Tier 2 "State changed" (decoration-grade): `cmd-exit`, `progress`
  */
 export type PaneNotifyKind = "osc9" | "bell" | "progress" | "cmd-exit";
-
 /**
  * Kind-scoped payload for a {@link PaneNotifyMessage} (tc-76m8.1). All fields
  * are optional; which apply is determined by the message's `kind`:
@@ -832,20 +757,19 @@ export type PaneNotifyKind = "osc9" | "bell" | "progress" | "cmd-exit";
  * without breaking older consumers.
  */
 export interface PaneNotifyPayload {
-  /** osc9: the notification body text (OSC 9 argument, OSC 777 body). */
-  readonly message?: string;
-  /** osc9: notification title, when the source carries one (OSC 777 `title;body`). */
-  readonly title?: string;
-  /** osc9: which escape carried the notification (diagnostic). */
-  readonly source?: PaneNotifySource;
-  /** progress: the ConEmu OSC 9;4 progress state. */
-  readonly progressState?: PaneProgressState;
-  /** progress: progress percentage 0–100, when the state carries one. */
-  readonly progress?: number;
-  /** cmd-exit: the command's reported exit code (OSC 633;D shell integration). */
-  readonly exitCode?: number;
+    /** osc9: the notification body text (OSC 9 argument, OSC 777 body). */
+    readonly message?: string;
+    /** osc9: notification title, when the source carries one (OSC 777 `title;body`). */
+    readonly title?: string;
+    /** osc9: which escape carried the notification (diagnostic). */
+    readonly source?: PaneNotifySource;
+    /** progress: the ConEmu OSC 9;4 progress state. */
+    readonly progressState?: PaneProgressState;
+    /** progress: progress percentage 0–100, when the state carries one. */
+    readonly progress?: number;
+    /** cmd-exit: the command's reported exit code (OSC 633;D shell integration). */
+    readonly exitCode?: number;
 }
-
 /**
  * An attention/status signal recognised on a pane's raw pty byte stream
  * (tc-76m8.1, user-stories.md S9 "the-changed-world").
@@ -872,17 +796,12 @@ export interface PaneNotifyPayload {
  * fall through to the `default` branch in `applyDelta` and ignore it.
  */
 export interface PaneNotifyMessage extends MessageBase {
-  readonly type: "pane.notify";
-  readonly paneId: PaneId;
-  readonly kind: PaneNotifyKind;
-  /** Kind-scoped payload; absent for `bell`. See {@link PaneNotifyPayload}. */
-  readonly payload?: PaneNotifyPayload;
+    readonly type: "pane.notify";
+    readonly paneId: PaneId;
+    readonly kind: PaneNotifyKind;
+    /** Kind-scoped payload; absent for `bell`. See {@link PaneNotifyPayload}. */
+    readonly payload?: PaneNotifyPayload;
 }
-
-// ---------------------------------------------------------------------------
-// Per-pane attach + hydration protocol (tc-295a.8 / tc-295a.9)
-// ---------------------------------------------------------------------------
-
 /**
  * A pane attach targeted a pane the session-proxy does not know about.
  * direction: session-proxy→client
@@ -899,14 +818,13 @@ export interface PaneNotifyMessage extends MessageBase {
  * vanished pane. The session-proxy does NOT silently absorb the request.
  */
 export interface PaneAttachFailedMessage extends MessageBase {
-  readonly type: "pane.attach.failed";
-  readonly paneId: PaneId;
-  /** Always "pane.not-found" today; open-ended for forward compatibility. */
-  readonly code: "pane.not-found" | (string & Record<never, never>);
-  /** Human-readable error description (English, for logging/debugging). */
-  readonly message: string;
+    readonly type: "pane.attach.failed";
+    readonly paneId: PaneId;
+    /** Always "pane.not-found" today; open-ended for forward compatibility. */
+    readonly code: "pane.not-found" | (string & Record<never, never>);
+    /** Human-readable error description (English, for logging/debugging). */
+    readonly message: string;
 }
-
 /**
  * Sentinel: per-pane hydration is starting.
  * direction: session-proxy→client
@@ -925,10 +843,9 @@ export interface PaneAttachFailedMessage extends MessageBase {
  * the hydration boundary; correctness does not depend on the client acting.
  */
 export interface PaneHydrationBeginMessage extends MessageBase {
-  readonly type: "pane.hydration.begin";
-  readonly paneId: PaneId;
+    readonly type: "pane.hydration.begin";
+    readonly paneId: PaneId;
 }
-
 /**
  * Sentinel: per-pane hydration is complete.
  * direction: session-proxy→client
@@ -938,10 +855,9 @@ export interface PaneHydrationBeginMessage extends MessageBase {
  * subsequent data-plane bytes for `paneId` are live output.
  */
 export interface PaneHydrationEndMessage extends MessageBase {
-  readonly type: "pane.hydration.end";
-  readonly paneId: PaneId;
+    readonly type: "pane.hydration.end";
+    readonly paneId: PaneId;
 }
-
 /**
  * Client requests that the session-proxy attach (validate + hydrate) a pane on
  * THIS connection.
@@ -966,103 +882,94 @@ export interface PaneHydrationEndMessage extends MessageBase {
  * addClient path.
  */
 export interface PaneAttachMessage extends MessageBase {
-  readonly type: "pane.attach";
-  readonly paneId: PaneId;
+    readonly type: "pane.attach";
+    readonly paneId: PaneId;
 }
-
-// ---------------------------------------------------------------------------
-// Command request / response (client↔sessionProxy, correlated)
-// ---------------------------------------------------------------------------
-
 /**
  * Open a new window in the bound session.
  * The session-proxy chooses the pane id(s); the created window/pane ids arrive via
  * SessionProxyCommandResponseMessage on success (payload.windowId, payload.paneId).
  */
 export interface OpenWindowCommand {
-  readonly kind: "open-window";
-  /** Optional name for the new window. If omitted the session-proxy picks one. */
-  readonly name?: string;
-  /**
-   * Working directory for the first pane of the new window (`-c <dir>`).
-   * Additive optional field — non-breaking per the versioning policy.
-   * tc-cr4dz: set by the cold-start profile applicator after substitution.
-   */
-  readonly cwd?: string;
-  /**
-   * Shell command to run in the first pane of the new window.
-   * Passed as a trailing argument to `new-window`.
-   * Additive optional field — non-breaking per the versioning policy.
-   * tc-cr4dz: set by the cold-start profile applicator after substitution.
-   */
-  readonly shellCommand?: string;
-  /**
-   * Environment variables to set in the first pane of the new window.
-   * Each entry is compiled to a repeated `-e NAME=value` flag on `new-window`.
-   * Additive optional field — non-breaking per the versioning policy.
-   * tc-gjdx.2: floor is tmux 3.0 (CHANGES FROM 2.9 TO 3.0) = MINIMUM_TMUX_VERSION,
-   * so no capability gate is required.
-   */
-  readonly env?: Record<string, string>;
+    readonly kind: "open-window";
+    /** Optional name for the new window. If omitted the session-proxy picks one. */
+    readonly name?: string;
+    /**
+     * Working directory for the first pane of the new window (`-c <dir>`).
+     * Additive optional field — non-breaking per the versioning policy.
+     * tc-cr4dz: set by the cold-start profile applicator after substitution.
+     */
+    readonly cwd?: string;
+    /**
+     * Shell command to run in the first pane of the new window.
+     * Passed as a trailing argument to `new-window`.
+     * Additive optional field — non-breaking per the versioning policy.
+     * tc-cr4dz: set by the cold-start profile applicator after substitution.
+     */
+    readonly shellCommand?: string;
+    /**
+     * Environment variables to set in the first pane of the new window.
+     * Each entry is compiled to a repeated `-e NAME=value` flag on `new-window`.
+     * Additive optional field — non-breaking per the versioning policy.
+     * tc-gjdx.2: floor is tmux 3.0 (CHANGES FROM 2.9 TO 3.0) = MINIMUM_TMUX_VERSION,
+     * so no capability gate is required.
+     */
+    readonly env?: Record<string, string>;
 }
-
 /**
  * Split an existing pane into two.
  * The new pane's id arrives in SessionProxyCommandResponseMessage on success (payload.paneId).
  */
 export interface SplitPaneCommand {
-  readonly kind: "split-pane";
-  /**
-   * The pane to split.  When absent, the session-proxy splits the current pane
-   * (tmux's implicit target).  This is used by the cold-start profile
-   * applicator (tc-cr4dz) when splitting a pane in a newly-created window
-   * where the new window's first pane ID is not yet known.
-   *
-   * Additive optional field — non-breaking per the versioning policy.
-   */
-  readonly paneId?: PaneId;
-  /** "horizontal" = side-by-side; "vertical" = stacked top-to-bottom. */
-  readonly direction: "horizontal" | "vertical";
-  /**
-   * Working directory for the new pane (`-c <dir>`).
-   * Additive optional field — non-breaking per the versioning policy.
-   * tc-cr4dz: set by the cold-start profile applicator after substitution.
-   */
-  readonly cwd?: string;
-  /**
-   * Shell command to run in the new pane.
-   * Passed as a trailing argument to `split-window`.
-   * Additive optional field — non-breaking per the versioning policy.
-   * tc-cr4dz: set by the cold-start profile applicator after substitution.
-   */
-  readonly shellCommand?: string;
-  /**
-   * Environment variables to set in the new pane.
-   * Each entry is compiled to a repeated `-e NAME=value` flag on `split-window`.
-   * Additive optional field — non-breaking per the versioning policy.
-   * tc-gjdx.2: floor is tmux 3.0 (CHANGES FROM 2.9 TO 3.0) = MINIMUM_TMUX_VERSION,
-   * so no capability gate is required.
-   */
-  readonly env?: Record<string, string>;
+    readonly kind: "split-pane";
+    /**
+     * The pane to split.  When absent, the session-proxy splits the current pane
+     * (tmux's implicit target).  This is used by the cold-start profile
+     * applicator (tc-cr4dz) when splitting a pane in a newly-created window
+     * where the new window's first pane ID is not yet known.
+     *
+     * Additive optional field — non-breaking per the versioning policy.
+     */
+    readonly paneId?: PaneId;
+    /** "horizontal" = side-by-side; "vertical" = stacked top-to-bottom. */
+    readonly direction: "horizontal" | "vertical";
+    /**
+     * Working directory for the new pane (`-c <dir>`).
+     * Additive optional field — non-breaking per the versioning policy.
+     * tc-cr4dz: set by the cold-start profile applicator after substitution.
+     */
+    readonly cwd?: string;
+    /**
+     * Shell command to run in the new pane.
+     * Passed as a trailing argument to `split-window`.
+     * Additive optional field — non-breaking per the versioning policy.
+     * tc-cr4dz: set by the cold-start profile applicator after substitution.
+     */
+    readonly shellCommand?: string;
+    /**
+     * Environment variables to set in the new pane.
+     * Each entry is compiled to a repeated `-e NAME=value` flag on `split-window`.
+     * Additive optional field — non-breaking per the versioning policy.
+     * tc-gjdx.2: floor is tmux 3.0 (CHANGES FROM 2.9 TO 3.0) = MINIMUM_TMUX_VERSION,
+     * so no capability gate is required.
+     */
+    readonly env?: Record<string, string>;
 }
-
 /**
  * Close (kill) a pane. The session-proxy emits a pane.closed delta on success.
  */
 export interface ClosePaneCommand {
-  readonly kind: "close-pane";
-  readonly paneId: PaneId;
+    readonly kind: "close-pane";
+    readonly paneId: PaneId;
 }
-
 /**
  * Rename a window. The session-proxy emits a window.renamed delta on success.
  */
 export interface RenameWindowCommand {
-  readonly kind: "rename-window";
-  readonly windowId: WindowId;
-  readonly name: string;
+    readonly kind: "rename-window";
+    readonly windowId: WindowId;
+    readonly name: string;
 }
-
 /**
  * Rename the bound tmux session.
  *
@@ -1076,31 +983,28 @@ export interface RenameWindowCommand {
  * Additive addition — tc-6gnc.9: resolves the tc-asyq.10 stub.
  */
 export interface RenameSessionCommand {
-  readonly kind: "rename-session";
-  /** The new session name. Must be non-empty. */
-  readonly name: string;
+    readonly kind: "rename-session";
+    /** The new session name. Must be non-empty. */
+    readonly name: string;
 }
-
 /**
  * Focus (select) a pane. The session-proxy emits a focus.changed delta on success.
  */
 export interface SelectPaneCommand {
-  readonly kind: "select-pane";
-  readonly paneId: PaneId;
+    readonly kind: "select-pane";
+    readonly paneId: PaneId;
 }
-
 /**
  * Resize a pane. The session-proxy emits a pane.resized delta on success.
  * Distinct from ResizeRequestMessage (viewport-driven); this is an explicit
  * user-initiated resize command.
  */
 export interface ResizePaneCommand {
-  readonly kind: "resize-pane";
-  readonly paneId: PaneId;
-  readonly cols: number;
-  readonly rows: number;
+    readonly kind: "resize-pane";
+    readonly paneId: PaneId;
+    readonly cols: number;
+    readonly rows: number;
 }
-
 /**
  * tc-zna.3: Atomic per-window resize transaction for VS-Code-managed strips.
  *
@@ -1130,19 +1034,18 @@ export interface ResizePaneCommand {
  * Additive addition — non-breaking per the versioning policy.
  */
 export interface ResizeManagedWindowCommand {
-  readonly kind: "resize-managed-window";
-  readonly windowId: WindowId;
-  /** Authoritative window dims (strip sum, separator-inclusive). */
-  readonly cols: number;
-  readonly rows: number;
-  /** Per-pane dims for every pane in the strip. */
-  readonly panes: ReadonlyArray<{
-    readonly paneId: PaneId;
+    readonly kind: "resize-managed-window";
+    readonly windowId: WindowId;
+    /** Authoritative window dims (strip sum, separator-inclusive). */
     readonly cols: number;
     readonly rows: number;
-  }>;
+    /** Per-pane dims for every pane in the strip. */
+    readonly panes: ReadonlyArray<{
+        readonly paneId: PaneId;
+        readonly cols: number;
+        readonly rows: number;
+    }>;
 }
-
 /**
  * tc-pizl.9: Release VS-Code-managed `window-size manual` for a window that
  * has dropped from a managed strip to a single pane.
@@ -1163,10 +1066,9 @@ export interface ResizeManagedWindowCommand {
  * case requires a paired session-proxy that handles this command.
  */
 export interface ReleaseManagedWindowCommand {
-  readonly kind: "release-managed-window";
-  readonly windowId: WindowId;
+    readonly kind: "release-managed-window";
+    readonly windowId: WindowId;
 }
-
 /**
  * One-shot pane text snapshot (tc-295a.11 / W3.3 / gap A1d).
  *
@@ -1196,10 +1098,9 @@ export interface ReleaseManagedWindowCommand {
  * respond with `protocol.unknown-message`; consumers may display a fallback.
  */
 export interface PaneCaptureCommand {
-  readonly kind: "pane.capture";
-  readonly paneId: PaneId;
+    readonly kind: "pane.capture";
+    readonly paneId: PaneId;
 }
-
 /**
  * Read-only diagnostics snapshot for the session-proxy (tc-x6l).
  *
@@ -1212,9 +1113,8 @@ export interface PaneCaptureCommand {
  * "session-proxy does not support session-proxy.info" fallback.
  */
 export interface SessionProxyInfoCommand {
-  readonly kind: "session-proxy.info";
+    readonly kind: "session-proxy.info";
 }
-
 /**
  * Payload of a successful `session-proxy.info` response (tc-x6l).
  *
@@ -1222,47 +1122,46 @@ export interface SessionProxyInfoCommand {
  * a snapshot of the storm alarm's current window state for attribution.
  */
 export interface SessionProxyInfoPayload {
-  /**
-   * Prometheus text exposition of all per-session-proxy counters and histograms.
-   *
-   * Includes:
-   *   - `topology_events_total{kind}` — per-kind topology notification counts.
-   *   - `commands_issued_total` — south-side tmux commands issued.
-   *   - `deltas_fanned_out_total{client}` — model-change deltas sent to clients.
-   *   - `command_round_trip_seconds` — command latency histogram.
-   */
-  readonly metricsText: string;
-  /**
-   * Total topology events counted in the current sliding window
-   * (default: last 5 seconds).
-   */
-  readonly stormWindowTotal: number;
-  /**
-   * Per-kind breakdown of events in the current sliding window.
-   *
-   * An object mapping notification kind (e.g. "layout-change") to the
-   * count of events seen in the window. Useful for identifying which
-   * event kind is responsible for a high storm rate.
-   */
-  readonly stormWindowBreakdown: Record<string, number>;
-  /**
-   * The configured storm alarm threshold (events in the window before an
-   * alarm trips). Included for context when interpreting `stormWindowTotal`.
-   */
-  readonly stormThreshold: number;
-  /**
-   * Connected session-proxy-wire clients and the per-client facts each presented
-   * at attach time (D2/D4, tc-4b6k.1, tc-4b6k.3). One entry per live client
-   * connection to this bound session; `identity` is absent for a connection that
-   * did not advertise one; `flags` is absent when none were carried on
-   * `session.attach`. Additive optional field — carried for observability only.
-   */
-  readonly clients?: ReadonlyArray<{
-    readonly identity?: ClientIdentity;
-    readonly flags?: ClientFlags;
-  }>;
+    /**
+     * Prometheus text exposition of all per-session-proxy counters and histograms.
+     *
+     * Includes:
+     *   - `topology_events_total{kind}` — per-kind topology notification counts.
+     *   - `commands_issued_total` — south-side tmux commands issued.
+     *   - `deltas_fanned_out_total{client}` — model-change deltas sent to clients.
+     *   - `command_round_trip_seconds` — command latency histogram.
+     */
+    readonly metricsText: string;
+    /**
+     * Total topology events counted in the current sliding window
+     * (default: last 5 seconds).
+     */
+    readonly stormWindowTotal: number;
+    /**
+     * Per-kind breakdown of events in the current sliding window.
+     *
+     * An object mapping notification kind (e.g. "layout-change") to the
+     * count of events seen in the window. Useful for identifying which
+     * event kind is responsible for a high storm rate.
+     */
+    readonly stormWindowBreakdown: Record<string, number>;
+    /**
+     * The configured storm alarm threshold (events in the window before an
+     * alarm trips). Included for context when interpreting `stormWindowTotal`.
+     */
+    readonly stormThreshold: number;
+    /**
+     * Connected session-proxy-wire clients and the per-client facts each presented
+     * at attach time (D2/D4, tc-4b6k.1, tc-4b6k.3). One entry per live client
+     * connection to this bound session; `identity` is absent for a connection that
+     * did not advertise one; `flags` is absent when none were carried on
+     * `session.attach`. Additive optional field — carried for observability only.
+     */
+    readonly clients?: ReadonlyArray<{
+        readonly identity?: ClientIdentity;
+        readonly flags?: ClientFlags;
+    }>;
 }
-
 /**
  * Kill the tmux session entirely.
  *
@@ -1279,10 +1178,9 @@ export interface SessionProxyInfoPayload {
  * fragile numeric-id mapping (tmux session numbers can be reshuffled).
  */
 export interface KillSessionCommand {
-  readonly kind: "kill-session";
-  readonly sessionName: string;
+    readonly kind: "kill-session";
+    readonly sessionName: string;
 }
-
 /**
  * Toggle `synchronize-panes` for a window.
  * direction: client→session-proxy
@@ -1297,14 +1195,11 @@ export interface KillSessionCommand {
  * Additive addition — non-breaking per the versioning policy.
  */
 export interface SetSynchronizePanesCommand {
-  readonly kind: "set-synchronize-panes";
-  readonly windowId: WindowId;
-  /** True to enable synchronize-panes; false to disable. */
-  readonly on: boolean;
+    readonly kind: "set-synchronize-panes";
+    readonly windowId: WindowId;
+    /** True to enable synchronize-panes; false to disable. */
+    readonly on: boolean;
 }
-
-// ── tc-7xv.9: pane verbs ──────────────────────────────────────────────────
-
 /**
  * Break a pane out of its window into a new window.
  * direction: client→session-proxy
@@ -1320,10 +1215,9 @@ export interface SetSynchronizePanesCommand {
  * Additive addition — non-breaking per the versioning policy.
  */
 export interface BreakPaneCommand {
-  readonly kind: "break-pane";
-  readonly paneId: PaneId;
+    readonly kind: "break-pane";
+    readonly paneId: PaneId;
 }
-
 /**
  * Swap a pane with the most-recently-used (MRU) other pane.
  * direction: client→session-proxy
@@ -1336,12 +1230,11 @@ export interface BreakPaneCommand {
  * Additive addition — non-breaking per the versioning policy.
  */
 export interface SwapPaneCommand {
-  readonly kind: "swap-pane";
-  readonly paneId: PaneId;
-  /** Optional explicit target pane.  When absent, rotates with -D. */
-  readonly targetPaneId?: PaneId;
+    readonly kind: "swap-pane";
+    readonly paneId: PaneId;
+    /** Optional explicit target pane.  When absent, rotates with -D. */
+    readonly targetPaneId?: PaneId;
 }
-
 /**
  * Set the DURABLE, driver-owned pane name (tc-1a8z).
  * direction: client→session-proxy
@@ -1369,13 +1262,11 @@ export interface SwapPaneCommand {
  * Additive addition — non-breaking per the versioning policy.
  */
 export interface RenamePaneCommand {
-  readonly kind: "rename-pane";
-  readonly paneId: PaneId;
-  /** New durable pane name.  Empty string clears the durable name. */
-  readonly title: string;
+    readonly kind: "rename-pane";
+    readonly paneId: PaneId;
+    /** New durable pane name.  Empty string clears the durable name. */
+    readonly title: string;
 }
-// ── tc-i9aq.1: durable object-policy/intent write (cold-start.md §4.A/§6.1) ──
-
 /**
  * Write a durable per-object policy/intent `@tmuxcc-*` user-option.
  * direction: client→session-proxy
@@ -1411,21 +1302,18 @@ export interface RenamePaneCommand {
  * Additive addition — non-breaking per the versioning policy.
  */
 export interface SetObjectPolicyCommand {
-  readonly kind: "set-object-policy";
-  /** Object scope the option is written at. */
-  readonly scope: "pane" | "window" | "session";
-  /** Target pane id (scope "pane"). */
-  readonly paneId?: PaneId;
-  /** Target window id (scope "window"). */
-  readonly windowId?: WindowId;
-  /** Which `@tmuxcc-*` option to write. */
-  readonly option: "bound" | "detach" | "icon";
-  /** New value, or null to clear (unset) the option. */
-  readonly value: string | null;
+    readonly kind: "set-object-policy";
+    /** Object scope the option is written at. */
+    readonly scope: "pane" | "window" | "session";
+    /** Target pane id (scope "pane"). */
+    readonly paneId?: PaneId;
+    /** Target window id (scope "window"). */
+    readonly windowId?: WindowId;
+    /** Which `@tmuxcc-*` option to write. */
+    readonly option: "bound" | "detach" | "icon";
+    /** New value, or null to clear (unset) the option. */
+    readonly value: string | null;
 }
-
-// ── tc-7xv.15: monitor-activity / monitor-silence commands ──────────────────
-
 /**
  * Set `monitor-activity` for a window.
  * direction: client→session-proxy
@@ -1440,12 +1328,11 @@ export interface SetObjectPolicyCommand {
  * Additive addition — non-breaking per the versioning policy.
  */
 export interface SetMonitorActivityCommand {
-  readonly kind: "set-monitor-activity";
-  readonly windowId: WindowId;
-  /** True to enable monitor-activity; false to disable. */
-  readonly on: boolean;
+    readonly kind: "set-monitor-activity";
+    readonly windowId: WindowId;
+    /** True to enable monitor-activity; false to disable. */
+    readonly on: boolean;
 }
-
 /**
  * Set `monitor-silence` for a window.
  * direction: client→session-proxy
@@ -1461,17 +1348,14 @@ export interface SetMonitorActivityCommand {
  * Additive addition — non-breaking per the versioning policy.
  */
 export interface SetMonitorSilenceCommand {
-  readonly kind: "set-monitor-silence";
-  readonly windowId: WindowId;
-  /**
-   * Silence threshold in seconds (1..N to enable), or 0/null to disable.
-   * tmux interprets `monitor-silence 0` as "off".
-   */
-  readonly seconds: number | null;
+    readonly kind: "set-monitor-silence";
+    readonly windowId: WindowId;
+    /**
+     * Silence threshold in seconds (1..N to enable), or 0/null to disable.
+     * tmux interprets `monitor-silence 0` as "off".
+     */
+    readonly seconds: number | null;
 }
-
-// ── tc-7xv.18: window verbs ──────────────────────────────────────────────────
-
 /**
  * Kill a tmux window and all its panes.
  *
@@ -1483,10 +1367,9 @@ export interface SetMonitorSilenceCommand {
  * Additive addition — non-breaking per the versioning policy.
  */
 export interface KillWindowCommand {
-  readonly kind: "kill-window";
-  readonly windowId: WindowId;
+    readonly kind: "kill-window";
+    readonly windowId: WindowId;
 }
-
 /**
  * Swap two windows within the session.
  *
@@ -1500,13 +1383,10 @@ export interface KillWindowCommand {
  * Additive addition — non-breaking per the versioning policy.
  */
 export interface SwapWindowCommand {
-  readonly kind: "swap-window";
-  readonly sourceWindowId: WindowId;
-  readonly targetWindowId: WindowId;
+    readonly kind: "swap-window";
+    readonly sourceWindowId: WindowId;
+    readonly targetWindowId: WindowId;
 }
-
-// ── end tc-7xv.18 ──────────────────────────────────────────────────────────
-
 /**
  * Discriminated union of all model-level commands a client may issue.
  * Narrow with `cmd.kind` to get the specific shape.
@@ -1518,38 +1398,7 @@ export interface SwapWindowCommand {
  *
  * All commands operate within the bound session. None carry sessionId.
  */
-export type WireCommand =
-  | OpenWindowCommand
-  | SplitPaneCommand
-  | ClosePaneCommand
-  | RenameWindowCommand
-  // tc-6gnc.9: rename the bound tmux session
-  | RenameSessionCommand
-  | SelectPaneCommand
-  | ResizePaneCommand
-  | KillSessionCommand
-  | SetSynchronizePanesCommand
-  // tc-7xv.15: monitor-activity / monitor-silence
-  | SetMonitorActivityCommand
-  | SetMonitorSilenceCommand
-  // tc-7xv.9: pane verbs
-  | BreakPaneCommand
-  | SwapPaneCommand
-  | RenamePaneCommand
-  // tc-i9aq.1: durable object-policy/intent write (cold-start.md §4.A)
-  | SetObjectPolicyCommand
-  // tc-7xv.18: window verbs
-  | KillWindowCommand
-  | SwapWindowCommand
-  // tc-zna.3: VS-Code-authoritative managed-window resize transaction
-  | ResizeManagedWindowCommand
-  // tc-pizl.9: release manual window-size on strip→single-pane teardown
-  | ReleaseManagedWindowCommand
-  // tc-x6l: read-only diagnostics + metrics
-  | SessionProxyInfoCommand
-  // tc-295a.11: one-shot pane text snapshot (kills C15 third authority)
-  | PaneCaptureCommand;
-
+export type WireCommand = OpenWindowCommand | SplitPaneCommand | ClosePaneCommand | RenameWindowCommand | RenameSessionCommand | SelectPaneCommand | ResizePaneCommand | KillSessionCommand | SetSynchronizePanesCommand | SetMonitorActivityCommand | SetMonitorSilenceCommand | BreakPaneCommand | SwapPaneCommand | RenamePaneCommand | SetObjectPolicyCommand | KillWindowCommand | SwapWindowCommand | ResizeManagedWindowCommand | ReleaseManagedWindowCommand | SessionProxyInfoCommand | PaneCaptureCommand;
 /**
  * Client issues a model-level command to the session-proxy.
  * direction: client→session-proxy
@@ -1560,13 +1409,12 @@ export type WireCommand =
  * requests. The session-proxy does NOT assign correlation ids.
  */
 export interface SessionProxyCommandRequestMessage extends MessageBase {
-  readonly type: "command.request";
-  /** Client-generated opaque string, echoed in the matching response. */
-  readonly correlationId: string;
-  /** The model operation to perform. */
-  readonly command: WireCommand;
+    readonly type: "command.request";
+    /** Client-generated opaque string, echoed in the matching response. */
+    readonly correlationId: string;
+    /** The model operation to perform. */
+    readonly command: WireCommand;
 }
-
 /**
  * Successful command result payload. Fields are optional because not every
  * command produces a new entity.
@@ -1585,33 +1433,32 @@ export interface SessionProxyCommandRequestMessage extends MessageBase {
  * tc-295a.11: `text` carries the captured pane text for `pane.capture` responses.
  */
 export interface SessionProxyCommandOkPayload {
-  readonly windowId?: WindowId;
-  readonly paneId?: PaneId;
-  /** session-proxy.info diagnostics payload (tc-x6l). Present only in session-proxy.info responses. */
-  readonly info?: SessionProxyInfoPayload;
-  /**
-   * Captured pane text for `pane.capture` responses (tc-295a.11 / W3.3).
-   *
-   * Full UTF-8 scrollback string as tmux emits it: rows separated by bare LF
-   * (`\n`).  Clients that need CRLF can apply their own LF→CRLF pass — the
-   * wire carries the raw tmux output so callers can choose their own rendering.
-   * Present only in `pane.capture` command responses; absent otherwise.
-   */
-  readonly text?: string;
-  /**
-   * tc-gjdx.7: apply-to-live result for a `session.applyTemplate` response.
-   * The would-create set (dryRun) / did-create set (real apply). Absent on all
-   * other command kinds.
-   */
-  readonly applyTemplate?: import("./session-template.js").TemplateApplyResult;
-  /**
-   * tc-gjdx.8: frozen template for a `session.freezeTemplate` response.
-   * The schema-valid SessionTemplate captured from the live session. Absent on
-   * all other command kinds.
-   */
-  readonly frozenTemplate?: import("./session-template.js").SessionTemplate;
+    readonly windowId?: WindowId;
+    readonly paneId?: PaneId;
+    /** session-proxy.info diagnostics payload (tc-x6l). Present only in session-proxy.info responses. */
+    readonly info?: SessionProxyInfoPayload;
+    /**
+     * Captured pane text for `pane.capture` responses (tc-295a.11 / W3.3).
+     *
+     * Full UTF-8 scrollback string as tmux emits it: rows separated by bare LF
+     * (`\n`).  Clients that need CRLF can apply their own LF→CRLF pass — the
+     * wire carries the raw tmux output so callers can choose their own rendering.
+     * Present only in `pane.capture` command responses; absent otherwise.
+     */
+    readonly text?: string;
+    /**
+     * tc-gjdx.7: apply-to-live result for a `session.applyTemplate` response.
+     * The would-create set (dryRun) / did-create set (real apply). Absent on all
+     * other command kinds.
+     */
+    readonly applyTemplate?: import("./session-template.js").TemplateApplyResult;
+    /**
+     * tc-gjdx.8: frozen template for a `session.freezeTemplate` response.
+     * The schema-valid SessionTemplate captured from the live session. Absent on
+     * all other command kinds.
+     */
+    readonly frozenTemplate?: import("./session-template.js").SessionTemplate;
 }
-
 /**
  * The session-proxy's response to a SessionProxyCommandRequestMessage.
  * direction: session-proxy→client
@@ -1626,19 +1473,15 @@ export interface SessionProxyCommandOkPayload {
  * exactly one command.response.
  */
 export interface SessionProxyCommandResponseMessage extends MessageBase {
-  readonly type: "command.response";
-  /** Echoed from the matching SessionProxyCommandRequestMessage. */
-  readonly correlationId: string;
-  /** Discriminated result: success or failure. */
-  readonly result:
-    | { readonly ok: true; readonly payload?: SessionProxyCommandOkPayload }
-    | CommandFailure;
+    readonly type: "command.response";
+    /** Echoed from the matching SessionProxyCommandRequestMessage. */
+    readonly correlationId: string;
+    /** Discriminated result: success or failure. */
+    readonly result: {
+        readonly ok: true;
+        readonly payload?: SessionProxyCommandOkPayload;
+    } | CommandFailure;
 }
-
-// ---------------------------------------------------------------------------
-// Error — unsolicited / protocol-level errors (session-proxy→client)
-// ---------------------------------------------------------------------------
-
 /**
  * Session-proxy command-response error codes (result.ok=false on command.response).
  *
@@ -1670,15 +1513,7 @@ export interface SessionProxyCommandResponseMessage extends MessageBase {
  *
  * The type is open-ended for forward compatibility.
  */
-export type SessionProxyCommandErrorCode =
-  | "verb.failed"
-  | "verb.internal"
-  | "verb.no-effect-ids"
-  | "read-only"
-  | "pane.not-found"
-  | "internal"
-  | (string & Record<never, never>);
-
+export type SessionProxyCommandErrorCode = "verb.failed" | "verb.internal" | "verb.no-effect-ids" | "read-only" | "pane.not-found" | "internal" | (string & Record<never, never>);
 /**
  * Unsolicited session-proxy / wire-level error codes (used in ErrorMessage).
  *
@@ -1704,15 +1539,7 @@ export type SessionProxyCommandErrorCode =
  *
  * The type is open-ended for forward compatibility.
  */
-export type WireErrorCode =
-  | "protocol.unknown-message"
-  | "protocol.malformed"
-  | "protocol.version-mismatch"
-  | "session.unavailable"
-  | "session.not-found"
-  | "internal"
-  | (string & Record<never, never>);
-
+export type WireErrorCode = "protocol.unknown-message" | "protocol.malformed" | "protocol.version-mismatch" | "session.unavailable" | "session.not-found" | "internal" | (string & Record<never, never>);
 /**
  * Unsolicited error pushed by the session-proxy.
  * direction: session-proxy→client
@@ -1735,20 +1562,15 @@ export type WireErrorCode =
  * "session.unavailable", the client should consider the connection dead.
  */
 export interface ErrorMessage extends MessageBase {
-  readonly type: "error";
-  readonly code: WireErrorCode;
-  /** Human-readable error description (English, for logging/debugging). */
-  readonly message: string;
-  /** If set, ties this error to a prior SessionProxyCommandRequestMessage. */
-  readonly correlationId?: string;
-  /** tc-fah2: for code "session.unavailable" only — the cause of the session ending. */
-  readonly cause?: "pane-exit" | "external";
+    readonly type: "error";
+    readonly code: WireErrorCode;
+    /** Human-readable error description (English, for logging/debugging). */
+    readonly message: string;
+    /** If set, ties this error to a prior SessionProxyCommandRequestMessage. */
+    readonly correlationId?: string;
+    /** tc-fah2: for code "session.unavailable" only — the cause of the session ending. */
+    readonly cause?: "pane-exit" | "external";
 }
-
-// ---------------------------------------------------------------------------
-// Client → SessionProxy messages (client requests)
-// ---------------------------------------------------------------------------
-
 /**
  * Client sends text/key input destined for a pane.
  * direction: client→session-proxy
@@ -1764,12 +1586,11 @@ export interface ErrorMessage extends MessageBase {
  * cover this well and remain JSON-serializable.
  */
 export interface InputMessage extends MessageBase {
-  readonly type: "input";
-  readonly paneId: PaneId;
-  /** UTF-8 text to write to the pane's stdin. */
-  readonly data: string;
+    readonly type: "input";
+    readonly paneId: PaneId;
+    /** UTF-8 text to write to the pane's stdin. */
+    readonly data: string;
 }
-
 /**
  * Client requests that a pane be resized.
  * direction: client→session-proxy
@@ -1779,12 +1600,11 @@ export interface InputMessage extends MessageBase {
  * PaneResizedMessage (session-proxy→client) confirming the new dimensions.
  */
 export interface ResizeRequestMessage extends MessageBase {
-  readonly type: "resize.request";
-  readonly paneId: PaneId;
-  readonly cols: number;
-  readonly rows: number;
+    readonly type: "resize.request";
+    readonly paneId: PaneId;
+    readonly cols: number;
+    readonly rows: number;
 }
-
 /**
  * Client's capabilities advertisement (sent once at handshake time).
  * direction: client→sessionProxy (and client→serverProxy)
@@ -1796,18 +1616,17 @@ export interface ResizeRequestMessage extends MessageBase {
  * The handshake sequence is defined by bead tc-auj; this is just the shape.
  */
 export interface ClientCapabilitiesMessage extends MessageBase {
-  readonly type: "client.capabilities";
-  readonly capabilities: Capabilities;
-  /**
-   * Durable client identity presented at handshake (D2, tc-4b6k.1). Sibling of
-   * `capabilities` (NOT inside the shared {@link Capabilities} object, which the
-   * server also sends). Additive optional field — a client that omits it
-   * handshakes exactly as before; both proxies capture, log, and expose it in
-   * their `*.info` payloads. Carried and logged only — no behavior change yet.
-   */
-  readonly identity?: ClientIdentity;
+    readonly type: "client.capabilities";
+    readonly capabilities: Capabilities;
+    /**
+     * Durable client identity presented at handshake (D2, tc-4b6k.1). Sibling of
+     * `capabilities` (NOT inside the shared {@link Capabilities} object, which the
+     * server also sends). Additive optional field — a client that omits it
+     * handshakes exactly as before; both proxies capture, log, and expose it in
+     * their `*.info` payloads. Carried and logged only — no behavior change yet.
+     */
+    readonly identity?: ClientIdentity;
 }
-
 /**
  * Client requests that the session-proxy re-send a full snapshot for this connection.
  * direction: client→session-proxy
@@ -1833,9 +1652,8 @@ export interface ClientCapabilitiesMessage extends MessageBase {
  * The exact-version handshake enforces this.
  */
 export interface ResyncRequestMessage extends MessageBase {
-  readonly type: "resync.request";
+    readonly type: "resync.request";
 }
-
 /**
  * Client tells the session-proxy that THIS client (window) became the active,
  * foreground client — an explicit activity signal for size-ownership policy.
@@ -1858,13 +1676,8 @@ export interface ResyncRequestMessage extends MessageBase {
  * size-ownership behavior), exactly as it would any unknown client message.
  */
 export interface ClientFocusMessage extends MessageBase {
-  readonly type: "client.focus";
+    readonly type: "client.focus";
 }
-
-// ---------------------------------------------------------------------------
-// Union types — the top-level discriminated unions
-// ---------------------------------------------------------------------------
-
 /**
  * All messages the session-proxy pushes to the client.
  * Narrow with `msg.type` to get the specific shape.
@@ -1881,160 +1694,31 @@ export interface ClientFocusMessage extends MessageBase {
  *   Commands:      SessionProxyCommandResponseMessage
  *   Errors:        ErrorMessage
  */
-export type SessionProxyMessage =
-  // Capabilities
-  | SessionProxyCapabilitiesMessage
-  // Snapshot
-  | SnapshotMessage
-  // Pane deltas
-  | PaneOpenedMessage
-  | PaneClosedMessage
-  | PaneResizedMessage
-  | PaneModeChangedMessage
-  // Pane re-home (window-membership change) delta (tc-4gor)
-  | PaneMovedMessage
-  // Durable pane-name delta (tc-1a8z)
-  | PaneLabelChangedMessage
-  // Dead-pane state delta (tc-4bv2 / tc-295a.10)
-  | PaneDeadChangedMessage
-  // Live shell title delta (tc-2mn8)
-  | PaneTitleChangedMessage
-  // Durable policy/intent delta (tc-i9aq.1, cold-start.md §4.A)
-  | PanePolicyChangedMessage
-  // Pane attention/status notification (tc-76m8.1, S9)
-  | PaneNotifyMessage
-  // Window deltas
-  | WindowAddedMessage
-  | WindowClosedMessage
-  | WindowRenamedMessage
-  // Sync-panes delta (tc-7xv.12)
-  | WindowSyncChangedMessage
-  // Monitor deltas (tc-7xv.15)
-  | WindowMonitorActivityChangedMessage
-  | WindowMonitorSilenceChangedMessage
-  // Layout deltas
-  | LayoutUpdatedMessage
-  // Focus deltas
-  | FocusChangedMessage
-  // Session delta (only rename survives in the session-proxy wire)
-  | SessionProxySessionRenamedMessage
-  // Client-count delta (tc-44wu0)
-  | ClientCountChangedMessage
-  // Per-pane attach + hydration protocol (tc-295a.8 / tc-295a.9)
-  | PaneAttachFailedMessage
-  | PaneHydrationBeginMessage
-  | PaneHydrationEndMessage
-  // Command responses
-  | SessionProxyCommandResponseMessage
-  // Unsolicited errors
-  | ErrorMessage;
-
+export type SessionProxyMessage = SessionProxyCapabilitiesMessage | SnapshotMessage | PaneOpenedMessage | PaneClosedMessage | PaneResizedMessage | PaneModeChangedMessage | PaneMovedMessage | PaneLabelChangedMessage | PaneDeadChangedMessage | PaneTitleChangedMessage | PanePolicyChangedMessage | PaneNotifyMessage | WindowAddedMessage | WindowClosedMessage | WindowRenamedMessage | WindowSyncChangedMessage | WindowMonitorActivityChangedMessage | WindowMonitorSilenceChangedMessage | LayoutUpdatedMessage | FocusChangedMessage | SessionProxySessionRenamedMessage | ClientCountChangedMessage | PaneAttachFailedMessage | PaneHydrationBeginMessage | PaneHydrationEndMessage | SessionProxyCommandResponseMessage | ErrorMessage;
 /**
  * All messages the client sends to the session-proxy.
  * Narrow with `msg.type` to get the specific shape.
  */
-export type ClientMessage =
-  | InputMessage
-  | ResizeRequestMessage
-  | ClientCapabilitiesMessage
-  | SessionProxyCommandRequestMessage
-  | ResyncRequestMessage
-  // Per-pane attach (tc-295a.8)
-  | PaneAttachMessage
-  // Client-focus activity signal (tc-76m8.3, S3 size-ownership policy)
-  | ClientFocusMessage;
-
+export type ClientMessage = InputMessage | ResizeRequestMessage | ClientCapabilitiesMessage | SessionProxyCommandRequestMessage | ResyncRequestMessage | PaneAttachMessage | ClientFocusMessage;
 /**
  * Any control-plane message (either direction) on the session-proxy wire.
  * Useful for generic transport code that doesn't care about direction.
  */
 export type ControlMessage = SessionProxyMessage | ClientMessage;
-
-// ---------------------------------------------------------------------------
-// Type guards — runtime narrowing without external schema libraries.
-// ---------------------------------------------------------------------------
-
 /** Narrows a ControlMessage to a specific session-proxy→client message type. */
-export function isSessionProxyMessage(msg: ControlMessage): msg is SessionProxyMessage {
-  const t = msg.type;
-  return (
-    // Capabilities
-    t === "session-proxy.capabilities" ||
-    // Snapshot
-    t === "snapshot" ||
-    // Pane deltas
-    t === "pane.opened" ||
-    t === "pane.closed" ||
-    t === "pane.resized" ||
-    t === "pane.mode-changed" ||
-    t === "pane.dead-changed" ||
-    // Pane re-home (window-membership change) delta (tc-4gor)
-    t === "pane.moved" ||
-    // Durable pane name delta (tc-1a8z)
-    t === "pane.label-changed" ||
-    // Live shell title delta (tc-2mn8)
-    t === "pane.title-changed" ||
-    // Pane attention/status notification (tc-76m8.1, S9)
-    t === "pane.notify" ||
-    // Window deltas
-    t === "window.added" ||
-    t === "window.closed" ||
-    t === "window.renamed" ||
-    // Sync-panes delta (tc-7xv.12)
-    t === "window.sync.changed" ||
-    // Monitor deltas (tc-7xv.15)
-    t === "window.monitor.activity.changed" ||
-    t === "window.monitor.silence.changed" ||
-    // Layout deltas
-    t === "layout.updated" ||
-    // Focus deltas
-    t === "focus.changed" ||
-    // Session delta
-    t === "session.renamed" ||
-    // Client-count delta (tc-44wu0)
-    t === "client-count.changed" ||
-    // Per-pane attach + hydration protocol (tc-295a.8 / tc-295a.9)
-    t === "pane.attach.failed" ||
-    t === "pane.hydration.begin" ||
-    t === "pane.hydration.end" ||
-    // Command responses
-    t === "command.response" ||
-    // Unsolicited errors
-    t === "error"
-  );
-}
-
+export declare function isSessionProxyMessage(msg: ControlMessage): msg is SessionProxyMessage;
 /** Narrows a ControlMessage to a specific client→session-proxy message type. */
-export function isClientMessage(msg: ControlMessage): msg is ClientMessage {
-  const t = msg.type;
-  return (
-    t === "input" ||
-    t === "resize.request" ||
-    t === "client.capabilities" ||
-    t === "command.request" ||
-    t === "resync.request" ||
-    // Per-pane attach (tc-295a.8)
-    t === "pane.attach" ||
-    // Client-focus activity signal (tc-76m8.3)
-    t === "client.focus"
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Backward-compatible type aliases
-// ---------------------------------------------------------------------------
-
+export declare function isClientMessage(msg: ControlMessage): msg is ClientMessage;
 /**
  * @deprecated Use SessionProxyCommandRequestMessage. Kept for transition period.
  */
 export type CommandRequestMessage = SessionProxyCommandRequestMessage;
-
 /**
  * @deprecated Use SessionProxyCommandResponseMessage. Kept for transition period.
  */
 export type CommandResponseMessage = SessionProxyCommandResponseMessage;
-
 /**
  * @deprecated Use SessionProxyCommandOkPayload. Kept for transition period.
  */
 export type CommandOkPayload = SessionProxyCommandOkPayload;
+//# sourceMappingURL=session-proxy-control.d.ts.map

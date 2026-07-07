@@ -151,6 +151,8 @@ export type {
   // SessionProxy diagnostics (session-proxy.info — tc-x6l)
   SessionProxyInfoCommand,
   SessionProxyInfoPayload,
+  // tc-u4ny.1: command-response error codes + unsolicited wire-error codes
+  SessionProxyCommandErrorCode,
   WireErrorCode,
   ErrorMessage,
   // SessionProxy union
@@ -209,6 +211,15 @@ export {
   runSessionProxyHandshake,
   runClientHandshake,
 } from "./handshake.js";
+
+// Typed command-failure envelope (tc-u4ny.1)
+export type { CommandFailure, CapabilityRequiredDetails } from "./errors.js";
+export {
+  CommandError,
+  isCommandError,
+  requiredCapability,
+  toCommandFailure,
+} from "./errors.js";
 
 // Transport seam — in-process pair + interface types (tc-em3)
 export type {
