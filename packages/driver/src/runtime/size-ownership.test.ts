@@ -282,6 +282,24 @@ describe("SizeOwnershipPolicy (tc-76m8.3)", () => {
     assert.ok(policy.isSizeOwner("win"));
   });
 
+  it("tc-51oo: a candidate-remove with no registered connection throws (add/remove imbalance tripwire)", () => {
+    const { clock } = makeFakeClock();
+    const policy = createSizeOwnershipPolicy({ debounceMs: DEBOUNCE, clock });
+
+    // Never added as a candidate — a wasCandidate remove is a bookkeeping bug,
+    // not an idempotent no-op: absorbed, a stray decrement could strip a key
+    // that still has live connections.
+    assert.throws(
+      () => policy.removeClient("ghost", true),
+      /add\/remove imbalance/,
+    );
+
+    // Already fully removed → same tripwire on the second remove.
+    policy.addClient("win", true);
+    policy.removeClient("win", true);
+    assert.throws(() => policy.removeClient("win", true), /add\/remove imbalance/);
+  });
+
   it("dispose cancels any pending timer", () => {
     const { clock, pending } = makeFakeClock();
     const policy = createSizeOwnershipPolicy({ debounceMs: DEBOUNCE, clock });

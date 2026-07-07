@@ -220,7 +220,17 @@ export function createSizeOwnershipPolicy(
 
     removeClient(key: string, wasCandidate: boolean): void {
       if (!wasCandidate) return; // non-candidate connection: never refcounted
-      const remaining = (candidateRefs.get(key) ?? 0) - 1;
+      const current = candidateRefs.get(key);
+      if (current === undefined) {
+        // Tripwire: a candidate-remove for a key that was never added (or already
+        // fully removed) is a session-proxy bookkeeping bug. Absorbing it would
+        // hide the exact class this refcount exists to kill — a stray decrement
+        // against a key with live connections strips a still-connected candidate.
+        throw new Error(
+          `size-ownership: removeClient(${key}, wasCandidate=true) with no registered candidate connection — add/remove imbalance`,
+        );
+      }
+      const remaining = current - 1;
       if (remaining > 0) {
         // Other live candidate connections for this key remain: the key is still a
         // candidate and, if it was, still the owner. Nothing changes.
@@ -228,8 +238,7 @@ export function createSizeOwnershipPolicy(
         return;
       }
       // The LAST candidate connection for this key closed — it is no longer a
-      // candidate. (A negative `remaining` from a spurious double-remove lands
-      // here too and is idempotent: delete of an absent key is a no-op.)
+      // candidate.
       candidateRefs.delete(key);
       lastActivity.delete(key);
       if (pending === key) clearPending();
