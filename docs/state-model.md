@@ -98,7 +98,7 @@ Late-joining clients get backfill from the replica, not from tmux.
 
 ## 4. Single-writer *reconciliation pricing* survives; the ownership claim does not
 
-> Revised 2026-07-02 (tc-4b6k O4 withdrawal / D3, `ownership-seams-decisions.md`
+> Revised 2026-07-02 (tc-4b6k O4 withdrawal / D3, [`ownership-seams-decisions.md`](./ownership-seams-decisions.md)
 > §2). The original premise below — "multi-client is rare-to-never, so a fact
 > can have one shared slot" — is **withdrawn** as an ownership claim. Shared-vs-
 > per-client coherence is now a design *requirement*: a fact that differs per
