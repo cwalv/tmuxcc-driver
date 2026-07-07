@@ -993,6 +993,94 @@ describe("server-proxy – integration (requires tmux)", { skip: !TMUX_AVAILABLE
 });
 
 // ---------------------------------------------------------------------------
+// tc-u4ny.2: capability-required wire shape — end-to-end details round-trip
+// ---------------------------------------------------------------------------
+//
+// Verifies that the dispatcher's `toCommandFailure` forwards `details` onto
+// the wire for the `tmux.capability-required` path.  This is the critical
+// link: the VS Code retry gate reads `details.capability` to decide whether
+// to offer the user an upgrade prompt; if details are dropped the gate
+// silently stops retrying with no diagnostic.
+//
+// The seam is `capabilitiesOverride` (a test-harness affordance on
+// ServerProxyOptions, tc-u4ny.2): when set, `start()` bypasses the live
+// `probeTmuxCapabilities()` call and uses the supplied map instead.  This
+// lets the test inject a pre-3.2 capability map (newSessionEnvFlag=false)
+// on a host that has tmux 3.4, without patching any production code path.
+
+describe("server-proxy — capability-required wire shape (tc-u4ny.2)", { skip: !TMUX_AVAILABLE }, () => {
+  // Simulate a pre-3.2 host: all 3.2+ capabilities are false.
+  // The only flag that matters here is newSessionEnvFlag; the others are set
+  // to a consistent below-3.2 posture so the override looks realistic.
+  const below32Caps = {
+    windowSize: true,
+    noOutputFlag: true,
+    windowSizeLatest: true,
+    ignoreSizeFlag: false,
+    readOnlyFlag: false,
+    pauseAfterFlag: false,
+    activePaneFlag: false,
+    newSessionEnvFlag: false,
+    scrollOnClear: false,
+    noDetachOnDestroy: false,
+  };
+
+  it(
+    "I-cap (tc-u4ny.2): session.create with env against below-3.2 caps → wire CommandFailure with details.capability",
+    async () => {
+      const socketName = nextSocketName();
+      const capProxy = createServerProxy({
+        socketName,
+        idleExitMs: 60_000,
+        handshakeTimeoutMs: 2_000,
+        capabilitiesOverride: below32Caps,
+      });
+      await capProxy.start();
+      try {
+        const { mux } = await connectToServerProxy(capProxy.endpoint());
+        const seq = { value: 1 };
+
+        // session.create with env on a below-3.2 capability map must fail with
+        // code "tmux.capability-required" and details.capability must be present
+        // on the wire — proving that toCommandFailure forwards details.
+        const resp = await sendServerProxyCommand(
+          mux,
+          { kind: "session.create", name: "cap-check", env: { TMUXCC_TEST_CAP: "1" } },
+          seq,
+        );
+
+        // The result must be a CommandFailure, not ok.
+        assert.equal(resp.result.ok, false, `Expected result.ok=false, got: ${JSON.stringify(resp.result)}`);
+
+        const failure = resp.result as { ok: false; code: string; message: string; details?: unknown };
+
+        assert.equal(
+          failure.code,
+          "tmux.capability-required",
+          `Expected code "tmux.capability-required", got: ${JSON.stringify(failure.code)}`,
+        );
+
+        // details.capability must arrive on the wire (the epic's critical link).
+        assert.ok(
+          failure.details !== undefined && failure.details !== null,
+          `Expected details to be present on the wire, got: ${JSON.stringify(failure.details)}`,
+        );
+        assert.equal(
+          (failure.details as { capability?: string }).capability,
+          "newSessionEnvFlag",
+          `Expected details.capability "newSessionEnvFlag", got: ${JSON.stringify(failure.details)}`,
+        );
+
+        mux.transport.close();
+      } finally {
+        await capProxy.shutdown();
+        spawnSync("tmux", ["-L", socketName, "kill-server"], { stdio: "ignore", timeout: 5_000 });
+      }
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
 // tc-w61: @tmuxcc marker integration tests (requires tmux)
 // ---------------------------------------------------------------------------
 

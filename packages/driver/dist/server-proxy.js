@@ -417,7 +417,10 @@ class ServerProxyImpl {
         // tmux is absent the probe also returns null (consistent with _tmuxAvailable
         // false). Must complete before the first client connection so the initial
         // snapshot and _buildInfo() see the correct capability state.
-        this._tmuxCapabilityState = probeTmuxCapabilities();
+        // tc-u4ny.2: capabilitiesOverride bypasses the live probe for test seams.
+        this._tmuxCapabilityState = this._opts.capabilitiesOverride
+            ? { version: "override", capabilities: this._opts.capabilitiesOverride, belowFloor: false }
+            : probeTmuxCapabilities();
         if (this._tmuxCapabilityState?.belowFloor) {
             // Actionable floor-gate message. The server-proxy stays up (same as the
             // _tmuxAvailable path) so the extension can surface it to the user.

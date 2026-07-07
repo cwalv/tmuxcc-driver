@@ -91,7 +91,7 @@ import type { MetricsHttpListener } from "./metrics-http.js";
 import { listSessions, killSession, checkSessionPresence, createTmuxWatcher, probeTmuxLiveness, getTmuxServerPid, countTmuxccClientsBySession, listSessionTopology, setSessionWorkspace, listSessionForFreeze } from "./tmux-south.js";
 import type { TmuxWatcher, TmuxAvailabilityOut } from "./tmux-south.js";
 import { probeTmuxCapabilities, MINIMUM_TMUX_VERSION } from "./tmux-capabilities.js";
-import type { TmuxCapabilityState } from "./tmux-capabilities.js";
+import type { TmuxCapabilityState, TmuxCapabilityMap } from "./tmux-capabilities.js";
 import { createSessionProxySupervisor } from "./session-proxy-supervisor.js";
 import type { SessionProxySupervisor, SessionProxyExitInfo } from "./session-proxy-supervisor.js";
 import type { RuntimeDirOptions } from "./runtime-dir.js";
@@ -191,6 +191,14 @@ export interface ServerProxyOptions {
    * `TMUXCC_HANDSHAKE_TIMEOUT_MS` for deployment-time adjustment.
    */
   handshakeTimeoutMs?: number;
+
+  /**
+   * Test-harness affordance (tc-u4ny.2): when set, bypasses the live
+   * {@link probeTmuxCapabilities} call in `start()` and uses this map instead.
+   * The synthesised capability state reports version `"override"` and
+   * `belowFloor: false`.  The production entry point never sets this.
+   */
+  capabilitiesOverride?: TmuxCapabilityMap;
 }
 
 /**
@@ -756,7 +764,10 @@ class ServerProxyImpl implements ServerProxyHandle {
     // tmux is absent the probe also returns null (consistent with _tmuxAvailable
     // false). Must complete before the first client connection so the initial
     // snapshot and _buildInfo() see the correct capability state.
-    this._tmuxCapabilityState = probeTmuxCapabilities();
+    // tc-u4ny.2: capabilitiesOverride bypasses the live probe for test seams.
+    this._tmuxCapabilityState = this._opts.capabilitiesOverride
+      ? { version: "override", capabilities: this._opts.capabilitiesOverride, belowFloor: false }
+      : probeTmuxCapabilities();
     if (this._tmuxCapabilityState?.belowFloor) {
       // Actionable floor-gate message. The server-proxy stays up (same as the
       // _tmuxAvailable path) so the extension can surface it to the user.
