@@ -49,6 +49,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createTmuxHost } from "./runtime/tmux-host.js";
 import { paneBoundOptionName } from "./state/bootstrap.js";
 import type { TmuxHost } from "./runtime/tmux-host.js";
+import { CommandError } from "@tmuxcc/protocol";
 import type { TmuxCapabilityMap } from "@tmuxcc/protocol";
 import type { FreezeSessionData } from "./template/freeze.js";
 
@@ -150,6 +151,21 @@ function runTmux(args: string[], timeoutMs: number): Promise<TmuxRunResult> {
     });
   });
 }
+
+// ---------------------------------------------------------------------------
+// Error codes
+// ---------------------------------------------------------------------------
+
+/**
+ * Structured wire code emitted by {@link createSession} when tmux refuses a
+ * `new-session` because the requested session name is already in use.
+ *
+ * Exporting the literal via a named constant keeps tmux's free-text `stderr`
+ * wording adapter-internal: callers (e.g. claim-session) discriminate via
+ * {@link isCommandError}`(err, TMUX_SESSION_NAME_TAKEN_CODE)` without ever
+ * referencing the raw tmux output string.
+ */
+export const TMUX_SESSION_NAME_TAKEN_CODE = "tmux.duplicate-session" as const;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -663,13 +679,12 @@ export async function createSession(
   // -e flag landed. An env-carrying create against tmux < 3.2 is an error.
   if (env !== undefined && Object.keys(env).length > 0) {
     if (capabilities !== undefined && !capabilities.newSessionEnvFlag) {
-      throw Object.assign(
-        new Error(
-          `new-session -e (capability newSessionEnvFlag) requires tmux >= 3.2. ` +
-          `The probed tmux version does not support this flag. ` +
-          `Upgrade tmux to >= 3.2 or omit env from session.create.`,
-        ),
-        { code: "tmux.capability-required", capability: "newSessionEnvFlag" },
+      throw new CommandError(
+        "tmux.capability-required",
+        `new-session -e (capability newSessionEnvFlag) requires tmux >= 3.2. ` +
+        `The probed tmux version does not support this flag. ` +
+        `Upgrade tmux to >= 3.2 or omit env from session.create.`,
+        { capability: "newSessionEnvFlag" },
       );
     }
   }
@@ -687,9 +702,16 @@ export async function createSession(
     10_000,
   );
   if (result.status !== 0 || result.error) {
-    throw new Error(
-      `tmux new-session failed: ${result.stderr?.trim() ?? result.error?.message ?? "unknown error"}`,
-    );
+    const reason = result.stderr?.trim() ?? result.error?.message ?? "unknown error";
+    // tmux emits "duplicate session: <name>" on a name collision.  The adapter
+    // owns this text — callers discriminate via the structured code constant.
+    if (result.stderr && result.stderr.toLowerCase().includes("duplicate session")) {
+      throw new CommandError(
+        TMUX_SESSION_NAME_TAKEN_CODE,
+        `tmux new-session: session name already in use (${reason})`,
+      );
+    }
+    throw new CommandError("tmux.unavailable", `tmux new-session failed: ${reason}`);
   }
 
   const tmuxId = (result.stdout ?? "").trim();

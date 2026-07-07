@@ -19,8 +19,9 @@
  */
 
 import { phaseLog, phaseNow } from "./runtime/phase-timing.js";
+import { CommandError, isCommandError } from "@tmuxcc/protocol";
 import type { SessionId } from "@tmuxcc/protocol";
-import { createSession, setGlobalScrollOnClear, setSessionMarker } from "./tmux-south.js";
+import { createSession, setGlobalScrollOnClear, setSessionMarker, TMUX_SESSION_NAME_TAKEN_CODE } from "./tmux-south.js";
 import type { TmuxCapabilityMap } from "./tmux-capabilities.js";
 
 // ---------------------------------------------------------------------------
@@ -267,25 +268,22 @@ export function createSessionClaimer(ctx: ClaimSessionContext): SessionClaimer {
           entry = ctx.registerSession(tmuxId, name);
         }
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        const code = err instanceof Object && "code" in err
-          ? (err as { code: unknown }).code
-          : undefined;
-        if (msg.toLowerCase().includes("duplicate")) {
-          // Race: another process created it between our check and create —
-          // we attached to that process's session; `created` stays false.
+        if (isCommandError(err, TMUX_SESSION_NAME_TAKEN_CODE)) {
+          // Race: another process created the session between our check and
+          // create — attach to that session; `created` stays false.
           await ctx.refreshSessions();
           entry = ctx.lookupByName(name);
           if (!entry) {
-            throw Object.assign(new Error(`session.create race: ${msg}`), { code: "internal" });
+            throw new CommandError("internal", `session.create race: ${err.message}`);
           }
-        } else if (code === "tmux.capability-required") {
-          // tc-gjdx.2: capability-required errors (e.g. env on tmux < 3.2) must
-          // propagate with their original code so the server-proxy can surface
-          // a specific error to the client — don't re-wrap as tmux.unavailable.
+        } else if (isCommandError(err)) {
+          // tc-gjdx.2: typed CommandErrors (e.g. capability-required) propagate
+          // with their original code so the server-proxy surfaces a specific
+          // wire failure — don't re-wrap.
           throw err;
         } else {
-          throw Object.assign(new Error(`tmux.unavailable: ${msg}`), { code: "tmux.unavailable" });
+          const msg = err instanceof Error ? err.message : String(err);
+          throw new CommandError("tmux.unavailable", `tmux.unavailable: ${msg}`);
         }
       }
     }

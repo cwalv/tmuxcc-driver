@@ -40,6 +40,7 @@ import * as http from "node:http";
 
 import { metricsHttpSocketPath, removeSocket, restrictSocket } from "./runtime-dir.js";
 import type { RuntimeDirOptions } from "./runtime-dir.js";
+import { CommandError } from "@tmuxcc/protocol";
 
 /** Content-Type for Prometheus text exposition format v0.0.4. */
 const PROM_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8";
@@ -130,8 +131,8 @@ export function parseMetricsHttpBind(
   return { kind: "tcp", host: boundHost, port };
 }
 
-function bindError(msg: string): Error {
-  return Object.assign(new Error(`metrics.bind-invalid: ${msg}`), { code: "metrics.bind-invalid" });
+function bindError(msg: string): CommandError {
+  return new CommandError("metrics.bind-invalid", `metrics.bind-invalid: ${msg}`);
 }
 
 /** Data providers the HTTP surface renders. */

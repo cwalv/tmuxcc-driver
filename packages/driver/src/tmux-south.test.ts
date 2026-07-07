@@ -201,6 +201,33 @@ describe("tmux-south createSession (tc-zcqr)", { skip: !TMUX_AVAILABLE }, () => 
     }
   });
 
+  // tc-u4ny.2: duplicate-session classification — the adapter must emit a
+  // structured CommandError("tmux.duplicate-session") so claim-session can
+  // discriminate via isCommandError rather than substring-matching tmux stderr.
+  // This is the "lost-create-race path" discriminant: claim-session catches
+  // this code and recovers (or throws "internal" if the session still cannot
+  // be found), rather than re-wrapping the prose as "tmux.unavailable".
+  it("throws CommandError tmux.duplicate-session when a session name is already taken", async () => {
+    const socketName = nextSocketName();
+    try {
+      // First create succeeds; second create on the same name must yield the
+      // structured code, not a generic error.
+      await createSession(socketName, "dup-test");
+      const err = await createSession(socketName, "dup-test").then(
+        () => null,
+        (e: unknown) => e,
+      );
+      assert.ok(err instanceof Error, `Expected an Error, got: ${String(err)}`);
+      assert.equal(
+        (err as { code?: string }).code,
+        "tmux.duplicate-session",
+        `Expected structured code "tmux.duplicate-session", got: ${JSON.stringify((err as { code?: string }).code)}`,
+      );
+    } finally {
+      killServer(socketName);
+    }
+  });
+
 });
 
 // ---------------------------------------------------------------------------
@@ -242,13 +269,11 @@ describe("tmux-south createSession env capability gate (tc-gjdx.2)", () => {
       (err as NodeJS.ErrnoException & { code?: string }).code === "tmux.capability-required",
       `Expected code "tmux.capability-required", got: ${JSON.stringify((err as { code?: string }).code)}`,
     );
-    assert.ok(
-      (err as Error).message.includes("newSessionEnvFlag"),
-      `Expected "newSessionEnvFlag" in error message: ${(err as Error).message}`,
-    );
-    assert.ok(
-      (err as Error).message.includes("3.2"),
-      `Expected "3.2" (the version floor) in error message: ${(err as Error).message}`,
+    // details.capability names the missing TmuxCapabilityMap key.
+    assert.equal(
+      ((err as { details?: { capability?: string } }).details ?? {}).capability,
+      "newSessionEnvFlag",
+      `Expected details.capability "newSessionEnvFlag", got: ${JSON.stringify((err as { details?: unknown }).details)}`,
     );
   });
 

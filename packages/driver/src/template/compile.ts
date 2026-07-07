@@ -37,6 +37,7 @@
  * @module template/compile
  */
 
+import { CommandError } from "@tmuxcc/protocol";
 import type {
   SessionTemplate,
   WindowTemplate,
@@ -91,14 +92,16 @@ export interface CompiledTemplate {
 
 /**
  * A template that is structurally valid (schema) but violates a cross-field
- * semantic invariant the schema cannot express (tc-gjdx.1). Carries the wire
- * error code so the broker surfaces it as `template.invalid` (fail-loud).
+ * semantic invariant the schema cannot express (tc-gjdx.1). Extends
+ * {@link CommandError} with code `"template.invalid"` so the dispatcher's
+ * `isCommandError` guard picks it up and `toCommandFailure` converts it to a
+ * typed wire failure automatically.
  */
-export class TemplateValidationError extends Error {
-  readonly code = "template.invalid";
+export class TemplateValidationError extends CommandError {
   constructor(message: string) {
-    super(message);
-    this.name = "TemplateValidationError";
+    super("template.invalid", message);
+    // name is "CommandError" (set by CommandError constructor) so that
+    // isCommandError() recognises instances of this class via structural check.
   }
 }
 

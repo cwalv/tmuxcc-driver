@@ -56,6 +56,7 @@ import {
 } from "../parser/commands.js";
 import { serializeGeometry } from "../parser/layout-string.js";
 import type { CompiledTemplate, CompiledWindow, CompiledPane } from "./compile.js";
+import { CommandError } from "@tmuxcc/protocol";
 
 /**
  * The tmux user-option that records the applied template's identity on the
@@ -88,13 +89,13 @@ export interface TemplateApplyOutcome {
 }
 
 /**
- * A mid-transaction apply failure (tc-gjdx.3 partial-failure semantics). Carries
- * the wire `template.invalid` code, the failed verb, tmux's verbatim reason, and
- * the created-so-far topology. NO rollback was performed — the partial session
- * persists as evidence. tc-gjdx.4 (apply-to-live) reuses this shape.
+ * A mid-transaction apply failure (tc-gjdx.3 partial-failure semantics). Extends
+ * {@link CommandError} with code `"template.invalid"`, the failed verb, tmux's
+ * verbatim reason, and the created-so-far topology. NO rollback was performed —
+ * the partial session persists as evidence. tc-gjdx.4 (apply-to-live) reuses
+ * this shape.
  */
-export class TemplateApplyError extends Error {
-  readonly code = "template.invalid";
+export class TemplateApplyError extends CommandError {
   constructor(
     /** The verb that failed, e.g. `open-window`, `split-pane`, `select-layout`. */
     readonly failedVerb: string,
@@ -106,10 +107,12 @@ export class TemplateApplyError extends Error {
     readonly created: TemplateApplyOutcome,
   ) {
     super(
+      "template.invalid",
       `template apply failed at ${failedVerb}: ${tmuxMessage}. ` +
         `Created before failure: ${describeCreated(created)} (no rollback — partial session preserved).`,
     );
-    this.name = "TemplateApplyError";
+    // name is "CommandError" (set by CommandError constructor) so that
+    // isCommandError() recognises instances of this class via structural check.
   }
 }
 

@@ -51,6 +51,9 @@ import {
   WIRE_PROTOCOL_VERSION,
   sessionId as mintSessionId,
   describeClientIdentity,
+  CommandError,
+  isCommandError,
+  toCommandFailure,
 } from "@tmuxcc/protocol";
 import type {
   Transport,
@@ -1844,12 +1847,10 @@ class ServerProxyImpl implements ServerProxyHandle {
         result: { ok: true, payload },
       });
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      const code = errorCode(err);
-      this._sendResponse(state, {
-        correlationId,
-        result: { ok: false, code, message: msg },
-      });
+      const result = isCommandError(err)
+        ? toCommandFailure(err)
+        : { ok: false as const, code: "internal", message: err instanceof Error ? err.message : String(err) };
+      this._sendResponse(state, { correlationId, result });
     } finally {
       // tc-bn7d: one observation per command, across every exit path.
       this._metrics.observeRpcRoundTrip((Date.now() - rpcStartMs) / 1000, command.kind);
@@ -1937,7 +1938,7 @@ class ServerProxyImpl implements ServerProxyHandle {
   private async _freezeTemplate(sessionId: SessionId, name?: string): Promise<SessionTemplate> {
     const entry = this._sessions.get(sessionId);
     if (entry === undefined) {
-      throw Object.assign(new Error(`session ${sessionId} not found`), { code: "session.not-found" });
+      throw new CommandError("session.not-found", `session ${sessionId} not found`);
     }
 
     const data = await listSessionForFreeze(this._opts.socketName, entry.name);
@@ -1999,10 +2000,7 @@ class ServerProxyImpl implements ServerProxyHandle {
     // session.create contract (a successful create always mints, so its
     // response always reports created=true; otherwise it fails name-taken).
     if (this._byName.has(name) || this._claimer.isInFlight(name)) {
-      throw Object.assign(
-        new Error(`Session name '${name}' is already in use`),
-        { code: "session.name-taken" },
-      );
+      throw new CommandError("session.name-taken", `Session name '${name}' is already in use`);
     }
 
     // Use claim semantics — create then spawn session-proxy.
@@ -2018,10 +2016,7 @@ class ServerProxyImpl implements ServerProxyHandle {
     // up — they belong to whoever created the session, exactly as if a
     // session.claim had been issued.
     if (!result.created) {
-      throw Object.assign(
-        new Error(`Session name '${name}' is already in use`),
-        { code: "session.name-taken" },
-      );
+      throw new CommandError("session.name-taken", `Session name '${name}' is already in use`);
     }
 
     return result;
@@ -2180,10 +2175,7 @@ class ServerProxyImpl implements ServerProxyHandle {
   ): Promise<TemplateApplyResult> {
     const entry = this._sessions.get(sessionId);
     if (entry === undefined) {
-      throw Object.assign(
-        new Error(`Session '${sessionId}' not found`),
-        { code: "session.not-found" },
-      );
+      throw new CommandError("session.not-found", `Session '${sessionId}' not found`);
     }
 
     // Query the live window names to compute the diff.  Fall back to an empty
@@ -2237,10 +2229,7 @@ class ServerProxyImpl implements ServerProxyHandle {
   ): Promise<{ ok: true }> {
     const entry = this._sessions.get(sessionId);
     if (!entry) {
-      throw Object.assign(
-        new Error(`Session '${sessionId}' not found`),
-        { code: "session.not-found" },
-      );
+      throw new CommandError("session.not-found", `Session '${sessionId}' not found`);
     }
 
     // Reap session-proxy first
@@ -2251,7 +2240,7 @@ class ServerProxyImpl implements ServerProxyHandle {
       await killSession(this._opts.socketName, entry.tmuxId);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      throw Object.assign(new Error(`tmux.unavailable: ${msg}`), { code: "tmux.unavailable" });
+      throw new CommandError("tmux.unavailable", `tmux.unavailable: ${msg}`);
     }
 
     // Update local state
@@ -2314,17 +2303,6 @@ class ServerProxyImpl implements ServerProxyHandle {
       }
     }
   }
-}
-
-// ---------------------------------------------------------------------------
-// Error code helper
-// ---------------------------------------------------------------------------
-
-function errorCode(err: unknown): string {
-  if (err && typeof err === "object" && "code" in err) {
-    return String((err as { code: unknown }).code);
-  }
-  return "internal";
 }
 
 // ---------------------------------------------------------------------------
