@@ -219,14 +219,41 @@ export function removeSocket(socketPath: string): void {
 }
 
 /**
- * Set permissions on a socket file to 0600.
- * Called immediately after creating a net.Server socket.
+ * Set permissions on a socket file to 0600, then verify the mode was applied.
+ *
+ * Called immediately after `server.listen()` to lock down the newly-created
+ * socket node.  Throws a descriptive Error if either the chmod fails or the
+ * post-chmod lstat shows group/other bits still set — fail-loud per the
+ * pre-alpha policy (tc-l5lp; same class as tc-idlp for directories).
  */
 export function restrictSocket(socketPath: string): void {
+  fs.chmodSync(socketPath, 0o600);
+  verifySocketMode(socketPath);
+}
+
+/**
+ * Verify that the socket file at `socketPath` has no group or other permission
+ * bits (mode & 0o077 === 0).
+ *
+ * Throws a descriptive Error if the invariant is violated.  Called by
+ * restrictSocket after chmodSync so a chmod that silently no-ops (e.g. on a
+ * filesystem that does not honour chmod on socket files) does not leave the
+ * socket reachable by group/other users (tc-l5lp).
+ */
+function verifySocketMode(socketPath: string): void {
+  let stat: fs.Stats;
   try {
-    fs.chmodSync(socketPath, 0o600);
-  } catch {
-    // Non-fatal — best effort on platforms where this is not supported
+    stat = fs.lstatSync(socketPath);
+  } catch (err: unknown) {
+    throw new Error(
+      `tmuxcc: socket ${socketPath}: lstat failed: ${String(err)}`,
+    );
+  }
+
+  if ((stat.mode & 0o077) !== 0) {
+    throw new Error(
+      `tmuxcc: socket ${socketPath} has unsafe permissions 0${(stat.mode & 0o777).toString(8)} — chmod 0600 did not take effect (no group/other access allowed)`,
+    );
   }
 }
 

@@ -16,7 +16,7 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { gcStaleRuntimeDirs, probeLiveSocket, resolveBaseRuntimeDir, runtimeBasePath } from "./runtime-dir.js";
+import { gcStaleRuntimeDirs, probeLiveSocket, resolveBaseRuntimeDir, runtimeBasePath, restrictSocket } from "./runtime-dir.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -446,6 +446,57 @@ describe("resolveBaseRuntimeDir — security: hijack detection (tc-idlp)", () =>
       /owned by uid|unsafe permissions/,
       "/tmp must be rejected as a runtime dir (wrong owner or unsafe permissions)",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// restrictSocket fail-loud tests (tc-l5lp)
+//
+// Verifies that chmod failures are not swallowed and that the post-chmod mode
+// is verified.  Mirror of the tc-idlp pattern for directories, applied to
+// socket files.
+// ---------------------------------------------------------------------------
+
+describe("restrictSocket — fail-loud chmod (tc-l5lp)", () => {
+  it("throws when the socket path does not exist (chmod failure propagates, not swallowed)", () => {
+    const fakePath = path.join(
+      os.tmpdir(),
+      `tmuxcc-test-noso-${process.pid}-${Date.now()}.sock`,
+    );
+    // Precondition: must not exist.
+    assert.ok(
+      !fs.existsSync(fakePath),
+      "precondition: test socket path must not exist",
+    );
+    assert.throws(
+      () => restrictSocket(fakePath),
+      (err: unknown) => err instanceof Error,
+      "restrictSocket must throw when socketPath does not exist (fail-loud, not best-effort)",
+    );
+  });
+
+  it("succeeds and verifies 0600 on an owned file (happy path)", () => {
+    const base = fs.mkdtempSync(
+      path.join(os.tmpdir(), "tmuxcc-test-rsock-"),
+    );
+    const filePath = path.join(base, "test.sock");
+    try {
+      // Create a file with permissive mode so the chmod has work to do.
+      fs.writeFileSync(filePath, "");
+      fs.chmodSync(filePath, 0o644);
+      assert.doesNotThrow(
+        () => restrictSocket(filePath),
+        "restrictSocket must not throw on an owned file",
+      );
+      const stat = fs.lstatSync(filePath);
+      assert.equal(
+        stat.mode & 0o077,
+        0,
+        "file must have no group/other bits after restrictSocket",
+      );
+    } finally {
+      fs.rmSync(base, { recursive: true, force: true });
+    }
   });
 });
 
