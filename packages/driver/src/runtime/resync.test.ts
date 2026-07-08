@@ -116,7 +116,7 @@ const P2 = paneId("p2");
 function makeModel1(): SessionModel {
   const sess: Session = { sessionId: S1, name: "main", windowIds: [W1], activeWindowId: W1 };
   const win: Window = { windowId: W1, sessionId: S1, name: "editor", paneIds: [P1], activePaneId: P1, layout: null };
-  const p1: Pane = { paneId: P1, windowId: W1, sessionId: S1, cols: 80, rows: 24, mode: "normal", scrollbackHandle: undefined };
+  const p1: Pane = { paneId: P1, windowId: W1, sessionId: S1, cols: 80, rows: 24, mode: "normal" };
   return {
     sessions: new Map([[S1, sess]]),
     windows: new Map([[W1, win]]),
@@ -128,8 +128,8 @@ function makeModel1(): SessionModel {
 function makeModel2(): SessionModel {
   const sess: Session = { sessionId: S1, name: "main", windowIds: [W1], activeWindowId: W1 };
   const win: Window = { windowId: W1, sessionId: S1, name: "editor", paneIds: [P1, P2], activePaneId: P1, layout: null };
-  const p1: Pane = { paneId: P1, windowId: W1, sessionId: S1, cols: 80, rows: 24, mode: "normal", scrollbackHandle: undefined };
-  const p2: Pane = { paneId: P2, windowId: W1, sessionId: S1, cols: 40, rows: 24, mode: "normal", scrollbackHandle: undefined };
+  const p1: Pane = { paneId: P1, windowId: W1, sessionId: S1, cols: 80, rows: 24, mode: "normal" };
+  const p2: Pane = { paneId: P2, windowId: W1, sessionId: S1, cols: 40, rows: 24, mode: "normal" };
   return {
     sessions: new Map([[S1, sess]]),
     windows: new Map([[W1, win]]),

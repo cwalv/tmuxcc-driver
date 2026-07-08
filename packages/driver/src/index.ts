@@ -30,15 +30,16 @@ export type {
   Session,
   Window,
   Pane,
+  PaneOverlay,
   FocusState,
   PaneMode,
   WindowLayout,
-  ScrollbackHandle,
   InvariantViolation,
   CheckInvariantsOptions,
 } from "./state/index.js";
 export {
   emptyModel,
+  emptyPaneOverlay,
   addSession,
   removeSession,
   updateSession,
@@ -48,9 +49,9 @@ export {
   addPane,
   removePane,
   updatePane,
+  updatePaneOverlay,
   setFocus,
   checkInvariants,
-  scrollbackHandle,
 } from "./state/index.js";
 // Projection functions for client round-trip tests:
 export { projectSnapshot, diffModel } from "./state/projection.js";

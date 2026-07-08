@@ -17,6 +17,7 @@ import { projectSnapshot, diffModel } from "./projection.js";
 import type { ProjectSnapshotOpts } from "./projection.js";
 import {
   emptyModel,
+  emptyPaneOverlay,
   addSession,
   addWindow,
   addPane,
@@ -110,11 +111,11 @@ function makePane(
     dead,
     exitCode,
     label: undefined,
-    boundClients: new Set(),
     detach: undefined,
     icon: undefined,
-    // scrollbackHandle and paneTitle are optional — omit to avoid
-    // exactOptionalPropertyTypes TS2375 when passing undefined explicitly.
+    // Binding intent lives in the overlay (per-client). paneTitle is optional —
+    // omit to avoid exactOptionalPropertyTypes TS2375 when passing undefined.
+    overlay: emptyPaneOverlay(),
   };
 }
 

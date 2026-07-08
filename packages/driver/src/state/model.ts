@@ -30,12 +30,15 @@
  * `parsedLayoutToWindowLayout` helper exported from this module; tc-7gp then
  * reads `Window.layout` as-is for `SnapshotWindow.layout`.
  *
- * ## Pane byte-buffer slot
- * Each `Pane` carries a `scrollbackHandle` field typed as `ScrollbackHandle`
- * (an opaque `number` alias defined here). The actual ring-buffer implementation
- * is tc-fx2's responsibility; at that point `ScrollbackHandle` becomes the
- * handle/key type that tc-fx2's store uses. Until then it defaults to
- * `undefined` (the field is `ScrollbackHandle | undefined`).
+ * ## Provenance-typed pane
+ * `Pane` is typed by PROVENANCE (tc-mysc.1): its tmux-canonical fields are a
+ * mechanical `Pick` of the `list-panes` reply row (`PaneFromRow`, from
+ * `state/bootstrap.ts`), so a fresh model can only get those values from the
+ * reply — writing a hardcoded literal for one at the rebuild site is a type
+ * error, not a drift to guard against. On top of `PaneFromRow` sit the remapped
+ * identity ids, the genuinely-transformed fields (`mode`, `exitCode`,
+ * `paneTitle`), and the client-local `overlay` (state that is NOT in any tmux
+ * row — carried forward wholesale across requery cycles rather than rebuilt).
  *
  * ## PaneMode
  * Reuses `PaneMode` from `src/wire/session-proxy-control.ts` directly. The wire type is
@@ -80,6 +83,7 @@ import type { PaneId, WindowId, SessionId } from "@tmuxcc/protocol";
 import type { WindowLayout, LayoutNode } from "@tmuxcc/protocol";
 import type { PaneMode } from "@tmuxcc/protocol";
 import type { ParsedLayout, LayoutCell } from "../parser/layout-string.js";
+import type { PaneFromRow } from "./bootstrap.js";
 
 // Re-export id constructors for convenience of reducers (avoids extra import)
 export { paneId, windowId, sessionId } from "@tmuxcc/protocol";
@@ -89,23 +93,47 @@ export type { PaneMode } from "@tmuxcc/protocol";
 export type { WindowLayout } from "@tmuxcc/protocol";
 
 // ---------------------------------------------------------------------------
-// Scrollback buffer handle
+// Pane overlay (client-local state, not sourced from any tmux reply row)
 // ---------------------------------------------------------------------------
 
 /**
- * Opaque handle to a pane's scrollback buffer.
+ * A pane's OVERLAY: the client-local state that is NOT carried by any tmux
+ * `list-*` reply row and therefore cannot be rebuilt by the bulk requery
+ * (tc-mysc.1). The rule is structural — "not in a row ⇒ in an overlay" — so the
+ * overlay is the home for every fact the session-proxy reconstructs by another
+ * path and must PRESERVE across a topology requery.
  *
- * tc-fx2 will supply the actual ring-buffer implementation and will likely
- * redeclare/merge this or replace it with a richer type. Until then it is an
- * opaque integer key that tc-fx2's store will use to associate buffers with
- * panes. The reducer mints a fresh handle (a simple incrementing counter is
- * fine) when a pane is created; tc-fx2 registers the buffer under that key.
+ * The requery carries the whole overlay object forward by reference for every
+ * surviving pane (`carryForwardOverlays`, state/requery.ts), so a field added
+ * here is preserved automatically — forgetting to carry it is unrepresentable.
  */
-export type ScrollbackHandle = number & { readonly __scrollbackHandle: unique symbol };
+export interface PaneOverlay {
+  /**
+   * Durable binding intent, PER (pane, client-identity) (D3, tc-4b6k.2).
+   *
+   * The set of durable client-identity ids (`ClientIdentity.id`) that want a VS
+   * Code terminal recreated for this pane on attach. Binding is a per-client
+   * fact: "bound in workspace A, detached in workspace B" is a legal, canonical
+   * state (this dissolves seam S1 — two windows, two truths — by correcting the
+   * fact's cardinality instead of exempting it to per-window memory).
+   *
+   * Authoritative source: per-client tmux user-options
+   * `@tmuxcc-bound-<enc(clientId)>` (see `paneBoundOptionName` in bootstrap.ts),
+   * written ONLY via the `set-object-policy` command keyed by the issuing
+   * connection's identity (the driver is the sole tmux writer). Because the
+   * client axis is not available to the bulk session-scoped requery, this set is
+   * NOT rebuilt by the bulk read: a client's slot is reconstructed on connect (a
+   * one-shot per-client `list-panes` read) and carried forward across requery
+   * cycles for surviving panes. Projection resolves the wire `pane.bound`
+   * boolean as `boundClients.has(reqClientId)` for the requesting client's
+   * identity (see {@link paneBoundFor}).
+   */
+  readonly boundClients: ReadonlySet<string>;
+}
 
-/** @internal Mint a ScrollbackHandle from a raw number (session-proxy use only). */
-export function scrollbackHandle(n: number): ScrollbackHandle {
-  return n as ScrollbackHandle;
+/** An empty overlay for a freshly-constructed pane (no bound clients yet). */
+export function emptyPaneOverlay(): PaneOverlay {
+  return { boundClients: new Set<string>() };
 }
 
 // ---------------------------------------------------------------------------
@@ -113,46 +141,35 @@ export function scrollbackHandle(n: number): ScrollbackHandle {
 // ---------------------------------------------------------------------------
 
 /**
- * A single pane in the model.
+ * A single pane in the model, typed by PROVENANCE (tc-mysc.1).
+ *
+ * Canonical fields (`cols`, `rows`, `dead`, `label`, `detach`, `icon`) come
+ * from {@link PaneFromRow} — a mechanical `Pick` of the `list-panes` reply row
+ * (`PANE_CANONICAL_FROM_ROW` in `state/bootstrap.ts`), so their semantics are
+ * documented ONCE on the `PANES_ROW` schema. On top of that base sit the
+ * remapped identity ids, the genuinely-transformed fields (`mode`, `exitCode`,
+ * `paneTitle`), and the client-local {@link PaneOverlay}.
  *
  * Projection note: maps directly to `SnapshotPane` (paneId, windowId,
  * sessionId, cols, rows). The additional `mode` field projects to
- * `PaneModeChangedMessage` deltas; `scrollbackHandle` is session-proxy-internal only.
+ * `PaneModeChangedMessage` deltas; `overlay` is session-proxy-internal only
+ * (its `boundClients` is resolved per-requesting-client into `pane.bound`).
  */
-export interface Pane {
+export interface Pane extends PaneFromRow {
   /** Wire-branded pane id (same type as SnapshotPane.paneId). */
   readonly paneId: PaneId;
   /** The window that owns this pane. */
   readonly windowId: WindowId;
   /** The session that ultimately owns this pane (denormalized for O(1) lookup). */
   readonly sessionId: SessionId;
-  /** Current width in terminal columns. */
-  readonly cols: number;
-  /** Current height in terminal rows. */
-  readonly rows: number;
   /**
    * Current mode of the pane. Reuses the wire PaneMode type directly so
    * projection is a pass-through. Defaults to "normal" on creation.
    */
   readonly mode: PaneMode;
   /**
-   * Dead-pane state (tc-4bv2 / tc-295a.10, co-decided shared pane-state shape).
-   *
-   * True when tmux reports `pane_dead=1` — the pane's process has exited but
-   * the pane slot survives because `remain-on-exit on` keeps the corpse in
-   * `list-panes`. A dead pane is a FIRST-CLASS member of the model and the
-   * snapshot (NOT an absence): the user can inspect its scrollback and
-   * kill/reap it. A pane that leaves `list-panes` entirely is removed by the
-   * diff and emits `pane.closed` (the strong contract, tc-295a.10) — that is a
-   * distinct event from this dead flag.
-   *
-   * Defaults to false. Authoritative source: the bootstrap requery's
-   * `#{pane_dead}` field.
-   */
-  readonly dead: boolean;
-  /**
-   * Exit code of the pane's process when known and dead (tmux
-   * `#{pane_dead_status}`), else undefined.
+   * Exit code of the pane's process when known and dead (transformed from the
+   * `#{pane_dead_status}` row field: forced `undefined` unless `dead`).
    *
    * Only meaningful when `dead === true`. tmux only exposes a dead status for
    * a corpse it is still listing (remain-on-exit); when a pane vanishes from
@@ -162,75 +179,11 @@ export interface Pane {
    */
   readonly exitCode: number | undefined;
   /**
-   * Durable, out-of-band, DRIVER-owned pane name (tc-1a8z).
-   *
-   * This is the CANONICAL user rename channel — set explicitly via the
-   * `rename-pane` wire command, which issues `set-option -pt %N @tmuxcc_label
-   * <name>` (the per-pane tmux user-option `@tmuxcc_label`).  It is a SEPARATE
-   * channel from the live shell title: it is NEVER set via a title escape
-   * (`select-pane -T` / OSC-0/2), so the shell cannot clobber it.
-   *
-   * Distinct from the (future) `pane_title` field (tc-2mn8) which carries the
-   * volatile shell-owned title sniffed from the %output stream.  Render
-   * precedence (durable label > live title > paneId) is the downstream
-   * consumer's concern (tc-asyq.6), NOT this model's.
-   *
-   * Authoritative source: the per-pane user-option `@tmuxcc_label`, re-read on
-   * every bootstrap requery (BOOTSTRAP_PANES_FORMAT), so the durable name
-   * survives a driver restart for free — canonical state lives with the pane in
-   * tmux.  `undefined` means no durable name has been set (the option is unset
-   * or empty); clearing the name (empty rename) resets to `undefined`.
+   * Client-local overlay state (binding intent, …) that is NOT sourced from any
+   * tmux reply row and is carried forward wholesale across requery cycles. See
+   * {@link PaneOverlay}.
    */
-  readonly label: string | undefined;
-  /**
-   * Durable binding intent, PER (pane, client-identity) (D3, tc-4b6k.2).
-   *
-   * The set of durable client-identity ids (`ClientIdentity.id`) that want a VS
-   * Code terminal recreated for this pane on attach.  Binding is a per-client
-   * fact: "bound in workspace A, detached in workspace B" is a legal, canonical
-   * state (this dissolves seam S1 — two windows, two truths — by correcting the
-   * fact's cardinality instead of exempting it to per-window memory). Projection
-   * resolves the wire `pane.bound` boolean as `boundClients.has(reqClientId)`
-   * for the requesting client's identity.
-   *
-   * Authoritative source: per-client tmux user-options
-   * `@tmuxcc-bound-<enc(clientId)>` (see `paneBoundOptionName` in bootstrap.ts),
-   * written ONLY via the `set-object-policy` command keyed by the issuing
-   * connection's identity (the driver is the sole tmux writer).  Because the
-   * client axis is not available to the bulk session-scoped requery, this set is
-   * NOT rebuilt by the bulk read: a client's slot is reconstructed on connect (a
-   * one-shot per-client `list-panes` read) and carried forward across requery
-   * cycles for surviving panes.  It survives a VS Code restart (durable in tmux)
-   * and vanishes with the pane.
-   */
-  readonly boundClients: ReadonlySet<string>;
-  /**
-   * RESOLVED detach-on-close policy (tc-i9aq.1, cold-start.md §4.A) from the
-   * `@tmuxcc-detach` user-option, read through a `#{@tmuxcc-detach}` FORMAT
-   * that walks pane→window→session — so this is the EFFECTIVE first-wins
-   * cascade value (pane override, else window default, else session default).
-   *
-   * `"detach"` keeps the tmux pane running when the VS Code tab closes;
-   * `"kill"` exits it.  `undefined` means no scope set a policy (the extension
-   * applies its own default).  The host owns the close DECISION; tmux merely
-   * computes the same first-wins walk.  Per-scope-OWN values (for the toggle
-   * UI's current-setting display) live in the extension's ephemeral policy
-   * cache, written through the verb.
-   */
-  readonly detach: "detach" | "kill" | undefined;
-  /**
-   * Durable icon policy (tc-i9aq.1, cold-start.md §4.A) from the per-pane
-   * `@tmuxcc-icon` user-option, or undefined when unset.  Opaque string (e.g. a
-   * ThemeIcon id); the extension interprets it.
-   */
-  readonly icon: string | undefined;
-  /**
-   * Handle into tc-fx2's scrollback buffer store, or undefined if no buffer
-   * has been allocated yet. The reducer mints a handle on pane creation;
-   * tc-fx2 registers the buffer under it. This field is session-proxy-internal and
-   * never sent on the wire.
-   */
-  readonly scrollbackHandle?: ScrollbackHandle;
+  readonly overlay: PaneOverlay;
   /**
    * Live shell window title for this pane — the canonical `#{pane_title}`
    * value (tc-2mn8 introduced the field; tc-s6ov.4 reworked the source).
@@ -861,7 +814,12 @@ export function removePane(model: SessionModel, paneId: PaneId): SessionModel {
   return { ...model, windows, panes, focus };
 }
 
-/** Replace a pane's fields (e.g. resize or mode change or title update). */
+/**
+ * Replace a pane's CANONICAL fields (e.g. resize or mode change or title
+ * update). Narrowed to the canonical/transform fields (tc-mysc.1): the
+ * client-local overlay is written through {@link updatePaneOverlay}, so a
+ * canonical writer cannot accidentally clobber overlay state.
+ */
 export function updatePane(
   model: SessionModel,
   paneId: PaneId,
@@ -874,12 +832,8 @@ export function updatePane(
       | "dead"
       | "exitCode"
       | "label"
-      | "scrollbackHandle"
       | "paneTitle"
-      // tc-i9aq.1: durable policy/intent optimistic-update fields.
-      // tc-4b6k.2: binding intent is per-client — the whole boundClients set is
-      // replaced on an optimistic patch (see setBoundClient).
-      | "boundClients"
+      // tc-i9aq.1: durable policy optimistic-update fields.
       | "detach"
       | "icon"
     >
@@ -893,13 +847,30 @@ export function updatePane(
 }
 
 /**
+ * Patch a pane's client-local {@link PaneOverlay} (tc-mysc.1). Merges `patch`
+ * into the pane's existing overlay; the canonical fields are untouched. This is
+ * the sole write path for overlay state (e.g. per-client binding intent).
+ */
+export function updatePaneOverlay(
+  model: SessionModel,
+  paneId: PaneId,
+  patch: Partial<PaneOverlay>,
+): SessionModel {
+  const pane = model.panes.get(paneId);
+  if (!pane) return model;
+  const panes = new Map(model.panes);
+  panes.set(paneId, { ...pane, overlay: { ...pane.overlay, ...patch } });
+  return { ...model, panes };
+}
+
+/**
  * Resolve a pane's binding intent for a specific client identity (D3,
  * tc-4b6k.2).  Returns true iff the client's durable id is in the pane's
- * `boundClients`.  An undefined `clientId` (an anonymous connection) is never
- * bound.
+ * `overlay.boundClients`.  An undefined `clientId` (an anonymous connection) is
+ * never bound.
  */
 export function paneBoundFor(pane: Pane, clientId: string | undefined): boolean {
-  return clientId !== undefined && pane.boundClients.has(clientId);
+  return clientId !== undefined && pane.overlay.boundClients.has(clientId);
 }
 
 /**

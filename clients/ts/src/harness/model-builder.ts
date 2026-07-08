@@ -15,7 +15,7 @@
  * @module harness/model-builder
  */
 
-import { emptyModel, addSession, addWindow, addPane, setFocus, updateWindow, updateSession } from "@tmuxcc/driver";
+import { emptyModel, emptyPaneOverlay, addSession, addWindow, addPane, setFocus, updateWindow, updateSession } from "@tmuxcc/driver";
 import type { PaneId, WindowId, WindowLayout } from "@tmuxcc/protocol";
 import type { SessionModel } from "@tmuxcc/driver";
 
@@ -60,10 +60,9 @@ export function buildModel(init: TranscriptInitialModel): SessionModel {
       dead: false,
       exitCode: undefined,
       label: undefined,
-      boundClients: new Set(),
       detach: undefined,
       icon: undefined,
-      // scrollbackHandle is optional — omit rather than passing undefined (exactOptionalPropertyTypes)
+      overlay: emptyPaneOverlay(),
     });
   }
 
@@ -134,10 +133,9 @@ export function applyVerbCreate(
       dead: false,
       exitCode: undefined,
       label: undefined,
-      boundClients: new Set(),
       detach: undefined,
       icon: undefined,
-      // scrollbackHandle is optional — omit rather than passing undefined (exactOptionalPropertyTypes)
+      overlay: emptyPaneOverlay(),
     });
   }
 

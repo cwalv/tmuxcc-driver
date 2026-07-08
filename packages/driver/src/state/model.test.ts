@@ -26,7 +26,8 @@ import {
   setFocus,
   checkInvariants,
   parsedLayoutToWindowLayout,
-  scrollbackHandle,
+  updatePaneOverlay,
+  emptyPaneOverlay,
 } from "./model.js";
 import { paneId, windowId, sessionId } from "./model.js";
 import type { Session, Window, Pane, SessionModel, FocusState } from "./model.js";
@@ -93,13 +94,12 @@ function makePane(
     dead,
     exitCode,
     label: undefined,
-    // tc-i9aq.1 / tc-4b6k.2: durable policy fields (required). Binding intent
-    // is per-client (boundClients).
-    boundClients: new Set(),
     detach: undefined,
     icon: undefined,
-    // scrollbackHandle and paneTitle are optional — omit to avoid
-    // exactOptionalPropertyTypes TS2375 when passing undefined explicitly.
+    // tc-4b6k.2: binding intent is per-client, in the overlay (not a canonical
+    // row field). paneTitle is optional — omit to avoid exactOptionalPropertyTypes
+    // TS2375 when passing undefined explicitly.
+    overlay: emptyPaneOverlay(),
   };
 }
 
@@ -495,12 +495,13 @@ describe("update helpers — invariant preservation", () => {
     assert.equal(after.panes.get(P1)!.mode, "copy");
   });
 
-  it("updatePane (scrollbackHandle) preserves invariants", () => {
+  it("updatePaneOverlay (boundClients) preserves invariants and leaves canonical fields", () => {
     const model = validModel();
-    const handle = scrollbackHandle(42);
-    const after = updatePane(model, P1, { scrollbackHandle: handle });
+    const after = updatePaneOverlay(model, P1, { boundClients: new Set(["ws-alpha"]) });
     assert.deepEqual(checkInvariants(after), []);
-    assert.equal(after.panes.get(P1)!.scrollbackHandle, 42);
+    assert.deepEqual([...after.panes.get(P1)!.overlay.boundClients], ["ws-alpha"]);
+    // Canonical fields untouched by an overlay write.
+    assert.equal(after.panes.get(P1)!.cols, model.panes.get(P1)!.cols);
   });
 
   it("updateWindow (rename) preserves invariants", () => {

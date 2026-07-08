@@ -25,7 +25,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import { createInMemoryTransportPair, runClientHandshake, WIRE_PROTOCOL_VERSION, paneId, windowId, sessionId } from "@tmuxcc/protocol";
-import { emptyModel, addSession, addWindow, addPane, setFocus, projectSnapshot, createControlServer } from "@tmuxcc/driver";
+import { emptyModel, emptyPaneOverlay, addSession, addWindow, addPane, setFocus, projectSnapshot, createControlServer } from "@tmuxcc/driver";
 import type { SnapshotMessage, Capabilities, Transport, ControlMessage } from "@tmuxcc/protocol";
 import type { ControlServer } from "@tmuxcc/driver";
 
@@ -69,10 +69,9 @@ function buildBaseModel() {
     dead: false,
     exitCode: undefined,
     label: undefined,
-    boundClients: new Set(),
     detach: undefined,
     icon: undefined,
-    // scrollbackHandle is optional — omit rather than passing undefined (exactOptionalPropertyTypes)
+    overlay: emptyPaneOverlay(),
   });
   m = setFocus(m, { paneId: P0, windowId: W0, sessionId: S0 });
   return m;

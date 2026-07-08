@@ -37,7 +37,7 @@
  */
 
 import { createInMemoryTransportPair, runSessionProxyHandshake, WIRE_PROTOCOL_VERSION, paneId, windowId, sessionId } from "@tmuxcc/protocol";
-import { projectSnapshot, emptyModel, addSession, addWindow, addPane, setFocus } from "@tmuxcc/driver";
+import { projectSnapshot, emptyModel, emptyPaneOverlay, addSession, addWindow, addPane, setFocus } from "@tmuxcc/driver";
 import type { Transport, ControlMessage, SessionProxyCommandRequestMessage, SessionProxyCommandResponseMessage } from "@tmuxcc/protocol";
 import type { SessionModel } from "@tmuxcc/driver";
 
@@ -111,10 +111,9 @@ export function makeStubModel(opts: StubModelOptions = {}): SessionModel {
       dead: false,
       exitCode: undefined,
       label: undefined,
-      boundClients: new Set(),
       detach: undefined,
       icon: undefined,
-      // scrollbackHandle is optional — omit rather than passing undefined (exactOptionalPropertyTypes)
+      overlay: emptyPaneOverlay(),
     });
   }
 

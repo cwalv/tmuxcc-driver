@@ -54,7 +54,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import { createInMemoryTransportPair, runSessionProxyHandshake, paneId, windowId, sessionId, WIRE_PROTOCOL_VERSION } from "@tmuxcc/protocol";
-import { emptyModel, addSession, addWindow, addPane, setFocus, projectSnapshot, diffModel } from "@tmuxcc/driver";
+import { emptyModel, emptyPaneOverlay, addSession, addWindow, addPane, setFocus, projectSnapshot, diffModel } from "@tmuxcc/driver";
 
 import type { PaneId, WindowId, SessionId, SnapshotMessage, SessionProxyMessage, WindowLayout, Capabilities } from "@tmuxcc/protocol";
 
@@ -122,10 +122,9 @@ function buildBaseModel() {
     dead: false,
     exitCode: undefined,
     label: undefined,
-    boundClients: new Set(),
     detach: undefined,
     icon: undefined,
-    // scrollbackHandle is optional — omit rather than passing undefined (exactOptionalPropertyTypes)
+    overlay: emptyPaneOverlay(),
   });
   m = addPane(m, {
     paneId: P1,
@@ -137,10 +136,9 @@ function buildBaseModel() {
     dead: false,
     exitCode: undefined,
     label: undefined,
-    boundClients: new Set(),
     detach: undefined,
     icon: undefined,
-    // scrollbackHandle is optional — omit rather than passing undefined (exactOptionalPropertyTypes)
+    overlay: emptyPaneOverlay(),
   });
   m = setFocus(m, { paneId: P0, windowId: W0, sessionId: S0 });
   return m;

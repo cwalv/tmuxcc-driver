@@ -244,27 +244,31 @@ export function requeryDiff(
   const windowRows = windowsResult.ok ? WINDOWS_ROW.parse(windowsResult.body) : [];
   const paneRows = panesResult.ok ? PANES_ROW.parse(panesResult.body) : [];
 
-  const next = carryForwardBoundClients(prev, buildInitialModel(windowRows, paneRows));
+  const next = carryForwardOverlays(prev, buildInitialModel(windowRows, paneRows));
   const deltas = diffModel(prev, next);
 
   return { next, deltas };
 }
 
 /**
- * Carry per-client binding intent forward across a requery cycle (D3,
- * tc-4b6k.2).
+ * Carry each surviving pane's OVERLAY forward across a requery cycle (tc-mysc.1,
+ * generalizing the per-client binding carry-forward of D3, tc-4b6k.2).
  *
  * `buildInitialModel` rebuilds the model from the bulk `list-*` replies, which
- * deliberately do NOT read the per-(pane,client) `@tmuxcc-bound-<key>` options
- * (the bulk session-scoped requery has no notion of the client set). So a fresh
- * candidate pane always has an EMPTY `boundClients`. This copies a surviving
- * pane's set from `prev` into the candidate, so a requery cycle never clobbers
- * binding intent that was reconstructed on connect (pipeline.applyClientBinding)
- * or applied optimistically (input-path's set-object-policy). A brand-new pane
- * (absent from `prev`) keeps its empty set; a pane whose `prev` set was already
- * empty is left as-is (preserving reference-equality for the common case).
+ * carry only CANONICAL fields — the overlay (client-local state such as
+ * per-(pane,client) binding intent) is NOT in any row (its authoritative
+ * `@tmuxcc-bound-<key>` options are not read by the bulk session-scoped requery,
+ * which has no notion of the client set). So a fresh candidate pane always has
+ * an EMPTY overlay. This copies a surviving pane's ENTIRE overlay object
+ * reference from `prev` into the candidate, so a requery cycle never clobbers
+ * overlay state that was reconstructed on connect (pipeline.applyClientBinding)
+ * or applied optimistically (input-path's set-object-policy).
+ *
+ * Copying the whole overlay by reference — not field by field — means a future
+ * overlay field is carried forward automatically: forgetting to carry one is
+ * unrepresentable. A brand-new pane (absent from `prev`) keeps its empty overlay.
  */
-function carryForwardBoundClients(
+function carryForwardOverlays(
   prev: SessionModel,
   candidate: SessionModel,
 ): SessionModel {
@@ -272,8 +276,8 @@ function carryForwardBoundClients(
   const panes = new Map(candidate.panes);
   for (const [id, pane] of candidate.panes) {
     const prevPane = prev.panes.get(id);
-    if (prevPane !== undefined && prevPane.boundClients.size > 0) {
-      panes.set(id, { ...pane, boundClients: prevPane.boundClients });
+    if (prevPane !== undefined) {
+      panes.set(id, { ...pane, overlay: prevPane.overlay });
       changed = true;
     }
   }
@@ -784,11 +788,11 @@ class RequeryEngineImpl implements RequeryEngine {
       // possibly-stale and must be discarded.
       const windowRows = WINDOWS_ROW.parse(winResult.body);
       const paneRows = PANES_ROW.parse(paneResult.body);
-      // tc-4b6k.2: carry per-client binding intent forward — the bulk requery
-      // does not read the per-client `@tmuxcc-bound-<key>` options, so a fresh
-      // candidate pane's boundClients is empty; adopt the pre-call model's set
-      // for surviving panes so a topology-only cycle never clobbers binding.
-      const candidate = carryForwardBoundClients(
+      // tc-mysc.1: carry each surviving pane's overlay forward — the bulk requery
+      // carries only canonical fields, so a fresh candidate pane's overlay is
+      // empty; adopt the pre-call model's overlay wholesale for surviving panes so
+      // a topology-only cycle never clobbers binding intent (or any overlay field).
+      const candidate = carryForwardOverlays(
         startModel,
         buildInitialModel(windowRows, paneRows),
       );

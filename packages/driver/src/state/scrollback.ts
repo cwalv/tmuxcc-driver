@@ -6,12 +6,10 @@
  * # Design
  *
  * ## Keying
- * Buffers are keyed by `PaneId` directly (not by the `ScrollbackHandle` opaque
- * number). `PaneId` is already the canonical per-pane identity used everywhere
- * in the sessionProxy, so keying by it avoids a needless indirection layer. The
- * `scrollbackHandle` field on `Pane` was reserved as an opaque slot in the
- * model spec; this module documents the decision to use `PaneId` instead — the
- * reducer (tc-5dd) should do the same when calling `append`/`drop`.
+ * Buffers are keyed by `PaneId` directly. `PaneId` is already the canonical
+ * per-pane identity used everywhere in the sessionProxy, so keying by it avoids
+ * a needless indirection layer — the reducer (tc-5dd) does the same when calling
+ * `append`/`drop`.
  *
  * ## Internal structure (chunk list + running total)
  * Each pane's buffer is stored as `{ chunks: Uint8Array[], totalBytes: number }`.

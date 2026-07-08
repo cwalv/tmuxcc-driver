@@ -166,7 +166,7 @@ export interface ProjectSnapshotOpts {
    * tc-4b6k.2 (D3): the requesting client's durable identity id
    * (`ClientIdentity.id`). Binding intent is per-client, so each pane's wire
    * `bound` boolean is resolved for THIS client as
-   * `pane.boundClients.has(clientId)`. Omit (or undefined) for an anonymous
+   * `pane.overlay.boundClients.has(clientId)`. Omit (or undefined) for an anonymous
    * connection — then no pane is bound. The serve layer passes the identity it
    * captured at handshake.
    */
@@ -306,7 +306,7 @@ export function projectSnapshot(
  * `clientId` (tc-4b6k.2, D3): the requesting client's durable identity id.
  * Binding intent is per-client, so `pane.opened.bound` and the
  * `pane.policy-changed` binding delta are resolved for THIS client
- * (`boundClients.has(clientId)`). Omit for the metrics-only / test diffs that
+ * (`overlay.boundClients.has(clientId)`). Omit for the metrics-only / test diffs that
  * have no client — then binding resolves to false and never produces a
  * binding-only `pane.policy-changed` (the per-client stream in serve.ts is the
  * one that carries binding deltas to a real client).

@@ -18,6 +18,7 @@ import { paneId, windowId, sessionId } from "@tmuxcc/protocol";
 import { diffModel, projectSnapshot } from "./projection.js";
 import {
   emptyModel,
+  emptyPaneOverlay,
   addSession,
   addWindow,
   addPane,
@@ -58,9 +59,9 @@ function buildBaseModel(): SessionModel {
     dead: false,
     exitCode: undefined,
     label: undefined,
-    boundClients: new Set(),
     detach: undefined,
     icon: undefined,
+    overlay: emptyPaneOverlay(),
     // paneTitle absent (undefined → no title seen yet)
   });
   return model;
@@ -190,9 +191,9 @@ describe("paneTitle – SnapshotPane carries paneTitle (tc-2mn8)", () => {
       dead: false,
       exitCode: undefined,
       label: undefined,
-      boundClients: new Set(),
       detach: undefined,
       icon: undefined,
+      overlay: emptyPaneOverlay(),
       paneTitle: "born-with-title",
     });
     const snapshot = projectSnapshot(model);

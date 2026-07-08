@@ -76,6 +76,7 @@ import {
   updateSession,
   setFocus,
   parsedLayoutToWindowLayout,
+  emptyPaneOverlay,
   paneId,
   windowId,
   sessionId,
@@ -130,7 +131,7 @@ export const TMUXCC_LABEL_OPTION = "@tmuxcc_label";
  * Written by the `set-object-policy` verb at PANE scope keyed by the ISSUING
  * connection's identity (`set-option -pt %N @tmuxcc-bound-<key> 1` / `-u` to
  * clear); read per-client on connect and carried forward across requery cycles
- * (see model.ts `boundClients`).  Lives WITH the pane in tmux, so it survives a
+ * (see the model.ts `PaneOverlay.boundClients`).  Lives WITH the pane in tmux, so it survives a
  * VS Code restart and vanishes with the pane — staleness is structurally
  * impossible (it cannot outlive its referent).
  *
@@ -236,7 +237,7 @@ export const WINDOWS_ROW = defineReplyRow("list-windows", {
  * `@tmuxcc-icon` are USER OPTIONS that store RAW tabs, so they are read through
  * `tabSanitized(...)` (see the module header). Binding intent (`@tmuxcc-bound`)
  * is NOT read here: it is per-(pane,client) and reconstructed on connect
- * (tc-4b6k.2), carried forward across cycles (model.ts `boundClients`).
+ * (tc-4b6k.2), carried forward across cycles (model.ts `PaneOverlay.boundClients`).
  */
 export const PANES_ROW = defineReplyRow("list-panes", {
   tmuxPaneId: field("#{pane_id}", sigilId("%"), 0),
@@ -245,14 +246,25 @@ export const PANES_ROW = defineReplyRow("list-panes", {
   cols: field("#{pane_width}", int, 80),
   rows: field("#{pane_height}", int, 24),
   active: field("#{?pane_active,1,0}", flag01, true),
-  // Dead-pane state (tc-4bv2 / tc-295a.10 shared shape). A dead pane's status
-  // may be empty (tmux reports no code) → exitCode undefined while dead stays.
+  // Dead-pane state (tc-4bv2 / tc-295a.10 shared shape). True when tmux reports
+  // `pane_dead=1` — the process exited but `remain-on-exit on` keeps the corpse
+  // in `list-panes` as a FIRST-CLASS model member (inspectable/reapable), NOT an
+  // absence (a pane that LEAVES `list-panes` is removed by the diff → `pane.closed`).
   dead: field("#{?pane_dead,1,0}", flag01, false),
+  // Exit code of a dead corpse (empty for a live pane → undefined). buildInitialModel
+  // forces it undefined unless `dead` (belt-and-braces transform).
   exitCode: field("#{pane_dead_status}", emptyAsUndefined(int), undefined),
-  // Durable driver-owned pane name (tc-1a8z). Empty → undefined (unset).
+  // Durable, DRIVER-owned pane name (tc-1a8z): the canonical rename channel set
+  // via `rename-pane` → `set-option -pt %N @tmuxcc_label`. NEVER set via a title
+  // escape, so the shell cannot clobber it; distinct from the live pane_title.
+  // Empty → undefined (unset / cleared).
   label: field(tabSanitized("@tmuxcc_label"), emptyAsUndefined(text), undefined),
-  // Durable per-pane policy (tc-i9aq.1, cold-start.md §4.A). Unset → undefined.
+  // RESOLVED detach-on-close policy (tc-i9aq.1, cold-start.md §4.A). `#{@tmuxcc-detach}`
+  // walks pane→window→session, so this is the EFFECTIVE first-wins cascade value
+  // (pane override, else window, else session). Unset → undefined (inherit default).
   detach: field("#{@tmuxcc-detach}", optionalKeyword(["detach", "kill"]), undefined),
+  // Durable per-pane icon policy (tc-i9aq.1): opaque string (e.g. a ThemeIcon id),
+  // interpreted by the extension. Unset → undefined.
   icon: field(tabSanitized("@tmuxcc-icon"), emptyAsUndefined(text), undefined),
 });
 
@@ -360,6 +372,55 @@ export type WindowsReplyRow = RowTypeOf<typeof WINDOWS_ROW>;
 export type PanesReplyRow = RowTypeOf<typeof PANES_ROW>;
 
 // ---------------------------------------------------------------------------
+// Pane provenance: canonical fields are a mechanical Pick of the reply row
+// ---------------------------------------------------------------------------
+
+/**
+ * The pane fields taken VERBATIM from a {@link PanesReplyRow} — same name, same
+ * type, no transform (tc-mysc.1). `buildInitialModel` copies exactly these via
+ * {@link pickCanonical}; a `Pane` is `PaneFromRow` + remapped identity ids +
+ * genuinely-transformed fields (`mode`, `exitCode`, `paneTitle`) + `overlay`.
+ *
+ * This list is the SECOND half of the tc-pqb4 defence (the first half — the
+ * schema-derived format/parse — landed in tc-mysc): because the canonical
+ * fields arrive by this Pick, writing a hardcoded literal for one at the
+ * construction site is a type error, so the "silently rebuilt from a default,
+ * then clobbered by the diff" bug is defined out of existence rather than
+ * guarded against. Adding a canonical field is one edit here + in `PANES_ROW`.
+ *
+ * The `satisfies` clause pins every entry to a real `PanesReplyRow` key.
+ */
+export const PANE_CANONICAL_FROM_ROW = [
+  "cols",
+  "rows",
+  "dead",
+  "label",
+  "detach",
+  "icon",
+] as const satisfies readonly (keyof PanesReplyRow)[];
+
+/** The pane fields picked verbatim from a {@link PanesReplyRow} (see {@link PANE_CANONICAL_FROM_ROW}). */
+export type PaneFromRow = Pick<PanesReplyRow, (typeof PANE_CANONICAL_FROM_ROW)[number]>;
+
+/** Copy the canonical-from-row fields out of a parsed pane row (mechanical, no transform). */
+function pickCanonical(row: PanesReplyRow): PaneFromRow {
+  const out: Record<string, unknown> = {};
+  for (const key of PANE_CANONICAL_FROM_ROW) {
+    out[key] = row[key];
+  }
+  return out as PaneFromRow;
+}
+
+/**
+ * The pane fields NOT covered by identity or {@link PaneFromRow} — the
+ * explicitly-constructed remainder (`mode`, `exitCode`, `overlay`, optional
+ * `paneTitle`). buildInitialModel writes this sub-object with a `satisfies`
+ * clause so a hardcoded literal for a canonical/identity field is an
+ * excess-property type error there.
+ */
+type PaneConstructionExtras = Omit<Pane, keyof PaneFromRow | "paneId" | "windowId" | "sessionId">;
+
+// ---------------------------------------------------------------------------
 // Model builder
 // ---------------------------------------------------------------------------
 
@@ -465,33 +526,30 @@ export function buildInitialModel(
     if (!model.windows.has(wid)) continue;
     if (model.panes.has(pid)) continue;
 
+    // Provenance construction (tc-mysc.1): the canonical fields arrive verbatim
+    // via `pickCanonical(row)`, so there is no place to write a hardcoded literal
+    // for one — the tc-pqb4 clobber is defined out of existence. Only the
+    // remapped identity ids and the genuinely-transformed remainder are written
+    // explicitly; the `satisfies PaneConstructionExtras` clause makes a hardcoded
+    // literal for any canonical/identity field an excess-property type error here.
     const p: Pane = {
       paneId: pid,
       windowId: wid,
       sessionId: sid,
-      cols: row.cols,
-      rows: row.rows,
-      mode: "normal",
-      // Dead-pane state from the requery (tc-4bv2 / tc-295a.10 shared shape).
-      // exitCode is only meaningful for a dead corpse; a live pane's
-      // pane_dead_status is empty (→ undefined) so this guard is belt-and-braces.
-      dead: row.dead,
-      exitCode: row.dead ? row.exitCode : undefined,
-      // Durable pane name from the @tmuxcc_label user-option (tc-1a8z).
-      // Re-read on every requery → survives a driver restart for free.
-      label: row.label,
-      // Durable close-policy / icon-policy from the @tmuxcc-* user-options
-      // (tc-i9aq.1, cold-start.md §4.A). Re-read on every requery → survive a
-      // VS Code restart, vanish with the pane.
-      detach: row.detach,
-      icon: row.icon,
-      // tc-4b6k.2: binding intent is per-(pane,client) and is NOT in the bulk
-      // requery. A fresh pane starts with no bound clients; the requery
-      // carry-forward (requery.ts) preserves a surviving pane's set, and a
-      // client's slot is (re)read on connect (pipeline.applyClientBinding).
-      boundClients: new Set<string>(),
-      // scrollbackHandle and paneTitle are absent (optional) — tc-fx2 and
-      // tc-2mn8 populate them respectively via updatePane after creation.
+      ...pickCanonical(row),
+      ...({
+        mode: "normal",
+        // exitCode is only meaningful for a dead corpse; a live pane's
+        // pane_dead_status is empty (→ undefined) so this guard is belt-and-braces.
+        exitCode: row.dead ? row.exitCode : undefined,
+        // tc-4b6k.2: binding intent (overlay.boundClients) is per-(pane,client)
+        // and is NOT in the bulk requery. A fresh pane starts with an empty
+        // overlay; carryForwardOverlays (requery.ts) preserves a surviving pane's
+        // overlay wholesale, and a client's slot is (re)read on connect
+        // (pipeline.applyClientBinding). paneTitle is absent until tc-2mn8's
+        // subscription populates it via updatePane.
+        overlay: emptyPaneOverlay(),
+      } satisfies PaneConstructionExtras),
     };
     model = addPane(model, p);
   }

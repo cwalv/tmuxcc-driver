@@ -169,7 +169,7 @@ function defaultWindowIdToTmux(id: WindowId): number {
  *
  * tc-4b6k.2 (D3): binding intent is per-client, so a `bound` write carries the
  * issuing connection's `clientId` — the pipeline patch flips only that client's
- * membership in the pane's `boundClients` set.
+ * membership in the pane's `overlay.boundClients` set.
  */
 function buildPanePolicyEvent(
   paneId: PaneId,
@@ -196,12 +196,16 @@ function buildPanePolicyEvent(
  * before-value of the touched field (tc-7xv.37 reversal) on tmux %error.
  *
  * tc-4b6k.2 (D3): the `bound` revert restores the issuing client's own prior
- * membership (`prev.boundClients.has(clientId)`), not a shared scalar.
+ * membership (`prev.overlay.boundClients.has(clientId)`), not a shared scalar.
  */
 function buildPanePolicyRevert(
   paneId: PaneId,
   option: "bound" | "detach" | "icon",
-  prev: { readonly boundClients: ReadonlySet<string>; readonly detach: "detach" | "kill" | undefined; readonly icon: string | undefined },
+  prev: {
+    readonly overlay: { readonly boundClients: ReadonlySet<string> };
+    readonly detach: "detach" | "kill" | undefined;
+    readonly icon: string | undefined;
+  },
   clientId: string | undefined,
 ): NotificationEvent {
   switch (option) {
@@ -209,7 +213,7 @@ function buildPanePolicyRevert(
       return {
         kind: "internal:set-pane-policy",
         paneId,
-        bound: clientId !== undefined && prev.boundClients.has(clientId),
+        bound: clientId !== undefined && prev.overlay.boundClients.has(clientId),
         clientId,
       };
     case "detach":

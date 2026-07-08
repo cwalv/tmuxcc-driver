@@ -1093,9 +1093,9 @@ describe("createInputPath — break-pane empty -P body no-op (tc-0c30.20)", () =
       dead: false,
       exitCode: undefined,
       label: undefined,
-      boundClients: new Set(),
       detach: undefined,
       icon: undefined,
+      overlay: emptyPaneOverlay(),
     };
     let m = emptyModel();
     m = addSession(m, session);
@@ -1635,6 +1635,7 @@ describe("createInputPath — set-monitor-silence (tc-7xv.15)", () => {
 
 import {
   emptyModel,
+  emptyPaneOverlay,
   addSession,
   addWindow,
   addPane,
@@ -1682,11 +1683,11 @@ function makeReversalModel(opts: {
     dead: false,
     exitCode: undefined,
     label: undefined,
-    boundClients: new Set(),
     detach: undefined,
     icon: undefined,
-    // scrollbackHandle and paneTitle are optional — omit to avoid
-    // exactOptionalPropertyTypes TS2375 when passing undefined explicitly.
+    // Binding intent lives in the overlay (per-client). paneTitle is optional —
+    // omit to avoid exactOptionalPropertyTypes TS2375 when passing undefined.
+    overlay: emptyPaneOverlay(),
   };
 
   let m = emptyModel();

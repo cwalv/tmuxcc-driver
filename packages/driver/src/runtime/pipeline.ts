@@ -91,6 +91,7 @@ import {
   emptyModel,
   setBoundClient,
   updatePane,
+  updatePaneOverlay,
   updateWindow,
   windowId as mintWindowId,
 } from "../state/model.js";
@@ -460,8 +461,8 @@ export interface RuntimePipeline {
    * once and applied before its snapshot is projected, or a reconnecting client
    * would briefly see `bound=false` for a pane it durably bound. This issues a
    * single `list-panes -F #{@tmuxcc-bound-<key>}` for the bound session, then
-   * patches each pane's `boundClients` membership for `clientId` to match tmux
-   * (canonical). Steady-state changes ride the optimistic set-object-policy
+   * patches each pane's `overlay.boundClients` membership for `clientId` to match
+   * tmux (canonical). Steady-state changes ride the optimistic set-object-policy
    * patch + the requery carry-forward; this is the reconstruction seam.
    *
    * No-op for an anonymous connection (undefined clientId — never bound) or
@@ -1315,16 +1316,16 @@ class RuntimePipelineImpl implements RuntimePipeline {
       if ((boundRaw ?? "").trim() === "1") boundPanes.add(mintPaneId("p" + n));
     }
 
-    // Patch each pane's boundClients membership for this client to match tmux
-    // (canonical): a full per-client reconcile, so a slot cleared while the
+    // Patch each pane's overlay.boundClients membership for this client to match
+    // tmux (canonical): a full per-client reconcile, so a slot cleared while the
     // client was away is dropped too.
     this.patchModel((model) => {
       let changed = false;
       const panes = new Map(model.panes);
       for (const [id, pane] of model.panes) {
-        const nextSet = setBoundClient(pane.boundClients, clientId, boundPanes.has(id));
-        if (nextSet !== pane.boundClients) {
-          panes.set(id, { ...pane, boundClients: nextSet });
+        const nextSet = setBoundClient(pane.overlay.boundClients, clientId, boundPanes.has(id));
+        if (nextSet !== pane.overlay.boundClients) {
+          panes.set(id, { ...pane, overlay: { ...pane.overlay, boundClients: nextSet } });
           changed = true;
         }
       }
@@ -1550,28 +1551,34 @@ class RuntimePipelineImpl implements RuntimePipeline {
       this.patchModel((model) => {
         const pane = model.panes.get(event.paneId);
         if (pane === undefined) return model;
+        let next = model;
+        // tc-4b6k.2 (D3): binding intent is per-client and lives in the OVERLAY —
+        // the write touched the ISSUING client's slot only, so flip that client's
+        // membership in the pane's overlay.boundClients set (event.clientId names
+        // the issuer). Written through updatePaneOverlay, not the canonical patch.
+        if (event.bound !== undefined && event.clientId !== undefined) {
+          const nextSet = setBoundClient(pane.overlay.boundClients, event.clientId, event.bound);
+          if (nextSet !== pane.overlay.boundClients) {
+            next = updatePaneOverlay(next, event.paneId, { boundClients: nextSet });
+          }
+        }
+        // detach/icon are canonical fields.
         const patch: {
-          boundClients?: ReadonlySet<string>;
           detach?: "detach" | "kill" | undefined;
           icon?: string | undefined;
         } = {};
-        // tc-4b6k.2 (D3): binding intent is per-client — the write touched the
-        // ISSUING client's slot only, so flip that client's membership in the
-        // pane's boundClients set (event.clientId names the issuer).
-        if (event.bound !== undefined && event.clientId !== undefined) {
-          const nextSet = setBoundClient(pane.boundClients, event.clientId, event.bound);
-          if (nextSet !== pane.boundClients) patch.boundClients = nextSet;
-        }
         if (event.detach !== undefined) {
-          const next = event.detach === null ? undefined : event.detach;
-          if (pane.detach !== next) patch.detach = next;
+          const detach = event.detach === null ? undefined : event.detach;
+          if (pane.detach !== detach) patch.detach = detach;
         }
         if (event.icon !== undefined) {
-          const next = event.icon === null ? undefined : event.icon;
-          if (pane.icon !== next) patch.icon = next;
+          const icon = event.icon === null ? undefined : event.icon;
+          if (pane.icon !== icon) patch.icon = icon;
         }
-        if (Object.keys(patch).length === 0) return model;
-        return updatePane(model, event.paneId, patch);
+        if (Object.keys(patch).length > 0) {
+          next = updatePane(next, event.paneId, patch);
+        }
+        return next;
       });
       this._fireNotificationHandlers(event);
       return;

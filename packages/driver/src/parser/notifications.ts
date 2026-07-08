@@ -381,7 +381,7 @@ export interface InternalPanePolicySetNotification {
    * New binding-intent value, when this write touched a `@tmuxcc-bound-<key>`
    * option (D3, tc-4b6k.2). Binding is per-client, so `clientId` names WHOSE
    * intent flipped — the pipeline patch updates that client's membership in the
-   * pane's `boundClients` set. Both are present together (or neither).
+   * pane's `overlay.boundClients` set. Both are present together (or neither).
    */
   readonly bound?: boolean;
   /**

@@ -2,29 +2,29 @@
  * State module — canonical in-session-proxy session model.
  *
  * Public surface:
- *   - Model types: SessionModel, Session, Window, Pane, FocusState
+ *   - Model types: SessionModel, Session, Window, Pane, PaneOverlay, FocusState
  *   - Id types (re-exported from wire): PaneId, WindowId, SessionId
- *   - Id constructors: paneId(), windowId(), sessionId(), scrollbackHandle()
+ *   - Id constructors: paneId(), windowId(), sessionId()
  *   - PaneMode (re-exported from wire)
  *   - WindowLayout (re-exported from wire)
- *   - ScrollbackHandle — opaque handle for tc-fx2's ring-buffer store
+ *   - emptyPaneOverlay() → PaneOverlay
  *   - InvariantViolation — structured violation type for checkInvariants
  *   - checkInvariants(model, opts?) → InvariantViolation[]
  *   - emptyModel() → SessionModel
  *   - addSession / removeSession / updateSession
  *   - addWindow  / removeWindow  / updateWindow
- *   - addPane    / removePane    / updatePane
+ *   - addPane    / removePane    / updatePane / updatePaneOverlay
  *   - setFocus
  *   - parsedLayoutToWindowLayout — bridge ParsedLayout → WindowLayout
  */
 
 export type {
   Pane,
+  PaneOverlay,
   Window,
   Session,
   FocusState,
   SessionModel,
-  ScrollbackHandle,
   InvariantViolation,
   CheckInvariantsOptions,
   PaneMode,
@@ -36,7 +36,8 @@ export {
   paneId,
   windowId,
   sessionId,
-  scrollbackHandle,
+  // Overlay constructor
+  emptyPaneOverlay,
   // Invariant checker
   checkInvariants,
   // Constructors
@@ -53,6 +54,7 @@ export {
   addPane,
   removePane,
   updatePane,
+  updatePaneOverlay,
   // Focus helper
   setFocus,
   // Parser→model bridge

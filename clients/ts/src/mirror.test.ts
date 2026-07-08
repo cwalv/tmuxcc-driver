@@ -15,7 +15,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import { paneId, windowId, sessionId } from "@tmuxcc/protocol";
-import { emptyModel, addWindow, addPane, removePane, updatePane, updateWindow, updateSession, setFocus, projectSnapshot, diffModel } from "@tmuxcc/driver";
+import { emptyModel, emptyPaneOverlay, addWindow, addPane, removePane, updatePane, updateWindow, updateSession, setFocus, projectSnapshot, diffModel } from "@tmuxcc/driver";
 
 import type { PaneId, WindowId, SessionId, SnapshotMessage, SessionProxyMessage, WindowLayout } from "@tmuxcc/protocol";
 import type { SessionModel } from "@tmuxcc/driver";
@@ -123,10 +123,9 @@ function makePane(
     dead: false,
     exitCode: undefined,
     label: undefined,
-    boundClients: new Set(),
     detach: undefined,
     icon: undefined,
-    // scrollbackHandle is optional — omit rather than passing undefined (exactOptionalPropertyTypes)
+    overlay: emptyPaneOverlay(),
   };
 }
 

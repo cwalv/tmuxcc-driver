@@ -30,6 +30,7 @@ import { WINDOWS_ROW, PANES_ROW } from "./bootstrap.js";
 import { diffModel } from "./projection.js";
 import {
   emptyModel,
+  emptyPaneOverlay,
   addPane,
   addSession,
   addWindow,
@@ -39,6 +40,7 @@ import {
   setFocus,
   updateSession,
   updatePane,
+  updatePaneOverlay,
 } from "./model.js";
 import type {
   Pane,
@@ -493,7 +495,7 @@ describe("requeryDiff: durable policy (@tmuxcc-detach/-icon, tc-i9aq.1) + bindin
     const line = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true, detach: "kill", icon: "rocket" });
     const { next, deltas } = requeryDiff(emptyModel(), okResult(winSingle), okResult(line));
     const p = next.panes.get(paneId("p1"))!;
-    assert.equal(p.boundClients.size, 0, "binding is per-client, not read by the bulk requery");
+    assert.equal(p.overlay.boundClients.size, 0, "binding is per-client, not read by the bulk requery");
     assert.equal(p.detach, "kill", "resolved detach re-read on bootstrap");
     assert.equal(p.icon, "rocket", "icon policy re-read on bootstrap");
     // The bootstrap diff carries the policy on pane.opened; bound resolves false
@@ -509,7 +511,7 @@ describe("requeryDiff: durable policy (@tmuxcc-detach/-icon, tc-i9aq.1) + bindin
     const bare = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true });
     const { next } = requeryDiff(emptyModel(), okResult(winSingle), okResult(bare));
     const p = next.panes.get(paneId("p1"))!;
-    assert.equal(p.boundClients.size, 0);
+    assert.equal(p.overlay.boundClients.size, 0);
     assert.equal(p.detach, undefined);
     assert.equal(p.icon, undefined);
   });
@@ -520,11 +522,11 @@ describe("requeryDiff: durable policy (@tmuxcc-detach/-icon, tc-i9aq.1) + bindin
     // per-client binding (the bulk read never does) must preserve it.
     const bare = paneLine({ paneNum: 1, winNum: 1, sessNum: 0, active: true });
     let prev = requeryDiff(emptyModel(), okResult(winSingle), okResult(bare)).next;
-    prev = updatePane(prev, paneId("p1"), { boundClients: new Set(["ws-alpha"]) });
+    prev = updatePaneOverlay(prev, paneId("p1"), { boundClients: new Set(["ws-alpha"]) });
 
     const { next, deltas } = requeryDiff(prev, okResult(winSingle), okResult(bare));
     assert.deepEqual(
-      [...next.panes.get(paneId("p1"))!.boundClients],
+      [...next.panes.get(paneId("p1"))!.overlay.boundClients],
       ["ws-alpha"],
       "surviving pane keeps its per-client binding across the requery",
     );
@@ -1412,13 +1414,12 @@ function applyDeltaToModel(m: MutableModel, delta: SessionProxyMessage): void {
         dead: delta.dead ?? false,
         exitCode: delta.dead ? delta.exitCode : undefined,
         label: delta.label,
-        // tc-4b6k.2: no-client diffs never resolve bound true, so the
-        // round-trip's per-client set stays empty.
-        boundClients: new Set<string>(),
         detach: delta.detach,
         icon: delta.icon,
-        // scrollbackHandle and paneTitle are optional — omit to avoid
+        // tc-4b6k.2: no-client diffs never resolve bound true, so the overlay's
+        // per-client set stays empty. paneTitle is optional — omit to avoid
         // exactOptionalPropertyTypes TS2375 when passing undefined explicitly.
+        overlay: emptyPaneOverlay(),
       };
       m.panes.set(delta.paneId, pane);
       m.windows.set(delta.windowId, {
@@ -1502,8 +1503,8 @@ function applyDeltasToModel(
 }
 
 /**
- * Comparable shape — strips fields we don't propagate via the wire (e.g.
- * scrollbackHandle, denormalized sessionId on Pane, etc.) so the round-trip
+ * Comparable shape — strips fields we don't propagate via the wire (e.g. the
+ * client-local overlay, denormalized sessionId on Pane, etc.) so the round-trip
  * property compares like-for-like.
  *
  * Layouts are compared as JSON strings (null stays null) so the deep-equal
@@ -1620,11 +1621,10 @@ function randomModel(rng: () => number, opts: { minWindows?: number } = {}): Ses
         dead: false,
         exitCode: undefined,
         label: undefined,
-        boundClients: new Set<string>(),
         detach: undefined,
         icon: undefined,
-        // scrollbackHandle and paneTitle are optional — omit to avoid
-        // exactOptionalPropertyTypes TS2375 when passing undefined explicitly.
+        // paneTitle is optional — omit to avoid exactOptionalPropertyTypes TS2375.
+        overlay: emptyPaneOverlay(),
       };
       model = addPane(model, pane);
     }
