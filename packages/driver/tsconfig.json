@@ -8,6 +8,7 @@
   "exclude": [
     "src/runtime/e2e-smoke.test.ts",
     "src/runtime/flow-load.test.ts",
+    "src/runtime/multi-session-latency.test.ts",
     "src/runtime/resize-roundtrip.test.ts",
     "src/runtime/resilience.test.ts",
     "src/runtime/resync.test.ts",
