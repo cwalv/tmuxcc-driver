@@ -85,6 +85,7 @@ import type {
   InputMessage,
   ResizeRequestMessage,
   PaneId,
+  PaneMode,
 } from "@tmuxcc/protocol";
 import { paneId } from "@tmuxcc/protocol";
 
@@ -2287,6 +2288,69 @@ describe(
         true,
         `concurrent full client's split-pane must succeed; got: ${JSON.stringify(fullResponse.result)}`,
       );
+
+      sessionProxy.kill();
+      await new Promise<void>((r) => { sessionProxy.host.onExit(() => r()); });
+    });
+
+    // -------------------------------------------------------------------------
+    // R10 (tc-mysc.3). LOAD-BEARING PROOF: pane.mode-changed is LIVE end-to-end.
+    //
+    // `#{pane_mode}` now backs Pane.mode through the `paneMode` codec, so
+    // entering / leaving copy-mode — each fires a real `%pane-mode-changed`,
+    // which the coalescer already classifies as topology (dirty bit → requery)
+    // — rebuilds the true mode and the projection diff emits a pane.mode-changed
+    // delta. Before tc-mysc.3 the field was hardcoded "normal", so every requery
+    // rebuilt "normal" and this delta could NEVER fire despite tmux answering
+    // and the extension shipping a handler: tmux answers, driver requeries,
+    // answer discarded (the tc-pqb4 class). We drive REAL tmux and assert BOTH
+    // edges reach the wire, with ZERO new event plumbing.
+    //
+    // Verified live (tmux 3.4): #{pane_mode} is "" normally and "copy-mode" in
+    // copy-mode; the codec maps ""→"normal", "copy-mode"→"copy". We enter with
+    // the `copy-mode` command and leave with `send-keys -X … cancel` (the
+    // key-driven exit); the requery reads pane_mode regardless of entry path.
+    // -------------------------------------------------------------------------
+
+    it("R10 (tc-mysc.3): entering/leaving copy-mode emits pane.mode-changed deltas end-to-end", async () => {
+      const sock = realSockName("pane-mode");
+      after(() => killRealServer(sock));
+
+      const sessionProxy = createSessionProxy({
+        host: { socketName: sock, sessionName: "r10session", cols: 80, rows: 24 },
+      });
+      sessionProxy.host.onError(() => {});
+      await sessionProxy.start();
+
+      const { sessionProxyTransport: dt, clientTransport: ct, controlMessages } = createRecordingPair();
+      sessionProxy.demux.attachTransport(dt);
+      const addPromise = sessionProxy.server.addClient(dt);
+      const clientPromise = runClientHandshake(ct, CLIENT_CAPS);
+      await Promise.all([addPromise, clientPromise]);
+
+      const snapshot = controlMessages.find((m) => m.type === "snapshot") as SnapshotMessage | undefined;
+      assert.ok(snapshot !== undefined, "snapshot must arrive before driving copy-mode");
+      assert.ok(snapshot!.panes.length >= 1, "need a pane to enter copy-mode");
+      const pane = snapshot!.panes[0]!.paneId;
+      const tmuxPaneNum = parseInt((pane as string).slice(1), 10);
+
+      // A pane.mode-changed delta for our pane with the given wire mode. Bootstrap
+      // never emits mode-changed (mode ships inside pane.opened), so "copy" appears
+      // only on enter and "normal" only on the subsequent exit — no false match.
+      const modeDeltaFor = (mode: PaneMode) =>
+        controlMessages.find(
+          (m) => m.type === "pane.mode-changed" && m.paneId === pane && m.mode === mode,
+        );
+
+      // ENTER copy-mode → %pane-mode-changed → requery → pane.mode-changed(copy).
+      void sessionProxy.send(`copy-mode -t %${tmuxPaneNum}`);
+      const enter = await waitFor(() => modeDeltaFor("copy"), 8000, "no pane.mode-changed(copy) within 8s");
+      assert.equal(enter.type, "pane.mode-changed");
+
+      // LEAVE copy-mode via a key-driven cancel → pane.mode-changed(normal).
+      void sessionProxy.send(`send-keys -X -t %${tmuxPaneNum} cancel`);
+      const leave = await waitFor(() => modeDeltaFor("normal"), 8000, "no pane.mode-changed(normal) within 8s");
+      assert.equal(leave.type, "pane.mode-changed");
 
       sessionProxy.kill();
       await new Promise<void>((r) => { sessionProxy.host.onExit(() => r()); });

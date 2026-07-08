@@ -18,6 +18,7 @@ import {
   FieldDecodeError,
   ReplyCodecError,
   SANITIZE_TAB_PATTERN,
+  paneMode,
 } from "./reply-row.js";
 import {
   WINDOWS_ROW,
@@ -52,6 +53,7 @@ const PANE_OVERRIDE: PanesReplyRow = {
   cols: 100,
   rows: 50,
   active: true,
+  mode: "copy",
   dead: true,
   exitCode: 137,
   label: "my-label",
@@ -91,9 +93,9 @@ describe("reply-row codec: schema-derived round-trip", () => {
     assert.equal(WINDOWS_ROW.fixtureLine({}).split("\t").length, WINDOWS_ROW.keys.length);
     assert.equal(PANES_ROW.fixtureLine({}).split("\t").length, PANES_ROW.keys.length);
     // Dead fields deleted (tc-mysc): 9 window fields. Pane fields: 11 after
-    // tc-mysc + paneTitle (tc-mysc.2) = 12.
+    // tc-mysc + `mode` (#{pane_mode}, tc-mysc.3) + paneTitle (tc-mysc.2) = 13.
     assert.equal(WINDOWS_ROW.keys.length, 9);
-    assert.equal(PANES_ROW.keys.length, 12);
+    assert.equal(PANES_ROW.keys.length, 13);
   });
 });
 
@@ -113,6 +115,7 @@ describe("reply-row codec: buildInitialModel field survival", () => {
     assert.ok(pane);
     assert.equal(pane.cols, 100);
     assert.equal(pane.rows, 50);
+    assert.equal(pane.mode, "copy");
     assert.equal(pane.label, "my-label");
     assert.equal(pane.detach, "kill");
     assert.equal(pane.icon, "term");
@@ -220,5 +223,31 @@ describe("reply-row codec: literal-TAB sanitizer pin (tc-mysc amendment 3)", () 
     assert.ok(BOOTSTRAP_WINDOWS_FORMAT.includes("#{window_name}"));
     assert.ok(BOOTSTRAP_WINDOWS_FORMAT.includes("#{session_name}"));
     assert.ok(!BOOTSTRAP_WINDOWS_FORMAT.includes("s/"), "no sanitizer on name fields");
+  });
+});
+
+describe("paneMode codec (#{pane_mode}, tc-mysc.3)", () => {
+  it("decode: empty → normal, copy-mode → copy, every other mode verbatim", () => {
+    // Aliased states (verified live, tmux 3.4: normal → "", copy-mode → "copy-mode").
+    assert.equal(paneMode.decode(""), "normal");
+    assert.equal(paneMode.decode("copy-mode"), "copy");
+    // Open pass-through: PaneMode is an open union; the long-tail mode names tmux
+    // emits pass VERBATIM (no invented normalization table — state-model.md §9).
+    assert.equal(paneMode.decode("view-mode"), "view-mode");
+    assert.equal(paneMode.decode("tree-mode"), "tree-mode");
+    assert.equal(paneMode.decode("options-mode"), "options-mode");
+  });
+
+  it("encode is the exact inverse of the aliases (else verbatim)", () => {
+    assert.equal(paneMode.encode("normal"), "");
+    assert.equal(paneMode.encode("copy"), "copy-mode");
+    assert.equal(paneMode.encode("view-mode"), "view-mode");
+    assert.equal(paneMode.encode("tree-mode"), "tree-mode");
+  });
+
+  it("round-trips the aliased states and an unknown mode", () => {
+    for (const wire of ["", "copy-mode", "tree-mode", "options-mode"]) {
+      assert.equal(paneMode.encode(paneMode.decode(wire)), wire);
+    }
   });
 });

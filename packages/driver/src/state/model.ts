@@ -36,14 +36,17 @@
  * `state/bootstrap.ts`), so a fresh model can only get those values from the
  * reply — writing a hardcoded literal for one at the rebuild site is a type
  * error, not a drift to guard against. On top of `PaneFromRow` sit the remapped
- * identity ids, the genuinely-transformed fields (`mode`, `exitCode`,
- * `paneTitle`), and the client-local `overlay` (state that is NOT in any tmux
- * row — carried forward wholesale across requery cycles rather than rebuilt).
+ * identity ids, the genuinely-transformed fields (`exitCode`, `paneTitle`), and
+ * the client-local `overlay` (state that is NOT in any tmux row — carried
+ * forward wholesale across requery cycles rather than rebuilt).
  *
  * ## PaneMode
- * Reuses `PaneMode` from `src/wire/session-proxy-control.ts` directly. The wire type is
- * already open-ended (`"normal" | "copy" | "view" | string`) so no translation
- * is needed at projection.
+ * `mode` is a CANONICAL-from-row field (tc-mysc.3): it is backed by
+ * `#{pane_mode}` through the `paneMode` codec (`state/reply-row.ts`) and joins
+ * `PaneFromRow`, so a fresh model always rebuilds the true mode from the reply
+ * — the old hardcoded `"normal"` that left the `pane.mode-changed` delta dead is
+ * unwritable (the tc-pqb4 class). Its wire type `PaneMode` is open-ended
+ * (`"normal" | "copy" | "view" | string`), so projection is a pass-through.
  *
  * ## Immutability discipline
  * All struct fields are `readonly`. The reducer produces a new `SessionModel`
@@ -81,7 +84,6 @@
 
 import type { PaneId, WindowId, SessionId } from "@tmuxcc/protocol";
 import type { WindowLayout, LayoutNode } from "@tmuxcc/protocol";
-import type { PaneMode } from "@tmuxcc/protocol";
 import type { ParsedLayout, LayoutCell } from "../parser/layout-string.js";
 import type { PaneFromRow } from "./bootstrap.js";
 
@@ -143,15 +145,15 @@ export function emptyPaneOverlay(): PaneOverlay {
 /**
  * A single pane in the model, typed by PROVENANCE (tc-mysc.1).
  *
- * Canonical fields (`cols`, `rows`, `dead`, `label`, `detach`, `icon`,
+ * Canonical fields (`cols`, `rows`, `mode`, `dead`, `label`, `detach`, `icon`,
  * `paneTitle`) come from {@link PaneFromRow} — a mechanical `Pick` of the
  * `list-panes` reply row (`PANE_CANONICAL_FROM_ROW` in `state/bootstrap.ts`), so
  * their semantics are documented ONCE on the `PANES_ROW` schema. On top of that
- * base sit the remapped identity ids, the genuinely-transformed fields (`mode`,
- * `exitCode`), and the client-local {@link PaneOverlay}.
+ * base sit the remapped identity ids, the genuinely-transformed field
+ * (`exitCode`), and the client-local {@link PaneOverlay}.
  *
  * Projection note: maps directly to `SnapshotPane` (paneId, windowId,
- * sessionId, cols, rows). The additional `mode` field projects to
+ * sessionId, cols, rows). The `mode` field (from `PaneFromRow`) projects to
  * `PaneModeChangedMessage` deltas; `overlay` is session-proxy-internal only
  * (its `boundClients` is resolved per-requesting-client into `pane.bound`).
  */
@@ -162,11 +164,6 @@ export interface Pane extends PaneFromRow {
   readonly windowId: WindowId;
   /** The session that ultimately owns this pane (denormalized for O(1) lookup). */
   readonly sessionId: SessionId;
-  /**
-   * Current mode of the pane. Reuses the wire PaneMode type directly so
-   * projection is a pass-through. Defaults to "normal" on creation.
-   */
-  readonly mode: PaneMode;
   /**
    * Exit code of the pane's process when known and dead (transformed from the
    * `#{pane_dead_status}` row field: forced `undefined` unless `dead`).

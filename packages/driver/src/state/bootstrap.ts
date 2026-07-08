@@ -90,6 +90,7 @@ import {
   flag01,
   emptyAsUndefined,
   optionalKeyword,
+  paneMode,
   tabSanitized,
   type RowTypeOf,
 } from "./reply-row.js";
@@ -246,6 +247,13 @@ export const PANES_ROW = defineReplyRow("list-panes", {
   cols: field("#{pane_width}", int, 80),
   rows: field("#{pane_height}", int, 24),
   active: field("#{?pane_active,1,0}", flag01, true),
+  // Current pane mode (tc-mysc.3), backed by `#{pane_mode}` via the `paneMode`
+  // codec (empty → "normal", "copy-mode" → "copy", every other mode name
+  // verbatim). Joins PANE_CANONICAL_FROM_ROW: buildInitialModel copies it
+  // verbatim, so entering/leaving copy-mode (a %pane-mode-changed → requery)
+  // rebuilds the true value and the projection diff emits pane.mode-changed —
+  // the delta was DEAD while this was hardcoded "normal" (the tc-pqb4 class).
+  mode: field("#{pane_mode}", paneMode, "normal"),
   // Dead-pane state (tc-4bv2 / tc-295a.10 shared shape). True when tmux reports
   // `pane_dead=1` — the process exited but `remain-on-exit on` keeps the corpse
   // in `list-panes` as a FIRST-CLASS model member (inspectable/reapable), NOT an
@@ -408,7 +416,13 @@ export type PanesReplyRow = RowTypeOf<typeof PANES_ROW>;
  * The pane fields taken VERBATIM from a {@link PanesReplyRow} — same name, same
  * type, no transform (tc-mysc.1). `buildInitialModel` copies exactly these via
  * {@link pickCanonical}; a `Pane` is `PaneFromRow` + remapped identity ids +
- * genuinely-transformed fields (`mode`, `exitCode`) + `overlay`.
+ * genuinely-transformed field (`exitCode`) + `overlay`.
+ *
+ * `mode` (tc-mysc.3) and `paneTitle` (tc-mysc.2) both join this Pick: their
+ * codecs do the wire⇄value transform IN the parse, so buildInitialModel copies
+ * the decoded value straight across with no construction-site logic — closing
+ * the second half of tc-pqb4 for each (the hardcoded literal is now unwritable
+ * here).
  *
  * This list is the SECOND half of the tc-pqb4 defence (the first half — the
  * schema-derived format/parse — landed in tc-mysc): because the canonical
@@ -422,6 +436,7 @@ export type PanesReplyRow = RowTypeOf<typeof PANES_ROW>;
 export const PANE_CANONICAL_FROM_ROW = [
   "cols",
   "rows",
+  "mode",
   "dead",
   "label",
   "detach",
@@ -448,10 +463,11 @@ function pickCanonical(row: PanesReplyRow): PaneFromRow {
 
 /**
  * The pane fields NOT covered by identity or {@link PaneFromRow} — the
- * explicitly-constructed remainder (`mode`, `exitCode`, `overlay`).
+ * explicitly-constructed remainder (`exitCode`, `overlay`).
  * buildInitialModel writes this sub-object with a `satisfies` clause so a
  * hardcoded literal for a canonical/identity field is an excess-property type
- * error there.
+ * error there (`mode` joined `PaneFromRow` in tc-mysc.3 and `paneTitle` in
+ * tc-mysc.2, so neither is writable here).
  */
 type PaneConstructionExtras = Omit<Pane, keyof PaneFromRow | "paneId" | "windowId" | "sessionId">;
 
@@ -573,7 +589,6 @@ export function buildInitialModel(
       sessionId: sid,
       ...pickCanonical(row),
       ...({
-        mode: "normal",
         // exitCode is only meaningful for a dead corpse; a live pane's
         // pane_dead_status is empty (→ undefined) so this guard is belt-and-braces.
         exitCode: row.dead ? row.exitCode : undefined,

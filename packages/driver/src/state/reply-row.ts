@@ -35,6 +35,8 @@
  * error boundary instead of the transient-retry path (tc-mysc amendment 1).
  */
 
+import type { PaneMode } from "@tmuxcc/protocol";
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -177,6 +179,42 @@ export function optionalKeyword<const K extends string>(
     encode: (value) => value ?? "",
   };
 }
+
+/**
+ * tmux `#{pane_mode}` ⇄ the wire {@link PaneMode} (tc-mysc.3).
+ *
+ * `#{pane_mode}` reports the pane's active mode-table NAME: EMPTY for a normal
+ * pane, `"copy-mode"` in copy-mode, and `"<x>-mode"` for the other window modes
+ * (`"view-mode"`, `"tree-mode"` for choose-tree/-buffer/-client, `"options-mode"`
+ * for customize-mode — all verified live, tmux 3.4). The two common states get a
+ * friendly wire alias (`""` → `"normal"`, `"copy-mode"` → `"copy"`); every other
+ * mode name passes through VERBATIM.
+ *
+ * The verbatim pass-through is deliberate: `PaneMode` is an OPEN string union
+ * (`"normal" | "copy" | "view" | string`), and this bead does NOT invent a
+ * normalization table for the long tail of tmux mode names (settling
+ * `view-mode`/`tree-mode` against the wire literals is an open question — see
+ * state-model.md §9). Consequently `"view-mode"` decodes to `"view-mode"`, NOT
+ * the `"view"` wire literal — the alias set is intentionally just the two states
+ * the model acts on today.
+ *
+ * `encode` is the exact inverse (`"normal"` → `""`, `"copy"` → `"copy-mode"`,
+ * else verbatim) so a fixture row and the parser share one definition of the
+ * wire form. Unlike {@link optionalKeyword}, this codec never fails: any string
+ * is a legal mode name.
+ */
+export const paneMode: FieldCodec<PaneMode> = {
+  decode(raw) {
+    if (raw === "") return "normal";
+    if (raw === "copy-mode") return "copy";
+    return raw;
+  },
+  encode(value) {
+    if (value === "normal") return "";
+    if (value === "copy") return "copy-mode";
+    return value;
+  },
+};
 
 // ---------------------------------------------------------------------------
 // Free-text sanitization (tc-mysc amendments 2 & 3)
