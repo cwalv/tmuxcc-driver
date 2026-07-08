@@ -446,8 +446,11 @@ class CoalescerImpl implements Coalescer {
     if (this._onNotify !== undefined) {
       try {
         this._onNotify(kind);
-      } catch {
-        // Observer errors must not break the pipeline.
+      } catch (err) {
+        // Observer errors must not break the pipeline (tc-1wx5).
+        process.stderr.write(
+          `[coalescer] onNotify observer threw: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
       }
     }
 
@@ -570,8 +573,11 @@ class CoalescerImpl implements Coalescer {
         if (this._onFatalError !== undefined) {
           try {
             this._onFatalError(err);
-          } catch {
-            // Swallow observer errors.
+          } catch (obsErr) {
+            // Swallow observer errors — must not break the pipeline (tc-1wx5).
+            process.stderr.write(
+              `[coalescer] onFatalError observer threw: ${obsErr instanceof Error ? obsErr.message : String(obsErr)}\n`,
+            );
           }
         }
         return;
@@ -579,8 +585,11 @@ class CoalescerImpl implements Coalescer {
       if (this._onError !== undefined) {
         try {
           this._onError(err);
-        } catch {
-          // Swallow observer errors.
+        } catch (obsErr) {
+          // Swallow observer errors — must not break the pipeline (tc-1wx5).
+          process.stderr.write(
+            `[coalescer] onError observer threw: ${obsErr instanceof Error ? obsErr.message : String(obsErr)}\n`,
+          );
         }
       }
       // On thrown rejection (the engine should never throw in practice, but
@@ -619,8 +628,11 @@ class CoalescerImpl implements Coalescer {
     if (result !== null && this._onDeltas !== undefined) {
       try {
         this._onDeltas(result, { edge, firstNotifyAt });
-      } catch {
-        // Subscriber errors must not break the pipeline.
+      } catch (err) {
+        // Subscriber errors must not break the pipeline (tc-1wx5).
+        process.stderr.write(
+          `[coalescer] onDeltas subscriber threw: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
       }
     }
 

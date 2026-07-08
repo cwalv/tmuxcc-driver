@@ -65,6 +65,7 @@ import type { ClientMessage } from "@tmuxcc/protocol";
 import type { PaneId, WindowId } from "@tmuxcc/protocol";
 import { paneId as mkPaneId, windowId as mkWindowId } from "@tmuxcc/protocol";
 import type { CommandResult } from "../parser/correlator.js";
+import type { SessionProxyRegistry } from "../metrics/registry.js";
 import {
   sendKeysHex,
   refreshClientSize,
@@ -362,6 +363,15 @@ export interface InputPathOptions {
    * still fires but no rollback is performed on tmux %error).
    */
   getModel?: () => SessionModel;
+
+  /**
+   * Session-proxy metrics registry for signalling send rejections (tc-1wx5).
+   *
+   * When provided, `enqueueInput` increments `input_send_rejected_total` on
+   * every `sendInputChunked` rejection and also writes a line to stderr.
+   * Omitting this option disables the counter (the stderr write still fires).
+   */
+  metrics?: SessionProxyRegistry;
 }
 
 /**
@@ -447,6 +457,7 @@ export function createInputPath(
   const toTmuxWindow = opts.windowIdToTmux ?? defaultWindowIdToTmux;
   const dispatchSynthetic = opts.dispatchSynthetic;
   const getModel = opts.getModel;
+  const metrics = opts.metrics;
 
   /**
    * Atomically register a correlator slot AND write the command (tc-3si.1).
@@ -528,9 +539,15 @@ export function createInputPath(
         ? sendInputChunked(tmuxPaneNum, bytes)
         : prev.then(() => sendInputChunked(tmuxPaneNum, bytes))
     )
-      // A rejected send must not poison the chain for subsequent inputs;
-      // send rejections were unobserved fire-and-forget before chunking too.
-      .catch(() => {});
+      // A rejected send must not poison the chain for subsequent inputs.
+      // Log + count so a broken send-keys path is visible in metrics and
+      // stderr rather than silently swallowed (tc-1wx5).
+      .catch((err: unknown) => {
+        process.stderr.write(
+          `[input-path] input send rejected for pane ${tmuxPaneNum}: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+        metrics?.incInputSendRejected();
+      });
     inputTail = chained;
     void chained.then(() => {
       if (inputTail === chained) inputTail = null;

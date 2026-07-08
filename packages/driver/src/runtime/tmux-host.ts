@@ -437,8 +437,11 @@ class TmuxHostImpl implements TmuxHost {
         for (const handler of this._exitHandlers) {
           try {
             handler(this._exitCode, this._exitSignal);
-          } catch {
-            // ignore
+          } catch (err) {
+            // Listener errors must not crash the host (tc-1wx5).
+            process.stderr.write(
+              `[tmux-host] exit handler threw: ${err instanceof Error ? err.message : String(err)}\n`,
+            );
           }
         }
       });
@@ -591,8 +594,11 @@ class TmuxHostImpl implements TmuxHost {
     for (const handler of this._errorHandlers) {
       try {
         handler(err);
-      } catch {
-        // ignore
+      } catch (handlerErr) {
+        // Listener errors must not suppress the original error (tc-1wx5).
+        process.stderr.write(
+          `[tmux-host] error handler threw: ${handlerErr instanceof Error ? handlerErr.message : String(handlerErr)}\n`,
+        );
       }
     }
   }

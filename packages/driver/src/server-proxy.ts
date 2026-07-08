@@ -1184,19 +1184,26 @@ class ServerProxyImpl implements ServerProxyHandle {
 
     try {
       await this.shutdown();
-    } catch {
+    } catch (err) {
       // Best-effort: even if shutdown failed midway, OUR socket file MUST be
       // gone before we report self-exit, or the next spawn stalls.  The
       // ownership guard (tc-kyq4.1) still applies — if shutdown already removed
       // it this is a no-op, and we never unlink a replacement's socket.
+      // Log so a self-exit shutdown failure is visible (tc-1wx5).
+      process.stderr.write(
+        `[server-proxy] shutdown() threw during self-exit (${reason}): ${err instanceof Error ? err.message : String(err)}\n`,
+      );
       this._removeOwnedSocket();
     }
 
     for (const cb of this._selfExitHandlers.slice()) {
       try {
         cb(reason);
-      } catch {
-        // Listener errors must not break the exit path
+      } catch (err) {
+        // Listener errors must not break the exit path (tc-1wx5).
+        process.stderr.write(
+          `[server-proxy] self-exit handler threw: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
       }
     }
   }

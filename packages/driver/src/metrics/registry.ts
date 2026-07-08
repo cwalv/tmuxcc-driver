@@ -596,6 +596,18 @@ export interface SessionProxyRegistry {
   incBoundaryQuarantine(): void;
 
   /**
+   * Increment `input_send_rejected_total` (tc-1wx5).
+   *
+   * Called by the `enqueueInput` chain guard in `runtime/input-path.ts` when a
+   * `sendInputChunked` promise rejects — meaning bytes typed by the user never
+   * reached the tmux pane (transport fault, correlator reject, tmux %error).
+   *
+   * **Expected-zero tripwire**: any non-zero value means the send-keys path
+   * to tmux broke.  The caller ALSO logs the rejection to stderr.
+   */
+  incInputSendRejected(): void;
+
+  /**
    * Render the full registry as Prometheus text exposition format.
    * Returns a Promise<string> to match prom-client's async API.
    */
@@ -965,6 +977,18 @@ export function createSessionProxyRegistry(): SessionProxyRegistry {
     registers: [reg],
   });
 
+  // tc-1wx5: input-path send rejection counter. Expected-zero tripwire: any
+  // increment means a `send-keys -H` that was carrying live terminal input
+  // was rejected (transport fault, correlator reject, or tmux %error). The
+  // enqueueInput caller ALSO logs the rejection to stderr.
+  const inputSendRejectedTotal = new Counter({
+    name: "input_send_rejected_total",
+    help:
+      "Input send-keys commands that were rejected by the tmux pipeline (transport fault, correlator reject, tmux error). " +
+      "Expected-zero tripwire: every increment means typed bytes were lost.",
+    registers: [reg],
+  });
+
   // tc-2x3.4: per-session error boundary trip counter.
   //
   // Incremented by the supervisor's onFatalError handler whenever the
@@ -1162,6 +1186,10 @@ export function createSessionProxyRegistry(): SessionProxyRegistry {
 
     incBoundaryQuarantine(): void {
       sessionBoundaryQuarantinedTotal.inc();
+    },
+
+    incInputSendRejected(): void {
+      inputSendRejectedTotal.inc();
     },
 
     observeDeltasPerCycle(count: number): void {

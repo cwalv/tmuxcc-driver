@@ -57,6 +57,10 @@ export function openServerProxyLog(logPath: string): ServerProxyLog | null {
   }
 
   let closed = false;
+  // Latched flag so a single write-failure note reaches stderr exactly once
+  // (tc-1wx5).  Subsequent failures are still swallowed (best-effort policy)
+  // but the first one is surfaced so a full disk / revoked fd is diagnosable.
+  let logWriteFailed = false;
 
   return {
     path: logPath,
@@ -65,8 +69,17 @@ export function openServerProxyLog(logPath: string): ServerProxyLog | null {
       try {
         const text = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
         fs.writeSync(fd, `${new Date().toISOString()} ${text}`);
-      } catch {
+      } catch (err) {
         // Best-effort: a full disk or revoked fd must not break the server-proxy.
+        // Emit a one-time note to stderr so write failures are diagnosable.
+        if (!logWriteFailed) {
+          logWriteFailed = true;
+          try {
+            process.stderr.write(
+              `[server-proxy-log] log write failed (${logPath}): ${err instanceof Error ? err.message : String(err)}\n`,
+            );
+          } catch { /* stderr also unreachable — give up silently */ }
+        }
       }
     },
     close(): void {

@@ -488,7 +488,15 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
       // registration is guarded on the promise still being the registered
       // value, so deleting it here means the resolved entry will not be
       // re-registered; we own its teardown.
-      void entry.then((e) => this._teardownEntry(e)).catch(() => {});
+      void entry
+        .then((e) => this._teardownEntry(e))
+        .catch((err: unknown) => {
+          // The creation promise rejected — the session-proxy was never fully
+          // started.  Log so a leak here is visible (tc-1wx5).
+          process.stderr.write(
+            `[session-proxy-supervisor] in-flight teardown rejected for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}\n`,
+          );
+        });
     } else {
       this._teardownEntry(entry);
     }
@@ -673,7 +681,15 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
       // Creation failed before readiness — kill the half-built session-proxy so
       // we leave no running tmux behind, then rethrow so ensureSessionProxy
       // removes the registry slot and the claim fails. D5: no socket to unlink.
-      try { sessionProxy.kill(); } catch { /* not started */ }
+      try { sessionProxy.kill(); } catch (err) {
+        // ESRCH means the process never ran or already exited — expected
+        // on this path (tc-1wx5).  Any other failure is unexpected; log it.
+        if ((err as NodeJS.ErrnoException).code !== "ESRCH") {
+          process.stderr.write(
+            `[session-proxy-supervisor] sessionProxy.kill() threw unexpectedly: ${err instanceof Error ? err.message : String(err)}\n`,
+          );
+        }
+      }
       throw err;
     }
 

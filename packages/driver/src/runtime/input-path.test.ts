@@ -2362,6 +2362,45 @@ describe("createInputPath — tc-n4ct cross-message ordering", () => {
     assert.deepEqual(tokens(host.writes[1]!), ["58"], "B's byte follows the abort");
     d2.resolve({ ok: true });
   });
+
+  it("send rejection increments metrics counter and does not poison the chain (tc-1wx5)", async () => {
+    // Verify: a rejected send (not just { ok: false } — an actual Promise
+    // rejection from a broken transport) increments incInputSendRejected and
+    // does not poison the chain for the next message.
+    //
+    // Message A must be > INPUT_CHUNK_BYTES (5000) so it enters enqueueInput
+    // rather than the synchronous fast path (which has no .catch / no counter).
+    // 5001 bytes = 2 chunks; the first chunk's send() returns the rejected
+    // promise, sendInputChunked rejects, and the second chunk is never reached.
+    let rejectedCount = 0;
+    // Partial stub — only the method input-path calls on a send rejection.
+    const stubRegistry = { incInputSendRejected: () => { rejectedCount++; } } as unknown as import("../metrics/registry.js").SessionProxyRegistry;
+
+    const host = makeFakeDeps();
+    // First send rejects (transport fault, not a tmux %error).
+    host.enqueueSendResult(Promise.reject(new Error("transport closed")));
+    // Second send resolves ok — chain must not be poisoned by the rejection.
+    const d2 = defer<InputPathCommandResult>();
+    host.enqueueSendResult(d2.promise);
+
+    const path = createInputPath(host, { metrics: stubRegistry });
+    // Message A: > 5000 bytes → multi-chunk → goes through enqueueInput, not
+    // the fast path.  Chunk 1's send rejects; chunk 2 is never reached.
+    path.handleClientMessage(makeInput("1", "a".repeat(5001)));
+    // Message B: queued behind A — must still fire after A's rejection is
+    // absorbed by the chain's .catch handler.
+    path.handleClientMessage(makeInput("1", "B"));
+
+    // Let both messages propagate through the chain.
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    d2.resolve({ ok: true });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+
+    // The rejection was caught and counted.
+    assert.equal(rejectedCount, 1, "send rejection must increment the metrics counter");
+    // B still sent (chain was not poisoned): A's first chunk + B's chunk = 2.
+    assert.equal(host.writes.length, 2, "B must reach the wire despite A's rejection");
+  });
 });
 
 // ---------------------------------------------------------------------------

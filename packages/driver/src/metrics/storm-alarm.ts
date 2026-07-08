@@ -333,8 +333,11 @@ class StormAlarmImpl implements StormAlarm {
     if (this._onTrip !== undefined) {
       try {
         this._onTrip(breakdown);
-      } catch {
-        // Swallow observer errors — must not break the pipeline.
+      } catch (err) {
+        // Swallow observer errors — must not break the pipeline (tc-1wx5).
+        process.stderr.write(
+          `[storm-alarm] trip observer threw: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
       }
     }
   }
