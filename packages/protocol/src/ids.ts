@@ -86,3 +86,48 @@ export function sessionId(raw: string): SessionId {
 export function connectionId(raw: string): ConnectionId {
   return raw as ConnectionId;
 }
+
+// ---------------------------------------------------------------------------
+// tc-33ug — wire ↔ tmux pane-id conversion pair
+// ---------------------------------------------------------------------------
+//
+// The wire protocol uses `p<N>` as the PaneId (minted by the session-proxy at
+// the south boundary).  tmux itself uses `%<N>` (what `#{pane_id}` reports).
+// These two forms are visually parallel but different strings; every QA seam
+// and test helper that needs to shell out to tmux must cross this boundary.
+//
+// Having the conversion live beside the PaneId type means there is exactly ONE
+// place to fix if the minting scheme ever changes (currently `pN`; a future
+// multi-session namespacing might produce `s0-pN`).
+
+/**
+ * Convert a wire PaneId (`p<N>`) to the native tmux pane id string (`%<N>`).
+ *
+ * Used wherever QA tooling or tests need to shell out to `tmux … -t %<N>`
+ * given a PaneId from the oracle / model.
+ *
+ * Example: `paneIdToTmux("p3" as PaneId)` → `"%3"`.
+ */
+export function paneIdToTmux(id: PaneId): string {
+  return `%${(id as string).slice(1)}`;
+}
+
+/**
+ * Convert a native tmux pane id string (`%<N>`) to a wire PaneId (`p<N>`).
+ *
+ * Validates that `tmuxId` starts with `%` and the remainder is a non-negative
+ * integer; throws `TypeError` on malformed input so callers fail loud rather
+ * than silently producing a wrong PaneId.
+ *
+ * Example: `tmuxToPaneId("%3")` → `"p3" as PaneId`.
+ *
+ * @throws {TypeError} when `tmuxId` does not match the `%<N>` form.
+ */
+export function tmuxToPaneId(tmuxId: string): PaneId {
+  if (!tmuxId.startsWith("%") || Number.isNaN(parseInt(tmuxId.slice(1), 10))) {
+    throw new TypeError(
+      `tmuxToPaneId: expected tmux pane id in "%<N>" form, got ${JSON.stringify(tmuxId)}`,
+    );
+  }
+  return `p${tmuxId.slice(1)}` as PaneId;
+}

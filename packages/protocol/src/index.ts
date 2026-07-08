@@ -23,7 +23,7 @@
 
 // Shared primitives — used by both planes
 export type { PaneId, WindowId, SessionId, ConnectionId } from "./ids.js";
-export { paneId, windowId, sessionId, connectionId } from "./ids.js";
+export { paneId, windowId, sessionId, connectionId, paneIdToTmux, tmuxToPaneId } from "./ids.js";
 
 // Layout types
 export type {
