@@ -334,9 +334,9 @@ which all pass `ignoreSize`.
 |---|---|---|
 | `connectServerProxyAndClaim` (claim/join) | `{ pullHydration }` | candidate |
 | `connectServerProxyAndClaim` (read-only observe) | `{ ignoreSize, readOnly, pullHydration }` | observer |
-| `connectServerProxyAndAttachSession` (silent reattach) | none | candidate |
-| `connectServerProxyAndAttachSession` (read-only observe) | `{ ignoreSize, readOnly }` | observer |
-| `connectServerProxyAndCreateUnique` (mints a fresh session) | none | candidate (first → owner) |
+| `connectServerProxyAndAttachSession` (silent reattach) | `{ pullHydration }` | candidate |
+| `connectServerProxyAndAttachSession` (read-only observe) | `{ ignoreSize, readOnly, pullHydration }` | observer |
+| `connectServerProxyAndCreateUnique` (mints a fresh session) | `{ pullHydration }` | candidate (first → owner) |
 | `connectServerProxyAndAttachPane` (auxiliary pane-scoped) | `{ ignoreSize, pullHydration }` | non-candidate |
 | driver-admin `fetchSessionProxyInfo` (`driver-admin/src/info.ts`) | `{ ignoreSize }` | non-candidate |
 
@@ -348,12 +348,17 @@ auxiliary pane-targeted connection is not its window's geometry driver, the main
 session connection is; refcounted candidacy (not this flag) is what keeps closing
 the aux from stripping the window's candidacy.
 
-> Pre-existing pullHydration inconsistency (NOT a size concern, unchanged here):
-> `connectServerProxyAndAttachSession` and `connectServerProxyAndCreateUnique` do
-> not declare `pullHydration`, contra the tc-76m8.28 "every extension data
-> connection declares pullHydration" convention — the driver falls back to its
-> push-replay for them (degraded, never worse). Tracked separately; left as-is so
-> this size-candidacy change does not perturb hydration behavior.
+> Every EXTENSION data connection declares `pullHydration` (tc-76m8.28; the last
+> two paths — `connectServerProxyAndAttachSession` and
+> `connectServerProxyAndCreateUnique` — were closed in tc-3sg8). The render hook
+> pull-hydrates each pane via `pane.attach` on every real bind (`session.ts`
+> `onPaneOpened`, gated on settled geometry, tc-76m8.24), so the driver's
+> unsolicited addClient-time replay is at best redundant and, on a
+> geometry-drifted reconnect (the silent-reattach path), corrupting — the
+> tc-76m8.24 class via the push entry point. `driver-admin fetchSessionProxyInfo`
+> is deliberately OUTSIDE this invariant: it is an anonymous SDK info reader, not
+> an extension render connection — it never binds panes to tabs, so the driver's
+> push is inert noise it ignores.
 
 ### Future-facility seam: multi-client arbitration modes
 
