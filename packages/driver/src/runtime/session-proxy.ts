@@ -53,14 +53,14 @@ import { createFlowController } from "./flow-control.js";
 import type { FlowController, FlowControllerOptions } from "./flow-control.js";
 import type { Transport } from "@tmuxcc/protocol";
 import { paneId as mintPaneId } from "@tmuxcc/protocol";
-import type { PaneId } from "@tmuxcc/protocol";
+import type { PaneId, WindowId } from "@tmuxcc/protocol";
 import type { PaneBufferStore } from "../state/scrollback.js";
 import type { SwitchClientOutcome } from "../state/switch-client.js";
 import { createSessionProxyRegistry, createStormAlarm } from "../metrics/index.js";
 import type { SessionProxyRegistry, StormAlarmOptions } from "../metrics/index.js";
 import type { CommandResult } from "../parser/correlator.js";
 import { hydrateTransport, hydratePane, captureText } from "./hydration.js";
-import type { HydrationSentinels } from "./hydration.js";
+import type { HydrationSentinels, HydrateOpts } from "./hydration.js";
 import { createVerbOriginRegistry } from "./verb-origin.js";
 import { createCloseCauseRegistry } from "./close-cause.js";
 import { createSizeOwnershipPolicy } from "./size-ownership.js";
@@ -334,6 +334,70 @@ export interface SessionProxy {
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
+
+/**
+ * Minimal read-only model shape {@link resolveSizeOwnerViewport} depends on.
+ * Kept narrow (mirrors the `HydrationPipeline` pattern) so the resolver is a
+ * pure, directly-unit-testable function that does not drag the full model graph
+ * into fixtures.
+ */
+export interface SizeOwnerViewportModel {
+  readonly panes: ReadonlyMap<
+    PaneId,
+    { readonly windowId: WindowId; readonly cols: number; readonly rows: number }
+  >;
+  readonly windows: ReadonlyMap<WindowId, { readonly paneIds: readonly PaneId[] }>;
+}
+
+/**
+ * tc-fwx0: resolve the D4 size-OWNER's target viewport for a pane about to be
+ * hydrated, or `undefined` when the size-owner capture gate should NOT engage
+ * (the fail-soft fallback: reconstruct-at-captured-size, then converge via the
+ * live `%output` stream).
+ *
+ * The size that matters for a faithful DIFFERENT-size reattach is the size
+ * owner's — the client D4 elected to drive the session geometry
+ * (window-size-`latest`), NOT the attaching connection's (which is often
+ * `ignoreSize`). This reads the driver's existing ownership state
+ * (`ownerKey` = `sizeOwnership.owner`, `lastResizeByClient` = each client's last
+ * desired viewport) and returns the owner's viewport only when a
+ * `refresh-client -C` before capture would actually change what is captured.
+ *
+ * Returns `undefined` (⇒ fallback) in every ambiguous / racy case, so the caller
+ * never wedges and never captures at a guessed size:
+ *   - `ownerKey === null`: no owner elected yet (the owner election has not
+ *     happened — e.g. the reattaching window's first-candidate promotion, or an
+ *     ownerless idle session). We cannot know the target size → fall back.
+ *   - the owner has no recorded `resize.request`: the owner's viewport has not
+ *     arrived yet (the common reattach ordering — pane.attach precedes the new
+ *     window's first `resize.request`). → fall back.
+ *   - the pane vanished between the model check and here → fall back.
+ *   - the pane's window has ≠ 1 pane: a split's panes reflow via the managed
+ *     layout path, not the gated `resize.request → refresh-client -C` path, so
+ *     the owner's full-window viewport is not this pane's target size → fall back.
+ *   - the owner's viewport already equals the pane's captured size: tmux is
+ *     already at the owner's size, so the refresh would be a no-op → skip it.
+ *
+ * Only when a single-pane window's owner has a known viewport that DIFFERS from
+ * the pane's current size do we return it, so the caller issues
+ * `refresh-client -C <cols>x<rows>` (gated on `%end`) before the capture.
+ */
+export function resolveSizeOwnerViewport(
+  pid: PaneId,
+  ownerKey: string | null,
+  lastResizeByClient: ReadonlyMap<string, { readonly cols: number; readonly rows: number }>,
+  model: SizeOwnerViewportModel,
+): { readonly cols: number; readonly rows: number } | undefined {
+  if (ownerKey === null) return undefined;
+  const want = lastResizeByClient.get(ownerKey);
+  if (want === undefined) return undefined;
+  const pane = model.panes.get(pid);
+  if (pane === undefined) return undefined;
+  const win = model.windows.get(pane.windowId);
+  if (win === undefined || win.paneIds.length !== 1) return undefined;
+  if (want.cols === pane.cols && want.rows === pane.rows) return undefined;
+  return { cols: want.cols, rows: want.rows };
+}
 
 /**
  * Assemble the full session-proxy runtime.
@@ -925,7 +989,8 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
     sentinels: HydrationSentinels,
     pid: PaneId,
   ): Promise<void> {
-    if (!pipeline.getModel().panes.has(pid)) {
+    const model = pipeline.getModel();
+    if (!model.panes.has(pid)) {
       server.sendDirected(controlTransport, {
         type: "pane.attach.failed",
         paneId: pid,
@@ -934,7 +999,22 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
       });
       return;
     }
-    const found = await hydratePane(pipeline, replayTransport, pid, sentinels);
+    // tc-fwx0: size-owner-aware capture gate. Resolve the current D4 size-owner's
+    // last-known viewport; when it differs from the pane's captured size (and the
+    // pane is the sole pane of its window), issue `refresh-client -C` gated on
+    // %end BEFORE capture so a different-size reattach reconstructs at the owner's
+    // size rather than a stale one. Resolves to `undefined` in every racy case
+    // (owner not yet elected / owner's resize.request not yet arrived), which
+    // falls back to reconstruct-at-captured-size then converge — never wedges.
+    const initialViewport = resolveSizeOwnerViewport(
+      pid,
+      sizeOwnership.owner,
+      lastResizeByClient,
+      model,
+    );
+    const hydrateOpts: HydrateOpts | undefined =
+      initialViewport !== undefined ? { initialViewport } : undefined;
+    const found = await hydratePane(pipeline, replayTransport, pid, sentinels, hydrateOpts);
     if (!found) {
       server.sendDirected(controlTransport, {
         type: "pane.attach.failed",

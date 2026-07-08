@@ -83,7 +83,7 @@
 import type { PaneId } from "@tmuxcc/protocol";
 import type { Transport } from "@tmuxcc/protocol";
 import type { CommandResult } from "../parser/correlator.js";
-import { capturePane, displayMessagePane, PANE_GRID_FACTS_FORMAT } from "../parser/commands.js";
+import { capturePane, displayMessagePane, PANE_GRID_FACTS_FORMAT, refreshClientSize } from "../parser/commands.js";
 
 /**
  * Cursor home + erase entire screen + erase scrollback.
@@ -143,6 +143,58 @@ export interface HydrationSentinels {
 }
 
 /**
+ * tc-fwx0: optional pre-capture resize gate for `hydrateTransport` and
+ * `hydratePane` — the reusable refresh-before-capture core (originally shaped in
+ * tc-w3ir.6; the tc-w3ir.6 caller — an attach-time viewport threaded through
+ * `session.attach` — was inert for the real client, so only this mechanism was
+ * kept).
+ *
+ * When `initialViewport` is provided, the hydrator issues
+ * `refresh-client -C <cols>x<rows>` via `pipeline.send` (which awaits the
+ * correlator `%end`, confirming tmux processed the resize) BEFORE dispatching
+ * any `capture-pane` command. This gates the capture on the completed resize so
+ * the replay reflects the intended viewport geometry rather than tmux's current
+ * (possibly stale) client size — the "no mid-reflow capture" guarantee for a
+ * different-size reattach.
+ *
+ * This module is deliberately viewport-agnostic: WHO decides the target size is
+ * the caller's policy. The `pane.attach` seam (session-proxy.ts) resolves the
+ * current D4 size-OWNER's last-known viewport (`sizeOwnership` +
+ * `lastResizeByClient`) and passes it here only when it differs from the pane's
+ * captured size; absent it (the common reattach ordering, where the owner's
+ * `resize.request` has not arrived yet) the legacy reconstruct-at-captured-size
+ * path runs and converges via the live `%output` stream.
+ */
+export interface HydrateOpts {
+  /**
+   * Target viewport for the pre-capture resize gate. When present,
+   * `refresh-client -C <cols>x<rows>` is issued and awaited before any
+   * `capture-pane` round-trip. Absent ⇒ legacy reconstruct-at-captured-size,
+   * converge via the live `%output` stream.
+   */
+  initialViewport?: { readonly cols: number; readonly rows: number };
+}
+
+/**
+ * Issue the pre-capture `refresh-client -C` resize gate when `opts` carries an
+ * `initialViewport`, awaiting `%end` so the resize is complete before any
+ * capture. Best-effort: a dead host or a torn-down pipeline is swallowed and the
+ * caller falls through to capture-then-converge (never wedges the hydration).
+ */
+async function maybeRefreshBeforeCapture(
+  pipeline: HydrationPipeline,
+  opts: HydrateOpts | undefined,
+): Promise<void> {
+  if (opts?.initialViewport === undefined) return;
+  const { cols, rows } = opts.initialViewport;
+  try {
+    await pipeline.send(refreshClientSize(cols, rows));
+  } catch {
+    // Host dead or pipeline torn down — fall through to capture-then-converge.
+  }
+}
+
+/**
  * Hydrate `transport` with clear-then-replay for each pane in `paneIds`.
  *
  * Concurrent across panes; resolves when every pane's round-trip has
@@ -154,18 +206,25 @@ export interface HydrationSentinels {
  *                   `transport.sendData(paneId, ...)`.
  * @param paneIds    The set of panes currently in the model.  The caller
  *                   typically passes `pipeline.getModel().panes.keys()`.
+ * @param sentinels  Optional begin/end sentinel hooks (tc-295a.9).
+ * @param opts       Optional `initialViewport` for the pre-capture resize gate
+ *                   (tc-fwx0). Issued once, before any pane's capture.
  */
-export function hydrateTransport(
+export async function hydrateTransport(
   pipeline: HydrationPipeline,
   transport: Transport,
   paneIds: Iterable<PaneId>,
   sentinels?: HydrationSentinels,
+  opts?: HydrateOpts,
 ): Promise<void> {
+  // tc-fwx0: pre-capture resize gate — issued once (awaits %end) before any
+  // capture-pane so every pane's replay reflects the gated viewport size.
+  await maybeRefreshBeforeCapture(pipeline, opts);
   const tasks: Promise<boolean>[] = [];
   for (const pid of paneIds) {
     tasks.push(_hydrateOnePane(pipeline, transport, pid, sentinels));
   }
-  return Promise.all(tasks).then(() => undefined);
+  await Promise.all(tasks);
 }
 
 /**
@@ -177,15 +236,23 @@ export function hydrateTransport(
  * Wraps the same `_hydrateOnePane` body the bulk path uses, so the sentinel +
  * no-interleave queueing behaviour is identical.
  *
+ * @param opts  Optional `initialViewport` for the pre-capture resize gate
+ *              (tc-fwx0): issues `refresh-client -C` and awaits `%end` before
+ *              the capture so the replay reflects the gated viewport size. This
+ *              is the seam the `pane.attach` handler uses for a size-owner-aware
+ *              different-size reattach.
  * @returns `true` if the pane hydrated (clear+replay delivered); `false` if the
  *          pane was not found / capture refused (caller surfaces pane.not-found).
  */
-export function hydratePane(
+export async function hydratePane(
   pipeline: HydrationPipeline,
   transport: Transport,
   pid: PaneId,
   sentinels?: HydrationSentinels,
+  opts?: HydrateOpts,
 ): Promise<boolean> {
+  // tc-fwx0: pre-capture resize gate (mirrors hydrateTransport).
+  await maybeRefreshBeforeCapture(pipeline, opts);
   return _hydrateOnePane(pipeline, transport, pid, sentinels);
 }
 
