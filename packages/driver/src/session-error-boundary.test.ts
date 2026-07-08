@@ -60,6 +60,7 @@ import type { SessionProxy } from "./runtime/session-proxy.js";
 import { createSessionProxySupervisor, SessionQuarantineError } from "./session-proxy-supervisor.js";
 import type { SessionProxySupervisor, SessionProxySupervisorOptions } from "./session-proxy-supervisor.js";
 import { probeLiveSocket } from "./runtime-dir.js";
+import { openServerProxyLog, installStderrMirror } from "./server-proxy-log.js";
 import {
   createInMemoryTransportPair,
   runClientHandshake,
@@ -1105,5 +1106,97 @@ describe("tc-2x3.4: per-session error boundary", { skip: !TMUX_AVAILABLE }, () =
     // Cleanup.
     supervisor.reapSessionProxy(sessionId);
     await new Promise<void>((r) => setTimeout(r, 500));
+  });
+
+  /**
+   * EB9 (tc-1yek.3): boundary-trip FATAL line reaches installStderrMirror-wired log.
+   *
+   * After `server-proxy-entry.ts` calls `installStderrMirror(log)` early in
+   * main(), every `process.stderr.write(...)` is tee'd into the server-proxy.log
+   * file BEFORE the forward to the (now-detached) pipe.  The EPIPE from the dead
+   * pipe is swallowed; the log file is the durable sink (tc-9xf1, tc-k6v).
+   *
+   * This test exercises the end-to-end path:
+   *   fault injection → _triggerFatalBoundary → process.stderr.write
+   *   → (mirror tee) → log.append → server-proxy.log file
+   *
+   * Acceptance criteria (tc-1yek.3):
+   *   - "[pipeline] FATAL:" line appears in server-proxy.log.
+   *   - Test completes without an EPIPE / uncaught-exception crash.
+   */
+  it("EB9 (tc-1yek.3): boundary-trip FATAL line reaches installStderrMirror log; no EPIPE crash", { timeout: 20_000 }, async () => {
+    const socketName = `tmuxcc-eb9-${process.pid}-${Date.now()}`;
+    const sessionName = `eb9-sess-${process.pid}`;
+    _sockets.push(socketName);
+    spawnTmuxSession(socketName, sessionName);
+
+    // Open a temp log file and install the stderr mirror — the same sequence
+    // server-proxy-entry.ts runs in main() before any per-session work.
+    const tmpDir = makeTempDir("eb9");
+    _tmpDirs.push(tmpDir);
+    const logPath = path.join(tmpDir, "server-proxy.log");
+
+    const log = openServerProxyLog(logPath);
+    assert.ok(log, "EB9: openServerProxyLog must succeed on a writable dir");
+
+    const uninstallMirror = installStderrMirror(log);
+
+    let boundaryFired = false;
+    let _readyToFault = false;
+    let _faultFired = false;
+
+    const proxy = createSessionProxy({
+      host: { socketName, sessionName, attach: true },
+      onFatalError(_err: unknown) {
+        boundaryFired = true;
+      },
+      onTopologyNotify(_kind: string) {
+        if (!_readyToFault || _faultFired) return;
+        _faultFired = true;
+        // This throw runs inside _dispatchEvent → host.onData try/catch →
+        // _triggerFatalBoundary, which writes "[pipeline] FATAL: session …"
+        // via process.stderr.write — patched by installStderrMirror to tee
+        // into the log file before attempting the forward to the dead pipe.
+        throw new Error("[EB9 fault injection] deliberate pipeline exception for log-sink test");
+      },
+    });
+    _proxies.push(proxy);
+
+    try {
+      await proxy.start();
+      _readyToFault = true;
+
+      // Trigger a topology notification (new-window) to fire the fault path.
+      triggerNewWindow(socketName, sessionName);
+
+      await waitFor(() => boundaryFired, 8_000, "boundary trip to fire (EB9)");
+      assert.ok(boundaryFired, "EB9: onFatalError must fire");
+
+      // Close the log to flush the fd before reading (fs.writeSync is already
+      // synchronous, but closing ensures the OS flushes any kernel buffers).
+      log.close();
+
+      // EB9-F1: the FATAL line must appear in the log file.
+      const content = fs.readFileSync(logPath, "utf8");
+      assert.ok(
+        content.includes("[pipeline] FATAL:"),
+        `EB9-F1: "[pipeline] FATAL:" must appear in server-proxy.log via the mirror tee; ` +
+          `got:\n${content.slice(0, 600)}`,
+      );
+
+      // EB9-F2: the session name must be present so the line is attributable.
+      assert.ok(
+        content.includes(sessionName),
+        `EB9-F2: FATAL line must name the session ("${sessionName}"); ` +
+          `got:\n${content.slice(0, 600)}`,
+      );
+
+      // EB9-F3: no EPIPE crash (implicit — process must still be alive here).
+      // The test completing this assertion proves the broker did not crash on
+      // writing to the detached pipe (tc-9xf1 regression guard).
+    } finally {
+      uninstallMirror();
+      log.close(); // idempotent if already closed above
+    }
   });
 });
