@@ -2177,3 +2177,107 @@ describe("server-proxy – shutdown drain: handshake timeout + late-connect guar
     assert.equal(snapshotReceived, false, "sessions.snapshot must NOT be sent to a late-handshake connection");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Option 1 connection tracking (tc-13hq)
+//
+// The structural fix: every accepted socket is tracked in _acceptedSockets
+// from the moment _handleConnection fires.  _shutdownOnce closes all
+// _acceptedSockets before server.close(), so drain cannot wedge on ANY
+// accepted connection regardless of handshake state.
+//
+// The key test: use a VERY LONG handshakeTimeoutMs (60 s) so the timer
+// cannot possibly be what unblocks shutdown.  If _acceptedSockets tracking is
+// working, shutdown() completes in <<1 s despite the open wedge socket.
+// Without the Option 1 fix (but with a 60 s handshake timeout), shutdown()
+// would hang for 60 s.
+// ---------------------------------------------------------------------------
+
+describe("server-proxy – Option 1 accepted-socket tracking (tc-13hq)", () => {
+  it("shutdown() resolves immediately even with a wedge connection — timer (60 s) is not what unblocks it", async () => {
+    const socketName = mintSocket("sp");
+    const runtimeDir = makeRuntimeDir("13hq-opt1");
+    // Use a handshake timeout WAY beyond any reasonable shutdown budget (60 s).
+    // If the timer were the mechanism, shutdown() would hang for 60 s and the
+    // 2 s rejectAfter below would fire first.  The test proves Option 1's
+    // _acceptedSockets loop in _shutdownOnce is what closes the wedge socket.
+    const serverProxy = createServerProxy({ socketName, runtimeDir, handshakeTimeoutMs: 60_000 });
+    await serverProxy.start();
+    const endpoint = serverProxy.endpoint();
+
+    // Open a raw connection that never sends client.capabilities.
+    const wedge = await connectSocketTransport(endpoint);
+    await waitFor(() => serverProxy.connectedClientCount === 1, 2_000, "wedge connected");
+
+    // shutdown() must complete well under the 60 s handshake timeout.
+    // _shutdownOnce's _acceptedSockets loop closes the wedge transport, which
+    // causes server.close() to resolve immediately.
+    const [timeoutP, clearTimeoutFn] = rejectAfter(
+      2_000,
+      "shutdown() hung — tc-13hq Option 1 not working: _acceptedSockets loop not closing the wedge socket",
+    );
+    try {
+      await Promise.race([serverProxy.shutdown(), timeoutP]);
+    } finally {
+      clearTimeoutFn();
+      wedge.close(); // idempotent; already destroyed by _shutdownOnce
+      await serverProxy.shutdown(); // idempotent after completion
+      fs.rmSync(runtimeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("AC(b): handshake completing after shutdown is rejected and transport is closed (tc-9r2y guard, belt-and-suspenders)", async () => {
+    // This is a belt-and-suspenders check for AC(b) with the long-timeout
+    // configuration (Option 1 active).  With a 60 s handshake timeout:
+    // - _shutdownOnce closes the transport via _acceptedSockets (Option 1).
+    // - runServerHandshake rejects (transport closed).
+    // - The tc-9r2y _shutdownPromise guard is NOT reached (rejection path).
+    // Both result in: transport closed, no snapshot sent.
+    const socketName = mintSocket("sp");
+    const runtimeDir = makeRuntimeDir("13hq-acb");
+    const serverProxy = createServerProxy({ socketName, runtimeDir, handshakeTimeoutMs: 60_000 });
+    await serverProxy.start();
+    const endpoint = serverProxy.endpoint();
+
+    const lateTransport = await connectSocketTransport(endpoint);
+    await waitFor(() => serverProxy.connectedClientCount === 1, 2_000, "late client connected");
+
+    // Wait for server-proxy.capabilities so the server has accepted the connection
+    // and _handleConnection has started running (transport is in _acceptedSockets).
+    const serverCapsP = new Promise<void>((resolve) => {
+      lateTransport.onControl((msg) => {
+        if ((msg as MessageBase).type === "server-proxy.capabilities") resolve();
+      });
+    });
+    const [serverCapTimeoutP, clearServerCapTimeout] = rejectAfter(2_000, "Timeout waiting for server-proxy.capabilities");
+    await Promise.race([serverCapsP, serverCapTimeoutP]);
+    clearServerCapTimeout();
+
+    let snapshotReceived = false;
+    let transportClosed = false;
+    lateTransport.onControl((msg) => {
+      if ((msg as MessageBase).type === "sessions.snapshot") snapshotReceived = true;
+    });
+    lateTransport.onClose(() => { transportClosed = true; });
+
+    // Trigger shutdown — _shutdownOnce closes all _acceptedSockets including
+    // this transport, which rejects runServerHandshake's pending await.
+    const shutdownP = serverProxy.shutdown();
+
+    const [shutdownTimeoutP, clearShutdownTimeout] = rejectAfter(
+      2_000,
+      "shutdown() hung — tc-13hq Option 1 AC(b): _acceptedSockets not closing the late transport",
+    );
+    try {
+      await Promise.race([shutdownP, shutdownTimeoutP]);
+    } finally {
+      clearShutdownTimeout();
+      lateTransport.close();
+      await serverProxy.shutdown(); // idempotent
+      fs.rmSync(runtimeDir, { recursive: true, force: true });
+    }
+
+    assert.ok(transportClosed, "transport must be closed when shutdown destroys _acceptedSockets");
+    assert.equal(snapshotReceived, false, "sessions.snapshot must NOT be sent to a connection closed during shutdown");
+  });
+});

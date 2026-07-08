@@ -13,13 +13,19 @@
  *                           session-proxy children (tc-eqgp).
  *
  * Environment variables:
- *   TMUXCC_IDLE_EXIT_MS     idle self-exit grace (tc-eqgp).  Same shape as
- *                           --idle-exit-ms — must be a positive integer
- *                           number of milliseconds.  Used by deployments
- *                           (and the e2e harness, tc-nt3n) that want a
- *                           shorter grace without passing CLI flags.  When
- *                           both are supplied, --idle-exit-ms wins (the
- *                           caller passed it explicitly).
+ *   TMUXCC_IDLE_EXIT_MS          idle self-exit grace (tc-eqgp).  Same shape as
+ *                                --idle-exit-ms — must be a positive integer
+ *                                number of milliseconds.  Used by deployments
+ *                                (and the e2e harness, tc-nt3n) that want a
+ *                                shorter grace without passing CLI flags.  When
+ *                                both are supplied, --idle-exit-ms wins (the
+ *                                caller passed it explicitly).
+ *   TMUXCC_HANDSHAKE_TIMEOUT_MS  server-side handshake timeout (tc-i1pg /
+ *                                tc-13hq).  A connection that connects but never
+ *                                sends client.capabilities is closed after this
+ *                                many milliseconds to free resources.  Default
+ *                                10 000 ms (10 s).  Tests inject a shorter value
+ *                                directly via createServerProxy options.
  *
  * Protocol:
  *   1. Parse arguments.
@@ -93,6 +99,13 @@ export interface ParsedEntryConfig {
    * later without a restart.
    */
   metricsAddr?: string;
+  /**
+   * tc-i1pg / tc-13hq: server-side handshake timeout (ms).  Parsed from the
+   * `TMUXCC_HANDSHAKE_TIMEOUT_MS` env var.  Absent ⇒ the 10 s default in
+   * `server-proxy.ts`.  Deployment-time adjustment only; tests inject a short
+   * value via `createServerProxy({ handshakeTimeoutMs })` directly.
+   */
+  handshakeTimeoutMs?: number;
 }
 
 /**
@@ -135,6 +148,7 @@ export function _parseEntryConfig(
   let persistThroughTmuxGone = false;
   let spawnInfo: SpawnInfo | undefined;
   let metricsAddr: string | undefined;
+  let handshakeTimeoutMs: number | undefined;
 
   for (let i = 0; i < argv.length; i++) {
     switch (argv[i]) {
@@ -191,6 +205,13 @@ export function _parseEntryConfig(
     idleExitMs = _parseIdleExitMs(env.TMUXCC_IDLE_EXIT_MS);
   }
 
+  // tc-i1pg / tc-13hq: TMUXCC_HANDSHAKE_TIMEOUT_MS env fallback — deployment-
+  // time knob for the server-side handshake timeout.  No CLI flag (this is a
+  // rarely-tuned value; tests inject it directly via createServerProxy opts).
+  if (handshakeTimeoutMs === undefined) {
+    handshakeTimeoutMs = _parseIdleExitMs(env.TMUXCC_HANDSHAKE_TIMEOUT_MS);
+  }
+
   // tc-0eds: TMUXCC_PERSIST_THROUGH_TMUX_GONE env fallback (the e2e harness
   // path — the wdio config inherits the spawned server-proxy's env).  Either
   // the flag or a truthy env var enables it; absence keeps the production
@@ -216,6 +237,7 @@ export function _parseEntryConfig(
     ...(persistThroughTmuxGone ? { persistThroughTmuxGone } : {}),
     ...(spawnInfo !== undefined ? { spawnInfo } : {}),
     ...(metricsAddr !== undefined ? { metricsAddr } : {}),
+    ...(handshakeTimeoutMs !== undefined ? { handshakeTimeoutMs } : {}),
   };
 }
 
@@ -226,6 +248,7 @@ function parseArgs(): {
   persistThroughTmuxGone?: boolean;
   spawnInfo?: SpawnInfo;
   metricsAddr?: string;
+  handshakeTimeoutMs?: number;
 } {
   const cfg = _parseEntryConfig(process.argv.slice(2), process.env);
 
@@ -247,6 +270,7 @@ function parseArgs(): {
       : {}),
     ...(cfg.spawnInfo !== undefined ? { spawnInfo: cfg.spawnInfo } : {}),
     ...(cfg.metricsAddr !== undefined ? { metricsAddr: cfg.metricsAddr } : {}),
+    ...(cfg.handshakeTimeoutMs !== undefined ? { handshakeTimeoutMs: cfg.handshakeTimeoutMs } : {}),
   };
 }
 
@@ -255,7 +279,7 @@ function parseArgs(): {
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-  const { socketName, runtimeDir, idleExitMs, persistThroughTmuxGone, spawnInfo, metricsAddr } = parseArgs();
+  const { socketName, runtimeDir, idleExitMs, persistThroughTmuxGone, spawnInfo, metricsAddr, handshakeTimeoutMs } = parseArgs();
 
   // tc-k6v: mirror stderr into the append-only server-proxy log file.  Best-effort:
   // a failed open (unwritable runtime dir) leaves the server-proxy running without
@@ -310,6 +334,7 @@ async function main(): Promise<void> {
     ...(log !== null ? { logPath: log.path } : {}),
     ...(spawnInfo !== undefined ? { spawnInfo } : {}),
     ...(metricsAddr !== undefined ? { metricsAddr } : {}),
+    ...(handshakeTimeoutMs !== undefined ? { handshakeTimeoutMs } : {}),
   };
   const serverProxy = createServerProxy(serverProxyOpts);
 

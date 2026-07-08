@@ -455,6 +455,22 @@ class ServerProxyImpl implements ServerProxyHandle {
 
   /** Active client connections */
   private _clients = new Map<Transport, ClientState>();
+  /**
+   * tc-13hq (Option 1): every accepted transport, tracked from the moment
+   * _handleConnection fires — BEFORE the wire handshake runs.  In
+   * _shutdownOnce this set is iterated and every transport is closed, so
+   * server.close() cannot block on a pre-handshake (un-handshaken) socket.
+   *
+   * Lifecycle:
+   *   - added in _handleConnection at accept time (before any await)
+   *   - removed via the onClose handler (fires synchronously on transport.close())
+   *   - cleared in _shutdownOnce after explicitly closing each entry
+   *
+   * Relationship to _clients: _clients ⊆ _acceptedSockets.  Closing all
+   * _acceptedSockets in _shutdownOnce subsumes the _clients close loop; both
+   * loops are kept for belt-and-suspenders clarity.
+   */
+  private _acceptedSockets = new Set<Transport>();
   /** Session table: sessionId → SessionEntry */
   private _sessions = new Map<SessionId, SessionEntry>();
   /** Name index: session name → SessionEntry (for fast lookups) */
@@ -937,6 +953,18 @@ class ServerProxyImpl implements ServerProxyHandle {
       try { transport.close(); } catch { /* ignore */ }
     }
     this._clients.clear();
+
+    // tc-13hq (Option 1): close all accepted sockets — pre-handshake connections
+    // not in _clients AND any session-proxy-owned transports removed from _clients
+    // by _handleAttach.  Each transport.close() fires its onClose handler
+    // synchronously (SocketTransport), so _acceptedSockets.delete() runs during
+    // iteration — safe in JS (deleted items are skipped by the iterator).
+    // This ensures server.close() below sees NO open connections and resolves
+    // immediately, regardless of handshake state.
+    for (const transport of this._acceptedSockets) {
+      try { transport.close(); } catch { /* ignore */ }
+    }
+    this._acceptedSockets.clear();
 
     // Reap all session-proxies
     this._supervisor.reapAll();
@@ -1442,13 +1470,27 @@ class ServerProxyImpl implements ServerProxyHandle {
   // ---------------------------------------------------------------------------
 
   private async _handleConnection(transport: Transport): Promise<void> {
-    // tc-i1pg: bounded handshake timeout — close a connection that never sends
-    // client.capabilities so server.close() is not blocked indefinitely during
-    // idle-exit / tmux-gone self-exit paths (which have no launcher SIGKILL to
-    // cover them).  The timer calls transport.close(), which fires
-    // runServerHandshake's onClose handler (transport.closed rejection) and
-    // falls through to the catch below.
+    // tc-13hq (Option 1): track every accepted transport from accept, before the
+    // handshake.  _shutdownOnce closes all _acceptedSockets so server.close()
+    // is never blocked by a pre-handshake connection.  The onClose handler
+    // removes the entry when the transport closes for any reason (timeout,
+    // handshake failure, normal close, or _shutdownOnce's explicit destroy).
+    this._acceptedSockets.add(transport);
+    transport.onClose(() => { this._acceptedSockets.delete(transport); });
+
+    // tc-i1pg: bounded handshake timeout — defense-in-depth resource guard.
+    // A connection that connects but never sends client.capabilities is closed
+    // after handshakeTimeoutMs (default 10 s) so zombie pre-handshake sockets
+    // cannot accumulate indefinitely during normal uptime.  This is no longer
+    // the PRIMARY drain-fix (tc-13hq Option 1 above handles that structurally)
+    // but remains valuable for fd/memory hygiene.  Fires loud stderr per the
+    // expected-zero convention (a stale half-open connection is unexpected in
+    // production).
     const handshakeTimer = setTimeout(() => {
+      process.stderr.write(
+        `serverProxy: handshake timeout after ${this._handshakeTimeoutMs} ms — ` +
+        `closing pre-handshake connection (tc-i1pg)\n`,
+      );
       try { transport.close(); } catch { /* ignore */ }
     }, this._handshakeTimeoutMs);
 
