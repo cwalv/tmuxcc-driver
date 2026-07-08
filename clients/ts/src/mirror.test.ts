@@ -125,6 +125,7 @@ function makePane(
     label: undefined,
     detach: undefined,
     icon: undefined,
+    paneTitle: undefined,
     overlay: emptyPaneOverlay(),
   };
 }

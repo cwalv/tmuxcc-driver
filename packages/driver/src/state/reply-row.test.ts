@@ -57,6 +57,7 @@ const PANE_OVERRIDE: PanesReplyRow = {
   label: "my-label",
   detach: "kill",
   icon: "term",
+  paneTitle: "live-title",
 };
 
 describe("reply-row codec: schema-derived round-trip", () => {
@@ -89,9 +90,10 @@ describe("reply-row codec: schema-derived round-trip", () => {
     // form (fixtureLine), not on the format string.
     assert.equal(WINDOWS_ROW.fixtureLine({}).split("\t").length, WINDOWS_ROW.keys.length);
     assert.equal(PANES_ROW.fixtureLine({}).split("\t").length, PANES_ROW.keys.length);
-    // Dead fields deleted (tc-mysc): 9 window fields, 11 pane fields.
+    // Dead fields deleted (tc-mysc): 9 window fields. Pane fields: 11 after
+    // tc-mysc + paneTitle (tc-mysc.2) = 12.
     assert.equal(WINDOWS_ROW.keys.length, 9);
-    assert.equal(PANES_ROW.keys.length, 11);
+    assert.equal(PANES_ROW.keys.length, 12);
   });
 });
 
@@ -116,6 +118,10 @@ describe("reply-row codec: buildInitialModel field survival", () => {
     assert.equal(pane.icon, "term");
     assert.equal(pane.dead, true);
     assert.equal(pane.exitCode, 137);
+    // tc-mysc.2: the format-backed live title reaches the model verbatim via the
+    // canonical Pick, so a model rebuilt by a requery carries titles (the
+    // regression fix — pre-format, every requery dropped paneTitle to undefined).
+    assert.equal(pane.paneTitle, "live-title");
   });
 });
 
@@ -161,6 +167,22 @@ describe("reply-row codec: strict parse is fail-loud", () => {
     assert.equal(parsed.length, 1);
     assert.equal(parsed[0]!.tmuxPaneId, 2);
   });
+
+  it("a raw NEWLINE in the pane_title column shatters the row → ReplyShapeError (tc-mysc amendment 4)", () => {
+    // Defense-in-depth contract, consistent with names: a raw newline in a field
+    // splits the row so the strict parser throws rather than misparsing. Real
+    // tmux never emits one — `screen_set_title` strips C0 control bytes from the
+    // title at the source (verified live in reply-row-tmux.test.ts) — but the
+    // parser bounds-throws if a future tmux ever changed that.
+    const line = PANES_ROW.fixtureLine({
+      tmuxPaneId: 1,
+      tmuxWindowId: 1,
+      tmuxSessionId: 0,
+      paneTitle: "a\nb",
+    });
+    assert.ok(line.includes("\n"), "fixture line must actually carry a raw newline in the title");
+    assert.throws(() => PANES_ROW.parse(ENC.encode(line)), ReplyShapeError);
+  });
 });
 
 describe("reply-row codec: literal-TAB sanitizer pin (tc-mysc amendment 3)", () => {
@@ -180,6 +202,13 @@ describe("reply-row codec: literal-TAB sanitizer pin (tc-mysc amendment 3)", () 
     assert.ok(
       BOOTSTRAP_PANES_FORMAT.includes("#{s/\t/ /:@tmuxcc-icon}"),
       "@tmuxcc-icon must be wrapped in an s/// with a real tab byte",
+    );
+    assert.ok(
+      // tc-mysc.2: the live pane title is user-controlled free text, sanitized
+      // like the other free-text fields (defense-in-depth; tmux 3.4 already
+      // strips control chars at the title-set path — see reply-row-tmux.test.ts).
+      BOOTSTRAP_PANES_FORMAT.includes("#{s/\t/ /:pane_title}"),
+      "pane_title must be wrapped in an s/// with a real tab byte",
     );
     assert.ok(
       !BOOTSTRAP_PANES_FORMAT.includes("s/\\t/"),

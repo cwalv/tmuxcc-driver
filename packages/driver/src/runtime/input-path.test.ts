@@ -1095,6 +1095,7 @@ describe("createInputPath — break-pane empty -P body no-op (tc-0c30.20)", () =
       label: undefined,
       detach: undefined,
       icon: undefined,
+      paneTitle: undefined,
       overlay: emptyPaneOverlay(),
     };
     let m = emptyModel();
@@ -1685,8 +1686,8 @@ function makeReversalModel(opts: {
     label: undefined,
     detach: undefined,
     icon: undefined,
-    // Binding intent lives in the overlay (per-client). paneTitle is optional —
-    // omit to avoid exactOptionalPropertyTypes TS2375 when passing undefined.
+    paneTitle: undefined,
+    // Binding intent lives in the overlay (per-client).
     overlay: emptyPaneOverlay(),
   };
 

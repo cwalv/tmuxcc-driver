@@ -1416,9 +1416,11 @@ function applyDeltaToModel(m: MutableModel, delta: SessionProxyMessage): void {
         label: delta.label,
         detach: delta.detach,
         icon: delta.icon,
+        // pane.opened does not carry paneTitle — a new pane starts with no title
+        // until the title-watch subscription / next requery delivers one.
+        paneTitle: undefined,
         // tc-4b6k.2: no-client diffs never resolve bound true, so the overlay's
-        // per-client set stays empty. paneTitle is optional — omit to avoid
-        // exactOptionalPropertyTypes TS2375 when passing undefined explicitly.
+        // per-client set stays empty.
         overlay: emptyPaneOverlay(),
       };
       m.panes.set(delta.paneId, pane);
@@ -1623,7 +1625,7 @@ function randomModel(rng: () => number, opts: { minWindows?: number } = {}): Ses
         label: undefined,
         detach: undefined,
         icon: undefined,
-        // paneTitle is optional — omit to avoid exactOptionalPropertyTypes TS2375.
+        paneTitle: undefined,
         overlay: emptyPaneOverlay(),
       };
       model = addPane(model, pane);

@@ -197,10 +197,9 @@ const P1 = paneId("p1");
 const P2 = paneId("p2");
 
 function makePane(id: PaneId, winId: WindowId, sessId: SessionId, cols = 80, rows = 24): Pane {
-  // exitCode and label are required (X | undefined); paneTitle is optional —
-  // omit to avoid exactOptionalPropertyTypes TS2375. Binding intent lives in the
-  // overlay (per-client, not a canonical row field).
-  return { paneId: id, windowId: winId, sessionId: sessId, cols, rows, mode: "normal", dead: false, exitCode: undefined, label: undefined, detach: undefined, icon: undefined, overlay: emptyPaneOverlay() };
+  // exitCode, label, paneTitle are canonical (X | undefined). Binding intent
+  // lives in the overlay (per-client, not a canonical row field).
+  return { paneId: id, windowId: winId, sessionId: sessId, cols, rows, mode: "normal", dead: false, exitCode: undefined, label: undefined, detach: undefined, icon: undefined, paneTitle: undefined, overlay: emptyPaneOverlay() };
 }
 
 function makeModel1(): SessionModel {

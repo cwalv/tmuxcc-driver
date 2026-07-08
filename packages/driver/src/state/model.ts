@@ -143,12 +143,12 @@ export function emptyPaneOverlay(): PaneOverlay {
 /**
  * A single pane in the model, typed by PROVENANCE (tc-mysc.1).
  *
- * Canonical fields (`cols`, `rows`, `dead`, `label`, `detach`, `icon`) come
- * from {@link PaneFromRow} — a mechanical `Pick` of the `list-panes` reply row
- * (`PANE_CANONICAL_FROM_ROW` in `state/bootstrap.ts`), so their semantics are
- * documented ONCE on the `PANES_ROW` schema. On top of that base sit the
- * remapped identity ids, the genuinely-transformed fields (`mode`, `exitCode`,
- * `paneTitle`), and the client-local {@link PaneOverlay}.
+ * Canonical fields (`cols`, `rows`, `dead`, `label`, `detach`, `icon`,
+ * `paneTitle`) come from {@link PaneFromRow} — a mechanical `Pick` of the
+ * `list-panes` reply row (`PANE_CANONICAL_FROM_ROW` in `state/bootstrap.ts`), so
+ * their semantics are documented ONCE on the `PANES_ROW` schema. On top of that
+ * base sit the remapped identity ids, the genuinely-transformed fields (`mode`,
+ * `exitCode`), and the client-local {@link PaneOverlay}.
  *
  * Projection note: maps directly to `SnapshotPane` (paneId, windowId,
  * sessionId, cols, rows). The additional `mode` field projects to
@@ -184,27 +184,12 @@ export interface Pane extends PaneFromRow {
    * {@link PaneOverlay}.
    */
   readonly overlay: PaneOverlay;
-  /**
-   * Live shell window title for this pane — the canonical `#{pane_title}`
-   * value (tc-2mn8 introduced the field; tc-s6ov.4 reworked the source).
-   *
-   * Sourced from a control-mode `%*` (all-panes) `#{pane_title}` subscription
-   * (`refresh-client -B 'title-watch:%*:#{pane_title}'`): tmux re-evaluates the
-   * format per pane on its ~1s timer and emits `%subscription-changed` only on
-   * change, so this catches EVERY title source — shell OSC-0/2, another
-   * client's `select-pane -T`, automatic title from `#{pane_current_command}`,
-   * etc. This SUPERSEDES the original OSC-0/2 `%output` sniff (tc-2mn8), which
-   * was blind to out-of-band changes that never flowed through this client's
-   * `%output`. The OSC sniffer is retained only to STRIP title sequences from
-   * the byte stream, not to feed this field.
-   *
-   * Absent when no title has been seen yet. An empty string is a valid title
-   * (the shell cleared it).
-   *
-   * Consumer precedence (for tab/tree display):
-   *   @tmuxcc_label (durable name) > paneTitle (live) > paneId (fallback)
-   */
-  readonly paneTitle?: string;
+  // NOTE: `paneTitle` is a CANONICAL field inherited from {@link PaneFromRow}
+  // (tc-mysc.2) — `string | undefined`, `undefined` = no title seen / cleared.
+  // Its semantics (dual source: low-latency title-watch subscription +
+  // canonical requery reaffirmation; control-char policy; consumer precedence
+  // @tmuxcc_label > paneTitle > paneId) are documented on the `PANES_ROW`
+  // schema in `state/bootstrap.ts`, not redeclared here.
 }
 
 /**

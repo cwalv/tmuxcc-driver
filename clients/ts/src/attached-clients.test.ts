@@ -71,6 +71,7 @@ function buildBaseModel() {
     label: undefined,
     detach: undefined,
     icon: undefined,
+    paneTitle: undefined,
     overlay: emptyPaneOverlay(),
   });
   m = setFocus(m, { paneId: P0, windowId: W0, sessionId: S0 });

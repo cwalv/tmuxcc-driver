@@ -73,3 +73,77 @@ describe("reply-row Layer-A: real tmux round-trip + sanitizer", { skip: !hasTmux
     );
   });
 });
+
+/**
+ * Layer-A (real tmux 3.4): pin `#{pane_title}` control-char behavior for BOTH
+ * read paths (tc-mysc.2 amendment 4) — the `list-panes` REQUERY format and the
+ * `title-watch` SUBSCRIPTION format. Verified live: tmux's title-set path
+ * (`screen_set_title`, reached by the shell's OSC-0/2) STRIPS every C0 control
+ * byte (TAB, NEWLINE, CR) from the title at the SOURCE, so `#{pane_title}` never
+ * emits a raw tab or newline on either path. The requery row therefore cannot
+ * shatter, the `%subscription-changed` notification line cannot be split, and —
+ * because both paths expand the same control-char-free value — they cannot
+ * disagree and churn a spurious `pane.title-changed`.
+ */
+describe("pane_title Layer-A: control-char policy on both read paths (tc-mysc.2)", { skip: !hasTmux }, () => {
+  // A title carrying every framing hazard: TAB (row split), NEWLINE (row +
+  // notification-line split), CR. tmux stores the printable remainder "XYZW".
+  const HAZARD_OSC = `printf '\\033]2;X\\tY\\nZ\\rW\\007'; sleep 30`;
+  const EXPECTED = "XYZW";
+
+  function sleepMs(ms: number): void {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  }
+
+  before(() => {
+    // A pane that emits the hazardous OSC title once, then idles.
+    tmuxBytes(["new-session", "-d", "-s", "titleprobe", "-x", "80", "-y", "24", HAZARD_OSC]);
+    // Poll until tmux has processed the OSC and stored the (stripped) title.
+    for (let i = 0; i < 50; i++) {
+      const t = tmuxText(["list-panes", "-t", "titleprobe", "-F", "#{pane_title}"]).replace(/\n+$/, "");
+      if (t === EXPECTED) break;
+      sleepMs(100);
+    }
+  });
+  after(() => {
+    tmuxBytes(["kill-server"]);
+  });
+
+  it("requery path: an OSC title with TAB/NEWLINE/CR parses cleanly, control chars stripped at source", () => {
+    // No throw: because tmux strips the control chars, the derived format the
+    // driver ships never carries a raw tab/newline in the title column.
+    const rows = PANES_ROW.parse(tmuxBytes(["list-panes", "-a", "-F", BOOTSTRAP_PANES_FORMAT]));
+    const row = rows.find((r) => r.paneTitle === EXPECTED);
+    assert.ok(row, `expected the title-probe pane with the stripped title ${JSON.stringify(EXPECTED)}`);
+    assert.ok(
+      !/[\t\n\r]/.test(row.paneTitle ?? ""),
+      "pane_title carries no raw control byte (tmux stripped it at the title-set path)",
+    );
+  });
+
+  it("subscription path: %subscription-changed title-watch delivers the same value on ONE clean line", () => {
+    // Drive a real control-mode client: subscribe to the exact title-watch
+    // format the pipeline ships, then read the initial notification (the pane's
+    // current title). Keep stdin open ~3s so the subscription's ~1s timer fires.
+    const sub = spawnSync(
+      "sh",
+      [
+        "-c",
+        `{ printf '%s\\n' 'refresh-client -B "title-watch:%*:#{pane_title}"'; sleep 3; } | ` +
+          `tmux -L ${SOCK} -C attach -t titleprobe 2>&1`,
+      ],
+      { encoding: "utf8", timeout: 10000 },
+    );
+    const line = (sub.stdout ?? "")
+      .split("\n")
+      .find((l) => l.includes("subscription-changed title-watch"));
+    assert.ok(line, `captured a title-watch notification; got: ${JSON.stringify(sub.stdout)}`);
+    // A single intact line ending in the full stripped value proves both that
+    // the value is control-char-free AND that no newline split the framing (a
+    // leaked newline would truncate the value or split the line).
+    assert.ok(
+      line.endsWith(`: ${EXPECTED}`),
+      `subscription value must be the stripped title on one line: ${JSON.stringify(line)}`,
+    );
+  });
+});

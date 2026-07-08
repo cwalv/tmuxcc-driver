@@ -559,17 +559,26 @@ export function diffModel(
   }
 
   // -------------------------------------------------------------------------
-  // 5c. pane.title-changed — live shell title change on existing panes (tc-2mn8)
+  // 5c. pane.title-changed — live shell title change on existing panes (tc-2mn8;
+  // format-backed tc-mysc.2). paneTitle is now sourced from the requery
+  // (`#{pane_title}`) AND the low-latency title-watch subscription, so the diff
+  // fires on ANY change. The old defined→absent diff-guard (tc-mysc amendment 5)
+  // existed only to suppress the spurious "title cleared" the pre-format requery
+  // manufactured by rebuilding every pane WITHOUT a title; format-backing makes
+  // that state unrepresentable at rebuild, so the guard is deleted. A model
+  // paneTitle of undefined (absent / cleared) maps to the wire's empty-string
+  // "cleared" sentinel (`PaneTitleChangedMessage.title` is a `string`; "" means
+  // the shell cleared it).
   // -------------------------------------------------------------------------
   for (const [id, pane] of next.panes) {
     const prevPane = prev.panes.get(id);
     if (!prevPane) continue; // new panes handled in pane.opened
-    if (prevPane.paneTitle !== pane.paneTitle && pane.paneTitle !== undefined) {
+    if (prevPane.paneTitle !== pane.paneTitle) {
       const msg: PaneTitleChangedMessage = {
         type: "pane.title-changed",
         seq: SEQ,
         paneId: pane.paneId,
-        title: pane.paneTitle,
+        title: pane.paneTitle ?? "",
       };
       out.push(msg);
     }

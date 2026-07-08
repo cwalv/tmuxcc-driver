@@ -1,5 +1,6 @@
 /**
- * Integration tests for paneTitle model field and pane.title-changed delta (tc-2mn8).
+ * Integration tests for paneTitle model field and pane.title-changed delta
+ * (tc-2mn8; format-backed tc-mysc.2).
  *
  * These tests live in src/state/ (not src/parser/) to respect the
  * parser-no-wire boundary rule: src/parser/ must not import src/wire/.
@@ -7,8 +8,12 @@
  * Coverage:
  *   - pane.title-changed delta is emitted by diffModel when paneTitle changes.
  *   - No delta when paneTitle is unchanged.
- *   - No delta when paneTitle goes from defined to absent (undefined).
+ *   - A defined→absent (cleared) title now emits title-changed "" — the
+ *     defined→absent diff-guard was deleted once paneTitle became format-backed
+ *     (tc-mysc amendment 5).
  *   - paneTitle is carried in snapshot (SnapshotPane.paneTitle).
+ *   - REGRESSION (tc-mysc.2): a model rebuilt by the requery carries titles, and
+ *     the requery reaffirms (does not clobber) a subscription-delivered title.
  */
 
 import { describe, it } from "node:test";
@@ -16,6 +21,8 @@ import assert from "node:assert/strict";
 
 import { paneId, windowId, sessionId } from "@tmuxcc/protocol";
 import { diffModel, projectSnapshot } from "./projection.js";
+import { buildInitialModel, WINDOWS_ROW, PANES_ROW } from "./bootstrap.js";
+import { fixtureBytes } from "./reply-row.js";
 import {
   emptyModel,
   emptyPaneOverlay,
@@ -61,8 +68,8 @@ function buildBaseModel(): SessionModel {
     label: undefined,
     detach: undefined,
     icon: undefined,
+    paneTitle: undefined, // no title seen yet
     overlay: emptyPaneOverlay(),
-    // paneTitle absent (undefined → no title seen yet)
   });
   return model;
 }
@@ -118,10 +125,13 @@ describe("paneTitle – pane.title-changed delta in diffModel (tc-2mn8)", () => 
     assert.equal(titleDelta, undefined, "no delta when title unchanged (prev === next)");
   });
 
-  it("does NOT emit pane.title-changed when prev has title and next has undefined (title cleared)", () => {
-    // Projection only emits title-changed when next paneTitle is defined.
-    // Going from defined → undefined is NOT signalled (the field just disappears
-    // from the model; the consumer uses the last-known value).
+  it("emits pane.title-changed with '' when prev has title and next has undefined (cleared)", () => {
+    // tc-mysc amendment 5: the defined→absent diff-guard was DELETED once
+    // paneTitle became format-backed (the pre-format requery manufactured this
+    // transition by rebuilding every pane without a title; format-backing makes
+    // that unrepresentable at rebuild). A genuine defined→absent transition now
+    // signals a cleared title, mapping the model's `undefined` to the wire's ""
+    // cleared sentinel (PaneTitleChangedMessage.title is a string).
     const prev = updatePane(buildBaseModel(), P1, { paneTitle: "had-a-title" });
 
     // Manually remove paneTitle from next pane using destructuring (exactOptionalPropertyTypes safe).
@@ -134,7 +144,10 @@ describe("paneTitle – pane.title-changed delta in diffModel (tc-2mn8)", () => 
 
     const deltas = diffModel(prev, next);
     const titleDelta = deltas.find((d) => d.type === "pane.title-changed");
-    assert.equal(titleDelta, undefined, "no delta when paneTitle goes defined → absent");
+    assert.ok(titleDelta, "defined → absent now emits a cleared-title delta");
+    if (titleDelta?.type === "pane.title-changed") {
+      assert.equal(titleDelta.title, "", "model undefined maps to the wire '' cleared sentinel");
+    }
   });
 
   it("does NOT emit pane.title-changed for a new pane (new pane carries title in pane.opened)", () => {
@@ -200,5 +213,64 @@ describe("paneTitle – SnapshotPane carries paneTitle (tc-2mn8)", () => {
     const pane = snapshot.panes.find((p) => p.paneId === paneId("p2"));
     assert.ok(pane, "pane p2 should be in snapshot");
     assert.equal(pane?.paneTitle, "born-with-title");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// tc-mysc.2 regression: the requery is a canonical title source
+// ---------------------------------------------------------------------------
+
+describe("paneTitle – requery is format-backed (tc-mysc.2 regression)", () => {
+  const P5 = paneId("p5");
+  const windowRows = [
+    WINDOWS_ROW.fixtureRow({ tmuxSessionId: 0, sessionName: "s", tmuxWindowId: 1, active: true }),
+  ];
+  const paneRowWithTitle = (title: string | undefined) =>
+    PANES_ROW.fixtureRow({ tmuxPaneId: 5, tmuxWindowId: 1, tmuxSessionId: 0, paneTitle: title });
+
+  it("a snapshot built AFTER a requery carries titles (the live regression fix)", () => {
+    // Pre-format, buildInitialModel dropped paneTitle → every requery rebuilt the
+    // pane WITHOUT a title, so a client reconnecting after a topology change saw
+    // no titles. Now the title arrives verbatim from `#{pane_title}`.
+    const model = buildInitialModel(windowRows, [paneRowWithTitle("vim - myfile.ts")]);
+    assert.equal(model.panes.get(P5)?.paneTitle, "vim - myfile.ts");
+
+    const snap = projectSnapshot(model);
+    const paneSnap = snap.panes.find((p) => p.paneId === P5);
+    assert.ok(paneSnap, "requery-built pane is in the snapshot");
+    assert.equal(paneSnap?.paneTitle, "vim - myfile.ts", "snapshot after requery carries the title");
+  });
+
+  it("a requery REAFFIRMS a subscription-delivered title (does not clobber it)", () => {
+    // The title-watch subscription delivered "vim - myfile.ts" via updatePane:
+    const afterSubscription = updatePane(
+      buildInitialModel(windowRows, [paneRowWithTitle(undefined)]),
+      P5,
+      { paneTitle: "vim - myfile.ts" },
+    );
+    // A later topology requery reads the SAME value from tmux (both paths expand
+    // the identical `#{pane_title}`):
+    const afterRequery = buildInitialModel(windowRows, [paneRowWithTitle("vim - myfile.ts")]);
+
+    assert.equal(
+      afterRequery.panes.get(P5)?.paneTitle,
+      "vim - myfile.ts",
+      "requery carries the title, not undefined",
+    );
+    const deltas = diffModel(afterSubscription, afterRequery);
+    const titleDelta = deltas.find((d) => d.type === "pane.title-changed");
+    assert.equal(titleDelta, undefined, "requery reaffirms — no spurious title-changed clobber");
+  });
+
+  it("an empty `#{pane_title}` reply decodes to absent (emptyAsUndefined)", () => {
+    // Route through the real parse (fixtureRow bypasses the codec): an empty
+    // pane_title column decodes to undefined, so buildInitialModel leaves the
+    // pane titleless rather than storing "".
+    const paneRows = PANES_ROW.parse(
+      fixtureBytes(PANES_ROW, [{ tmuxPaneId: 5, tmuxWindowId: 1, tmuxSessionId: 0, paneTitle: "" }]),
+    );
+    assert.equal(paneRows[0]?.paneTitle, undefined, "empty pane_title column decodes to undefined");
+    const model = buildInitialModel(windowRows, paneRows);
+    assert.equal(model.panes.get(P5)?.paneTitle, undefined, "empty title → absent in the model");
   });
 });

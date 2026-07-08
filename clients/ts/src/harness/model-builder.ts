@@ -62,6 +62,7 @@ export function buildModel(init: TranscriptInitialModel): SessionModel {
       label: undefined,
       detach: undefined,
       icon: undefined,
+      paneTitle: undefined,
       overlay: emptyPaneOverlay(),
     });
   }
@@ -135,6 +136,7 @@ export function applyVerbCreate(
       label: undefined,
       detach: undefined,
       icon: undefined,
+      paneTitle: undefined,
       overlay: emptyPaneOverlay(),
     });
   }

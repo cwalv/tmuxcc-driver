@@ -113,8 +113,8 @@ function makePane(
     label: undefined,
     detach: undefined,
     icon: undefined,
-    // Binding intent lives in the overlay (per-client). paneTitle is optional —
-    // omit to avoid exactOptionalPropertyTypes TS2375 when passing undefined.
+    paneTitle: undefined,
+    // Binding intent lives in the overlay (per-client).
     overlay: emptyPaneOverlay(),
   };
 }

@@ -96,9 +96,9 @@ function makePane(
     label: undefined,
     detach: undefined,
     icon: undefined,
+    paneTitle: undefined,
     // tc-4b6k.2: binding intent is per-client, in the overlay (not a canonical
-    // row field). paneTitle is optional — omit to avoid exactOptionalPropertyTypes
-    // TS2375 when passing undefined explicitly.
+    // row field).
     overlay: emptyPaneOverlay(),
   };
 }

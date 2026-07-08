@@ -266,6 +266,35 @@ export const PANES_ROW = defineReplyRow("list-panes", {
   // Durable per-pane icon policy (tc-i9aq.1): opaque string (e.g. a ThemeIcon id),
   // interpreted by the extension. Unset → undefined.
   icon: field(tabSanitized("@tmuxcc-icon"), emptyAsUndefined(text), undefined),
+  // Live shell window title (tc-2mn8, format-backed tc-mysc.2) — the SINGLE
+  // declaration of this canonical field's semantics (model.ts `Pane.paneTitle`
+  // inherits it via PaneFromRow and does not redeclare).
+  //
+  // TWO read paths, both `#{pane_title}`, that always agree:
+  //   - LOW-LATENCY: the `title-watch` `%*` subscription (pipeline.ts) — the
+  //     event source that delivers a change within tmux's ~1s timer.
+  //   - CANONICAL: THIS requery field — every cycle REAFFIRMS the title from
+  //     tmux, so a snapshot rebuilt after a topology change carries titles
+  //     instead of dropping them (the tc-mysc.2 regression fix). Because both
+  //     paths expand the same value, the requery never clobbers a
+  //     subscription-delivered title.
+  //
+  // User-controlled FREE TEXT (shell OSC-0/2 or `select-pane -T`), so it is read
+  // through `tabSanitized(...)` like the other free-text fields. Verified live
+  // (tmux 3.4, reply-row-tmux.test.ts): the title-set path (`screen_set_title`)
+  // STRIPS every C0 control byte (TAB, NEWLINE, CR) at the SOURCE — an OSC title
+  // `X<TAB>Y<NL>Z` is stored as `XYZ`, and `select-pane -T` REJECTS a
+  // control-char title wholesale — so `#{pane_title}` never emits a raw tab or
+  // newline on EITHER path: the requery row cannot shatter and the
+  // `%subscription-changed` line cannot split (amendment 4). The s/// is thus a
+  // no-op on real data but pins the tab vector as defense-in-depth; the strict
+  // parser still bounded-throws on a raw newline (consistent with names) if a
+  // future tmux ever changed this.
+  //
+  // Empty → undefined (no title seen / cleared); `#{pane_title}` defaults to the
+  // hostname on untouched panes. Consumer precedence for tab/tree display:
+  // @tmuxcc_label (durable name) > paneTitle (live) > paneId (fallback).
+  paneTitle: field(tabSanitized("pane_title"), emptyAsUndefined(text), undefined),
 });
 
 /**
@@ -379,7 +408,7 @@ export type PanesReplyRow = RowTypeOf<typeof PANES_ROW>;
  * The pane fields taken VERBATIM from a {@link PanesReplyRow} — same name, same
  * type, no transform (tc-mysc.1). `buildInitialModel` copies exactly these via
  * {@link pickCanonical}; a `Pane` is `PaneFromRow` + remapped identity ids +
- * genuinely-transformed fields (`mode`, `exitCode`, `paneTitle`) + `overlay`.
+ * genuinely-transformed fields (`mode`, `exitCode`) + `overlay`.
  *
  * This list is the SECOND half of the tc-pqb4 defence (the first half — the
  * schema-derived format/parse — landed in tc-mysc): because the canonical
@@ -397,6 +426,12 @@ export const PANE_CANONICAL_FROM_ROW = [
   "label",
   "detach",
   "icon",
+  // Live shell title (tc-mysc.2): format-backed by `#{pane_title}`, picked
+  // verbatim like the other free-text option fields. Sourcing it from the requery
+  // is the tc-mysc.2 regression fix — a snapshot rebuilt after a topology requery
+  // now CARRIES titles instead of dropping them. The title-watch subscription
+  // (pipeline.ts) stays the low-latency source; this requery reaffirms.
+  "paneTitle",
 ] as const satisfies readonly (keyof PanesReplyRow)[];
 
 /** The pane fields picked verbatim from a {@link PanesReplyRow} (see {@link PANE_CANONICAL_FROM_ROW}). */
@@ -413,10 +448,10 @@ function pickCanonical(row: PanesReplyRow): PaneFromRow {
 
 /**
  * The pane fields NOT covered by identity or {@link PaneFromRow} — the
- * explicitly-constructed remainder (`mode`, `exitCode`, `overlay`, optional
- * `paneTitle`). buildInitialModel writes this sub-object with a `satisfies`
- * clause so a hardcoded literal for a canonical/identity field is an
- * excess-property type error there.
+ * explicitly-constructed remainder (`mode`, `exitCode`, `overlay`).
+ * buildInitialModel writes this sub-object with a `satisfies` clause so a
+ * hardcoded literal for a canonical/identity field is an excess-property type
+ * error there.
  */
 type PaneConstructionExtras = Omit<Pane, keyof PaneFromRow | "paneId" | "windowId" | "sessionId">;
 
@@ -546,8 +581,9 @@ export function buildInitialModel(
         // and is NOT in the bulk requery. A fresh pane starts with an empty
         // overlay; carryForwardOverlays (requery.ts) preserves a surviving pane's
         // overlay wholesale, and a client's slot is (re)read on connect
-        // (pipeline.applyClientBinding). paneTitle is absent until tc-2mn8's
-        // subscription populates it via updatePane.
+        // (pipeline.applyClientBinding). paneTitle is now format-backed
+        // (`#{pane_title}`, tc-mysc.2) so it arrives verbatim via pickCanonical
+        // above — no longer an absent-until-subscription remainder.
         overlay: emptyPaneOverlay(),
       } satisfies PaneConstructionExtras),
     };
