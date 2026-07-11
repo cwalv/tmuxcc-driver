@@ -438,6 +438,21 @@ const WATCHER_HEALTHY_MS = 10_000;
 const WATCHER_RESPAWN_BACKOFF_INIT_MS = 250;
 const WATCHER_RESPAWN_BACKOFF_MAX_MS = 8_000;
 
+/**
+ * tc-1yek.15: the STABLE-ABSENCE settle.  A session that looks absent (missing
+ * from `list-sessions`, no live session-proxy, `has-session` says gone) is NOT
+ * removed on that single observation — it is re-checked after this settle, and
+ * removed only if it is STILL authoritatively gone.  A live session that flapped
+ * absent under reconnect/contention churn recovers within this window (its
+ * session-proxy reconnects, or `has-session` finds it again), so it is kept.  The
+ * window is comfortably longer than the sub-millisecond server-desync flap and the
+ * session-proxy reconnect, yet short enough that a genuine teardown is still
+ * removed promptly (it only ever delays a removal, never a keep).  This is an
+ * authoritative-stable-signal requirement against a flapping external, not a
+ * race-masking retry: it re-confirms once, it does not loop until the flake clears.
+ */
+const SESSION_ABSENCE_RECONFIRM_MS = 500;
+
 // ---------------------------------------------------------------------------
 // ServerProxyImpl
 // ---------------------------------------------------------------------------
@@ -1390,16 +1405,42 @@ class ServerProxyImpl implements ServerProxyHandle {
     // so the session provably exists).  Genuine teardown still removes promptly:
     // a really-killed session fails `has-session` with "can't find session" →
     // "absent" → removed; explicit `session.destroy` removes directly, not here.
+    // tc-1yek.15: even a positive "absent" from `has-session` is not authoritative
+    // in a SINGLE sample when the shared server is churning.  Under reconnect /
+    // contention load the server transiently desyncs — it momentarily fails
+    // `has-session` for a session that is genuinely alive (the "bound tmux host
+    // died" transient that also reaps the session-proxy, so the fast-path above
+    // misses it too).  A removal is destructive (broadcasts `sessions.removed` →
+    // the client disposes its SessionManager), so NEVER drop a session on one
+    // flap: collect the sessions that look absent NOW, let the flap settle, then
+    // remove ONLY those STILL authoritatively gone.  A session that reappears in
+    // the settle (its proxy reconnects, or `has-session` finds it again) is
+    // kept — the illegal "dropped a live session" state is made unrepresentable.
+    // Genuine teardown still removes promptly (one settle later); explicit
+    // `session.destroy` removes directly, not here.
+    const maybeAbsent: Array<[SessionId, SessionEntry]> = [];
     for (const [sid, entry] of this._sessions) {
       if (currentTmuxIds.has(entry.tmuxId)) continue;
       // Fast path: a live/in-flight session-proxy proves the session exists.
       if (this._supervisor.hasSessionProxy(sid)) continue;
-      // Authoritative: only a positive "absent" from a reachable server removes.
+      // A positive "absent" from a reachable server is NECESSARY but, on its own,
+      // not SUFFICIENT — it may be a transient churn flap, so confirm below.
       if ((await checkSessionPresence(this._opts.socketName, entry.tmuxId)) !== "absent") continue;
-      this._sessions.delete(sid);
-      this._byName.delete(entry.name);
-      this._supervisor.reapSessionProxy(sid);
-      this._broadcastRemoved(sid);
+      maybeAbsent.push([sid, entry]);
+    }
+    if (maybeAbsent.length > 0) {
+      // One settle, then re-confirm each on FRESH signals — a live session that
+      // flapped has recovered by now.  Remove only the still-authoritatively-gone.
+      await new Promise<void>((resolve) => setTimeout(resolve, SESSION_ABSENCE_RECONFIRM_MS));
+      for (const [sid, entry] of maybeAbsent) {
+        if (!this._sessions.has(sid)) continue; // already removed by another path
+        if (this._supervisor.hasSessionProxy(sid)) continue; // proxy reconnected → alive
+        if ((await checkSessionPresence(this._opts.socketName, entry.tmuxId)) !== "absent") continue; // reappeared → alive
+        this._sessions.delete(sid);
+        this._byName.delete(entry.name);
+        this._supervisor.reapSessionProxy(sid);
+        this._broadcastRemoved(sid);
+      }
     }
 
     // Build a set of existing tmux ids in our table for addition/rename detection
