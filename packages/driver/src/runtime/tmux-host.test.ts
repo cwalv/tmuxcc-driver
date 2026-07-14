@@ -649,6 +649,59 @@ describe("TmuxHost — real tmux 3.4", { skip: !tmuxAvailable ? "tmux not found 
   });
 
   // -------------------------------------------------------------------------
+  // tc-1yek.13 — guard the stop/teardown PTY write path against dead fds.
+  //
+  // When tmux exits unexpectedly the test-harness teardown still calls
+  // stop(), which writes "detach-client\n" to a PTY fd that may already be
+  // dead.  In the Layer-A EDH VS Code's bootstrap-fork.js overrides SIGPIPE
+  // (Node's default SIG_IGN), so the write lands as "Unexpected SIGPIPE"
+  // before the EPIPE errno bubbles back.
+  //
+  // The fix: ptyEmitter error handler now
+  //   (a) pre-sets _exited on EIO (narrows the stop() write race), and
+  //   (b) treats EPIPE/EBADF as benign when _stopPromise != null || _exited.
+  //
+  // This test injects EPIPE via the ptyEmitter seam while stop() is in
+  // progress (_stopPromise set) and asserts that no uncaughtException fires
+  // and the error is NOT escalated through onError.
+  // -------------------------------------------------------------------------
+  it("EPIPE on ptyEmitter during stop() teardown is benign — not escalated (tc-1yek.13)", async () => {
+    const sock = sockName("epipe-teardown");
+    after(() => killServer(sock));
+
+    const host = createTmuxHost({ socketName: sock, sessionName: "tc-1yek13-epipe" });
+    let escalated: Error | null = null;
+    host.onError((err) => { escalated = err; });
+
+    await host.start();
+
+    // Capture any uncaughtException to fail the test loudly rather than
+    // aborting the entire runner (the pattern from tc-crnt.14).
+    let uncaught: Error | null = null;
+    const onUncaught = (err: Error): void => { uncaught = err; };
+    process.once("uncaughtException", onUncaught);
+
+    // Begin stop() without awaiting — this sets _stopPromise synchronously,
+    // signalling teardown.  The host is still live enough for the pty seam.
+    const stopPromise = host.stop();
+
+    // Inject EPIPE while _stopPromise is non-null.  In production this
+    // arrives from the detach-client write landing on a dying PTY fd
+    // (tc-1yek.13 / tc-9xf1 family): it must be treated as benign.
+    const pty = (host as unknown as { _pty: { emit(event: string, err: Error): void } })._pty;
+    const epipe = Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+    pty.emit("error", epipe);
+
+    await new Promise<void>((r) => setTimeout(r, 50));
+    process.removeListener("uncaughtException", onUncaught);
+
+    assert.equal(uncaught, null, "an EPIPE during stop() teardown must NOT escape as uncaughtException");
+    assert.equal(escalated, null, "an EPIPE on the pty socket during stop() teardown must NOT escalate to onError");
+
+    await stopPromise;
+  });
+
+  // -------------------------------------------------------------------------
   // tc-76m8.20 — pty write-after-close fd lifecycle (node-pty+1.1.0.patch).
   //
   // node-pty's CustomWriteStream writes to the RAW pty-master fd number, from

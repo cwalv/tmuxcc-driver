@@ -399,11 +399,25 @@ class TmuxHostImpl implements TmuxHost {
         // arrives while a benign one is in flight (the `< 2` guard is evaluated
         // per-emit).
         const code = (err as NodeJS.ErrnoException).code ?? "";
-        if (code.includes("EAGAIN") || code.includes("EIO")) return;
-        // Any OTHER pty read-socket fault (e.g. EBADF during a teardown race
-        // under rapid churn) is host-fatal: the -CC client's pty is unusable.
-        // Mark exited (so a racing write() throws the friendly "after exit"
-        // error instead of touching a dead fd) and surface through the error
+        if (code.includes("EAGAIN")) return;
+        if (code.includes("EIO")) {
+          // PTY slave closed: pre-set _exited to narrow the stop() write race.
+          // The onExit path owns the normal exit transition (exit handlers,
+          // exitCode) — this just ensures a racing stop() call sees _exited=true
+          // and skips the dead-fd write (tc-1yek.13).
+          this._exited = true;
+          return;
+        }
+        // EPIPE/EBADF during stop/teardown: the detach-client write reached a
+        // dying PTY fd — an expected destroyed-pipe write (tc-1yek.13, tc-9xf1
+        // family). Treat as benign; stop() is already in progress and the onExit
+        // path owns the transition.
+        if ((code === "EPIPE" || code === "EBADF") && (this._stopPromise !== null || this._exited)) {
+          return;
+        }
+        // Any OTHER pty read-socket fault is host-fatal: the -CC client's pty is
+        // unusable. Mark exited (so a racing write() throws the friendly "after
+        // exit" error instead of touching a dead fd) and surface through the error
         // boundary, where the session's onError handler reaps just THIS session.
         this._exited = true;
         this._emitError(err instanceof Error ? err : new Error(String(err)));
