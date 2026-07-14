@@ -200,6 +200,17 @@ export interface ServerProxyOptions {
    * `belowFloor: false`.  The production entry point never sets this.
    */
   capabilitiesOverride?: TmuxCapabilityMap;
+
+  /**
+   * Test-harness affordance (tc-j8mx.7): awaited at the top of every
+   * `_doRefreshSessions`.  A test holds this promise to keep the initial
+   * reconcile in-flight while it connects a client, proving the handshake-
+   * snapshot gate withholds the client's snapshot until the reconcile resolves
+   * (a snapshot must assert "these ARE the sessions", never "I have not looked
+   * yet").  Undefined in production — the entry point never sets it, so the
+   * reconcile runs unblocked.
+   */
+  _refreshBarrierForTesting?: () => Promise<void>;
 }
 
 /**
@@ -612,6 +623,30 @@ class ServerProxyImpl implements ServerProxyHandle {
    */
   private _refreshPending: Promise<void> | null = null;
 
+  // ── tc-j8mx.7 handshake-snapshot gate ──────────────────────────────────────
+  /**
+   * The initial `_refreshSessions()` kicked off by `start()`, captured so
+   * `_handleConnection` can gate its handshake snapshot on it.
+   *
+   * A connection that lands between the socket bind and this promise resolving
+   * would otherwise build a snapshot from the not-yet-populated table and wipe
+   * every live session from the client's store (the s35 cascade discovered in
+   * tc-j8mx.5). Assigned synchronously in `start()` immediately after the socket
+   * bind — before the event loop can dispatch a connection — so every
+   * `_handleConnection` observes a non-null value; null only before then, when
+   * the socket is not yet listening.
+   */
+  private _initialReconcile: Promise<void> | null = null;
+  /**
+   * True once ANY reconcile has established tmux truth — a real session list OR
+   * a confirmed tmux-absent (binary missing / "no server running"). Only a
+   * genuine transient spawn failure (`listSessions` null with the binary
+   * present) leaves it false. The handshake-snapshot gate refuses to assert an
+   * empty table until this is true, so a broker that "has not looked yet" never
+   * claims there are no sessions (tc-j8mx.7).
+   */
+  private _everReconciled = false;
+
   // ── tc-x6l server-proxy metrics ───────────────────────────────────────────────
   private readonly _metrics: ServerProxyMetrics = createServerProxyMetrics();
 
@@ -788,8 +823,13 @@ class ServerProxyImpl implements ServerProxyHandle {
     this._boundSocketIno = this._statSocketIno(this._socketPath);
 
     // Initial session load — await so `_adoptedExistingServer` (below) and the
-    // first client's snapshot see the reconciled table.
-    await this._refreshSessions();
+    // first client's snapshot see the reconciled table. tc-j8mx.7: capture this
+    // first reconcile as the gate `_handleConnection` awaits before building any
+    // handshake snapshot. Assigned synchronously here — right after the socket
+    // bind, before the event loop can dispatch a connection — so every
+    // `_handleConnection` observes a non-null `_initialReconcile`.
+    this._initialReconcile = this._refreshSessions();
+    await this._initialReconcile;
 
     // tc-4b6k.12 D9: probe tmux version and derive the capability map once.
     // Runs after _refreshSessions so _tmuxAvailable is already up to date; if
@@ -1346,6 +1386,10 @@ class ServerProxyImpl implements ServerProxyHandle {
   }
 
   private async _doRefreshSessions(): Promise<void> {
+    // tc-j8mx.7 test seam: a held barrier keeps this reconcile in-flight so a
+    // test can prove the handshake-snapshot gate withholds the snapshot until
+    // the initial reconcile resolves.  No-op in production (undefined).
+    await this._opts._refreshBarrierForTesting?.();
     // tc-x6l: sessions gauge is updated at the end of each refresh.
     // tc-zcqr: listSessions returns null on transient failure (timeout, spawn
     // error, unexpected non-zero exit) — distinguish from "no sessions"
@@ -1362,6 +1406,16 @@ class ServerProxyImpl implements ServerProxyHandle {
     const availability: TmuxAvailabilityOut = { binaryMissing: false };
     const rows = await listSessions(this._opts.socketName, availability);
     const nowAvailable = !availability.binaryMissing;
+    // tc-j8mx.7: record that this broker has DEFINITIVELY established tmux truth.
+    // A real session list (rows), a "no server running" empty list (rows === []),
+    // or a confirmed binary-missing (ENOENT → rows null but binaryMissing) are all
+    // authoritative "these ARE the sessions" answers. Only a genuine transient
+    // spawn failure (rows null with the binary present) leaves _everReconciled
+    // false — the handshake-snapshot gate then withholds the snapshot rather than
+    // asserting an empty "could not look" table.
+    if (rows !== null || availability.binaryMissing) {
+      this._everReconciled = true;
+    }
     if (nowAvailable !== this._tmuxAvailable) {
       this._tmuxAvailable = nowAvailable;
       // Only push if we already have live clients AND start() has finished:
@@ -1560,6 +1614,44 @@ class ServerProxyImpl implements ServerProxyHandle {
     // _shutdownPromise is set synchronously by shutdown() before _shutdownOnce
     // runs any async work, so it is a reliable "shutdown has begun" sentinel.
     if (this._shutdownPromise !== null) {
+      try { transport.close(); } catch { /* ignore */ }
+      return;
+    }
+
+    // tc-j8mx.7: gate the handshake snapshot on a DEFINITIVE session reconcile.
+    // A connection that lands between the socket bind and the first
+    // `_refreshSessions` resolving — a fresh/relaunched broker's initial connect
+    // OR a post-crash keepalive reconnect — must NEVER receive a snapshot built
+    // from the not-yet-populated table: an empty snapshot wipes every live
+    // session from the client's store (the s35 cascade, tc-j8mx.5). A snapshot
+    // must assert "these ARE the sessions", never "I have not looked yet".
+    if (this._initialReconcile !== null) {
+      await this._initialReconcile;
+    }
+    if (!this._everReconciled) {
+      // The initial reconcile did not establish tmux truth (a genuine transient
+      // spawn failure — NOT tmux-absent, which IS an authoritative answer).
+      // Re-drive once so this connection gets a fresh attempt rather than an
+      // empty "could not look" snapshot.
+      await this._refreshSessions();
+    }
+    // A connection cannot outlive a shutdown that began during the awaits above
+    // (the tc-9r2y hazard): the sweep already cleared _clients, so registering
+    // here would strand this transport. Re-check the sentinel and bail.
+    if (this._shutdownPromise !== null) {
+      try { transport.close(); } catch { /* ignore */ }
+      return;
+    }
+    if (!this._everReconciled) {
+      // Still no definitive reconcile (tmux transiently unreachable). Fail loud
+      // and CLOSE without a snapshot rather than assert an empty table as truth:
+      // the client keeps its rows, marks the wire stale, and reconnects with
+      // backoff — each reconnect re-drives another reconcile, so the broker
+      // self-heals the moment tmux becomes reachable again.
+      process.stderr.write(
+        `serverProxy: closing connection before snapshot — no definitive session ` +
+        `reconcile yet (tmux transiently unreachable); client will reconnect (tc-j8mx.7)\n`,
+      );
       try { transport.close(); } catch { /* ignore */ }
       return;
     }

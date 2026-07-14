@@ -1081,6 +1081,102 @@ describe("server-proxy — capability-required wire shape (tc-u4ny.2)", { skip: 
 });
 
 // ---------------------------------------------------------------------------
+// tc-j8mx.7: handshake-snapshot gate — no snapshot is emitted before the
+// initial session reconcile resolves.  A connection that lands between the
+// socket bind and the first `_refreshSessions` resolving (a fresh/relaunched
+// broker's initial connect OR a post-crash keepalive reconnect) must never
+// receive an EMPTY snapshot built from the not-yet-populated table — an empty
+// snapshot wipes every live session from the client's store (the s35 cascade,
+// tc-j8mx.5).  A snapshot must assert "these ARE the sessions", never "I have
+// not looked yet".
+// ---------------------------------------------------------------------------
+
+describe("tc-j8mx.7: handshake-snapshot gate", { skip: !TMUX_AVAILABLE }, () => {
+  it(
+    "withholds the handshake snapshot until the initial reconcile resolves, then asserts truth",
+    async () => {
+      const socketName = mintSocket("sp");
+      const runtimeDir = makeRuntimeDir("gate");
+
+      // A live session on the socket so the reconcile has real truth to assert.
+      // Without the gate, a connection that races the reconcile would receive an
+      // EMPTY snapshot (the table is not yet populated) and wipe this session.
+      spawnSync("tmux", ["-L", socketName, "new-session", "-d", "-s", "gate-target"], {
+        stdio: "ignore",
+        timeout: 5_000,
+      });
+
+      // The barrier holds the initial reconcile in-flight until we release it.
+      let releaseBarrier!: () => void;
+      const barrier = new Promise<void>((resolve) => {
+        releaseBarrier = resolve;
+      });
+
+      const serverProxy = createServerProxy({
+        socketName,
+        runtimeDir,
+        idleExitMs: 60_000,
+        handshakeTimeoutMs: 5_000,
+        _refreshBarrierForTesting: () => barrier,
+      });
+
+      // Kick off start() WITHOUT awaiting — it binds the socket (accepting
+      // connections) and then blocks awaiting the held reconcile barrier.
+      const startP = serverProxy.start();
+      const endpoint = serverProxySocketPath(socketName, { runtimeDir });
+
+      try {
+        // The socket is listening (bound before the reconcile), so we can connect
+        // and handshake while the reconcile is still held open.
+        await waitFor(() => fs.existsSync(endpoint), 5_000, "server-proxy socket to bind");
+
+        const transport = await connectSocketTransport(endpoint);
+        await runClientHandshake(transport, CLIENT_CAPS, "server-proxy.capabilities");
+        const mux = new TransportMux(transport);
+
+        let snapshot: ServerProxySnapshotMessage | null = null;
+        mux.subscribe((msg) => {
+          if (msg.type === "sessions.snapshot") {
+            snapshot = msg as unknown as ServerProxySnapshotMessage;
+          }
+        });
+
+        // GATE: while the initial reconcile is held, NO snapshot may be emitted.
+        await new Promise((r) => setTimeout(r, 250));
+        assert.equal(
+          snapshot,
+          null,
+          "handshake snapshot must be withheld until the initial reconcile resolves",
+        );
+
+        // Release the reconcile; start() completes and the withheld snapshot is
+        // sent — reflecting the reconciled table, never the empty pre-reconcile one.
+        releaseBarrier();
+        await startP;
+        await waitFor(() => snapshot !== null, 5_000, "snapshot after reconcile release");
+
+        const sent = snapshot as unknown as ServerProxySnapshotMessage;
+        assert.equal(sent.type, "sessions.snapshot");
+        assert.ok(
+          sent.sessions.some((s) => s.name === "gate-target"),
+          `snapshot must assert the live session, never empty: ${JSON.stringify(sent.sessions)}`,
+        );
+
+        transport.close();
+      } finally {
+        // Idempotent: ensure start() can complete even if an assertion threw
+        // while the barrier was still held.
+        releaseBarrier();
+        await startP.catch(() => {});
+        await serverProxy.shutdown();
+        spawnSync("tmux", ["-L", socketName, "kill-server"], { stdio: "ignore", timeout: 5_000 });
+        fs.rmSync(runtimeDir, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
 // tc-w61: @tmuxcc marker integration tests (requires tmux)
 // ---------------------------------------------------------------------------
 
