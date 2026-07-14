@@ -14,6 +14,9 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { accessSync, constants as fsConstants } from "node:fs";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   BOOTSTRAP_PANES_FORMAT,
@@ -24,13 +27,26 @@ import {
 import { ReplyShapeError } from "./reply-row.js";
 
 const SOCK = `tmuxcc-test-replyrow-${process.pid}`;
+// tc-j8mx.9: separate socket for the pane_title suite to avoid the sequential
+// socket-reuse race.  kill-server on SOCK may return before the socket file is
+// fully removed; if new-session then runs on the same name, it can connect to
+// the dying server and fail ("no sessions").  A distinct name sidesteps it.
+const TITLE_SOCK = `tmuxcc-test-replyrow-title-${process.pid}`;
 
-function tmuxBytes(args: string[]): Uint8Array {
-  const r = spawnSync("tmux", ["-L", SOCK, ...args], { encoding: "buffer" });
+// tc-j8mx.9: hermetic pane shell — the pane_title tests assert on #{pane_title}
+// values set by an explicit OSC-0/2 sequence.  The operator's interactive shell
+// (e.g. zprezto zsh) rewrites the terminal title from its precmd hook, racing
+// the asserted value on both read paths.  Point $SHELL at a non-login /bin/sh
+// wrapper for the pane_title server only (see before() below).
+const __dir = dirname(fileURLToPath(import.meta.url));
+const HERMETIC_PANE_SHELL = resolve(__dir, "../harness/hermetic-pane-shell.sh");
+
+function tmuxBytes(args: string[], sock: string = SOCK): Uint8Array {
+  const r = spawnSync("tmux", ["-L", sock, ...args], { encoding: "buffer" });
   return r.stdout ?? new Uint8Array(0);
 }
-function tmuxText(args: string[]): string {
-  const r = spawnSync("tmux", ["-L", SOCK, ...args], { encoding: "utf8" });
+function tmuxText(args: string[], sock: string = SOCK): string {
+  const r = spawnSync("tmux", ["-L", sock, ...args], { encoding: "utf8" });
   return r.stdout ?? "";
 }
 
@@ -96,25 +112,47 @@ describe("pane_title Layer-A: control-char policy on both read paths (tc-mysc.2)
   }
 
   before(() => {
+    // tc-j8mx.9: start the server with a hermetic non-login /bin/sh as
+    // default-shell.  tmux derives default-shell from $SHELL of the
+    // server-starting process.  Without this, the operator's interactive shell
+    // (e.g. zprezto zsh) races the asserted #{pane_title}: its precmd hook
+    // fires after initialization and overwrites the OSC-set title.
+    // Loud accessSync: a missing wrapper must not silently fall back to the
+    // operator shell (which would re-arm the race).  Restore $SHELL immediately
+    // after new-session so other tests in this process are unaffected.
+    accessSync(HERMETIC_PANE_SHELL, fsConstants.X_OK);
+    const prevShell = process.env["SHELL"];
+    process.env["SHELL"] = HERMETIC_PANE_SHELL;
     // A pane that emits the hazardous OSC title once, then idles.
-    tmuxBytes(["new-session", "-d", "-s", "titleprobe", "-x", "80", "-y", "24", HAZARD_OSC]);
+    tmuxBytes(["new-session", "-d", "-s", "titleprobe", "-x", "80", "-y", "24", HAZARD_OSC], TITLE_SOCK);
+    // Restore $SHELL: the server's default-shell is now baked in; restoring
+    // here keeps other tests in this process on the operator shell.
+    if (prevShell !== undefined) {
+      process.env["SHELL"] = prevShell;
+    } else {
+      delete process.env["SHELL"];
+    }
     // Poll until tmux has processed the OSC and stored the (stripped) title.
     for (let i = 0; i < 50; i++) {
-      const t = tmuxText(["list-panes", "-t", "titleprobe", "-F", "#{pane_title}"]).replace(/\n+$/, "");
+      const t = tmuxText(["list-panes", "-t", "titleprobe", "-F", "#{pane_title}"], TITLE_SOCK).replace(/\n+$/, "");
       if (t === EXPECTED) break;
       sleepMs(100);
     }
   });
   after(() => {
-    tmuxBytes(["kill-server"]);
+    tmuxBytes(["kill-server"], TITLE_SOCK);
   });
 
   it("requery path: an OSC title with TAB/NEWLINE/CR parses cleanly, control chars stripped at source", () => {
     // No throw: because tmux strips the control chars, the derived format the
     // driver ships never carries a raw tab/newline in the title column.
-    const rows = PANES_ROW.parse(tmuxBytes(["list-panes", "-a", "-F", BOOTSTRAP_PANES_FORMAT]));
+    const rows = PANES_ROW.parse(tmuxBytes(["list-panes", "-a", "-F", BOOTSTRAP_PANES_FORMAT], TITLE_SOCK));
     const row = rows.find((r) => r.paneTitle === EXPECTED);
-    assert.ok(row, `expected the title-probe pane with the stripped title ${JSON.stringify(EXPECTED)}`);
+    // tc-j8mx.9: include all observed pane titles in the assertion message so
+    // a zprezto-format title in the diff proves the mechanism (operator precmd
+    // racing the OSC-set value).
+    const observedTitles = rows.map((r) => r.paneTitle ?? "<undefined>");
+    assert.ok(row, `expected the title-probe pane with the stripped title ${JSON.stringify(EXPECTED)}; observed pane titles: ${JSON.stringify(observedTitles)}`);
     assert.ok(
       !/[\t\n\r]/.test(row.paneTitle ?? ""),
       "pane_title carries no raw control byte (tmux stripped it at the title-set path)",
@@ -130,7 +168,7 @@ describe("pane_title Layer-A: control-char policy on both read paths (tc-mysc.2)
       [
         "-c",
         `{ printf '%s\\n' 'refresh-client -B "title-watch:%*:#{pane_title}"'; sleep 3; } | ` +
-          `tmux -L ${SOCK} -C attach -t titleprobe 2>&1`,
+          `tmux -L ${TITLE_SOCK} -C attach -t titleprobe 2>&1`,
       ],
       { encoding: "utf8", timeout: 10000 },
     );
