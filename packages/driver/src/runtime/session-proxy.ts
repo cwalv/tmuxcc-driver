@@ -64,6 +64,7 @@ import type { HydrationSentinels, HydrateOpts } from "./hydration.js";
 import { createVerbOriginRegistry } from "./verb-origin.js";
 import { createCloseCauseRegistry } from "./close-cause.js";
 import { createSizeOwnershipPolicy } from "./size-ownership.js";
+import { createManualWindowLedger } from "./manual-window-ledger.js";
 import type { ResizeRequestMessage } from "@tmuxcc/protocol";
 import type { Clock } from "../state/coalescer.js";
 
@@ -756,6 +757,23 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
   //    atomically registers a correlator slot before writing. getModel is
   //    also wired so that tc-7xv.37 error reversal can capture the
   //    before-state for rollback when tmux replies with %error.
+  // 7b. tc-x9bj: manual-window lifecycle ledger.
+  //
+  //     Tracks windows under `window-size manual` (set by every
+  //     resize-managed-window batch) and issues the idempotent reset
+  //     (`set-window-option -u window-size`) when a pane is removed from or
+  //     moved out of a marked window (break-pane, kill-pane, close-pane).
+  //     The bootstrap sweep fires on the first model change and resets every
+  //     sole-pane window, un-freezing any window stranded manual by a prior
+  //     proxy crash or an unsplit that raced a restart.
+  //
+  //     The ledger is wired BEFORE createInputPath so the onManagedWindowResize
+  //     callback is available when inputPath is constructed.
+  const manualWindowLedger = createManualWindowLedger((cmd) => {
+    void pipeline.send(cmd);
+  });
+  let _ledgerBootstrapped = false;
+
   const inputPath = createInputPath(
     {
       send: (cmd) => pipeline.send(cmd),
@@ -765,6 +783,7 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
       ...opts.input,
       dispatchSynthetic: (event) => pipeline.injectNotification(event),
       getModel: () => pipeline.getModel(),
+      onManagedWindowResize: (windowId) => manualWindowLedger.markManual(windowId),
     },
   );
 
@@ -868,6 +887,14 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
   // present in the next model are bound, including those that first appear
   // in bootstrap.
   pipeline.onModelChange((next, prev) => {
+    // tc-x9bj: manual-window ledger — bootstrap sweep on first model change,
+    // then track pane removals/move-outs to auto-release `window-size manual`.
+    if (!_ledgerBootstrapped) {
+      _ledgerBootstrapped = true;
+      manualWindowLedger.bootstrapSweep(next);
+    }
+    manualWindowLedger.onModelChange(next, prev);
+
     for (const pid of next.panes.keys()) {
       if (!demux.isPaneKnown(pid)) {
         demux.notifyPaneBound(pid);

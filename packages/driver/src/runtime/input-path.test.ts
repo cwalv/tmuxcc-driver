@@ -656,38 +656,6 @@ describe("createInputPath — CommandRequestMessage", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Suite: release-managed-window — strip teardown (tc-pizl.9)
-// ---------------------------------------------------------------------------
-
-describe("createInputPath — release-managed-window (tc-pizl.9)", () => {
-  it("release-managed-window → set-window-option -u window-size (single fire-and-forget write)", () => {
-    // When a managed 2-pane strip drops to 1 pane, the vscode factory sends
-    // `release-managed-window` to reset `window-size manual` so the surviving
-    // pane resumes auto-tracking its client dimensions.
-    //
-    // Expected tmux command: set-window-option -u -t @<N> window-size
-    const host = makeFakeDeps();
-    const path = createInputPath(host);
-
-    const msg: CommandRequestMessage = {
-      type: "command.request",
-      seq: nextSeq(),
-      correlationId: "c-rmw1",
-      command: {
-        kind: "release-managed-window",
-        windowId: windowId("w5"),
-      },
-    };
-    path.handleClientMessage(msg);
-
-    // Must be a single synchronous (non-batched) send — no window resize,
-    // no pane resize lines.
-    assert.equal(host.lastWrite, "set-window-option -u -t @5 window-size\n");
-    assert.equal(host.writes.length, 1, "release-managed-window must produce exactly one write");
-  });
-});
-
-// ---------------------------------------------------------------------------
 // Suite: client.capabilities is silently ignored
 // ---------------------------------------------------------------------------
 

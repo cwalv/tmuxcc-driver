@@ -372,6 +372,19 @@ export interface InputPathOptions {
    * Omitting this option disables the counter (the stderr write still fires).
    */
   metrics?: SessionProxyRegistry;
+
+  /**
+   * tc-x9bj: called after a `resize-managed-window` batch is serialized,
+   * so the driver-side manual-window ledger can mark the window.
+   *
+   * The ledger then auto-releases the `window-size manual` override when
+   * a pane is removed from or moved out of the window (model change), and
+   * sweeps all sole-pane windows at bootstrap.
+   *
+   * Omit when the ledger is not wired (e.g. legacy test helpers that
+   * construct an InputPath directly without a session-proxy).
+   */
+  onManagedWindowResize?: (windowId: WindowId) => void;
 }
 
 /**
@@ -1073,21 +1086,10 @@ export function createInputPath(
               lines.push(resizePaneCmd(tmuxPaneNum, pane.cols, pane.rows));
             }
             sendBatch(lines);
-            break;
-          }
-
-          case "release-managed-window": {
-            // tc-pizl.9: Strip→single-pane teardown — release the manual window-size
-            // override left by the managed-strip path so the surviving pane resumes
-            // auto-tracking its tmux client dimensions.
-            //
-            // Translates to: set-window-option -u -t @<wid> window-size
-            //
-            // The `-u` flag unsets the window-local option and falls back to the
-            // global default (typically `latest`), restoring client-driven sizing.
-            // Idempotent — safe to send even when the window was not manual.
-            const tmuxWinNum = toTmuxWindow(command.windowId);
-            sendCommand(setWindowSizeDefault(tmuxWinNum));
+            // tc-x9bj: notify the driver-side manual-window ledger so it can
+            // auto-release the `window-size manual` override when a pane is
+            // removed from or moved out of this window (break-pane, kill-pane).
+            opts.onManagedWindowResize?.(command.windowId);
             break;
           }
 
