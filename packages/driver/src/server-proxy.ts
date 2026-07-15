@@ -89,7 +89,7 @@ import type { ServerProxyMetrics } from "./metrics.js";
 import { mergeMetricsText } from "./metrics-exposition.js";
 import { parseMetricsHttpBind, bindMetricsHttp } from "./metrics-http.js";
 import type { MetricsHttpListener } from "./metrics-http.js";
-import { listSessions, killSession, checkSessionPresence, createTmuxWatcher, probeTmuxLiveness, getTmuxServerPid, countTmuxccClientsBySession, listSessionTopology, setSessionWorkspace, listSessionForFreeze } from "./tmux-south.js";
+import { listSessions, killSession, checkSessionPresence, createTmuxWatcher, probeTmuxLiveness, getTmuxServerPid, countTmuxccClientsBySession, listSessionTopology, setSessionWorkspace, listSessionForFreeze, getTmuxDefaultShell } from "./tmux-south.js";
 import type { TmuxWatcher, TmuxAvailabilityOut } from "./tmux-south.js";
 import { probeTmuxCapabilities, MINIMUM_TMUX_VERSION } from "./tmux-capabilities.js";
 import type { TmuxCapabilityState, TmuxCapabilityMap } from "./tmux-capabilities.js";
@@ -545,6 +545,22 @@ class ServerProxyImpl implements ServerProxyHandle {
    */
   private _tmuxAvailable = true;
 
+  /**
+   * The tmux server's `default-shell` global option (tc-s5f7.2).
+   *
+   * Read once during `start()` via `getTmuxDefaultShell`.  Authoritative shell
+   * path for SI detection: tmux's configured shell, not the login shell of the
+   * process that launched VS Code (`process.env.SHELL`).
+   *
+   * `null` when tmux is absent or `show-options -g default-shell` failed
+   * (best-effort).  Clients fall back to `process.env.SHELL` in that case.
+   *
+   * Additive optional field on `sessions.snapshot`.  Once set at start, this
+   * field is stable for the broker's lifetime (the tmux server's configured
+   * default-shell is not a runtime-mutable value).
+   */
+  private _defaultShell: string | null = null;
+
   // ── tc-4b6k.12 tmux capability state ───────────────────────────────────────
   /**
    * tmux version and capability map, probed once via `tmux -V` during
@@ -848,6 +864,11 @@ class ServerProxyImpl implements ServerProxyHandle {
         ` (detected ${this._tmuxCapabilityState.version})\n`,
       );
     }
+
+    // tc-s5f7.2: read the tmux default-shell once at startup.  Best-effort:
+    // `getTmuxDefaultShell` never throws.  Clients use this as the authoritative
+    // shell path for SI detection; null means "fall back to process.env.SHELL".
+    this._defaultShell = await getTmuxDefaultShell(this._opts.socketName);
 
     // tc-k6v: sessions present at start ⇒ the tmux server pre-existed this
     // server-proxy — it was "adopted", not minted by a later session.claim (§6.2).
@@ -1817,7 +1838,14 @@ class ServerProxyImpl implements ServerProxyHandle {
       });
     }
     // tc-295a.35: canonical tmux-availability flag carried in every snapshot.
-    return { type: "sessions.snapshot", seq, sessions, tmuxAvailable: this._tmuxAvailable };
+    // tc-s5f7.2: defaultShell from tmux show-options, or absent when unknown.
+    return {
+      type: "sessions.snapshot",
+      seq,
+      sessions,
+      tmuxAvailable: this._tmuxAvailable,
+      ...(this._defaultShell !== null ? { defaultShell: this._defaultShell } : {}),
+    };
   }
 
   /**
@@ -1946,15 +1974,18 @@ class ServerProxyImpl implements ServerProxyHandle {
 
       switch (command.kind) {
         case "session.claim":
-          payload = await this._claimer.claim(command.name);
+          // tc-s5f7.2: forward shellCommand for bash/fish SI on the initial pane.
+          payload = await this._claimer.claim(command.name, undefined, command.shellCommand);
           break;
         case "session.create":
           // tc-gjdx.2: forward env so the claim path can pass -e flags to new-session.
-          payload = await this._createSession(command.name, command.env);
+          // tc-s5f7.2: forward shellCommand for bash/fish SI on the initial pane.
+          payload = await this._createSession(command.name, command.env, command.shellCommand);
           break;
         case "session.createUnique":
           // tc-gjdx.2: forward env similarly for unique-create.
-          payload = await this._createUniqueSession(command.baseName, command.workspaceUri, command.env);
+          // tc-s5f7.2: forward shellCommand for bash/fish SI on the initial pane.
+          payload = await this._createUniqueSession(command.baseName, command.workspaceUri, command.env, command.shellCommand);
           break;
         case "session.destroy":
           payload = await this._destroySession(command.sessionId);
@@ -2187,6 +2218,7 @@ class ServerProxyImpl implements ServerProxyHandle {
   private async _createSession(
     name: string,
     env?: Record<string, string>,
+    shellCommand?: string,
   ): Promise<{ sessionId: SessionId; created: boolean }> {
     await this._refreshSessions();
 
@@ -2201,7 +2233,8 @@ class ServerProxyImpl implements ServerProxyHandle {
     // Use claim semantics — create then spawn session-proxy.
     // tc-gjdx.2: env is forwarded to the claimer, which passes it to
     // createSession for the -e NAME=value new-session flags.
-    const result = await this._claimer.claim(name, env);
+    // tc-s5f7.2: shellCommand is the trailing positional arg for new-session.
+    const result = await this._claimer.claim(name, env, shellCommand);
 
     // tc-3y8.2: enforce mint-or-fail.  The checks above close the in-process
     // races, but another tmux client (outside this serverProxy) can still mint the
@@ -2256,6 +2289,7 @@ class ServerProxyImpl implements ServerProxyHandle {
     baseName: string,
     workspaceUri?: string,
     env?: Record<string, string>,
+    shellCommand?: string,
   ): Promise<{ sessionId: SessionId; created: boolean; name: string }> {
     // Normalise: empty / whitespace-only baseName → "tmuxcc".
     const base = (baseName ?? "").trim() || "tmuxcc";
@@ -2279,7 +2313,8 @@ class ServerProxyImpl implements ServerProxyHandle {
       // us (race between the check above and _claimer.claim below), the claim
       // resolves with created=false — that means the name was taken; loop.
       // tc-gjdx.2: env is forwarded so new-session receives the -e flags.
-      const result = await this._claimer.claim(candidate, env);
+      // tc-s5f7.2: shellCommand forwarded for bash/fish SI on the initial pane.
+      const result = await this._claimer.claim(candidate, env, shellCommand);
       if (result.created) {
         // S4: stamp the workspace identity on the just-minted session so reopen
         // matches by option, not by the (human, non-unique) name.  Also mirror

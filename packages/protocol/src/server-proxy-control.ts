@@ -170,6 +170,21 @@ export interface ServerProxySnapshotMessage extends MessageBase {
    * broker that simply doesn't report the flag).
    */
   readonly tmuxAvailable?: boolean;
+  /**
+   * The tmux server's `default-shell` global option (tc-s5f7.2).
+   *
+   * This is the shell tmux uses for EVERY new pane unless overridden by a
+   * trailing shell-command argument.  The extension uses it as the authoritative
+   * shell for SI detection instead of `process.env.SHELL`: when the two differ
+   * (e.g. the user sets `set -g default-shell /usr/bin/fish` in `.tmux.conf`
+   * while their login shell is bash), the driver-provided value wins so
+   * `shellCommand` targets the shell that ACTUALLY runs in each pane.
+   *
+   * Absent when the driver could not read the option (older tmux, probe error).
+   * The client falls back to `process.env.SHELL` when this field is absent.
+   * Additive optional field — non-breaking per the versioning policy.
+   */
+  readonly defaultShell?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -358,6 +373,17 @@ export interface SessionClaimCommand {
    * (tc-gjdx.6); driver-side application is tc-gjdx.3.
    */
   readonly template?: SessionTemplate;
+  /**
+   * Shell command to run in the initial pane of the created session.
+   * Passed as a trailing argument to `new-session` (symmetric with
+   * `open-window` / `split-pane`). Inert when the session already exists and
+   * this claim attaches rather than creates.
+   *
+   * tc-s5f7.2: set by the client for bash/fish SI (--init-file / --init-command)
+   * only when the tmux default-shell matches the shell the shellCommand targets,
+   * so the user's configured shell is never overridden. Additive optional field.
+   */
+  readonly shellCommand?: string;
 }
 
 /**
@@ -383,6 +409,16 @@ export interface SessionCreateCommand {
    * client).
    */
   readonly env?: Record<string, string>;
+  /**
+   * Shell command to run in the initial pane of the created session.
+   * Passed as a trailing argument to `new-session` (symmetric with
+   * `open-window` / `split-pane`).
+   *
+   * tc-s5f7.2: set by the client for bash/fish SI (--init-file / --init-command)
+   * only when the tmux default-shell matches the shell the shellCommand targets.
+   * Additive optional field — non-breaking per the versioning policy.
+   */
+  readonly shellCommand?: string;
 }
 
 /**
@@ -435,6 +471,16 @@ export interface SessionCreateUniqueCommand {
    * client).
    */
   readonly env?: Record<string, string>;
+  /**
+   * Shell command to run in the initial pane of the created session.
+   * Passed as a trailing argument to `new-session` (symmetric with
+   * `open-window` / `split-pane`).
+   *
+   * tc-s5f7.2: set by the client for bash/fish SI (--init-file / --init-command)
+   * only when the tmux default-shell matches the shell the shellCommand targets.
+   * Additive optional field — non-breaking per the versioning policy.
+   */
+  readonly shellCommand?: string;
 }
 
 /**

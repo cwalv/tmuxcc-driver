@@ -2075,4 +2075,156 @@ describe("protocol schema conformance", () => {
       assert.strictEqual(isCommandError(null), false, "null must not match");
     });
   });
+
+  // -------------------------------------------------------------------------
+  // 12. shellCommand on session-create verbs + defaultShell on snapshot
+  //     tc-s5f7.2 — bash/fish SI on the initial pane + authoritative shell detection
+  // -------------------------------------------------------------------------
+
+  describe("shellCommand on creating verbs + defaultShell on snapshot (tc-s5f7.2)", () => {
+    // --- shellCommand on session.claim ---
+
+    it("accepts session.claim carrying shellCommand", () => {
+      const msg: ServerProxyCommandRequestMessage = {
+        type: "command.request",
+        seq: 40,
+        correlationId: "claim-sc-1",
+        command: { kind: "session.claim", name: "main", shellCommand: "bash --init-file /path/to/shellIntegration.bash" },
+      };
+      assert.ok(validateServerProxyClientMsg(msg), JSON.stringify(validateServerProxyClientMsg.errors));
+    });
+
+    it("accepts session.claim WITHOUT shellCommand (additive-optional)", () => {
+      const msg: ServerProxyCommandRequestMessage = {
+        type: "command.request",
+        seq: 41,
+        correlationId: "claim-plain-1",
+        command: { kind: "session.claim", name: "main" },
+      };
+      assert.ok(validateServerProxyClientMsg(msg), JSON.stringify(validateServerProxyClientMsg.errors));
+    });
+
+    it("rejects session.claim with a non-string shellCommand", () => {
+      const bad = {
+        type: "command.request",
+        seq: 42,
+        correlationId: "claim-bad-sc",
+        command: { kind: "session.claim", name: "main", shellCommand: 42 },
+      };
+      assert.strictEqual(validateServerProxyClientMsg(bad), false, "shellCommand must be a string");
+    });
+
+    // --- shellCommand on session.create ---
+
+    it("accepts session.create carrying shellCommand", () => {
+      const msg: ServerProxyCommandRequestMessage = {
+        type: "command.request",
+        seq: 43,
+        correlationId: "create-sc-1",
+        command: { kind: "session.create", name: "main", shellCommand: "bash --init-file /path/to/shellIntegration.bash" },
+      };
+      assert.ok(validateServerProxyClientMsg(msg), JSON.stringify(validateServerProxyClientMsg.errors));
+    });
+
+    it("accepts session.create carrying both env and shellCommand", () => {
+      const msg: ServerProxyCommandRequestMessage = {
+        type: "command.request",
+        seq: 44,
+        correlationId: "create-sc-env-1",
+        command: {
+          kind: "session.create",
+          name: "main",
+          env: { VSCODE_NONCE: "abc123" },
+          shellCommand: "fish --init-command 'source /path/to/shellIntegration.fish'",
+        },
+      };
+      assert.ok(validateServerProxyClientMsg(msg), JSON.stringify(validateServerProxyClientMsg.errors));
+    });
+
+    it("accepts session.create WITHOUT shellCommand (additive-optional)", () => {
+      const msg: ServerProxyCommandRequestMessage = {
+        type: "command.request",
+        seq: 45,
+        correlationId: "create-plain-2",
+        command: { kind: "session.create", name: "plain" },
+      };
+      assert.ok(validateServerProxyClientMsg(msg), JSON.stringify(validateServerProxyClientMsg.errors));
+    });
+
+    it("rejects session.create with a non-string shellCommand", () => {
+      const bad = {
+        type: "command.request",
+        seq: 46,
+        correlationId: "create-bad-sc",
+        command: { kind: "session.create", name: "main", shellCommand: true },
+      };
+      assert.strictEqual(validateServerProxyClientMsg(bad), false, "shellCommand must be a string");
+    });
+
+    // --- shellCommand on session.createUnique ---
+
+    it("accepts session.createUnique carrying shellCommand", () => {
+      const msg: ServerProxyCommandRequestMessage = {
+        type: "command.request",
+        seq: 47,
+        correlationId: "unique-sc-1",
+        command: { kind: "session.createUnique", baseName: "dev", shellCommand: "bash --init-file /path/to/shellIntegration.bash" },
+      };
+      assert.ok(validateServerProxyClientMsg(msg), JSON.stringify(validateServerProxyClientMsg.errors));
+    });
+
+    it("accepts session.createUnique WITHOUT shellCommand (additive-optional)", () => {
+      const msg: ServerProxyCommandRequestMessage = {
+        type: "command.request",
+        seq: 48,
+        correlationId: "unique-plain-2",
+        command: { kind: "session.createUnique", baseName: "dev" },
+      };
+      assert.ok(validateServerProxyClientMsg(msg), JSON.stringify(validateServerProxyClientMsg.errors));
+    });
+
+    it("rejects session.createUnique with a non-string shellCommand", () => {
+      const bad = {
+        type: "command.request",
+        seq: 49,
+        correlationId: "unique-bad-sc",
+        command: { kind: "session.createUnique", baseName: "dev", shellCommand: [] },
+      };
+      assert.strictEqual(validateServerProxyClientMsg(bad), false, "shellCommand must be a string");
+    });
+
+    // --- defaultShell on sessions.snapshot ---
+
+    it("accepts sessions.snapshot carrying defaultShell", () => {
+      const msg = {
+        type: "sessions.snapshot",
+        seq: 1,
+        sessions: [],
+        tmuxAvailable: true,
+        defaultShell: "/bin/bash",
+      };
+      assert.ok(validateServerProxyMsg(msg), JSON.stringify(validateServerProxyMsg.errors));
+    });
+
+    it("accepts sessions.snapshot WITHOUT defaultShell (additive-optional)", () => {
+      const msg = {
+        type: "sessions.snapshot",
+        seq: 1,
+        sessions: [],
+        tmuxAvailable: true,
+      };
+      assert.ok(validateServerProxyMsg(msg), JSON.stringify(validateServerProxyMsg.errors));
+    });
+
+    it("rejects sessions.snapshot with a non-string defaultShell", () => {
+      const bad = {
+        type: "sessions.snapshot",
+        seq: 1,
+        sessions: [],
+        tmuxAvailable: true,
+        defaultShell: 42,
+      };
+      assert.strictEqual(validateServerProxyMsg(bad), false, "defaultShell must be a string");
+    });
+  });
 });

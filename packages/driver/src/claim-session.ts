@@ -181,8 +181,13 @@ export interface SessionClaimer {
    * (`newSessionEnvFlag`); throws with `code: "tmux.capability-required"` when
    * the probed version does not support it.  Ignored (not an error) if the
    * session already exists and `env` would have been a no-op.
+   *
+   * tc-s5f7.2: `shellCommand` is the trailing shell-command argument forwarded
+   * to `new-session` when the session must be created.  Used for bash/fish SI
+   * (`--init-file` / `--init-command`) when the tmux default-shell matches the
+   * targeted shell.  Inert when the session already exists (attach path).
    */
-  claim(name: string, env?: Record<string, string>): Promise<ClaimSessionResult>;
+  claim(name: string, env?: Record<string, string>, shellCommand?: string): Promise<ClaimSessionResult>;
 
   /**
    * Whether a claim for `name` is currently in flight.
@@ -223,7 +228,7 @@ export function createSessionClaimer(ctx: ClaimSessionContext): SessionClaimer {
    * `phaseLog` line, and calls `ctx.onClaimComplete(timing)` — the tc-is5w
    * histogram hook.
    */
-  async function doClaimSession(name: string, env?: Record<string, string>): Promise<ClaimSessionResult> {
+  async function doClaimSession(name: string, env?: Record<string, string>, shellCommand?: string): Promise<ClaimSessionResult> {
     // tc-is5w: record t0 at claim entry for the "claim" phase timer.
     const t0 = phaseNow();
 
@@ -253,11 +258,14 @@ export function createSessionClaimer(ctx: ClaimSessionContext): SessionClaimer {
         // tc-gjdx.2: env is forwarded so new-session can inject -e NAME=value
         // flags; createSession gates env on the newSessionEnvFlag capability
         // (tmux >= 3.2) and throws loud if the flag is absent.
+        // tc-s5f7.2: shellCommand is the trailing shell-command positional arg
+        // for new-session (bash/fish SI); inert when undefined.
         const { tmuxId } = await createSession(
           ctx.socketName,
           name,
           ctx.getCapabilities(),
           env,
+          shellCommand,
         );
         created = true;
         entry = ctx.lookupByName(name);
@@ -359,7 +367,7 @@ export function createSessionClaimer(ctx: ClaimSessionContext): SessionClaimer {
   }
 
   return {
-    claim(name: string, env?: Record<string, string>): Promise<ClaimSessionResult> {
+    claim(name: string, env?: Record<string, string>, shellCommand?: string): Promise<ClaimSessionResult> {
       const inFlight = claimLocks.get(name);
       if (inFlight) {
         // Joined claim: by the time this resolves the session exists; this
@@ -367,10 +375,11 @@ export function createSessionClaimer(ctx: ClaimSessionContext): SessionClaimer {
         // reports `created: true`).
         // tc-gjdx.2: env is applied only at creation time; a joined claim
         // discards it (the session is already being created by the initiator).
+        // tc-s5f7.2: shellCommand likewise discarded on a joined claim.
         return inFlight.then((r) => ({ ...r, created: false }));
       }
 
-      const promise = doClaimSession(name, env).finally(() => {
+      const promise = doClaimSession(name, env, shellCommand).finally(() => {
         // Only remove the lock if it's still THIS promise (not a newer one).
         if (claimLocks.get(name) === promise) {
           claimLocks.delete(name);

@@ -77,6 +77,14 @@
           "type": "array",
           "items": { "$ref": "#/$defs/ServerProxySessionInfo" },
           "description": "All sessions known to this server-proxy at snapshot time."
+        },
+        "tmuxAvailable": {
+          "type": "boolean",
+          "description": "Whether the broker can currently reach the tmux binary (tc-295a.35). Absent on older brokers; treat absent as true (safe default). False when ENOENT on tmux spawn."
+        },
+        "defaultShell": {
+          "type": "string",
+          "description": "The tmux server's default-shell global option (tc-s5f7.2). Authoritative shell path the extension should use for SI detection instead of process.env.SHELL. Absent when the driver could not read the option; client falls back to process.env.SHELL."
         }
       },
       "additionalProperties": false

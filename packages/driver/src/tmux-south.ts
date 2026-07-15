@@ -673,6 +673,7 @@ export async function createSession(
   name: string,
   capabilities?: TmuxCapabilityMap,
   env?: Record<string, string>,
+  shellCommand?: string,
 ): Promise<{ tmuxId: string }> {
   // tc-gjdx.2: gate -e on new-session at 3.2 (CHANGES FROM 3.1c TO 3.2).
   // This flag is NOT available in the 3.0 base where new-window/split-window's
@@ -697,8 +698,14 @@ export async function createSession(
     }
   }
 
+  // tc-s5f7.2: optional trailing shell-command arg, symmetric with new-window.
+  // tmux new-session accepts: new-session [options] [shell-command]
+  // Passed as the last positional argument after all flags (including -P -F).
+  // When absent the pane uses tmux's configured default-shell.
+  const shellCommandArgs: string[] = shellCommand !== undefined ? [shellCommand] : [];
+
   const result = await runTmux(
-    ["-L", socketName, "new-session", "-d", "-s", name, ...envFlags, "-P", "-F", "#{session_id}"],
+    ["-L", socketName, "new-session", "-d", "-s", name, ...envFlags, "-P", "-F", "#{session_id}", ...shellCommandArgs],
     10_000,
   );
   if (result.status !== 0 || result.error) {
@@ -833,6 +840,40 @@ export async function setGlobalScrollOnClear(
     ["-L", socketName, "set-option", "-wg", "scroll-on-clear", on ? "on" : "off"],
     3_000,
   );
+}
+
+/**
+ * Read tmux's `default-shell` global server option (tc-s5f7.2).
+ *
+ * Returns the value of `show-options -g default-shell` — the shell tmux uses
+ * for every new pane unless a trailing shell-command argument overrides it.
+ * This is the authoritative source for per-pane shell detection: it reflects
+ * what the user configured in `.tmux.conf`, while `process.env.SHELL` reflects
+ * the login shell of the process that launched VS Code — they can differ.
+ *
+ * Returns `null` when:
+ *   - The tmux binary is unavailable (probe not yet run, or tmux < MINIMUM_VERSION).
+ *   - `show-options -g default-shell` produces non-zero status or empty output.
+ *   - Any other error (best-effort: this is informational, never fail-loud).
+ *
+ * The caller stores the result and includes it in every `sessions.snapshot`
+ * so the extension can use it for SI shell detection without a round-trip.
+ */
+export async function getTmuxDefaultShell(socketName: string): Promise<string | null> {
+  try {
+    const result = await runTmux(
+      ["-L", socketName, "show-options", "-g", "default-shell"],
+      5_000,
+    );
+    if (result.status !== 0 || !result.stdout) return null;
+    // tmux output format: "default-shell /bin/bash\n"
+    const line = result.stdout.trim();
+    const match = /^default-shell\s+(.+)$/.exec(line);
+    if (match === null || match[1] === undefined) return null;
+    return match[1].trim() || null;
+  } catch {
+    return null;
+  }
 }
 
 /**
