@@ -330,6 +330,20 @@ export interface SessionProxy {
    * Forceful kill.  Idempotent.
    */
   kill(): void;
+
+  /**
+   * tc-j8mx.12: resolves once this session-proxy's terminal farewell
+   * broadcast has run — the host-exit `session.unavailable` (or fault
+   * `internal`) goodbye has been written to every attached client transport
+   * and those transports closed.  Pending until the bound host exits.
+   *
+   * The broker's tmux-gone self-exit awaits this fact for every started
+   * session-proxy before its shutdown closes client transports; without the
+   * wait, the shutdown's transport.close() races the setImmediate-deferred
+   * farewell and a losing farewell is silently dropped — clients then see a
+   * bare data-socket close and react as if the session-proxy crashed.
+   */
+  whenFarewellSettled(): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -611,6 +625,19 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
   let _paneExitHeadedCascade = false;
   let _lastOutputTs = 0;   // timestamp of most recent %output/%extended-output event
   let _modelStabilized = false; // true after first onModelChange (bootstrap done)
+
+  // tc-j8mx.12: the terminal-farewell fact.  Settled once the host-exit
+  // farewell broadcast has run (the setImmediate body in start()'s host.onExit
+  // — after broadcastErrorAndClose has written the `session.unavailable` /
+  // `internal` goodbye to every attached client transport and closed them).
+  // The broker's tmux-gone self-exit awaits this fact (via the supervisor)
+  // before its shutdown closes client transports, so a designed whole-server
+  // death can never destroy a client's data socket before its farewell is on
+  // the wire.
+  let _settleFarewell!: () => void;
+  const _farewellSettled = new Promise<void>((resolve) => {
+    _settleFarewell = resolve;
+  });
 
   const pipeline = createRuntimePipeline(host, {
     buffers: accountingStore,
@@ -1169,6 +1196,10 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
               cause: _paneExitHeadedCascade ? "pane-exit" : "external",
             } : {}),
           });
+          // tc-j8mx.12: the farewell (and the transport closes that carry it)
+          // is on the wire — release anything gating on the terminal-farewell
+          // fact (the broker's tmux-gone self-exit drain).
+          _settleFarewell();
         });
       });
     },
@@ -1672,6 +1703,10 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
       pipeline.stop();
       sizeOwnership.dispose();
       host.kill();
+    },
+
+    whenFarewellSettled(): Promise<void> {
+      return _farewellSettled;
     },
   };
 

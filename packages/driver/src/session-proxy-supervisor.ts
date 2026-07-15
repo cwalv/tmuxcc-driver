@@ -286,6 +286,21 @@ export interface SessionProxySupervisor {
   reapAll(): void;
 
   /**
+   * tc-j8mx.12: resolves once every session-proxy that STARTED under this
+   * supervisor has settled its terminal farewell broadcast (see
+   * {@link SessionProxy.whenFarewellSettled}).  Snapshot semantics: proxies
+   * created after the call are not awaited.  Resolves immediately when no
+   * started proxy has a farewell outstanding.
+   *
+   * The server-proxy's tmux-gone self-exit awaits this fact before its
+   * shutdown closes client transports — the farewells stay on each
+   * session-proxy's own host-exit path (preserving the pane-exit/external
+   * cause attribution, which needs the host pty fully drained), the broker
+   * just refuses to destroy the wire before the goodbyes are on it.
+   */
+  whenFarewellsSettled(): Promise<void>;
+
+  /**
    * Register a handler called when a session-proxy exits unexpectedly.
    */
   onCrash(handler: SessionProxyCrashHandler): void;
@@ -330,6 +345,16 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
   private _sessionProxies = new Map<string, SessionProxyEntry | Promise<SessionProxyEntry>>();
   private _crashHandler: SessionProxyCrashHandler | null = null;
   private _aliveCountHandlers: Array<(count: number) => void> = [];
+
+  /**
+   * tc-j8mx.12: terminal-farewell promises of every STARTED session-proxy
+   * whose farewell has not yet settled.  Tracked independently of
+   * `_sessionProxies` because the registry entry is deleted by the host-exit
+   * handler (onHostDeath) while the farewell broadcast is still parked in the
+   * session-proxy's setImmediate — exactly the window the tmux-gone drain
+   * must cover.  Entries remove themselves on settle.
+   */
+  private _pendingFarewells = new Set<Promise<void>>();
 
   // ---------------------------------------------------------------------------
   // tc-2x3.6 GAP 2: circuit breaker state
@@ -506,6 +531,10 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
     for (const sessionId of [...this._sessionProxies.keys()]) {
       this.reapSessionProxy(sessionId);
     }
+  }
+
+  whenFarewellsSettled(): Promise<void> {
+    return Promise.all([...this._pendingFarewells]).then(() => undefined);
   }
 
   // ---------------------------------------------------------------------------
@@ -692,6 +721,15 @@ class SessionProxySupervisorImpl implements SessionProxySupervisor {
       }
       throw err;
     }
+
+    // tc-j8mx.12: the host is live — track its terminal-farewell fact until it
+    // settles.  (Only STARTED proxies are tracked: a failed start() has no
+    // host-exit event, so its farewell would never settle.)
+    const farewellSettled = sessionProxy.whenFarewellSettled();
+    this._pendingFarewells.add(farewellSettled);
+    void farewellSettled.then(() => {
+      this._pendingFarewells.delete(farewellSettled);
+    });
 
     // Wire host-exit teardown (tmux crashed or the bound session ended).
     //

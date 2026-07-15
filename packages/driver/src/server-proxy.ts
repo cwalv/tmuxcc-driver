@@ -464,6 +464,18 @@ const WATCHER_RESPAWN_BACKOFF_MAX_MS = 8_000;
  */
 const SESSION_ABSENCE_RECONFIRM_MS = 500;
 
+/**
+ * tc-j8mx.12: hang-guard on the tmux-gone farewell drain (`_selfExit` waits
+ * for every started session-proxy's terminal farewell broadcast before
+ * `shutdown()` closes client transports).  tmux is positively gone when the
+ * drain runs, so every session-proxy host exit — and with it every farewell —
+ * is imminent; the wait normally settles in milliseconds (node-pty exit
+ * detection + one setImmediate).  The deadline exists only for a wedged
+ * host-exit, where behavior degrades to the pre-fix race instead of pinning
+ * the exit forever.  Correctness rides on the farewell FACT, never this timer.
+ */
+const SELF_EXIT_FAREWELL_DRAIN_DEADLINE_MS = 2_000;
+
 // ---------------------------------------------------------------------------
 // ServerProxyImpl
 // ---------------------------------------------------------------------------
@@ -1258,6 +1270,26 @@ class ServerProxyImpl implements ServerProxyHandle {
     // shutdown path doesn't have to know about the announcement seq.
     this._broadcastExiting(reason);
 
+    // tc-j8mx.12: on a tmux-gone exit every started session-proxy owes its
+    // attached clients an in-band `session.unavailable` farewell — the signal
+    // the extension's tc-76m8.38 latch keys the designed-death suppression on.
+    // The farewell rides the session-proxy's own host-exit path (a
+    // setImmediate-deferred broadcast, so the host pty drains first and the
+    // pane-exit/external cause attribution stays correct), which RACES this
+    // self-exit: `shutdown()` below closes every client transport, and a
+    // farewell that loses the race is silently dropped (sendControl no-ops on
+    // a closed transport).  Clients then see a bare data-socket close and
+    // react as if the session-proxy crashed ("connection lost."), and a lost
+    // pane-exit attribution turns the S7-silent interactive exit into a
+    // spurious "tmux server ended" toast.  tmux is positively gone here, so
+    // every host exit — and with it every farewell — is imminent: wait on
+    // that fact before destroying the wire.  The deadline is a hang-guard for
+    // a wedged host-exit only (behavior then degrades to the pre-fix race);
+    // correctness never rides on the timer.
+    if (reason === "tmux-gone") {
+      await this._awaitFarewellDrain();
+    }
+
     try {
       await this.shutdown();
     } catch (err) {
@@ -1281,6 +1313,29 @@ class ServerProxyImpl implements ServerProxyHandle {
           `[server-proxy] self-exit handler threw: ${err instanceof Error ? err.message : String(err)}\n`,
         );
       }
+    }
+  }
+
+  /**
+   * tc-j8mx.12: wait for every started session-proxy's terminal farewell
+   * broadcast (see `_selfExit`'s tmux-gone comment), bounded by the
+   * {@link SELF_EXIT_FAREWELL_DRAIN_DEADLINE_MS} hang-guard.
+   */
+  private async _awaitFarewellDrain(): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(() => {
+        process.stderr.write(
+          `serverProxy: tmux-gone farewell drain hit the ${SELF_EXIT_FAREWELL_DRAIN_DEADLINE_MS} ms hang-guard — proceeding with shutdown (a session-proxy host-exit never fired?)\n`,
+        );
+        resolve();
+      }, SELF_EXIT_FAREWELL_DRAIN_DEADLINE_MS);
+      timer.unref();
+    });
+    try {
+      await Promise.race([this._supervisor.whenFarewellsSettled(), deadline]);
+    } finally {
+      if (timer !== null) clearTimeout(timer);
     }
   }
 
