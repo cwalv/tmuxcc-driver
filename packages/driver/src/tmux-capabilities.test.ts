@@ -178,7 +178,7 @@ describe("deriveCapabilities", () => {
 
   // tc-gjdx.2: newSessionEnvFlag — CHANGES FROM 3.1c TO 3.2
   // -e on new-session landed in 3.2; -e on new-window/split-window landed
-  // earlier in 3.0 (= MINIMUM) and needs no separate capability entry.
+  // earlier in 3.0 (= former MINIMUM) and needs no separate capability entry.
   it("newSessionEnvFlag is false below 3.2", () => {
     assert.equal(deriveCapabilities("3.1").newSessionEnvFlag, false);
     assert.equal(deriveCapabilities("3.1c").newSessionEnvFlag, false);
@@ -189,6 +189,21 @@ describe("deriveCapabilities", () => {
   it("newSessionEnvFlag is true above 3.2", () => {
     assert.equal(deriveCapabilities("3.3").newSessionEnvFlag, true);
     assert.equal(deriveCapabilities("3.6").newSessionEnvFlag, true);
+  });
+
+  // tc-cvny: perWindowClientSize — CHANGES FROM 3.2a TO 3.3
+  // refresh-client -C @<id>:WxH per-window syntax (cmd-refresh-client.c,
+  // sscanf "@%u:%ux%u" branch, confirmed in git: fd756a15 is tagged 3.3+).
+  it("perWindowClientSize is false below 3.3", () => {
+    assert.equal(deriveCapabilities("3.2").perWindowClientSize, false);
+    assert.equal(deriveCapabilities("3.2a").perWindowClientSize, false);
+  });
+  it("perWindowClientSize is true at 3.3", () => {
+    assert.equal(deriveCapabilities("3.3").perWindowClientSize, true);
+  });
+  it("perWindowClientSize is true above 3.3", () => {
+    assert.equal(deriveCapabilities("3.4").perWindowClientSize, true);
+    assert.equal(deriveCapabilities("3.6").perWindowClientSize, true);
   });
 
   it("all capabilities true on a future version", () => {
@@ -202,6 +217,7 @@ describe("deriveCapabilities", () => {
     assert.equal(caps.activePaneFlag, true);
     assert.equal(caps.newSessionEnvFlag, true);
     assert.equal(caps.scrollOnClear, true);
+    assert.equal(caps.perWindowClientSize, true);
     assert.equal(caps.noDetachOnDestroy, true);
   });
 
@@ -216,6 +232,7 @@ describe("deriveCapabilities", () => {
     assert.equal(caps.activePaneFlag, false);
     assert.equal(caps.newSessionEnvFlag, false);
     assert.equal(caps.scrollOnClear, false);
+    assert.equal(caps.perWindowClientSize, false);
     assert.equal(caps.noDetachOnDestroy, false);
   });
 });
@@ -231,8 +248,23 @@ describe("MINIMUM_TMUX_VERSION", () => {
     assert.ok(parts, `MINIMUM_TMUX_VERSION "${MINIMUM_TMUX_VERSION}" is not parseable`);
   });
 
-  it("is at or above 3.0 (no-output required for the watcher)", () => {
-    assert(compareTmuxVersion(MINIMUM_TMUX_VERSION, "3.0") >= 0);
+  it("is at or above 3.3 (perWindowClientSize required for tc-cvny)", () => {
+    // The floor must be at least 3.3 where perWindowClientSize was introduced.
+    // tc-cvny.2 ships it at 3.4; tc-cvny.1 may lower it to 3.3 — either way >= 3.3.
+    assert(compareTmuxVersion(MINIMUM_TMUX_VERSION, "3.3") >= 0);
+  });
+
+  it("belowFloor is true for a version below the floor", () => {
+    // A version string known to be below any sensible floor should produce belowFloor=true.
+    const belowFloor = compareTmuxVersion("2.9", MINIMUM_TMUX_VERSION) < 0;
+    assert.equal(belowFloor, true, `2.9 should be below MINIMUM_TMUX_VERSION "${MINIMUM_TMUX_VERSION}"`);
+  });
+
+  it("belowFloor is false at or above the floor", () => {
+    const atFloor = compareTmuxVersion(MINIMUM_TMUX_VERSION, MINIMUM_TMUX_VERSION) < 0;
+    assert.equal(atFloor, false, `MINIMUM_TMUX_VERSION itself should not be belowFloor`);
+    const above = compareTmuxVersion("99.0", MINIMUM_TMUX_VERSION) < 0;
+    assert.equal(above, false, `99.0 should not be belowFloor`);
   });
 });
 
@@ -266,6 +298,7 @@ describe("probeTmuxCapabilities (live probe)", { skip: !TMUX_AVAILABLE }, () => 
     assert.equal(typeof caps.pauseAfterFlag, "boolean");
     assert.equal(typeof caps.activePaneFlag, "boolean");
     assert.equal(typeof caps.scrollOnClear, "boolean");
+    assert.equal(typeof caps.perWindowClientSize, "boolean");
     assert.equal(typeof caps.noDetachOnDestroy, "boolean");
   });
 

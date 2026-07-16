@@ -249,6 +249,7 @@ describe("tmux-south createSession env capability gate (tc-gjdx.2)", () => {
       activePaneFlag: false,
       newSessionEnvFlag: false,
       scrollOnClear: false,
+      perWindowClientSize: false,
       noDetachOnDestroy: false,
     };
 
@@ -291,6 +292,7 @@ describe("tmux-south createSession env capability gate (tc-gjdx.2)", () => {
       activePaneFlag: false,
       newSessionEnvFlag: false,
       scrollOnClear: false,
+      perWindowClientSize: false,
       noDetachOnDestroy: false,
     };
 
@@ -327,6 +329,7 @@ describe("tmux-south createSession env capability gate (tc-gjdx.2)", () => {
       activePaneFlag: false,
       newSessionEnvFlag: false,
       scrollOnClear: false,
+      perWindowClientSize: false,
       noDetachOnDestroy: false,
     };
 

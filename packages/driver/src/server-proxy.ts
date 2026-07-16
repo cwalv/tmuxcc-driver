@@ -202,6 +202,16 @@ export interface ServerProxyOptions {
   capabilitiesOverride?: TmuxCapabilityMap;
 
   /**
+   * Test-harness affordance (tc-cvny.2): when set, bypasses BOTH
+   * {@link probeTmuxCapabilities} AND {@link capabilitiesOverride} in `start()`
+   * and uses this full {@link TmuxCapabilityState} directly.  Allows tests to
+   * inject `belowFloor: true` to verify the claim-time floor gate without
+   * requiring an actual below-floor tmux binary.  The production entry point
+   * never sets this.
+   */
+  _capabilityStateForTesting?: TmuxCapabilityState;
+
+  /**
    * Test-harness affordance (tc-j8mx.7): awaited at the top of every
    * `_doRefreshSessions`.  A test holds this promise to keep the initial
    * reconcile in-flight while it connects a client, proving the handshake-
@@ -865,9 +875,13 @@ class ServerProxyImpl implements ServerProxyHandle {
     // false). Must complete before the first client connection so the initial
     // snapshot and _buildInfo() see the correct capability state.
     // tc-u4ny.2: capabilitiesOverride bypasses the live probe for test seams.
-    this._tmuxCapabilityState = this._opts.capabilitiesOverride
-      ? { version: "override", capabilities: this._opts.capabilitiesOverride, belowFloor: false }
-      : probeTmuxCapabilities();
+    // tc-cvny.2: _capabilityStateForTesting supersedes both to allow injecting
+    //   belowFloor:true (the floor gate is not exercisable via capabilitiesOverride
+    //   alone since that path hardcodes belowFloor:false).
+    this._tmuxCapabilityState = this._opts._capabilityStateForTesting
+      ?? (this._opts.capabilitiesOverride
+        ? { version: "override", capabilities: this._opts.capabilitiesOverride, belowFloor: false }
+        : probeTmuxCapabilities());
     if (this._tmuxCapabilityState?.belowFloor) {
       // Actionable floor-gate message. The server-proxy stays up (same as the
       // _tmuxAvailable path) so the extension can surface it to the user.
@@ -2009,6 +2023,30 @@ class ServerProxyImpl implements ServerProxyHandle {
       this._sendResponse(state, {
         correlationId,
         result: { ok: false, code: "server-proxy.shutting-down", message: "Server proxy is shutting down" },
+      });
+      return;
+    }
+
+    // tc-cvny.2 D9: fail-loud floor gate for session-mutating commands.
+    // When the installed tmux is below MINIMUM_TMUX_VERSION, session creation
+    // and claim are rejected immediately with a clear error.  Read-only
+    // operations (server-proxy.info, session.topology, etc.) are NOT gated —
+    // the broker stays up so the extension can surface the actionable message.
+    if (
+      this._tmuxCapabilityState?.belowFloor &&
+      (command.kind === "session.claim" ||
+        command.kind === "session.create" ||
+        command.kind === "session.createUnique")
+    ) {
+      this._sendResponse(state, {
+        correlationId,
+        result: {
+          ok: false,
+          code: "tmux.below-floor",
+          message:
+            `tmuxcc requires tmux ${MINIMUM_TMUX_VERSION} or later` +
+            ` (detected ${this._tmuxCapabilityState.version})`,
+        },
       });
       return;
     }

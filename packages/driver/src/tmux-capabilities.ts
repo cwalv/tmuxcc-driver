@@ -18,11 +18,15 @@
  *
  * # Minimum supported version
  *
- * {@link MINIMUM_TMUX_VERSION} (`"3.0"`) is the floor below which the driver
- * emits an actionable message. The floor is set at 3.0 because the `no-output`
- * control-mode client flag (needed for the thin watcher to suppress pane output)
- * was introduced in 3.0. Below 3.0 the watcher cannot be made passive and core
- * functionality is degraded.
+ * {@link MINIMUM_TMUX_VERSION} (`"3.4"`) is the floor below which session
+ * creation/claim is rejected with a loud error (tc-cvny.2 D9).
+ *
+ * Floor rationale: tmuxcc's per-window client size reporting (tc-cvny) uses
+ * `refresh-client -C @w:WxH` — the `@<id>:WxH` per-window syntax introduced
+ * in tmux 3.3 (CHANGES FROM 3.2a TO 3.3, verified against cmd-refresh-client.c).
+ * The floor is set at 3.4 pending tc-cvny.1's authoritative verification of
+ * whether 3.3 is sufficient; changing the floor to "3.3" is a one-constant edit
+ * here once tc-cvny.1 clears it.
  *
  * @module tmux-capabilities
  */
@@ -40,19 +44,21 @@ export type { TmuxCapabilityMap };
 // ---------------------------------------------------------------------------
 
 /**
- * Minimum tmux version required for tmuxcc core operation.
+ * Minimum tmux version required for tmuxcc to accept session claims (tc-cvny.2).
  *
- * Below this floor the server-proxy logs an actionable message and the
- * `TmuxCapabilityState.belowFloor` field is `true`. The driver does NOT exit —
- * it stays up and reports the floor violation through snapshot / info so the
- * extension can surface an actionable message to the user.
+ * Below this floor `session.claim`, `session.create`, and
+ * `session.createUnique` are rejected with a loud `"tmux.below-floor"` error.
+ * The server-proxy stays up so the extension can surface the actionable message
+ * to the user; only session-mutating operations are gated.
  *
- * Floor rationale: tmux 3.0 introduced `no-output` (control-mode flag via
- * `refresh-client -F`), which is required for the thin watcher to suppress
- * pane output. Below 3.0 the watcher's passive attach is not possible.
- * CHANGES FROM 2.9 TO 3.0.
+ * Floor rationale: the tc-cvny per-window client size feature requires the
+ * `@<id>:WxH` syntax on `refresh-client -C`, which was introduced in tmux 3.3.
+ * The floor is conservatively set at 3.4 until tc-cvny.1 verifies whether 3.3
+ * is fully sufficient; changing the floor is a one-constant edit.
+ * CHANGES FROM 3.2a TO 3.3 (perWindowClientSize capability verified against
+ * cmd-refresh-client.c in the reference repo).
  */
-export const MINIMUM_TMUX_VERSION = "3.0";
+export const MINIMUM_TMUX_VERSION = "3.4";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -147,9 +153,14 @@ export function deriveCapabilities(version: string): TmuxCapabilityMap {
     // tc-gjdx.2: new-session -e flag landed in 3.2 (CHANGES FROM 3.1c TO 3.2).
     // The same flag for new-window / split-window landed earlier in 3.0
     // (CHANGES FROM 2.9 TO 3.0) and needs no separate capability entry since
-    // 3.0 == MINIMUM_TMUX_VERSION.
+    // all supported tmux versions are >= MINIMUM_TMUX_VERSION (3.4 > 3.0).
     newSessionEnvFlag: gte("3.2"),
     scrollOnClear:     gte("3.3"),
+    // tc-cvny: per-window client size via `refresh-client -C @<id>:WxH`.
+    // Verified in cmd-refresh-client.c: sscanf(size, "@%u:%ux%u", ...) branch.
+    // Introduced in 3.3 (confirmed by git tag: fd756a15 is contained in 3.3).
+    // CHANGES FROM 3.2a TO 3.3 (confirmed against CHANGES in the reference repo).
+    perWindowClientSize: gte("3.3"),
     noDetachOnDestroy: gte("3.6"),
   };
 }

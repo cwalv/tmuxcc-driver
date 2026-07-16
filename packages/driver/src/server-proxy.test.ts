@@ -40,6 +40,7 @@ import * as path from "node:path";
 
 import { createServerProxy, connectSocketTransport, serverProxySocketPath, ServerProxyAlreadyRunningError } from "./index.js";
 import type { ServerProxyHandle, ServerProxySelfExitReason } from "./index.js";
+import { deriveCapabilities, MINIMUM_TMUX_VERSION } from "./tmux-capabilities.js";
 import type { Transport } from "@tmuxcc/protocol";
 
 import {
@@ -1022,6 +1023,7 @@ describe("server-proxy — capability-required wire shape (tc-u4ny.2)", { skip: 
     activePaneFlag: false,
     newSessionEnvFlag: false,
     scrollOnClear: false,
+    perWindowClientSize: false,
     noDetachOnDestroy: false,
   };
 
@@ -1074,6 +1076,99 @@ describe("server-proxy — capability-required wire shape (tc-u4ny.2)", { skip: 
         mux.transport.close();
       } finally {
         await capProxy.shutdown();
+        spawnSync("tmux", ["-L", socketName, "kill-server"], { stdio: "ignore", timeout: 5_000 });
+      }
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// tc-cvny.2: claim-time floor gate — session.claim / session.create are
+// rejected with code "tmux.below-floor" when the injected capability state
+// has belowFloor=true; read-only commands (server-proxy.info) are NOT gated.
+// ---------------------------------------------------------------------------
+
+describe("server-proxy — tmux.below-floor claim-time gate (tc-cvny.2)", { skip: !TMUX_AVAILABLE }, () => {
+  it(
+    "I-floor (tc-cvny.2): session.claim with belowFloor=true → code tmux.below-floor; info is NOT gated",
+    async () => {
+      const socketName = mintSocket("sp");
+      // Inject a below-floor TmuxCapabilityState: version "2.9" is below
+      // MINIMUM_TMUX_VERSION (currently "3.4").  deriveCapabilities("2.9")
+      // provides a consistent capability map; belowFloor=true triggers the gate.
+      const belowFloorState = {
+        version: "2.9",
+        capabilities: deriveCapabilities("2.9"),
+        belowFloor: true,
+      };
+      const floorProxy = createServerProxy({
+        socketName,
+        idleExitMs: 60_000,
+        handshakeTimeoutMs: 2_000,
+        _capabilityStateForTesting: belowFloorState,
+      });
+      await floorProxy.start();
+      try {
+        const { mux } = await connectToServerProxy(floorProxy.endpoint());
+        const seq = { value: 1 };
+
+        // session.claim must be rejected with the floor gate error.
+        const claimResp = await sendServerProxyCommand(
+          mux,
+          { kind: "session.claim", name: "floor-check" },
+          seq,
+        );
+        assert.equal(
+          claimResp.result.ok,
+          false,
+          `Expected result.ok=false for session.claim, got: ${JSON.stringify(claimResp.result)}`,
+        );
+        const claimFailure = claimResp.result as { ok: false; code: string; message: string };
+        assert.equal(
+          claimFailure.code,
+          "tmux.below-floor",
+          `Expected code "tmux.below-floor" for session.claim, got: ${JSON.stringify(claimFailure.code)}`,
+        );
+        // Message must mention the floor version and the detected version.
+        assert.ok(
+          claimFailure.message.includes(MINIMUM_TMUX_VERSION),
+          `Expected message to include floor "${MINIMUM_TMUX_VERSION}": "${claimFailure.message}"`,
+        );
+        assert.ok(
+          claimFailure.message.includes("2.9"),
+          `Expected message to include detected version "2.9": "${claimFailure.message}"`,
+        );
+
+        // session.create must also be rejected.
+        const createResp = await sendServerProxyCommand(
+          mux,
+          { kind: "session.create", name: "floor-check-create" },
+          seq,
+        );
+        assert.equal(
+          createResp.result.ok,
+          false,
+          `Expected result.ok=false for session.create, got: ${JSON.stringify(createResp.result)}`,
+        );
+        const createFailure = createResp.result as { ok: false; code: string };
+        assert.equal(
+          createFailure.code,
+          "tmux.below-floor",
+          `Expected code "tmux.below-floor" for session.create, got: ${JSON.stringify(createFailure.code)}`,
+        );
+
+        // server-proxy.info (read-only) must NOT be blocked — broker stays up
+        // so the extension can surface the actionable message to the user.
+        const infoResp = await sendServerProxyCommand(mux, { kind: "server-proxy.info" }, seq);
+        assert.equal(
+          infoResp.result.ok,
+          true,
+          `Expected server-proxy.info to succeed with belowFloor=true, got: ${JSON.stringify(infoResp.result)}`,
+        );
+
+        mux.transport.close();
+      } finally {
+        await floorProxy.shutdown();
         spawnSync("tmux", ["-L", socketName, "kill-server"], { stdio: "ignore", timeout: 5_000 });
       }
     },

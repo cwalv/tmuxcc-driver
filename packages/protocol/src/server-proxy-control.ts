@@ -826,6 +826,16 @@ export interface TmuxCapabilityMap {
    * CHANGES FROM 3.1c TO 3.2.
    */
   readonly newSessionEnvFlag: boolean;
+  /**
+   * Per-window client size via `refresh-client -C @w:WxH` (tc-cvny).
+   *
+   * When set, the driver can report per-window viewport sizes using the
+   * `@<windowId>:WxH` syntax on `refresh-client -C`, allowing tmux to
+   * maintain a per-window size fact for this client independent of other
+   * windows.  Clearing is done via `refresh-client -C @<windowId>:`.
+   * CHANGES FROM 3.2a TO 3.3.
+   */
+  readonly perWindowClientSize: boolean;
 }
 
 /**
