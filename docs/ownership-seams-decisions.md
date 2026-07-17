@@ -417,3 +417,61 @@ behind the cleaned `protocol/` boundary" — not rewrite-from-here.
 11. **Recycle-takeover fence** (P3, verify-class) — prove the stale-driver
     recycle cannot leave two live brokers past the 5 s soft budget, or fence
     it (drain-confirm before spawn). (§1.2 residual)
+
+---
+
+## 7. D4 disposition — bead tc-cvny (2026-07-17)
+
+**D4 as originally ratified (§2, above):** expressed the size-ownership
+partition via `ClientFlags` (`ignoreSize`), with an activity-elected owner
+(the `SizeOwnershipPolicy`, `runtime/size-ownership.ts`, tc-76m8.3) as the
+mechanism. Arbitration modes (`smallest`/`largest`/`manual`) were reserved
+future facilities.
+
+**D4 as shipped by tc-cvny: retired the owner-election mechanism entirely.**
+
+The owner-election mechanism was incoherent at the substrate level. The driver
+has exactly one tmux `-CC` control client per session: the single-client
+architecture hides N frontend windows from tmux's native `window-size`
+arbitration. A raw `tmux attach` client (explicitly supported) gives tmux a
+second arbitrating party — simultaneously with the driver's election policy
+— and neither knows the other is acting. The driver's election is decorative
+in that case and its size writes silently ineffective when tmux hands the window
+to the raw client. The design had two arbiters of the same concern: the
+classic two-blind-arbiters incoherence. The `tc-x9bj` bug class (manual
+`window-size` outliving its strip via crash, unsplit, or reconnect) lost its
+substrate under this model: once `window-size manual` is never set, there is
+nothing to leak.
+
+**Replacement mechanism (tc-cvny):** the driver reports each window's viewport
+truthfully via tmux's per-window client-size facility (`refresh-client -C
+@<win>:WxH`, tmux ≥ 3.4, tc-cvny.2 version probe). This participates in
+tmux's *existing* native arbitration — one decider per concern, per the
+settled design principle (operator, 2026-07-16). The driver reports every
+known window (report policy: report-every-window, stop-updating-on-unbind,
+never-clear-while-attached — live-confirmed, tc-cvny.1). `resize.request`
+now carries the window's full box, not a pane's subdivided dims; strips push
+only sash subdivisions via `resize-pane` (tc-cvny.4).
+
+**What this removes from the codebase:**
+`runtime/size-ownership.ts` (285 lines, SizeOwnershipPolicy + owner gate +
+candidacy refcounts); the session-proxy owner gate + `lastResizeByClient`
+replay; `hydration.ts` fwx0 owner-resolution; `runtime/manual-window-ledger.ts`
+(tc-x9bj Option B groundwork, obsoleted); `client.focus` wire message +
+`size-ownership-activity` WireFeature token + extension `sendFocus` handler
+(tc-cvny.4 — with no owner to elect, client focus changes no window's size).
+
+**What is preserved:**
+`ClientFlags.ignoreSize` and `ClientFlags.readOnly` remain on the wire and
+in the driver's gate — their semantics shift from "excludes this client from
+candidacy" to "this client never reports sizes." The `readOnly` authority gate
+stays driver-enforced (PROTOCOL.md §12 caveat applies: tmux's `read-only`
+flag does not bind the `-CC` command channel). The D8 parity vocabulary
+reserved in §6.3/PROTOCOL.md §12 is re-expressed in per-window terms:
+`resize.request` is the per-window size report channel; no owner-pin or
+`window-size manual` mode is built or reserved.
+
+**Decision log citations:** tc-cvny epic OPTION comments record the settled
+principles (one-decider-per-concern, no reimplementation of tmux policy, no
+resize-window fallback). tc-cvny.1 pins the upstream semantics relied on.
+tc-cvny.3 (driver) and tc-cvny.4 (extension) are the implementing beads.

@@ -285,34 +285,18 @@ attach, so the resize-gate is not achievable in `hydration.ts` alone.
 
 ---
 
-## §8 — Size partition and the client-flags model (D4, tc-4b6k.3)
+## §8 — Per-window client size reports and the client-flags model (D4 → tc-cvny)
 
-### Problem: multi-client viewport flap
-
-Each `session.attach` connection can issue `resize.request` → the driver issues
-`refresh-client -C <W>x<H>` on the single tmux -CC client. When two VS Code
-windows share the same session (different viewport sizes), both connections send
-`resize.request` and the two calls race, flapping the tmux viewport between the
-two window sizes. Every flap triggers a `%layout-change`, a diff, and a
-`layout.updated` wire blast to all clients — a thundering-herd of size noise.
-
-### Solution: owner/non-owner size partition
+### The mechanism: per-window size reports
 
 `session.attach` carries `flags?: ClientFlags` (`ignoreSize`, `readOnly`). The
-session-proxy (D4, tc-4b6k.3) enforces two gates in its `transport.onControl`
-handler, before messages reach `input-path.ts`:
+session-proxy enforces two gates in its `transport.onControl` handler, before
+messages reach `input-path.ts`:
 
 - **ignoreSize gate**: `ignoreSize` (and `readOnly`, which implies it) makes a
-  connection a size NON-CANDIDATE — it can never drive `refresh-client -C`. Among
-  the remaining CANDIDATES the size owner is elected by ACTIVITY, not by a static
-  flag (the `SizeOwnershipPolicy`, `runtime/size-ownership.ts`, tc-76m8.3):
-  ownership follows the most-recently-active candidate, debounced on
-  owner-silence, first-candidate-owns, immediate handoff on owner departure. A
-  `resize.request` from a non-owner — a non-candidate, or a candidate that is not
-  the current owner — is silently dropped. Candidacy is refcounted per client
-  identity (tc-51oo): a window's several same-identity connections share one
-  candidacy slot, so closing one (a pane-scoped aux, or a reconnect overlap) never
-  strips a still-connected candidate's candidacy.
+  connection a reporting NON-PARTICIPANT — it never calls `refresh-client -C`.
+  All other connections are free to report. A `resize.request` from an
+  `ignoreSize` client is silently dropped.
 - **readOnly gate**: if `flags.readOnly === true`, `input` messages are silently
   dropped and mutating `command.request` verbs are rejected with
   `{ ok: false, code: "read-only" }`. Read-only queries (`pane.capture`,
@@ -321,32 +305,62 @@ handler, before messages reach `input-path.ts`:
 `ClientFlags` is stored on `ClientState` in `serve.ts` and surfaced in the
 `session-proxy.info` → `clients[].flags` field for observability.
 
-### Extension policy (tc-51oo)
+### How reporting works (tc-cvny)
 
-Ordinary VS Code windows attach as size CANDIDATES (no size flags) and let the
-driver's activity policy elect the owner — the extension no longer pre-decides
-ownership from the `session.claim` `created` bit. A connection carries flags only
-where "never drives size" is semantically true of it: read-only observers,
-auxiliary pane-scoped connections, and the anonymous SDK reader (driver-admin),
-which all pass `ignoreSize`.
+`resize.request` resolves a pane to its owning window and emits
+`refresh-client -C @<win>:WxH` (change-gated). This is not an ownership claim;
+it is a truthful per-window size report into tmux's native arbitration
+(`window-size latest|largest|smallest`). No `window-size manual` is ever set; no
+owner is ever elected by the driver.
+
+**Report policy:** once a client begins reporting (first `resize.request`), the
+driver reports **every window in the session** — including windows the extension
+does not render. This is required because participation is sticky: once the driver
+ever issues any `refresh-client -C`, it participates in tmux's per-window
+arbitration; for any window without a `@w` entry the driver then contributes its
+global tty size (live-confirmed, tc-cvny.1 probe 1), which would silently snap
+all unreported windows to the driver's arbitrary 80×24 pty size. Reporting at
+current (or creator-inherited) dims for every window prevents that snap.
+Reports are **never cleared** while the client is attached — clearing means
+"adopt my global size," not "revert" (live-confirmed). Unbinding a window stops
+updating its report; stale reports are soft (another client's activity or a later
+report can correct them). tmux frees per-window entries on client loss.
+
+**Multi-client:** when two extension windows show the same tmux window, the driver
+reports the most-recent box change — a report policy, not an arbitration policy.
+tmux runs its native arbitration across all contributors. A raw `tmux attach`
+client that wins `latest` can only shrink the window below the driver's report
+(the ceiling/clamp semantics of `@w`, tc-cvny.1 probe 1) — the corruption
+direction (pane grid larger than our box) is unreachable while our report stands.
+
+**Strips** are not a sizing special case: the driver reports the strip group's
+total box, and tmux re-tiles panes proportionally. The extension then pushes
+sash subdivisions via `resize-pane` — the one thing tmux cannot know. The old
+managed batch (`window-size manual` + `resize-window` + `resize-pane`×N) collapses
+to the `resize-pane` part; `resize-managed-window` carries `cols`/`rows` for
+extension bookkeeping but the driver uses only the pane subdivisions.
+
+### Extension policy (tc-cvny.4)
+
+Connections carry flags only where "never reports sizes" is semantically true:
 
 | Path (`server-proxy-connect.ts`, unless noted) | flags sent | size role |
 |---|---|---|
-| `connectServerProxyAndClaim` (claim/join) | `{ pullHydration }` | candidate |
+| `connectServerProxyAndClaim` (claim/join) | `{ pullHydration }` | reports sizes |
 | `connectServerProxyAndClaim` (read-only observe) | `{ ignoreSize, readOnly, pullHydration }` | observer |
-| `connectServerProxyAndAttachSession` (silent reattach) | `{ pullHydration }` | candidate |
+| `connectServerProxyAndAttachSession` (silent reattach) | `{ pullHydration }` | reports sizes |
 | `connectServerProxyAndAttachSession` (read-only observe) | `{ ignoreSize, readOnly, pullHydration }` | observer |
-| `connectServerProxyAndCreateUnique` (mints a fresh session) | `{ pullHydration }` | candidate (first → owner) |
-| `connectServerProxyAndAttachPane` (auxiliary pane-scoped) | `{ ignoreSize, pullHydration }` | non-candidate |
-| driver-admin `fetchSessionProxyInfo` (`driver-admin/src/info.ts`) | `{ ignoreSize }` | non-candidate |
+| `connectServerProxyAndCreateUnique` (mints a fresh session) | `{ pullHydration }` | reports sizes |
+| `connectServerProxyAndAttachPane` (auxiliary pane-scoped) | `{ ignoreSize, pullHydration }` | non-participant |
+| driver-admin `fetchSessionProxyInfo` (`driver-admin/src/info.ts`) | `{ ignoreSize }` | non-participant |
 
-`created` no longer affects the flags a claim connection sends — creator and
-joiner both attach as candidates and the driver arbitrates by activity (the
-`created` bit still gates create-time-only template application, unrelated to
-size). The pane-scoped connection stays a non-candidate on SEMANTIC grounds — an
-auxiliary pane-targeted connection is not its window's geometry driver, the main
-session connection is; refcounted candidacy (not this flag) is what keeps closing
-the aux from stripping the window's candidacy.
+The pane-scoped connection is a non-participant on semantic grounds — an auxiliary
+pane-targeted connection is not its window's geometry driver; the main session
+connection is. `created` does not affect size flags: creator and joiner both
+attach without `ignoreSize` and report sizes freely. Client focus (the
+`client.focus` wire message) and the `size-ownership-activity` feature token are
+retired (tc-cvny.4) — with per-window reporting there is no session-size owner
+to elect, so client activity changes no window's size.
 
 > Every EXTENSION data connection declares `pullHydration` (tc-76m8.28; the last
 > two paths — `connectServerProxyAndAttachSession` and
@@ -360,24 +374,22 @@ the aux from stripping the window's candidacy.
 > an extension render connection — it never binds panes to tabs, so the driver's
 > push is inert noise it ignores.
 
-### Future-facility seam: multi-client arbitration modes
+### Future-facility seam: reserved arbitration modes (D8 parity vocabulary)
 
-The shipped policy is the **activity-elected owner** (D4 mechanism + tc-76m8.3
-policy, refcounted candidacy tc-51oo, described above). The `ClientFlags` wire
-slot and the driver gates are also the _infrastructure_ for richer arbitration
-modes that remain reserved (operator carve-out, not yet implemented):
+The `ClientFlags` wire slot and the `ignoreSize` gate are also the infrastructure
+for richer arbitration modes that remain reserved (operator carve-out, not yet
+implemented, per `PROTOCOL.md` §12):
 
-1. **Minimum-size** (tmux default): smallest viewport among all attached clients.
-   Currently bypassed by the control-mode single-client architecture.
-2. **Manual / owner-pin**: an operator-chosen client holds size regardless of
-   activity (an explicit "hold ownership" escape hatch above the activity policy).
-3. **Latest-sender** (S3, deleted): last `resize.request` wins regardless of
-   source — the pre-D4 behavior, now gated out for non-owners.
+1. **Minimum-size** (tmux native `window-size smallest`): the default tmux policy
+   for plain clients; currently bypassed by the control-mode single-client
+   architecture.
+2. **Owner-pin** (manual hold): an operator-chosen client holds size regardless of
+   tmux's native arbitration.
+3. **Per-member view via session groups**: the heavyweight future option for full
+   per-client geometry isolation (`new-session -t`).
 
-Owner-transfer across reconnects is no longer TBD: a reattaching window attaches
-as a candidate and — when it is the sole/most-recently-active candidate — owns via
-the activity policy (first-candidate-owns on an ownerless session, or handoff
-after owner-silence between windows). No `session.claim-ownership` verb is needed.
+These are recorded in `PROTOCOL.md` §12's reserved-modes prose. Nothing is built;
+the `ClientFlags` schema slot is the reservation.
 
 ## 9. Canonicality: the reply-row codec (tc-mysc)
 

@@ -146,9 +146,10 @@ load-bearing example:
   carried forward. Reading it into the shared canonical row would re-introduce
   the shared-slot illegal state D1/D3 removed.
 
-Per-client **size ownership** (the owner/non-owner size partition, D4 /
-tc-76m8.3) is likewise a per-client fact rather than a single shared model value;
-its mechanics live in [`../docs/state-model.md`](../docs/state-model.md) §8.
+Per-client **size reporting** (each client reports per-window sizes via
+`refresh-client -C @<win>:WxH`; `ignoreSize` clients never report) is likewise a
+per-client fact rather than a single shared model value; its mechanics live in
+[`../docs/state-model.md`](../docs/state-model.md) §8.
 
 ### 3.3 Client identity is the axis (D2)
 

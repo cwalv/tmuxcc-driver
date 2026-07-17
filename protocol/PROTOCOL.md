@@ -250,11 +250,10 @@ This package is structured for future beads to amend without breaking existing c
 - **New command kind** (W2.1): add a `$def` entry to `session-proxy/client.json` `$defs/WireCommand` `oneOf`.
 - **Causality tags** (W3.1): add field to `shared/primitives.json` `$defs/MessageBase`.
 - **SessionEntry enrichment** (W1.3): amend `ServerProxySessionInfo` in `server-proxy/server-push.json`.
-- **Per-client attach flags** (tc-4b6k.3/tc-4b6k.4): the `ClientFlags` `$def` in
-  `shared/primitives.json` is the reserved slot. When `session.attach` lands
-  (tc-4b6k.4) it references `ClientFlags`; the driver behavior lands in
-  tc-4b6k.3. Widen the typed set (from `ignoreSize`/`readOnly`) as the parity
-  map in §12 is implemented.
+- **Per-client attach flags**: the `ClientFlags` `$def` in
+  `shared/primitives.json` carries the typed set (`ignoreSize`, `readOnly`,
+  `pullHydration`). Widen it as reserved rows in the §12 parity map are
+  implemented.
 
 ---
 
@@ -263,9 +262,9 @@ This package is structured for future beads to amend without breaking existing c
 The driver deliberately narrows tmux's client axis today (one `-CC` control
 client stands in for N frontend clients), but the *protocol* must still carry
 the axis so widening later is an implementation change, not a protocol change
-(decisions `ownership-seams-decisions.md` §2.1). tc-4b6k.1 lands the **identity**
-(§3.3) and the two-flag **schema slot** (`ClientFlags`); the rest of this map is
-**reserved prose** — recorded here, not yet typed or carried.
+(decisions `ownership-seams-decisions.md` §2.1). The table below records each
+per-client capability's protocol status; implemented rows have shipped code
+behind them, reserved rows are prose only.
 
 | tmux per-client capability | tmux mechanism | Protocol status |
 |---|---|---|
