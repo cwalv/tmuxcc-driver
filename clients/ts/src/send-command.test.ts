@@ -17,7 +17,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import { paneId, sessionId, createInMemoryTransportPair, runSessionProxyHandshake, WIRE_PROTOCOL_VERSION, isCommandError } from "@tmuxcc/protocol";
-import type { CommandRequestMessage, WireCommand, ClientMessage, SnapshotMessage, SessionProxyCommandResponseMessage } from "@tmuxcc/protocol";
+import type { CommandRequestMessage, WireCommand, ClientMessage, SnapshotMessage, SessionProxyCommandResponseMessage, ResizeRequestMessage } from "@tmuxcc/protocol";
 import { windowId } from "@tmuxcc/protocol";
 
 import { createInputApi } from "./input.js";
@@ -67,6 +67,41 @@ describe("InputApi.sendCommand — unit", () => {
     assert.equal(messages.length, 2);
     assert.equal(messages[0]!.seq, 1, "sendInput should use seq=1");
     assert.equal(messages[1]!.seq, 2, "sendCommand should use seq=2");
+  });
+
+  it("tc-cvny: sendCommand flushes a pending coalesced resize FIRST (box-before-push order)", () => {
+    // A `resize.request` coalesces to a microtask, but `sendCommand` sends
+    // synchronously — so a naive interleave would put the command on the wire
+    // BEFORE the resize.  For the strip transaction (window-box report via
+    // resize.request, then the resize-managed-window sash push) the box MUST
+    // land first or the proportional re-tile rescales the sashes away.
+    // sendCommand therefore drains the coalesce buffer before sending.
+    const messages: ClientMessage[] = [];
+    const sender: InputSender = {
+      send(msg) { messages.push(msg as ClientMessage); },
+    };
+
+    // Default coalescing enabled (the production path).
+    const api = createInputApi(sender);
+    api.resizePane(paneId("p0"), 79, 13);          // buffered (microtask)
+    api.sendCommand({                               // must flush the resize first
+      kind: "resize-managed-window",
+      windowId: windowId("w0"),
+      cols: 79,
+      rows: 13,
+      panes: [
+        { paneId: paneId("p0"), cols: 39, rows: 13 },
+        { paneId: paneId("p1"), cols: 39, rows: 13 },
+      ],
+    });
+
+    assert.equal(messages.length, 2, "both the flushed resize and the command must be on the wire");
+    assert.equal(messages[0]!.type, "resize.request", "the box report must be sent BEFORE the command");
+    const resize = messages[0]! as ResizeRequestMessage;
+    assert.equal(resize.cols, 79);
+    assert.equal(resize.rows, 13);
+    assert.equal(messages[1]!.type, "command.request", "the sash push follows the box report");
+    assert.ok(messages[0]!.seq < messages[1]!.seq, "wire seq preserves box-before-push order");
   });
 
   it("split-pane command has the correct shape", () => {

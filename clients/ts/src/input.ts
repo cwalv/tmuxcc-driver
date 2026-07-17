@@ -468,6 +468,13 @@ export function createInputApi(
     },
 
     sendCommand(cmd: WireCommand): void {
+      // Order guarantee (tc-cvny): a `resize.request` (coalesced, deferred to a
+      // microtask) that precedes this command must reach the wire BEFORE it —
+      // e.g. a strip's window-box report (`refresh-client -C @<win>:WxH`) must
+      // land before the `resize-managed-window` sash push, or the proportional
+      // re-tile rescales the sashes away (tc-cvny.1 report-then-push). Drain the
+      // coalesce buffer synchronously first so the FIFO wire preserves order.
+      if (pending.size > 0) flushResizes();
       // Each sendCommand call consumes a seq and generates a unique correlationId.
       const msg: CommandRequestMessage = {
         type: "command.request",
