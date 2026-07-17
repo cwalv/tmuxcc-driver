@@ -61,6 +61,7 @@ import { createOutputDemux } from "./output-demux.js";
 import { createRuntimePipeline } from "./pipeline.js";
 import { createControlServer } from "./serve.js";
 import { createInputPath } from "./input-path.js";
+import { createSizeReporter } from "./size-report.js";
 import { createFlowController } from "./flow-control.js";
 import { createSessionProxy } from "./session-proxy.js";
 import { createSessionProxyRegistry } from "../metrics/index.js";
@@ -553,11 +554,21 @@ async function wireScriptedSession(
   const server = createControlServer(pipeline);
 
   // 4. Input path. tc-3si.1: input-path takes `send`/`sendBatch` from the
-  // pipeline rather than the host directly — slot+write is atomic.
-  const inputPath = createInputPath({
-    send: (cmd) => pipeline.send(cmd),
-    sendBatch: (cmds) => pipeline.sendBatch(cmds),
+  // pipeline rather than the host directly — slot+write is atomic. tc-cvny: a
+  // SizeReporter routes resize.request to per-window `refresh-client -C @<win>:`.
+  const sizeReporter = createSizeReporter({
+    getModel: () => pipeline.getModel(),
+    sendBatch: (cmds) => {
+      for (const p of pipeline.sendBatch(cmds)) void p.catch(() => {});
+    },
   });
+  const inputPath = createInputPath(
+    {
+      send: (cmd) => pipeline.send(cmd),
+      sendBatch: (cmds) => pipeline.sendBatch(cmds),
+    },
+    { reportForPane: (pid, cols, rows) => sizeReporter.reportForPane(pid, cols, rows) },
+  );
 
   // 5. Start host + pipeline.
   await host.start();
@@ -792,10 +803,11 @@ describe("tc-93a: SessionProxy integration — fake-tmux harness", () => {
   // T5. Resize
   // -------------------------------------------------------------------------
 
-  it("T5: client ResizeRequestMessage → refresh-client -C WxH command reaches host.write()", async () => {
+  it("T5: client ResizeRequestMessage → per-window refresh-client -C @<win>:WxH reaches host.write()", async () => {
     const sess = await wireScriptedSession();
 
     try {
+      // pane %1 lives in window @1 (bootstrap fixture), so the report targets @1.
       const resizeMsg: ResizeRequestMessage = {
         type: "resize.request",
         seq: 1,
@@ -809,12 +821,8 @@ describe("tc-93a: SessionProxy integration — fake-tmux harness", () => {
 
       const written = sess.host.writtenCommands.join("\n");
       assert.ok(
-        written.includes("refresh-client") && written.includes("-C"),
-        `expected refresh-client -C in written commands; got: ${written}`,
-      );
-      assert.ok(
-        written.includes("120x40"),
-        `expected 120x40 in refresh-client -C command; got: ${written}`,
+        written.includes("refresh-client -C @1:120x40"),
+        `expected per-window refresh-client -C @1:120x40 in written commands; got: ${written}`,
       );
     } finally {
       await sess.cleanup();
