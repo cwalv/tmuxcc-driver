@@ -317,11 +317,10 @@ export class CommandCorrelator {
    *
    * Use when a caller needs tmux to process several command lines without
    * permitting another writer to interleave between them (e.g. the
-   * resize-managed-window transaction in input-path: window-size manual →
-   * resize-window → resize-pane×N, where an intervening %layout-change
-   * notification between resize-window and the pane resizes would corrupt the
-   * layout). Each command line still gets its own `%begin/%end` block; the
-   * returned Promises resolve in submission order.
+   * resize-managed-window sash push in input-path: resize-pane×N, where an
+   * intervening %layout-change notification between the pane resizes would
+   * corrupt the layout). Each command line still gets its own `%begin/%end`
+   * block; the returned Promises resolve in submission order.
    *
    * Equivalent to N individual `send()` calls except for the atomicity: this
    * method emits ONE `write()` call with all lines joined by `\n`, so no other

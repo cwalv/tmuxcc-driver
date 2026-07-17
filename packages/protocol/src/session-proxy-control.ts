@@ -1102,40 +1102,37 @@ export interface ResizePaneCommand {
 }
 
 /**
- * tc-zna.3: Atomic per-window resize transaction for VS-Code-managed strips.
+ * tc-cvny: sash-subdivision push for VS-Code-managed strips.
  *
  * The VS Code factory is the authoritative geometry source for "managed"
  * windows (windows whose tmux panes are mirrored 1:1 onto VS Code terminal
  * tabs in a single split group / strip).  When the strip changes — split
  * arrives, sash drag re-tiles, member promoted out — the factory aggregates
- * the new geometry and emits ONE ResizeManagedWindow transaction per window.
+ * the new geometry and emits ONE of these per window.
  *
- * The session-proxy translates this to a deterministic tmux command batch:
+ * The window's TOTAL box is NOT set here: it is reported per-window like any
+ * window via {@link ResizeRequestMessage} (`refresh-client -C @<win>:WxH`),
+ * which re-tiles the panes proportionally. This command carries the one thing
+ * tmux cannot know — the exact sash subdivisions — which the session-proxy
+ * pushes as `resize-pane -t %<paneId> -x <cols> -y <rows>` for each pane in
+ * `panes`, batched as one host write (no per-pane geometry storm). There is no
+ * `window-size manual` / `resize-window` step (no manual lifecycle exists).
  *
- *   1. `set-window-option -t @<wid> window-size manual`
- *      (idempotent; switches the window out of "follow the smallest client"
- *       sizing into client-authoritative mode)
- *   2. `resize-window -t @<wid> -x <cols> -y <rows>`
- *   3. `resize-pane -t %<paneId> -x <cols> -y <rows>` for each pane in `panes`
+ * Ordering: the extension sends the window's `resize.request` (the box report)
+ * BEFORE this push, so the proportional re-tile lands before the sash pins; the
+ * wire is FIFO, so the session-proxy preserves that order (tc-cvny.1).
  *
- * Batching is required: tmux processes each command independently, and a
- * naive sequence of per-pane refresh-client calls causes the geometry storm
- * the bead describes.  Issuing the window+pane resizes as one block bounds
- * the work tmux has to do per VS-Code-side dim change.
- *
- * The blanket `resize.request` (→ `refresh-client -C`) wire message remains
- * available for unmanaged paths (single-pane tabs, the editor-area / panel
- * viewport).  Managed windows use this command instead.
- *
- * Additive addition — non-breaking per the versioning policy.
+ * `cols`/`rows` (the window total) are carried for the extension's own
+ * bookkeeping; the session-proxy ignores them (the box arrives via
+ * `resize.request`).
  */
 export interface ResizeManagedWindowCommand {
   readonly kind: "resize-managed-window";
   readonly windowId: WindowId;
-  /** Authoritative window dims (strip sum, separator-inclusive). */
+  /** Window total dims (strip sum, separator-inclusive); reported via resize.request. */
   readonly cols: number;
   readonly rows: number;
-  /** Per-pane dims for every pane in the strip. */
+  /** Per-pane dims for every pane in the strip — the sash subdivisions to pin. */
   readonly panes: ReadonlyArray<{
     readonly paneId: PaneId;
     readonly cols: number;
@@ -1745,12 +1742,15 @@ export interface InputMessage extends MessageBase {
 }
 
 /**
- * Client requests that a pane be resized.
+ * Client reports a window's viewport (tc-cvny).
  * direction: client→session-proxy
  *
- * The client sends this when the host viewport changes (e.g. VS Code pane
- * resized). The session-proxy applies the resize to tmux and then emits a
- * PaneResizedMessage (session-proxy→client) confirming the new dimensions.
+ * Sent when the host viewport changes (e.g. VS Code pane/tab resized). The
+ * `paneId` resolves to a window; the session-proxy reports that window's box to
+ * tmux per-window (`refresh-client -C @<win>:<cols>x<rows>`), change-gated, and
+ * lets tmux's native size arbitration apply it. For a single-pane window the box
+ * is the pane's size; for a strip the extension sends the group's total box
+ * here (the sash subdivisions go via {@link ResizeManagedWindowCommand}).
  */
 export interface ResizeRequestMessage extends MessageBase {
   readonly type: "resize.request";
@@ -1811,25 +1811,17 @@ export interface ResyncRequestMessage extends MessageBase {
 }
 
 /**
- * Client tells the session-proxy that THIS client (window) became the active,
- * foreground client — an explicit activity signal for size-ownership policy.
+ * Client tells the session-proxy that THIS client (window) gained focus.
  * direction: client→session-proxy
  *
- * S3 "Geometry among peers" / D4 policy layer (tc-76m8.3). Size ownership among
- * peer clients follows activity, window-size-`latest` style: the most-recently
- * ACTIVE client owns the session's size (drives `refresh-client -C`); the others
- * ignore size. Two signals feed "active": `input` traffic (the human is typing
- * here) and this message (the human focused this window without typing). Mere
- * connection is NOT activity — a freshly-attached idle peer must not seize size
- * from the client the human is using.
+ * No payload: the client identity is implicit in the transport (the durable
+ * identity presented at handshake, D2). The extension sends this when its VS
+ * Code window gains focus.
  *
- * No payload: the client identity is implicit in the transport (the same
- * durable identity presented at handshake, D2). The extension sends this when
- * its VS Code window gains focus. The session-proxy debounces reassignment so
- * simultaneous typing across peers cannot ping-pong reflows.
- *
- * Additive, forward-compatible: a proxy that predates this type ignores it (no
- * size-ownership behavior), exactly as it would any unknown client message.
+ * Carries no driver-side sizing effect (tc-cvny): sizing is now per-window and
+ * reported truthfully — there is no session-size owner to elect, so focus does
+ * not change any window's size. The session-proxy accepts and ignores it; it
+ * stays on the wire for the extension's focus tracking and future use.
  */
 export interface ClientFocusMessage extends MessageBase {
   readonly type: "client.focus";

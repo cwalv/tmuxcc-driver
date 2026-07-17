@@ -23,6 +23,7 @@ import type {
   ResizeRequestMessage,
   ClientCapabilitiesMessage,
   CommandRequestMessage,
+  PaneId,
 } from "@tmuxcc/protocol";
 import { paneId, windowId, sessionId, WIRE_PROTOCOL_VERSION } from "@tmuxcc/protocol";
 import { paneBoundOptionName } from "../state/bootstrap.js";
@@ -318,50 +319,69 @@ describe("createInputPath — InputMessage", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Suite: ResizeRequestMessage → refresh-client -C
+// Suite: ResizeRequestMessage → reportForPane (per-window report, tc-cvny)
+//
+// input-path no longer emits a tmux command for a resize.request — the paneId
+// (which resolves to a window) and the box are forwarded to the SizeReporter
+// via `opts.reportForPane`, which change-gates and issues the per-window
+// `refresh-client -C @<win>:WxH`. input-path itself writes nothing.
 // ---------------------------------------------------------------------------
 
 describe("createInputPath — ResizeRequestMessage", () => {
-  it("80x24 → refresh-client -C 80x24", () => {
+  function makeReportCapture(): {
+    calls: Array<{ paneId: string; cols: number; rows: number }>;
+    reportForPane: (paneId: PaneId, cols: number, rows: number) => void;
+  } {
+    const calls: Array<{ paneId: string; cols: number; rows: number }> = [];
+    return {
+      calls,
+      reportForPane: (pid, cols, rows) => calls.push({ paneId: String(pid), cols, rows }),
+    };
+  }
+
+  it("forwards paneId + box to reportForPane and writes no command", () => {
     const host = makeFakeDeps();
-    const path = createInputPath(host);
+    const cap = makeReportCapture();
+    const path = createInputPath(host, { reportForPane: cap.reportForPane });
 
     path.handleClientMessage(makeResize("1", 80, 24));
 
-    assert.equal(host.lastWrite, "refresh-client -C 80x24\n");
+    assert.deepEqual(cap.calls, [{ paneId: "p1", cols: 80, rows: 24 }]);
+    assert.equal(host.writes.length, 0, "resize.request emits no tmux command from input-path");
   });
 
-  it("220x50 → refresh-client -C 220x50", () => {
+  it("preserves the paneId (the reporter resolves it to a window)", () => {
     const host = makeFakeDeps();
-    const path = createInputPath(host);
+    const cap = makeReportCapture();
+    const path = createInputPath(host, { reportForPane: cap.reportForPane });
 
-    path.handleClientMessage(makeResize("2", 220, 50));
-
-    assert.equal(host.lastWrite, "refresh-client -C 220x50\n");
-  });
-
-  it("resize uses cols × rows from the message (not the pane id)", () => {
-    const host = makeFakeDeps();
-    const path = createInputPath(host);
-
-    // paneId is irrelevant to the output command (refresh-client -C is client-wide)
     path.handleClientMessage(makeResize("99", 132, 43));
 
-    assert.equal(host.lastWrite, "refresh-client -C 132x43\n");
-    // Confirm pane number does NOT appear in the command
-    assert.ok(!host.lastWrite?.includes("%99"), "pane id should not appear in refresh-client output");
+    assert.deepEqual(cap.calls, [{ paneId: "p99", cols: 132, rows: 43 }]);
   });
 
-  it("produces exactly one write per resize message", () => {
+  it("reports once per resize message", () => {
     const host = makeFakeDeps();
-    const path = createInputPath(host);
+    const cap = makeReportCapture();
+    const path = createInputPath(host, { reportForPane: cap.reportForPane });
 
     path.handleClientMessage(makeResize("1", 80, 24));
     path.handleClientMessage(makeResize("1", 160, 48));
 
-    assert.equal(host.writes.length, 2);
-    assert.equal(host.writes[0], "refresh-client -C 80x24\n");
-    assert.equal(host.writes[1], "refresh-client -C 160x48\n");
+    assert.deepEqual(cap.calls, [
+      { paneId: "p1", cols: 80, rows: 24 },
+      { paneId: "p1", cols: 160, rows: 48 },
+    ]);
+    assert.equal(host.writes.length, 0);
+  });
+
+  it("is a no-op when no reporter is wired", () => {
+    const host = makeFakeDeps();
+    const path = createInputPath(host);
+
+    path.handleClientMessage(makeResize("1", 80, 24));
+
+    assert.equal(host.writes.length, 0);
   });
 });
 
@@ -565,8 +585,10 @@ describe("createInputPath — CommandRequestMessage", () => {
     assert.equal(host.lastWrite, "refresh-client -C 100x30\n");
   });
 
-  // tc-zna.3: managed-window resize transaction.
-  it("resize-managed-window → set-window-option manual + resize-window + per-pane resize-pane (batched)", () => {
+  // tc-cvny: managed-window sash push — resize-pane×N only. The window box is
+  // reported per-window via the resize.request → SizeReporter path, not here;
+  // no window-size manual / resize-window is issued.
+  it("resize-managed-window → per-pane resize-pane only (batched)", () => {
     const host = makeFakeDeps();
     const path = createInputPath(host);
 
@@ -588,11 +610,9 @@ describe("createInputPath — CommandRequestMessage", () => {
     path.handleClientMessage(msg);
 
     // Single host.write batch — assertion on contents in order.
-    assert.equal(host.writes.length, 1, "managed-window resize must be one batched write");
+    assert.equal(host.writes.length, 1, "managed-window sash push must be one batched write");
     const lines = host.writes[0]!.split("\n").filter((l) => l.length > 0);
     assert.deepEqual(lines, [
-      "set-window-option -t @3 window-size manual",
-      "resize-window -t @3 -x 201 -y 50",
       "resize-pane -t %1 -x 100 -y 50",
       "resize-pane -t %2 -x 100 -y 50",
     ]);
@@ -618,17 +638,14 @@ describe("createInputPath — CommandRequestMessage", () => {
 
     assert.equal(host.writes.length, 1);
     const lines = host.writes[0]!.split("\n").filter((l) => l.length > 0);
-    assert.deepEqual(lines, [
-      "set-window-option -t @7 window-size manual",
-      "resize-window -t @7 -x 120 -y 40",
-      "resize-pane -t %9 -x 120 -y 40",
-    ]);
+    assert.deepEqual(lines, ["resize-pane -t %9 -x 120 -y 40"]);
   });
 
-  it("resize-managed-window with zero panes still emits manual + resize-window", () => {
+  it("resize-managed-window with zero panes writes nothing", () => {
     // Defensive: factory should never send an empty pane list, but the
     // protocol should not blow up if it happens (e.g. race where panes were
-    // all closed between aggregation and dispatch).
+    // all closed between aggregation and dispatch). With no sash to push and
+    // no window box to set here, there is nothing to write.
     const host = makeFakeDeps();
     const path = createInputPath(host);
 
@@ -646,12 +663,7 @@ describe("createInputPath — CommandRequestMessage", () => {
     };
     path.handleClientMessage(msg);
 
-    assert.equal(host.writes.length, 1);
-    const lines = host.writes[0]!.split("\n").filter((l) => l.length > 0);
-    assert.deepEqual(lines, [
-      "set-window-option -t @0 window-size manual",
-      "resize-window -t @0 -x 80 -y 24",
-    ]);
+    assert.equal(host.writes.length, 0);
   });
 });
 
@@ -761,16 +773,21 @@ describe("createInputPath — kill-session command", () => {
 describe("createInputPath — mixed message sequence", () => {
   it("processes input then resize then input correctly", () => {
     const host = makeFakeDeps();
-    const path = createInputPath(host);
+    const reports: string[] = [];
+    const path = createInputPath(host, {
+      reportForPane: (pid, cols, rows) => reports.push(`${String(pid)}:${cols}x${rows}`),
+    });
 
     path.handleClientMessage(makeInput("1", "ab"));
     path.handleClientMessage(makeResize("1", 80, 24));
     path.handleClientMessage(makeInput("2", "c"));
 
-    assert.equal(host.writes.length, 3);
+    // resize.request routes to the reporter, not a host write, so only the two
+    // send-keys hit the host — in order.
+    assert.equal(host.writes.length, 2);
     assert.equal(host.writes[0], "send-keys -H -t %1 61 62\n");
-    assert.equal(host.writes[1], "refresh-client -C 80x24\n");
-    assert.equal(host.writes[2], "send-keys -H -t %2 63\n");
+    assert.equal(host.writes[1], "send-keys -H -t %2 63\n");
+    assert.deepEqual(reports, ["p1:80x24"]);
   });
 });
 

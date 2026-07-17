@@ -47,7 +47,7 @@ import type { RuntimePipeline } from "./pipeline.js";
 import { createControlServer } from "./serve.js";
 import type { ControlServer, ControlServerOptions, AddClientOptions } from "./serve.js";
 import type { ClientFlags } from "@tmuxcc/protocol";
-import { createInputPath } from "./input-path.js";
+import { createInputPath, defaultWindowIdToTmux } from "./input-path.js";
 import type { InputPath, InputPathOptions } from "./input-path.js";
 import { createFlowController } from "./flow-control.js";
 import type { FlowController, FlowControllerOptions } from "./flow-control.js";
@@ -63,10 +63,9 @@ import { hydrateTransport, hydratePane, captureText } from "./hydration.js";
 import type { HydrationSentinels, HydrateOpts } from "./hydration.js";
 import { createVerbOriginRegistry } from "./verb-origin.js";
 import { createCloseCauseRegistry } from "./close-cause.js";
-import { createSizeOwnershipPolicy } from "./size-ownership.js";
-import { createManualWindowLedger } from "./manual-window-ledger.js";
-import type { ResizeRequestMessage } from "@tmuxcc/protocol";
-import type { Clock } from "../state/coalescer.js";
+import { createSizeReporter } from "./size-report.js";
+import type { SizeReporter } from "./size-report.js";
+import { setWindowSizeDefault } from "../parser/commands.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -130,19 +129,6 @@ export interface SessionProxyOptions {
    * Pass `{ threshold: Infinity }` to disable the alarm while keeping counters.
    */
   stormAlarm?: StormAlarmOptions;
-
-  /**
-   * Size-ownership policy (tc-76m8.3, S3 "Geometry among peers"). Ownership of
-   * the session size follows client activity (window-size-`latest` style);
-   * `debounceMs` is the owner-silence hold before a more-recently-active peer
-   * takes ownership (default {@link DEFAULT_SIZE_OWNERSHIP_DEBOUNCE_MS}). `clock`
-   * is injectable so tests advance the debounce deterministically. Omit to
-   * accept the defaults.
-   */
-  sizeOwnership?: {
-    readonly debounceMs?: number;
-    readonly clock?: Clock;
-  };
 
   /**
    * Called when the per-session pipeline catches an unhandled exception
@@ -351,12 +337,12 @@ export interface SessionProxy {
 // ---------------------------------------------------------------------------
 
 /**
- * Minimal read-only model shape {@link resolveSizeOwnerViewport} depends on.
+ * Minimal read-only model shape {@link resolveWindowReportViewport} depends on.
  * Kept narrow (mirrors the `HydrationPipeline` pattern) so the resolver is a
  * pure, directly-unit-testable function that does not drag the full model graph
  * into fixtures.
  */
-export interface SizeOwnerViewportModel {
+export interface WindowReportViewportModel {
   readonly panes: ReadonlyMap<
     PaneId,
     { readonly windowId: WindowId; readonly cols: number; readonly rows: number }
@@ -365,53 +351,40 @@ export interface SizeOwnerViewportModel {
 }
 
 /**
- * tc-fwx0: resolve the D4 size-OWNER's target viewport for a pane about to be
- * hydrated, or `undefined` when the size-owner capture gate should NOT engage
- * (the fail-soft fallback: reconstruct-at-captured-size, then converge via the
- * live `%output` stream).
+ * tc-cvny: resolve the per-window report to re-issue before capturing a pane
+ * about to be hydrated, or `undefined` when the pre-capture gate should NOT
+ * engage (the fail-soft fallback: reconstruct-at-captured-size, then converge
+ * via the live `%output` stream).
  *
- * The size that matters for a faithful DIFFERENT-size reattach is the size
- * owner's — the client D4 elected to drive the session geometry
- * (window-size-`latest`), NOT the attaching connection's (which is often
- * `ignoreSize`). This reads the driver's existing ownership state
- * (`ownerKey` = `sizeOwnership.owner`, `lastResizeByClient` = each client's last
- * desired viewport) and returns the owner's viewport only when a
- * `refresh-client -C` before capture would actually change what is captured.
- *
- * Returns `undefined` (⇒ fallback) in every ambiguous / racy case, so the caller
- * never wedges and never captures at a guessed size:
- *   - `ownerKey === null`: no owner elected yet (the owner election has not
- *     happened — e.g. the reattaching window's first-candidate promotion, or an
- *     ownerless idle session). We cannot know the target size → fall back.
- *   - the owner has no recorded `resize.request`: the owner's viewport has not
- *     arrived yet (the common reattach ordering — pane.attach precedes the new
- *     window's first `resize.request`). → fall back.
+ * For a faithful DIFFERENT-size reattach the pane must be captured at the size
+ * its window is reported at. The reporter's ledger holds that size; when it
+ * differs from the pane's current model size (a `resize.request` updated the
+ * report but tmux's re-tile has not yet reflowed the pane), we re-issue the
+ * window's report and await `%end` before capture. Returns `undefined` (⇒
+ * fallback) in every ambiguous / racy case so the caller never wedges:
  *   - the pane vanished between the model check and here → fall back.
  *   - the pane's window has ≠ 1 pane: a split's panes reflow via the managed
- *     layout path, not the gated `resize.request → refresh-client -C` path, so
- *     the owner's full-window viewport is not this pane's target size → fall back.
- *   - the owner's viewport already equals the pane's captured size: tmux is
- *     already at the owner's size, so the refresh would be a no-op → skip it.
- *
- * Only when a single-pane window's owner has a known viewport that DIFFERS from
- * the pane's current size do we return it, so the caller issues
- * `refresh-client -C <cols>x<rows>` (gated on `%end`) before the capture.
+ *     `resize-pane` push, not the window box, so the window report is not this
+ *     pane's target size → fall back.
+ *   - the window has no report yet (never reported / the reattacher's own
+ *     `resize.request` has not arrived) → fall back.
+ *   - the report already equals the pane's captured size: tmux is already
+ *     there, so the refresh would be a no-op → skip it.
  */
-export function resolveSizeOwnerViewport(
+export function resolveWindowReportViewport(
   pid: PaneId,
-  ownerKey: string | null,
-  lastResizeByClient: ReadonlyMap<string, { readonly cols: number; readonly rows: number }>,
-  model: SizeOwnerViewportModel,
-): { readonly cols: number; readonly rows: number } | undefined {
-  if (ownerKey === null) return undefined;
-  const want = lastResizeByClient.get(ownerKey);
-  if (want === undefined) return undefined;
+  reportedSizeForWindow: (windowTmuxNum: number) => { readonly cols: number; readonly rows: number } | undefined,
+  model: WindowReportViewportModel,
+): { readonly windowTmuxNum: number; readonly cols: number; readonly rows: number } | undefined {
   const pane = model.panes.get(pid);
   if (pane === undefined) return undefined;
   const win = model.windows.get(pane.windowId);
   if (win === undefined || win.paneIds.length !== 1) return undefined;
-  if (want.cols === pane.cols && want.rows === pane.rows) return undefined;
-  return { cols: want.cols, rows: want.rows };
+  const windowTmuxNum = defaultWindowIdToTmux(pane.windowId);
+  const reported = reportedSizeForWindow(windowTmuxNum);
+  if (reported === undefined) return undefined;
+  if (reported.cols === pane.cols && reported.rows === pane.rows) return undefined;
+  return { windowTmuxNum, cols: reported.cols, rows: reported.rows };
 }
 
 /**
@@ -784,22 +757,25 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
   //    atomically registers a correlator slot before writing. getModel is
   //    also wired so that tc-7xv.37 error reversal can capture the
   //    before-state for rollback when tmux replies with %error.
-  // 7b. tc-x9bj: manual-window lifecycle ledger.
+  // 7a. Per-window size reporter (tc-cvny).
   //
-  //     Tracks windows under `window-size manual` (set by every
-  //     resize-managed-window batch) and issues the idempotent reset
-  //     (`set-window-option -u window-size`) when a pane is removed from or
-  //     moved out of a marked window (break-pane, kill-pane, close-pane).
-  //     The bootstrap sweep fires on the first model change and resets every
-  //     sole-pane window, un-freezing any window stranded manual by a prior
-  //     proxy crash or an unsplit that raced a restart.
+  //     The driver holds NO sizing policy. It reports each window's viewport to
+  //     tmux per-window (`refresh-client -C @<win>:WxH`) and lets tmux's native
+  //     `latest`/`largest`/`smallest` arbitration decide the window size. The
+  //     reporter is a change-gated cache of our OWN last-reported sizes — not an
+  //     election, priority, or mode. It reports every window it knows (so no
+  //     window snaps to the driver's global pty size) and never clears a report
+  //     while attached (see size-report.ts).
   //
-  //     The ledger is wired BEFORE createInputPath so the onManagedWindowResize
-  //     callback is available when inputPath is constructed.
-  const manualWindowLedger = createManualWindowLedger((cmd) => {
-    void pipeline.send(cmd);
+  //     Constructed BEFORE createInputPath so `reportForPane` is available when
+  //     inputPath is wired; onModelChange (report new windows, prune closed) is
+  //     driven from the pipeline model-change subscription below.
+  const sizeReporter: SizeReporter = createSizeReporter({
+    getModel: () => pipeline.getModel(),
+    sendBatch: (cmds) => {
+      for (const p of pipeline.sendBatch(cmds)) void p.catch(() => {});
+    },
   });
-  let _ledgerBootstrapped = false;
 
   const inputPath = createInputPath(
     {
@@ -810,39 +786,16 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
       ...opts.input,
       dispatchSynthetic: (event) => pipeline.injectNotification(event),
       getModel: () => pipeline.getModel(),
-      onManagedWindowResize: (windowId) => manualWindowLedger.markManual(windowId),
+      reportForPane: (paneId, cols, rows) => sizeReporter.reportForPane(paneId, cols, rows),
     },
   );
 
-  // 7a. Size-ownership policy (tc-76m8.3, S3 "Geometry among peers").
-  //
-  //     D4's MECHANISM is frozen: only the size OWNER's `resize.request` reaches
-  //     `refresh-client -C`; non-owners' are dropped. This POLICY decides WHO
-  //     owns — the most-recently-ACTIVE client (window-size-`latest`), debounced
-  //     so simultaneous typing across peers can't ping-pong reflows. Activity =
-  //     `input` traffic + explicit `client.focus`; mere connection is not.
-  //
-  //     `lastResizeByClient` remembers each client's latest desired viewport
-  //     (even non-owners: a non-owner's resize is dropped, but if it later wins
-  //     ownership its size must be applied so tmux reflows to it — otherwise the
-  //     newly-active window would be stuck at the previous owner's geometry). On
-  //     an ownership change we replay the new owner's last resize through the
-  //     input path (which bypasses the owner gate, being an internal re-apply).
-  const lastResizeByClient = new Map<string, ResizeRequestMessage>();
-  const sizeOwnership = createSizeOwnershipPolicy({
-    ...(opts.sizeOwnership?.debounceMs !== undefined
-      ? { debounceMs: opts.sizeOwnership.debounceMs }
-      : {}),
-    ...(opts.sizeOwnership?.clock !== undefined ? { clock: opts.sizeOwnership.clock } : {}),
-    onOwnerChange: (ownerKey) => {
-      if (ownerKey === null) return;
-      const last = lastResizeByClient.get(ownerKey);
-      if (last === undefined) return;
-      // Re-apply the new owner's viewport: D4 mechanism (refresh-client -C) via
-      // the input path, bypassing the per-transport owner gate in addClient.
-      inputPath.handleClientMessage(last);
-    },
-  });
+  // One-shot attach hygiene (tc-cvny): a session outlives the driver, so an
+  // older build may have left windows in `window-size manual`. No manual mode
+  // exists any more, so on the first model change reset every window to the
+  // default policy (`set-window-option -u window-size`; idempotent — tmux
+  // no-ops a window already on the default). Guarded so it runs exactly once.
+  let _attachHygieneSwept = false;
 
   // 8. Route %pause / %continue notifications from the pipeline to the
   //    FlowController.  These are content-plane signals, not topology — they
@@ -914,13 +867,22 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
   // present in the next model are bound, including those that first appear
   // in bootstrap.
   pipeline.onModelChange((next, prev) => {
-    // tc-x9bj: manual-window ledger — bootstrap sweep on first model change,
-    // then track pane removals/move-outs to auto-release `window-size manual`.
-    if (!_ledgerBootstrapped) {
-      _ledgerBootstrapped = true;
-      manualWindowLedger.bootstrapSweep(next);
+    // tc-cvny: one-shot attach hygiene on the first model change — reset every
+    // window to the default window-size policy in case an older build left one
+    // in `manual`. Idempotent; runs exactly once.
+    if (!_attachHygieneSwept) {
+      _attachHygieneSwept = true;
+      const resets: string[] = [];
+      for (const wid of next.windows.keys()) {
+        resets.push(setWindowSizeDefault(defaultWindowIdToTmux(wid)));
+      }
+      if (resets.length > 0) {
+        for (const p of pipeline.sendBatch(resets)) void p.catch(() => {});
+      }
     }
-    manualWindowLedger.onModelChange(next, prev);
+    // tc-cvny: report windows that appeared without a report yet (never-revealed
+    // windows keep their current dims) and prune reports for closed windows.
+    sizeReporter.onModelChange();
 
     for (const pid of next.panes.keys()) {
       if (!demux.isPaneKnown(pid)) {
@@ -1053,17 +1015,17 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
       });
       return;
     }
-    // tc-fwx0: size-owner-aware capture gate. Resolve the current D4 size-owner's
-    // last-known viewport; when it differs from the pane's captured size (and the
-    // pane is the sole pane of its window), issue `refresh-client -C` gated on
-    // %end BEFORE capture so a different-size reattach reconstructs at the owner's
-    // size rather than a stale one. Resolves to `undefined` in every racy case
-    // (owner not yet elected / owner's resize.request not yet arrived), which
-    // falls back to reconstruct-at-captured-size then converge — never wedges.
-    const initialViewport = resolveSizeOwnerViewport(
+    // tc-cvny: per-window-report capture gate. When the pane's window is
+    // reported at a size that differs from the pane's captured size (and the
+    // pane is the sole pane of its window), re-issue that window's report
+    // (`refresh-client -C @<win>:WxH`) gated on %end BEFORE capture, so a
+    // different-size reattach reconstructs at the reported size rather than a
+    // stale one. Resolves to `undefined` in every racy case (window not reported
+    // yet / the reattacher's own resize.request not arrived), which falls back
+    // to reconstruct-at-captured-size then converge — never wedges.
+    const initialViewport = resolveWindowReportViewport(
       pid,
-      sizeOwnership.owner,
-      lastResizeByClient,
+      (winNum) => sizeReporter.reportedSizeForWindow(winNum),
       model,
     );
     const hydrateOpts: HydrateOpts | undefined =
@@ -1167,7 +1129,6 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
           stormAlarm.stop();
           metricsRegistry.stop();
           pipeline.stop();
-          sizeOwnership.dispose();
 
           // tc-zcqr / tc-1a9d: push farewell AND close client transports.
           // The transport close is the wire-level signal the extension's
@@ -1216,25 +1177,6 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
         ...(opts.preNegotiated !== undefined ? { preNegotiated: opts.preNegotiated } : {}),
         ...(clientFlags !== undefined ? { flags: clientFlags } : {}),
       });
-
-      // 1a'. Size-ownership registration (tc-76m8.3). Key by the durable client
-      //      identity (D2) when present, else the connection id — both stable for
-      //      this transport's lifetime. A connection is a size CANDIDATE unless it
-      //      attached with `ignore-size` or `read-only` (tmux `attach -r` parity:
-      //      those flags mean "never drive size"). The first candidate becomes
-      //      owner immediately; thereafter ownership follows activity.
-      //
-      //      tc-51oo: one window presents ONE identity across all its connections
-      //      (main session + pane-scoped aux + reconnect overlap), so several
-      //      connections collapse to the same clientKey. Candidacy is refcounted
-      //      per key inside the policy (see size-ownership.ts) — closing one
-      //      connection never strips a still-connected same-identity candidate.
-      const clientKey: string =
-        server.clientIdentityFor(transport)?.id ??
-        (server.connectionIdFor(transport) as unknown as string);
-      const isSizeCandidate =
-        clientFlags?.ignoreSize !== true && clientFlags?.readOnly !== true;
-      sizeOwnership.addClient(clientKey, isSizeCandidate);
 
       // 1a. Register this client's FC-1 sub-ledger (tc-0wtb). The demux fans one
       //     %output append out to EVERY attached transport, so each client owes
@@ -1421,40 +1363,26 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
           return;
         }
 
-        // tc-76m8.3 (S3): client.focus — explicit activity signal from the
-        // extension (this window came to the foreground). Never reaches tmux;
-        // it only marks this client most-recently-active for size ownership.
+        // client.focus carries no driver-side effect — the extension emits it
+        // for its own focus tracking. Swallow it here so it is not relayed to
+        // input-path as an unknown message.
         if (msg.type === "client.focus") {
-          sizeOwnership.noteActivity(clientKey);
           return;
         }
 
-        // D4 mechanism (frozen) + tc-76m8.3 POLICY: the size OWNER's resize
-        // drives `refresh-client -C`; a non-owner's is dropped. WHO owns is no
-        // longer the static `ignore-size` flag — it follows activity
-        // (window-size-`latest`). Record this client's latest desired viewport
-        // regardless of ownership (a non-owner that later wins must have its
-        // size re-applied so tmux reflows to it), then gate on current owner.
-        if (msg.type === "resize.request") {
-          lastResizeByClient.set(clientKey, msg as ResizeRequestMessage);
-          if (!sizeOwnership.isSizeOwner(clientKey)) {
-            return;
-          }
+        // tc-cvny: ignoreSize gate. A client attached with `ignore-size` never
+        // reports its viewport — drop its resize.request (tmux `attach -r`
+        // parity). All other clients report per-window; there is no owner to
+        // elect and no non-owner to drop. Falls through to handleClientMessage
+        // → SizeReporter for the report.
+        if (msg.type === "resize.request" && clientFlags?.ignoreSize === true) {
+          return;
         }
 
         // D4 (tc-4b6k.3): readOnly gate — observer clients must not send input
         // or issue mutating commands.  Drop input silently.
         if (msg.type === "input" && clientFlags?.readOnly === true) {
           return;
-        }
-
-        // tc-76m8.3 (S3): input is an activity signal — the human is typing
-        // here, so (after debounce) this client owns the session size. Noted
-        // AFTER the read-only drop: a read-only observer produces no input and
-        // is not a size candidate anyway, but keeping the order explicit means
-        // only delivered input counts. Falls through to handleClientMessage.
-        if (msg.type === "input") {
-          sizeOwnership.noteActivity(clientKey);
         }
 
         // tc-295a.11: pane.capture — one-shot pane text snapshot.
@@ -1655,15 +1583,6 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
         // paused pane's max. Detaching the slowest consumer can itself drop the
         // max to/below low-water and resume the pane for the remaining clients.
         fc.removeClient(transport);
-        // tc-76m8.3 / tc-51oo: drop this CONNECTION from size-ownership. Candidacy
-        // is refcounted per identity key, so `wasCandidate` must match this
-        // connection's attach-time candidacy — a non-candidate (ignore-size /
-        // read-only) close is a no-op, and closing one same-identity connection
-        // never strips a still-connected candidate's candidacy. Only the last
-        // candidate connection for the key hands off (no debounce) to the
-        // most-recently-active remaining candidate, which re-applies its viewport.
-        sizeOwnership.removeClient(clientKey, isSizeCandidate);
-        lastResizeByClient.delete(clientKey);
         server.removeClient(transport);
       });
 
@@ -1693,7 +1612,6 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
       stormAlarm.stop();
       metricsRegistry.stop();
       pipeline.stop();
-      sizeOwnership.dispose();
       return host.stop();
     },
 
@@ -1701,7 +1619,6 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
       stormAlarm.stop();
       metricsRegistry.stop();
       pipeline.stop();
-      sizeOwnership.dispose();
       host.kill();
     },
 

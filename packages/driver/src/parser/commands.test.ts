@@ -38,9 +38,8 @@ import {
   // tc-1a8z: per-pane user-option builders (durable pane name).
   setOptionForPane,
   showOptionsForPane,
-  // tc-zna.3: managed-window resize builders.
-  setWindowSizeManual,
-  resizeWindow,
+  // tc-cvny: managed-window sash push + attach hygiene builders.
+  setWindowSizeDefault,
   resizePane,
   // tc-gjdx.3: template-compiler command builders.
   selectLayout,
@@ -856,26 +855,16 @@ describe("refreshClientSubscribePanes", () => {
 });
 
 // ---------------------------------------------------------------------------
-// tc-zna.3: managed-window resize builders
+// tc-cvny: managed-window sash push + attach hygiene builders
 // ---------------------------------------------------------------------------
 
-describe("setWindowSizeManual", () => {
-  it("emits set-window-option -t @<N> window-size manual", () => {
-    assert.equal(setWindowSizeManual(3), "set-window-option -t @3 window-size manual");
+describe("setWindowSizeDefault", () => {
+  it("emits set-window-option -u -t @<N> window-size", () => {
+    assert.equal(setWindowSizeDefault(3), "set-window-option -u -t @3 window-size");
   });
 
   it("works for window @0", () => {
-    assert.equal(setWindowSizeManual(0), "set-window-option -t @0 window-size manual");
-  });
-});
-
-describe("resizeWindow", () => {
-  it("emits resize-window -t @<N> -x <cols> -y <rows>", () => {
-    assert.equal(resizeWindow(3, 220, 50), "resize-window -t @3 -x 220 -y 50");
-  });
-
-  it("handles small dimensions", () => {
-    assert.equal(resizeWindow(7, 1, 1), "resize-window -t @7 -x 1 -y 1");
+    assert.equal(setWindowSizeDefault(0), "set-window-option -u -t @0 window-size");
   });
 });
 

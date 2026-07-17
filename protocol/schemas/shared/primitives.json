@@ -120,7 +120,7 @@
       "properties": {
         "ignoreSize": {
           "type": "boolean",
-          "description": "tmux-parity `ignore-size` flag: this client does not contribute its viewport to the session's size arbitration. When true the driver drops `resize.request` messages from this client without issuing `refresh-client -C`. Only the owning (non-ignoreSize) client drives the tmux viewport."
+          "description": "tmux-parity `ignore-size` flag: this client never reports its viewport, so its windows contribute nothing to tmux's size arbitration (tc-cvny). When true the driver drops `resize.request` messages from this client; every other client reports its windows per-window (refresh-client -C @<win>:WxH)."
         },
         "readOnly": {
           "type": "boolean",

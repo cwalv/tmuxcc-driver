@@ -140,24 +140,18 @@ export function describeClientIdentity(identity: ClientIdentity | undefined): st
 /**
  * Per-client tmux-parity attach flags (D4/D8, decisions §2.1).
  *
- * RESERVED-NOT-IMPLEMENTED in tc-4b6k.1: this type defines the protocol SLOTS
- * the two minimum flags will occupy on the future `session.attach` step (the
- * attach wire step is tc-4b6k.4; the driver behavior — owner-drives-size /
- * observer partition — is tc-4b6k.3). Nothing carries this on the wire yet; it
- * exists so later beads land on a defined shape.
- *
  * The core vocabulary mirrors tmux(1) client flags. The wider parity map
- * (per-client size, active-pane, pause-after, no-detach-on-destroy, session
- * groups) is reserved prose in PROTOCOL.md §12, not typed here.
- * `pullHydration` is tmuxcc-native (no tmux counterpart): it negotiates which
- * side owns the hydration replay for this client.
+ * (active-pane, pause-after, no-detach-on-destroy, session groups) is reserved
+ * prose in PROTOCOL.md §12, not typed here. `pullHydration` is tmuxcc-native
+ * (no tmux counterpart): it negotiates which side owns the hydration replay for
+ * this client.
  */
 export interface ClientFlags {
   /**
-   * tmux-parity `ignore-size`: this client does not contribute its viewport to
-   * the session's size arbitration (only the owning client drives
-   * `refresh-client -C`). Reserved; the driver does not act on it yet
-   * (owner-only size authority is tc-4b6k.3).
+   * tmux-parity `ignore-size`: this client never reports its viewport, so its
+   * windows contribute nothing to tmux's size arbitration (tc-cvny). The
+   * session-proxy drops this client's `resize.request` messages; every other
+   * client reports its windows per-window (`refresh-client -C @<win>:WxH`).
    */
   readonly ignoreSize?: boolean;
   /**
@@ -217,7 +211,7 @@ export type WireFeature =
   | "focus-events"     // session-proxy wire: active-pane focus notifications
   | "input-forwarding" // session-proxy wire: client→session-proxy key/text input
   | "client-read-only" // session-proxy wire: driver enforces read-only client mode via ClientFlags.readOnly (tc-76m8.2)
-  | "size-ownership-activity" // session-proxy wire: size ownership follows client activity; client.focus accepted (tc-76m8.3, S3)
+  | "size-ownership-activity" // session-proxy wire: client.focus accepted (no sizing effect since tc-cvny — per-window reporting is owner-less; token retained for extension compat)
   | "sessions-watch"   // server-proxy wire: push notifications on session-set changes
   | "session-create"   // server-proxy wire: client may request a new session
   | "session-destroy"  // server-proxy wire: client may request a session be killed

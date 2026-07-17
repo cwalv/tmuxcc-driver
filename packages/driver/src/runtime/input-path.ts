@@ -8,7 +8,9 @@
  * # Handled message types
  *
  *   - `input`          → `send-keys -H -t %<N> <hex-bytes…>`
- *   - `resize.request` → `refresh-client -C <cols>x<rows>`
+ *   - `resize.request` → the pane's window is resolved and its viewport is
+ *                        reported per-window via the {@link SizeReporter}
+ *                        (`refresh-client -C @<win>:WxH`, tc-cvny).
  *   - `command.request`→ mapped to the matching tmux command via the E2
  *                        serializers (split-pane, new-window etc.).
  *   - `client.capabilities` — silently ignored (handshake concern, tc-auj).
@@ -35,17 +37,12 @@
  * # Resize mapping decision
  *
  * `ResizeRequestMessage{paneId, cols, rows}` represents a client viewport
- * change — the host window (VS Code pane, terminal emulator) was resized.
- * The correct tmux command is `refresh-client -C <cols>x<rows>`, which sets
- * the **control-mode client** terminal size.  tmux then propagates the new
- * client size to the window layout and ultimately to individual panes.
- *
- * Per-pane sizing via `refresh-client -C @<win>:<cols>x<rows>` (tmux ≥ 3.4)
- * would be the right primitive for multi-window per-tab sizing (e.g. iTerm2),
- * but requires knowing which window the pane belongs to and is outside the
- * scope of this bead.  The `ResizePaneCommand` wire command (handled below) is
- * the explicit user-initiated resize path and also maps to `refresh-client -C`
- * for now; a future bead can refine this to `resize-pane` if needed.
+ * change — the host window (VS Code pane, terminal emulator) was resized. The
+ * `paneId` resolves to a window and that window's viewport is reported
+ * per-window through the {@link SizeReporter} (`refresh-client -C @<win>:WxH`,
+ * tmux ≥ 3.4): tmux stores the size per-(client, window) and folds it into its
+ * own `latest`/`largest`/`smallest` arbitration. The driver holds no sizing
+ * policy — it reports each window's truth and lets tmux arbitrate (tc-cvny).
  *
  * # API seam
  *
@@ -69,7 +66,6 @@ import type { SessionProxyRegistry } from "../metrics/registry.js";
 import {
   sendKeysHex,
   refreshClientSize,
-  refreshClientWindowSize,
   splitWindow,
   newWindow,
   breakPane,
@@ -80,9 +76,6 @@ import {
   unsetOptionForWindow,
   setOptionForSession,
   unsetOptionForSession,
-  setWindowSizeManual,
-  setWindowSizeDefault,
-  resizeWindow,
   resizePane as resizePaneCmd,
 } from "../parser/commands.js";
 import type { NotificationEvent } from "../parser/notifications.js";
@@ -307,9 +300,9 @@ export interface InputPathDeps {
 
   /**
    * Atomic slot+write callback for transactional N-line batches (typically
-   * `pipeline.sendBatch`). Used by the resize-managed-window path
-   * (window-size manual → resize-window → resize-pane×N) where intervening
-   * commands from another writer would corrupt the layout transaction.
+   * `pipeline.sendBatch`). Used by the resize-managed-window path (the
+   * `resize-pane`×N sash push) where intervening commands from another writer
+   * would corrupt the layout transaction.
    */
   sendBatch: (commands: readonly string[]) => Promise<CommandResult>[];
 }
@@ -374,17 +367,16 @@ export interface InputPathOptions {
   metrics?: SessionProxyRegistry;
 
   /**
-   * tc-x9bj: called after a `resize-managed-window` batch is serialized,
-   * so the driver-side manual-window ledger can mark the window.
+   * tc-cvny: report a window's viewport per-window in response to a
+   * `resize.request`. Called with the request's `paneId` (which resolves to the
+   * window) and the declared box; the {@link SizeReporter} change-gates and
+   * issues `refresh-client -C @<win>:WxH`.
    *
-   * The ledger then auto-releases the `window-size manual` override when
-   * a pane is removed from or moved out of the window (model change), and
-   * sweeps all sole-pane windows at bootstrap.
-   *
-   * Omit when the ledger is not wired (e.g. legacy test helpers that
-   * construct an InputPath directly without a session-proxy).
+   * Omit when the reporter is not wired (e.g. legacy test helpers that construct
+   * an InputPath directly without a session-proxy) — the `resize.request` is
+   * then a no-op.
    */
-  onManagedWindowResize?: (windowId: WindowId) => void;
+  reportForPane?: (paneId: PaneId, cols: number, rows: number) => void;
 }
 
 /**
@@ -903,22 +895,17 @@ export function createInputPath(
       }
 
       // -----------------------------------------------------------------------
-      // resize.request → refresh-client -C <cols>x<rows>
+      // resize.request → per-window report (refresh-client -C @<win>:WxH)
       //
       // Signals that the client viewport (VS Code pane, terminal window) changed
-      // size.  `refresh-client -C WxH` updates the control-mode client's
-      // reported terminal dimensions.  tmux propagates this to the window layout
-      // and, through layout recalculation, to individual pane sizes.
-      //
-      // The paneId is carried in the message but is not used in the tmux command:
-      // `refresh-client -C` operates on the client (not a specific pane), and
-      // tmux determines which pane(s) to resize through its layout engine.  This
-      // is the correct mapping for a viewport-driven resize; a per-pane explicit
-      // resize would use `resize-pane` (see ResizePaneCommand below).
+      // size.  The `paneId` resolves to a window and that window's box is
+      // reported per-window via the SizeReporter, which change-gates and issues
+      // `refresh-client -C @<win>:WxH`.  tmux stores the size per-(client,
+      // window) and arbitrates natively — the driver reports truth, it does not
+      // decide the window's size (tc-cvny).
       // -----------------------------------------------------------------------
       case "resize.request": {
-        const cmd = refreshClientSize(msg.cols, msg.rows);
-        sendCommand(cmd);
+        opts.reportForPane?.(msg.paneId, msg.cols, msg.rows);
         break;
       }
 
@@ -1055,41 +1042,28 @@ export function createInputPath(
           }
 
           case "resize-managed-window": {
-            // tc-zna.3: VS-Code-authoritative managed-window resize transaction.
+            // tc-cvny: push the strip's sash subdivisions — the one thing tmux
+            // cannot know — via `resize-pane`×N. The window's total box is NOT
+            // set here: it is reported per-window like any window through the
+            // `resize.request` → SizeReporter path, and tmux re-tiles the panes
+            // proportionally. No `window-size manual` / `resize-window`: sizing
+            // is a per-window report, with no manual lifecycle to enter or leak.
             //
-            // The VS Code factory owns the truth for windows whose panes form
-            // a single split group; when that geometry changes the factory
-            // emits ONE of these per window with the strip totals + per-pane
-            // dims.  We translate to a deterministic batch:
+            // Ordering (tc-cvny.1, pinned): the window's report must reach tmux
+            // BEFORE this push — a `resize-pane` issued before the report is
+            // rescaled away by the proportional re-tile. The extension sends the
+            // `resize.request` (the report) before this command; the pipeline is
+            // FIFO, so order is preserved on the wire.
             //
-            //   1. set-window-option -t @<wid> window-size manual  (idempotent;
-            //      required so resize-window actually sticks under tmux's
-            //      default window-size=latest policy)
-            //   2. resize-window -t @<wid> -x <cols> -y <rows>
-            //   3. resize-pane  -t %<pid> -x <c> -y <r>  for each pane
-            //
-            // All three are issued via `sendBatch` so tmux processes the
-            // transaction atomically: ONE host write of all lines, with N
-            // correlator slots registered in submission order (tc-3si.1).
-            // No %layout-change notification can interleave between the
-            // window resize and the pane resizes, and the trailing acks
-            // cannot mis-bind to any concurrent requery's list-* slot.
-            //
-            // The blanket resize.request → refresh-client -C path remains
-            // available for unmanaged windows (single-pane tabs, editor-area).
-            const tmuxWinNum = toTmuxWindow(command.windowId);
+            // The `resize-pane`s go via `sendBatch` so they are ONE host write
+            // with N correlator slots in submission order (tc-3si.1) — no
+            // requery list-* slot can mis-bind between them.
             const lines: string[] = [];
-            lines.push(setWindowSizeManual(tmuxWinNum));
-            lines.push(resizeWindow(tmuxWinNum, command.cols, command.rows));
             for (const pane of command.panes) {
               const tmuxPaneNum = toTmuxPane(pane.paneId);
               lines.push(resizePaneCmd(tmuxPaneNum, pane.cols, pane.rows));
             }
-            sendBatch(lines);
-            // tc-x9bj: notify the driver-side manual-window ledger so it can
-            // auto-release the `window-size manual` override when a pane is
-            // removed from or moved out of this window (break-pane, kill-pane).
-            opts.onManagedWindowResize?.(command.windowId);
+            if (lines.length > 0) sendBatch(lines);
             break;
           }
 

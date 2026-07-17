@@ -65,7 +65,7 @@ import { createSocketTransport } from "../socket-transport.js";
 import { trackSocket, killTmuxServer } from "./test-tmux-cleanup.js";
 
 // ---------------------------------------------------------------------------
-// tmux guard + socket bookkeeping (mirrors size-ownership.e2e.test.ts).
+// tmux guard + socket bookkeeping (shared e2e harness pattern).
 // ---------------------------------------------------------------------------
 
 const tmuxAvailable = (() => {

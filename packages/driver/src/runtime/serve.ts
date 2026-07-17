@@ -426,9 +426,10 @@ const DEFAULT_CAPABILITIES: Capabilities = {
     // ClientFlags.readOnly (silent input swallow + loud verb rejection).
     // Extension checks for this feature before offering "Attach read-only" (D9 pattern).
     "client-read-only",
-    // tc-76m8.3 (S3): size ownership follows client activity; the session-proxy
-    // accepts `client.focus` and reassigns size ownership to the most-recently
-    // active peer (window-size-`latest`, debounced).
+    // tc-cvny: the session-proxy accepts `client.focus` (it no longer carries a
+    // sizing effect — sizing is per-window and owner-less). Kept advertised so
+    // the extension's focus path is unchanged; full retirement of the token +
+    // the extension's sendFocus gate is tc-cvny.4/.6.
     "size-ownership-activity",
   ],
 };

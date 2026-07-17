@@ -48,7 +48,7 @@
         { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
       ],
       "type": "object",
-      "description": "Client requests that a pane be resized (host viewport changed). The session-proxy applies the resize and emits a PaneResizedMessage confirming the new dimensions. Distinct from ResizePaneCommand (explicit user action). direction: client→session-proxy.",
+      "description": "Client reports a window's viewport (host viewport changed) — tc-cvny. The paneId resolves to a window; the session-proxy reports that window's box per-window (refresh-client -C @<win>:WxH, change-gated) and lets tmux arbitrate natively. For a single-pane window the box is the pane's size; for a strip the extension sends the group's total box here (sash subdivisions go via ResizeManagedWindowCommand). Distinct from ResizePaneCommand (explicit user action). direction: client→session-proxy.",
       "required": ["type", "seq", "paneId", "cols", "rows"],
       "properties": {
         "type": { "const": "resize.request" },
@@ -94,7 +94,7 @@
         { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
       ],
       "type": "object",
-      "description": "Client tells the session-proxy that this window became the active/foreground client — an explicit activity signal for size-ownership policy (tc-76m8.3, S3 'Geometry among peers'). Size ownership among peer clients follows activity (window-size-`latest` style); this signal plus `input` traffic mark a client active, and the most-recently-active client owns the session size. No payload — the client identity is implicit in the transport (D2). Additive, forward-compatible: an older proxy ignores it. direction: client→session-proxy.",
+      "description": "Client tells the session-proxy that this window gained focus. No payload — the client identity is implicit in the transport (D2). Carries no driver-side sizing effect (tc-cvny): sizing is per-window and owner-less, so focus changes no window's size; the session-proxy accepts and ignores it, and it stays on the wire for the extension's focus tracking. direction: client→session-proxy.",
       "required": ["type", "seq"],
       "properties": {
         "type": { "const": "client.focus" },
@@ -222,7 +222,7 @@
 
     "ResizeManagedWindowCommand": {
       "type": "object",
-      "description": "Atomic per-window resize transaction for VS-Code-managed strips. Added tc-zna.3. The session-proxy translates to: set-window-option manual + resize-window + resize-pane per pane.",
+      "description": "Sash-subdivision push for VS-Code-managed strips (tc-cvny). The session-proxy translates to resize-pane per pane (batched). The window's total box is NOT set here — it is reported per-window via resize.request (refresh-client -C @<win>:WxH); this command only pins the sash subdivisions tmux cannot infer. No window-size manual / resize-window.",
       "required": ["kind", "windowId", "cols", "rows", "panes"],
       "properties": {
         "kind": { "const": "resize-managed-window" },
@@ -230,7 +230,7 @@
         "cols": {
           "type": "integer",
           "minimum": 1,
-          "description": "Authoritative window dims (strip sum, separator-inclusive)."
+          "description": "Window total dims (strip sum, separator-inclusive); reported via resize.request. Carried for the extension's bookkeeping; the session-proxy ignores it here."
         },
         "rows": { "type": "integer", "minimum": 1 },
         "panes": {
@@ -245,7 +245,7 @@
             },
             "additionalProperties": false
           },
-          "description": "Per-pane dims for every pane in the strip."
+          "description": "Per-pane dims for every pane in the strip — the sash subdivisions to pin via resize-pane."
         }
       },
       "additionalProperties": false

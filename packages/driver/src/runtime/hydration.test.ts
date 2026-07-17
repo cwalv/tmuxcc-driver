@@ -698,35 +698,35 @@ describe("tc-w3ir.2 structured grid reconstruction frame", () => {
 });
 
 // ---------------------------------------------------------------------------
-// (F) tc-fwx0 — different-size reattach: pre-capture resize gate
+// (F) tc-cvny — different-size reattach: pre-capture per-window report gate
 //
-// The reusable refresh-before-capture core (originally shaped in tc-w3ir.6):
-// when `initialViewport` is provided, `hydrateTransport` / `hydratePane` must
-// issue `refresh-client -C <cols>x<rows>` (a `pipeline.send` that awaits `%end`)
-// BEFORE dispatching any `capture-pane` command — the "no mid-reflow capture"
-// guarantee for a different-size reattach. WHO decides the viewport is the
-// caller's policy (session-proxy's size-owner resolver, tested separately); this
-// section pins the MECHANISM.
+// The reusable report-before-capture core: when `initialViewport` is provided,
+// `hydrateTransport` / `hydratePane` must issue `refresh-client -C @<win>:WxH`
+// (a `pipeline.send` that awaits `%end`) BEFORE dispatching any `capture-pane`
+// command — the "no mid-reflow capture" guarantee for a different-size reattach.
+// WHICH window/size to report is the caller's concern (session-proxy's per-window
+// report resolver, tested separately); this section pins the MECHANISM.
 //
-//   F1. `refresh-client -C` appears in the command log BEFORE any `capture-pane`.
+//   F1. `refresh-client -C @<win>:` appears in the command log BEFORE any
+//       `capture-pane`.
 //   F2. The capture is gated: no `capture-pane` is dispatched while the
 //       `refresh-client -C` round-trip is still in flight.
-//   F3. Legacy path unchanged: no `refresh-client -C` when `initialViewport` absent.
+//   F3. Path unchanged: no `refresh-client -C` when `initialViewport` absent.
 // ---------------------------------------------------------------------------
 
-describe("tc-fwx0 different-size reattach — pre-capture resize gate (hydrateTransport)", () => {
-  it("F1: refresh-client -C appears before any capture-pane in the command log", async () => {
+describe("tc-cvny different-size reattach — pre-capture per-window report gate (hydrateTransport)", () => {
+  it("F1: refresh-client -C @<win>: appears before any capture-pane in the command log", async () => {
     const { pipeline, sentCommands, setReply } = makeFakePipeline();
     const { transport } = makeRecordingTransport();
     setReply("capture-pane", ok(new TextEncoder().encode("body")));
 
     await hydrateTransport(pipeline, transport, [P1], undefined, {
-      initialViewport: { cols: 100, rows: 30 },
+      initialViewport: { windowTmuxNum: 5, cols: 100, rows: 30 },
     });
 
-    const refreshIdx = sentCommands.findIndex((c) => c.startsWith("refresh-client -C 100x30"));
+    const refreshIdx = sentCommands.findIndex((c) => c.startsWith("refresh-client -C @5:100x30"));
     const captureIdx = sentCommands.findIndex((c) => c.startsWith("capture-pane"));
-    assert.ok(refreshIdx >= 0, "refresh-client -C 100x30 must be in the command log");
+    assert.ok(refreshIdx >= 0, "refresh-client -C @5:100x30 must be in the command log");
     assert.ok(captureIdx >= 0, "capture-pane must be in the command log");
     assert.ok(
       refreshIdx < captureIdx,
@@ -753,7 +753,7 @@ describe("tc-fwx0 different-size reattach — pre-capture resize gate (hydrateTr
     const { transport } = makeRecordingTransport();
 
     const hydrationDone = hydrateTransport(pipeline, transport, [P1], undefined, {
-      initialViewport: { cols: 80, rows: 24 },
+      initialViewport: { windowTmuxNum: 5, cols: 80, rows: 24 },
     });
 
     // Yield to let the resize request dispatch (async fn body + microtasks).
@@ -792,12 +792,12 @@ describe("tc-fwx0 different-size reattach — pre-capture resize gate (hydrateTr
     setReply("capture-pane", ok(new TextEncoder().encode("body")));
 
     await hydratePane(pipeline, transport, P1, undefined, {
-      initialViewport: { cols: 200, rows: 50 },
+      initialViewport: { windowTmuxNum: 5, cols: 200, rows: 50 },
     });
 
-    const refreshIdx = sentCommands.findIndex((c) => c.startsWith("refresh-client -C 200x50"));
+    const refreshIdx = sentCommands.findIndex((c) => c.startsWith("refresh-client -C @5:200x50"));
     const captureIdx = sentCommands.findIndex((c) => c.startsWith("capture-pane"));
-    assert.ok(refreshIdx >= 0, "refresh-client -C 200x50 must be in the command log");
+    assert.ok(refreshIdx >= 0, "refresh-client -C @5:200x50 must be in the command log");
     assert.ok(captureIdx >= 0, "capture-pane must be in the command log");
     assert.ok(
       refreshIdx < captureIdx,
