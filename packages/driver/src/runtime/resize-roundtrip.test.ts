@@ -18,8 +18,10 @@
  *        → clientTransport.sendControl({type:"resize.request", cols, rows})
  *
  *   2. sessionProxyTransport.onControl → inputPath.handleClientMessage
- *        → refreshClientSize(cols, rows)
- *        → host.write("refresh-client -C <cols>x<rows>\n")
+ *        → opts.reportForPane(paneId, cols, rows)
+ *        → SizeReporter.reportForPane: resolve pane→window, change-gate,
+ *          then sendBatch(["refresh-client -C @<win>:WxH", ...all other windows])
+ *          (first resize also participates all known windows — tc-cvny)
  *
  *   3. tmux -CC processes the command:
  *        → emits %begin/%end block (command ack)
