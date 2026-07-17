@@ -770,11 +770,21 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
   //     Constructed BEFORE createInputPath so `reportForPane` is available when
   //     inputPath is wired; onModelChange (report new windows, prune closed) is
   //     driven from the pipeline model-change subscription below.
+  //
+  //     Fire-and-forget: reports are best-effort. `pipeline.sendBatch` throws
+  //     synchronously once the host has exited (write-after-exit); a report
+  //     racing teardown must not propagate into the model-change dispatch, so
+  //     swallow both a synchronous throw and any per-command rejection.
+  const sendBatchBestEffort = (cmds: readonly string[]): void => {
+    try {
+      for (const p of pipeline.sendBatch(cmds)) void p.catch(() => {});
+    } catch {
+      // Host exited mid-report — nothing left to size.
+    }
+  };
   const sizeReporter: SizeReporter = createSizeReporter({
     getModel: () => pipeline.getModel(),
-    sendBatch: (cmds) => {
-      for (const p of pipeline.sendBatch(cmds)) void p.catch(() => {});
-    },
+    sendBatch: (cmds) => sendBatchBestEffort(cmds),
   });
 
   const inputPath = createInputPath(
@@ -876,9 +886,7 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
       for (const wid of next.windows.keys()) {
         resets.push(setWindowSizeDefault(defaultWindowIdToTmux(wid)));
       }
-      if (resets.length > 0) {
-        for (const p of pipeline.sendBatch(resets)) void p.catch(() => {});
-      }
+      if (resets.length > 0) sendBatchBestEffort(resets);
     }
     // tc-cvny: report windows that appeared without a report yet (never-revealed
     // windows keep their current dims) and prune reports for closed windows.
