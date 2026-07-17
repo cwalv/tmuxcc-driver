@@ -1810,23 +1810,6 @@ export interface ResyncRequestMessage extends MessageBase {
   readonly type: "resync.request";
 }
 
-/**
- * Client tells the session-proxy that THIS client (window) gained focus.
- * direction: client→session-proxy
- *
- * No payload: the client identity is implicit in the transport (the durable
- * identity presented at handshake, D2). The extension sends this when its VS
- * Code window gains focus.
- *
- * Carries no driver-side sizing effect (tc-cvny): sizing is now per-window and
- * reported truthfully — there is no session-size owner to elect, so focus does
- * not change any window's size. The session-proxy accepts and ignores it; it
- * stays on the wire for the extension's focus tracking and future use.
- */
-export interface ClientFocusMessage extends MessageBase {
-  readonly type: "client.focus";
-}
-
 // ---------------------------------------------------------------------------
 // Union types — the top-level discriminated unions
 // ---------------------------------------------------------------------------
@@ -1906,9 +1889,7 @@ export type ClientMessage =
   | SessionProxyCommandRequestMessage
   | ResyncRequestMessage
   // Per-pane attach (tc-295a.8)
-  | PaneAttachMessage
-  // Client-focus activity signal (tc-76m8.3, S3 size-ownership policy)
-  | ClientFocusMessage;
+  | PaneAttachMessage;
 
 /**
  * Any control-plane message (either direction) on the session-proxy wire.
@@ -1980,9 +1961,7 @@ export function isClientMessage(msg: ControlMessage): msg is ClientMessage {
     t === "command.request" ||
     t === "resync.request" ||
     // Per-pane attach (tc-295a.8)
-    t === "pane.attach" ||
-    // Client-focus activity signal (tc-76m8.3)
-    t === "client.focus"
+    t === "pane.attach"
   );
 }
 

@@ -211,7 +211,6 @@ export type WireFeature =
   | "focus-events"     // session-proxy wire: active-pane focus notifications
   | "input-forwarding" // session-proxy wire: client→session-proxy key/text input
   | "client-read-only" // session-proxy wire: driver enforces read-only client mode via ClientFlags.readOnly (tc-76m8.2)
-  | "size-ownership-activity" // session-proxy wire: client.focus accepted (no sizing effect since tc-cvny — per-window reporting is owner-less; token retained for extension compat)
   | "sessions-watch"   // server-proxy wire: push notifications on session-set changes
   | "session-create"   // server-proxy wire: client may request a new session
   | "session-destroy"  // server-proxy wire: client may request a session be killed

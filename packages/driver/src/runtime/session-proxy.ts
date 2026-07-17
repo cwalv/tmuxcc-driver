@@ -1371,13 +1371,6 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
           return;
         }
 
-        // client.focus carries no driver-side effect — the extension emits it
-        // for its own focus tracking. Swallow it here so it is not relayed to
-        // input-path as an unknown message.
-        if (msg.type === "client.focus") {
-          return;
-        }
-
         // tc-cvny: ignoreSize gate. A client attached with `ignore-size` never
         // reports its viewport — drop its resize.request (tmux `attach -r`
         // parity). All other clients report per-window; there is no owner to

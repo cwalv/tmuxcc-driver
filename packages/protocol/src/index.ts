@@ -184,8 +184,6 @@ export type {
   ResyncRequestMessage,
   // Client → SessionProxy (per-pane attach — tc-295a.8)
   PaneAttachMessage,
-  // Client → SessionProxy (focus activity signal — tc-76m8.3)
-  ClientFocusMessage,
   // Client union
   ClientMessage,
   // Either direction (session-proxy wire)

@@ -138,12 +138,10 @@ export interface StubSessionProxyOptions {
   initialModel?: SessionModel;
 
   /**
-   * Features the stub session-proxy advertises during the handshake
-   * (tc-76m8.15). Defaults to `[]` (no optional features) to preserve existing
-   * test behaviour — the negotiated feature set is the intersection of these and
-   * the client's advertised features.
-   *
-   * Pass `["size-ownership-activity"]` to exercise the `client.focus` feature gate.
+   * Features the stub session-proxy advertises during the handshake. Defaults to
+   * `[]` (no optional features) to preserve existing test behaviour — the
+   * negotiated feature set is the intersection of these and the client's
+   * advertised features.
    */
   serverFeatures?: string[];
 }

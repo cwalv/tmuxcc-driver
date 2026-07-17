@@ -227,9 +227,6 @@ export async function connectClient(
     attachPane(paneId: PaneId): void {
       inputApi.attachPane(paneId);
     },
-    sendFocus(): void {
-      inputApi.sendFocus();
-    },
   };
 
   // ── disconnect() ────────────────────────────────────────────────────────────

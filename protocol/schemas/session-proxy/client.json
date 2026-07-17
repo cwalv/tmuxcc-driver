@@ -89,20 +89,6 @@
       "additionalProperties": false
     },
 
-    "ClientFocusMessage": {
-      "allOf": [
-        { "$ref": "tmuxcc:shared/primitives#/$defs/MessageBase" }
-      ],
-      "type": "object",
-      "description": "Client tells the session-proxy that this window gained focus. No payload — the client identity is implicit in the transport (D2). Carries no driver-side sizing effect (tc-cvny): sizing is per-window and owner-less, so focus changes no window's size; the session-proxy accepts and ignores it, and it stays on the wire for the extension's focus tracking. direction: client→session-proxy.",
-      "required": ["type", "seq"],
-      "properties": {
-        "type": { "const": "client.focus" },
-        "seq": { "type": "integer", "minimum": 1 }
-      },
-      "additionalProperties": false
-    },
-
     "OpenWindowCommand": {
       "type": "object",
       "description": "Open a new window in the bound session. The session-proxy chooses the pane id(s); created window/pane ids arrive in the command response.",
@@ -446,8 +432,7 @@
         { "$ref": "#/$defs/ResizeRequestMessage" },
         { "$ref": "#/$defs/ResyncRequestMessage" },
         { "$ref": "#/$defs/SessionProxyCommandRequestMessage" },
-        { "$ref": "#/$defs/PaneAttachMessage" },
-        { "$ref": "#/$defs/ClientFocusMessage" }
+        { "$ref": "#/$defs/PaneAttachMessage" }
       ],
       "description": "Discriminated union of all messages the client sends to the session-proxy. Narrow on `type`."
     }
