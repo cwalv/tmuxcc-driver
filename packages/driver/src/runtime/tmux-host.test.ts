@@ -27,6 +27,8 @@ import { join, dirname } from "node:path";
 import { createTmuxHost } from "./tmux-host.js";
 // tc-blk — process-level safety net for real-tmux test sockets.
 import { trackSocket, killTmuxServer } from "./test-tmux-cleanup.js";
+// tc-widw — hermetic pane shell for waits that depend on pane-shell readiness.
+import { hermeticShellEnv } from "../harness/hermetic-shell.js";
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -545,20 +547,62 @@ describe("TmuxHost — real tmux 3.4", { skip: !tmuxAvailable ? "tmux not found 
     after(() => killServer(sock));
 
     // Pre-create an all-dead-pane session (the operator's reproducer): a pane
-    // with remain-on-exit whose shell has exited.
-    spawnSync("tmux", ["-L", sock, "new-session", "-d", "-s", sess], { timeout: 4000 });
-    spawnSync("tmux", ["-L", sock, "set-option", "-t", sess, "remain-on-exit", "on"], { timeout: 4000 });
-    spawnSync("tmux", ["-L", sock, "send-keys", "-t", sess, "exit", "Enter"], { timeout: 4000 });
-    // Spin-wait for the corpse so the attach genuinely targets a dead pane.
-    const deadline = Date.now() + 3000;
+    // with remain-on-exit whose shell has exited.  The server MUST start with
+    // the hermetic $SHELL (tc-widw): the typed "exit" is executed only after
+    // the pane shell finishes initializing, and on the operator's login shell
+    // that leg is ~810 ms nominal / unbounded under contention vs the 3 s
+    // deadline below — the mechanism behind this spec's transient setup
+    // failures.  Hermetic /bin/sh executes it in ~10 ms, load-insensitively.
+    // Only new-session starts the server (default-shell is baked in then);
+    // the env is passed uniformly because it is harmless on the others.
+    const setup: Array<[string, string[]]> = [
+      ["new-session", ["new-session", "-d", "-s", sess]],
+      ["set-option", ["set-option", "-t", sess, "remain-on-exit", "on"]],
+      ["send-keys", ["send-keys", "-t", sess, "exit", "Enter"]],
+    ];
+    for (const [label, args] of setup) {
+      const r = spawnSync("tmux", ["-L", sock, ...args], {
+        encoding: "utf8", timeout: 4000, env: hermeticShellEnv(),
+      });
+      assert.equal(
+        r.status, 0,
+        `test setup: tmux ${label} failed: status=${String(r.status)} stderr=${(r.stderr ?? "").trim()}`,
+      );
+    }
+    // Wait for the corpse so the attach genuinely targets a dead pane.  No
+    // event exists on this path (no control-mode client yet), so poll: the
+    // transition is structurally guaranteed now, and 3 s is a hang-breaker at
+    // ~300x nominal.  Tripwire (tc-widw): every observation is recorded and
+    // dumped on expiry so a future failure discriminates "list-panes kept
+    // failing" (access path) from "pane never died" (transition), instead of
+    // the two being conflated in one assert message.
+    const pollTrace: string[] = [];
+    const pollStart = Date.now();
+    const deadline = pollStart + 3000;
     let dead = false;
     while (Date.now() < deadline) {
       const r = spawnSync("tmux", ["-L", sock, "list-panes", "-t", sess, "-F", "#{pane_dead}"], {
         encoding: "utf8", timeout: 2000,
       });
+      pollTrace.push(
+        `+${Date.now() - pollStart}ms status=${String(r.status)} ` +
+        `out=${JSON.stringify((r.stdout ?? "").trim())} err=${JSON.stringify((r.stderr ?? "").trim())}`,
+      );
       if (r.status === 0 && (r.stdout ?? "").trim() === "1") { dead = true; break; }
     }
-    assert.equal(dead, true, "test setup: pane should be dead before attach");
+    if (!dead) {
+      const panes = spawnSync("tmux", ["-L", sock, "list-panes", "-t", sess, "-F",
+        "#{pane_id} dead=#{pane_dead} pid=#{pane_pid} cmd=#{pane_current_command}"],
+        { encoding: "utf8", timeout: 2000 });
+      const content = spawnSync("tmux", ["-L", sock, "capture-pane", "-t", sess, "-p"],
+        { encoding: "utf8", timeout: 2000 });
+      assert.fail(
+        "test setup: pane not dead before attach (tc-widw tripwire).\n" +
+        `panes: ${(panes.stdout ?? panes.stderr ?? "").trim()}\n` +
+        `pane content: ${JSON.stringify((content.stdout ?? "").trim())}\n` +
+        `poll trace (${pollTrace.length} observations):\n  ${pollTrace.join("\n  ")}`,
+      );
+    }
 
     const host = createTmuxHost({
       socketName: sock,

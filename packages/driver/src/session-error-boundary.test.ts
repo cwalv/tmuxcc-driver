@@ -57,6 +57,8 @@ import * as fs from "node:fs";
 
 import { createSessionProxy } from "./runtime/session-proxy.js";
 import type { SessionProxy } from "./runtime/session-proxy.js";
+// tc-widw — hermetic pane shell for waits that depend on pane-shell readiness.
+import { hermeticShellEnv } from "./harness/hermetic-shell.js";
 import { createSessionProxySupervisor, SessionQuarantineError } from "./session-proxy-supervisor.js";
 import type { SessionProxySupervisor, SessionProxySupervisorOptions } from "./session-proxy-supervisor.js";
 import { probeLiveSocket } from "./runtime-dir.js";
@@ -101,10 +103,17 @@ async function waitFor(
 /**
  * Spawn a detached tmux session on an isolated socket.
  * Throws if the spawn fails.
+ *
+ * The server starts with the hermetic $SHELL (tc-widw): EB8/DS3 type "exit"
+ * into a freshly spawned pane, and on the operator's login shell that input
+ * is executed only after rc init (~810 ms nominal, unbounded under
+ * contention) — the mechanism behind the EB8 transient.  Hermetic /bin/sh
+ * panes execute typed input in ~10 ms, load-insensitively.
  */
 function spawnTmuxSession(socketName: string, sessionName: string): void {
   const r = spawnSync("tmux", ["-L", socketName, "new-session", "-d", "-s", sessionName], {
     timeout: 8_000,
+    env: hermeticShellEnv(),
   });
   if (r.error || r.status !== 0) {
     throw new Error(

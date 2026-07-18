@@ -65,6 +65,8 @@ import { createSizeReporter } from "./size-report.js";
 import { createFlowController } from "./flow-control.js";
 import { createSessionProxy } from "./session-proxy.js";
 import { createSessionProxyRegistry } from "../metrics/index.js";
+// tc-widw — hermetic pane shell for waits that depend on pane-shell readiness.
+import { hermeticShellOverride } from "../harness/hermetic-shell.js";
 import type { Clock, TimeoutHandle } from "../state/coalescer.js";
 import { WINDOWS_ROW, PANES_ROW } from "../state/bootstrap.js";
 
@@ -1669,6 +1671,17 @@ function killRealServer(sock: string): void {
   killTmuxServer(sock);
 }
 
+/**
+ * Host options for the real-tmux suite (tc-widw): the driver-spawned server
+ * starts with the hermetic $SHELL so panes run /bin/sh.  R2's data-frame wait
+ * (send-keys → %output) — and any other wait on a pane shell reading input —
+ * otherwise depends on the operator's login-shell rc init (~810 ms nominal,
+ * unbounded under contention), the mechanism behind the tc-93a transient.
+ */
+function realHost(sock: string, sessionName: string) {
+  return { socketName: sock, sessionName, cols: 80, rows: 24, env: hermeticShellOverride() };
+}
+
 /** Poll a Buffer accumulator until predicate returns true or timeout. */
 function waitForBuffer(
   chunks: Uint8Array[],
@@ -1701,7 +1714,7 @@ describe(
       after(() => killRealServer(sock));
 
       const sessionProxy = createSessionProxy({
-        host: { socketName: sock, sessionName: "r1session", cols: 80, rows: 24 },
+        host: realHost(sock, "r1session"),
       });
       sessionProxy.host.onError(() => {}); // suppress unhandled error events
 
@@ -1735,7 +1748,7 @@ describe(
       after(() => killRealServer(sock));
 
       const sessionProxy = createSessionProxy({
-        host: { socketName: sock, sessionName: "r2session", cols: 80, rows: 24 },
+        host: realHost(sock, "r2session"),
       });
       sessionProxy.host.onError(() => {});
 
@@ -1788,7 +1801,7 @@ describe(
       after(() => killRealServer(sock));
 
       const sessionProxy = createSessionProxy({
-        host: { socketName: sock, sessionName: "r4session", cols: 80, rows: 24 },
+        host: realHost(sock, "r4session"),
       });
       sessionProxy.host.onError(() => {});
 
@@ -1823,7 +1836,7 @@ describe(
       after(() => killRealServer(sock)); // belt-and-suspenders
 
       const sessionProxy = createSessionProxy({
-        host: { socketName: sock, sessionName: "r3session", cols: 80, rows: 24 },
+        host: realHost(sock, "r3session"),
       });
       sessionProxy.host.onError(() => {});
 
@@ -1878,7 +1891,7 @@ describe(
       };
 
       const sessionProxy = createSessionProxy({
-        host: { socketName: sock, sessionName: "r6session", cols: 80, rows: 24 },
+        host: realHost(sock, "r6session"),
         stormAlarm: { clock: countingClock },
       });
       sessionProxy.host.onError(() => {});
@@ -1920,7 +1933,7 @@ describe(
       after(() => killRealServer(sock));
 
       const sessionProxy = createSessionProxy({
-        host: { socketName: sock, sessionName: "r7session", cols: 80, rows: 24 },
+        host: realHost(sock, "r7session"),
       });
       sessionProxy.host.onError(() => {});
 
@@ -2023,7 +2036,7 @@ describe(
       after(() => killRealServer(sock));
 
       const sessionProxy = createSessionProxy({
-        host: { socketName: sock, sessionName: "r8session", cols: 80, rows: 24 },
+        host: realHost(sock, "r8session"),
       });
       sessionProxy.host.onError(() => {});
       await sessionProxy.start();
@@ -2134,7 +2147,7 @@ describe(
       after(() => killRealServer(sock));
 
       const sessionProxy = createSessionProxy({
-        host: { socketName: sock, sessionName: "r9session", cols: 80, rows: 24 },
+        host: realHost(sock, "r9session"),
       });
       sessionProxy.host.onError(() => {});
       await sessionProxy.start();
@@ -2325,7 +2338,7 @@ describe(
       after(() => killRealServer(sock));
 
       const sessionProxy = createSessionProxy({
-        host: { socketName: sock, sessionName: "r10session", cols: 80, rows: 24 },
+        host: realHost(sock, "r10session"),
       });
       sessionProxy.host.onError(() => {});
       await sessionProxy.start();
