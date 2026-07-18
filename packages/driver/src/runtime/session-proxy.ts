@@ -618,10 +618,14 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
   //   goes the un-loud direction. No non-fragile tmux signal distinguishes it: gap-timing
   //   and pty read-chunk coupling carry no signal, and the only real difference is
   //   prompt-content (a dead shell prints no trailing prompt; a live one prints `$ `),
-  //   which the no-magic / no-content-micro-format doctrine rules out. It is far narrower
-  //   than the retired 500ms window (which mis-fired for a full half-second after ANY
-  //   output); the miss is a single rare missed toast, not data loss. Accepted per the
-  //   amendment rather than closed with a window or a prompt sniff.
+  //   which the no-magic / no-content-micro-format doctrine rules out. The exposure is
+  //   NOT uniformly rare: it is biased toward busy single-pane sessions — a pane
+  //   streaming output makes its %output the likely event preceding an external kill's
+  //   `%sessions-changed`, and that is exactly when a user most wants the "session
+  //   died" toast. Mitigations: strictly narrower than the retired 500ms window (one
+  //   event vs half a second of events), the loud default on every other path, and the
+  //   miss is one absent toast, not data loss. Accepted per the amendment rather than
+  //   closed with a window or a prompt sniff.
   //
   // STARTUP GUARD (_modelStabilized):
   //   Output before the first onModelChange (bootstrap shell prompts) is excluded, so
