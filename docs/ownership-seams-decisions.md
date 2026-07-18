@@ -721,20 +721,28 @@ filed as a bead under tc-99h6.
    reserved prose licenses nothing on its own. Classifies cleanly as
    "dormant-(d), gated" — **not a finding** (the gate is the disposition).
 
-4. **The daemon-tax question (sizing doc §5) — classify-and-record only, NOT
-   resolved (per bead scope).** The candidate: features paying the
-   protocol-vocabulary + connection-lifecycle tax without getting daemon
+4. **The daemon-tax question (sizing doc §5) — RESOLVED: daemon reaffirmed
+   (operator, 2026-07-18, bead tc-8vjj).** The candidate was: features paying
+   the protocol-vocabulary + connection-lifecycle tax without getting daemon
    (API-product) value — the unexamined-axiom class at the process-architecture
    level (design-flaw-detection.md §4). It is **not §3.1 state** — it is a
    process-architecture cost question, so the (a)–(d) lens does not apply; it
    maps instead to the §3.3 "cite-upstream-or-it-didn't-happen" /
-   §2 unexplored-axiom detector. Recorded, not resolved: the driver-as-separate-
-   process imposes no *capability* limit (every hard geometry limit comes from
-   VS Code, not the split — sizing-report-dont-own.md §5), so its justification
-   is the API-product claim, not technical necessity; feature designs should
-   notice when they pay the daemon tax without daemon value. **Not filed as a
-   finding** because the bead scopes it to classify-and-record only; whether to
-   open it is an operator/architecture call, tracked as an open question here.
+   §2 unexplored-axiom detector. The axiom is now examined and holds, on two
+   grounds. **(1) The boundary is not ours to remove:** tmux is already an
+   out-of-process server behind a wire protocol (control mode), so the
+   serialization + connection-lifecycle tax class is inherent to the system's
+   shape — an in-process driver would relocate the control-mode client into the
+   extension host, not remove the tax (and would give up crash isolation and
+   the one-broker-serving-N-windows property for no capability gain). **(2) The
+   driver's conceptual home is the tmux side of the seam:** it is the
+   rich-client interface tmux itself would offer — in the limit the driver
+   interface could extend tmux proper — not a VS Code accessory. That answers
+   the API-product question structurally rather than by naming a speculative
+   consumer. Standing consequence for feature designs: the *incremental*
+   driver↔extension wire vocabulary is still not free — a design should notice
+   when it adds wire surface without tmux-side value — but the daemon itself is
+   settled, not an open question.
 
 5. **Persistence — the contrast / done-right case — (b) re-derivation, by
    construction.** tmux is the sole persistence layer; the driver idle-exits and
