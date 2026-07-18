@@ -60,6 +60,14 @@ import type { PaneBufferStore } from "../state/scrollback.js";
 // ---------------------------------------------------------------------------
 import { setupE2E } from "./e2e-smoke.test.js";
 
+// tc-w7r1 — hermetic pane shell. R5 asserts the exact death-cause under the fast
+// /bin/sh, the timing the old 500ms output-recency window could not survive (a
+// login-shell ~810ms delay was what made the pre-fix oracle hold). With the
+// adjacency discriminator (session-proxy.ts), an external kill-server has no pane
+// %output adjacent to its %sessions-changed regardless of shell speed → cause
+// "external" holds deterministically.
+import { hermeticShellOverride } from "../harness/hermetic-shell.js";
+
 // ---------------------------------------------------------------------------
 // Guard: skip real-tmux tests if tmux absent
 // ---------------------------------------------------------------------------
@@ -580,18 +588,26 @@ describe(
     );
 
     // -----------------------------------------------------------------------
-    // R5. kill-server → connected clients receive session.unavailable
+    // R5. kill-server → connected clients receive session.unavailable (cause external)
     //
     // This is the session-proxy-level RESPONSE test (tc-7ml.2):
-    //   1. Start session-proxy + first client via setupE2E.
+    //   1. Start session-proxy + first client via setupE2E (HERMETIC shell, tc-w7r1).
     //   2. Connect a second client via sessionProxy.addClient (full onClose wiring).
     //   3. Wire the second client's onControl to capture messages.
-    //   4. Kill the tmux server.
-    //   5. Assert the second client receives an error with code "session.unavailable".
+    //   4. Kill the tmux server (external death — no pane exit precedes it).
+    //   5. Assert the farewell is session.unavailable with cause EXACTLY "external".
     //
     // Uses sessionProxy.addClient so the data-plane detach + server.removeClient path
     // is fully wired (same as production code).  The second client's transport
     // is kept alive so that the broadcastError delivery is observable.
+    //
+    // tc-w7r1 regression moat: this runs under the hermetic /bin/sh, the timing the
+    // retired 500ms output-recency window could not survive — pre-fix the cause
+    // flipped to "pane-exit" every run (proven N=3). The adjacency discriminator makes
+    // "external" hold deterministically because kill-server emits no pane %output
+    // adjacent to its session-death %sessions-changed. Do NOT weaken back to a
+    // login-shell (non-hermetic) setup: the ~810ms delay would mask the very race this
+    // moat guards.
     // -----------------------------------------------------------------------
 
     it(
@@ -601,7 +617,12 @@ describe(
         const sock = sockName("unavail");
         after(() => killServer(sock));
 
-        const session = await setupE2E("unavail");
+        // tc-w7r1: hermetic shell. Pre-fix, this flipped cause "external" →
+        // "pane-exit" every run (the fast /bin/sh's startup output landed inside
+        // the retired 500ms wall-clock window); post-fix the adjacency rule keeps
+        // it "external" because kill-server emits no pane %output adjacent to its
+        // session-death %sessions-changed.
+        const session = await setupE2E("unavail", { env: hermeticShellOverride() });
 
         try {
           const { sessionProxy } = session;

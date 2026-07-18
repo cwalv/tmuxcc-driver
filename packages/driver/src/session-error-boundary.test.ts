@@ -809,6 +809,95 @@ describe("tc-2x3.4: per-session error boundary", { skip: !TMUX_AVAILABLE }, () =
     );
   });
 
+  /**
+   * DS4 (tc-w7r1): last-pane exit while a SECOND session keeps the server ALIVE →
+   * cause still "pane-exit" (matrix case (a)).
+   *
+   * EB8 covers matrix case (b): the bound session is the ONLY session, so its last-
+   * pane exit also exits the server. This test covers case (a): a sibling session
+   * keeps the tmux server alive AFTER the bound session dies. The tc-w7r1 matrix
+   * pinned that the -CC control client of the dying session sees the SAME cascade in
+   * both — `%output %<pane> <exit-echo>` then `%sessions-changed` then a bare `%exit`
+   * — because tmux carries no death REASON on the -CC transport and the server's
+   * survival is invisible to the departing client. So the adjacency discriminator must
+   * attribute pane-exit regardless of whether the server outlives the session; this
+   * test is the moat against a future change that (wrongly) keys attribution on server
+   * survival / the exit-empty teardown.
+   */
+  it("DS4 (tc-w7r1): last-pane exit with a sibling session keeping the server alive → cause pane-exit", { timeout: 30_000 }, async () => {
+    const socketName = `tmuxcc-ds4-${process.pid}-${Date.now()}`;
+    const sessionName = `ds4-sess-${process.pid}`;
+    _sockets.push(socketName);
+    spawnTmuxSession(socketName, sessionName);
+
+    // A sibling session on the same server — it keeps the server alive after the
+    // bound session's last pane exits (contrast EB8, where the server exits too).
+    execFileSync(
+      "tmux",
+      ["-L", socketName, "new-session", "-d", "-s", `${sessionName}-keepalive`],
+      { encoding: "utf8", env: hermeticShellEnv() },
+    );
+
+    const proxy = createSessionProxy({
+      host: { socketName, sessionName, attach: true },
+    });
+    _proxies.push(proxy);
+
+    await proxy.start();
+
+    const { sessionProxy: dt, client: ct } = createInMemoryTransportPair();
+    const addP = proxy.addClient(dt);
+    await runClientHandshake(ct, {
+      protocolVersion: WIRE_PROTOCOL_VERSION,
+      features: [
+        "pane-lifecycle" as const,
+        "layout-updates" as const,
+        "focus-events" as const,
+        "input-forwarding" as const,
+      ],
+    });
+    await addP;
+
+    const received: Array<{ type: string; code?: string; cause?: string }> = [];
+    let clientClosed = false;
+    ct.onControl((msg) => {
+      const m = msg as unknown as Record<string, string>;
+      const entry: { type: string; code?: string; cause?: string } = { type: m.type! };
+      if (m.code !== undefined) entry.code = m.code;
+      if (m.cause !== undefined) entry.cause = m.cause;
+      received.push(entry);
+    });
+    ct.onClose(() => { clientClosed = true; });
+
+    // Exit the bound session's last pane. The session dies; the sibling keeps the
+    // server up.
+    const paneIds = execFileSync(
+      "tmux",
+      ["-L", socketName, "list-panes", "-t", sessionName, "-F", "#{pane_id}"],
+      { encoding: "utf8" },
+    ).trim().split("\n");
+    execFileSync("tmux", ["-L", socketName, "send-keys", "-t", paneIds[0]!, "exit", "Enter"], {
+      encoding: "utf8",
+    });
+
+    await waitFor(() => clientClosed, 20_000, "DS4: client transport to close after last-pane exit");
+
+    // DS4-F1: farewell must be session.unavailable.
+    const farewell = received.find((m) => m.type === "error" && m.code === "session.unavailable");
+    assert.ok(
+      farewell !== undefined,
+      `DS4-F1: client must receive session.unavailable farewell; got: ${JSON.stringify(received)}`,
+    );
+
+    // DS4-F2: cause must be "pane-exit" — the last pane's process exit headed the
+    // cascade, even though the server survives via the sibling session.
+    assert.equal(
+      farewell.cause,
+      "pane-exit",
+      `DS4-F2: cause must be "pane-exit" for a last-pane exit even when a sibling session keeps the server alive; got: ${JSON.stringify(farewell)}`,
+    );
+  });
+
   // EB3 (deleted, tc-4b6k.4): the socket-clobber ownership guard it exercised
   // (`_doSocketTeardown` / `_socketPathRefCount` / `_closeServerFdOnly`) no
   // longer exists — the single-socket wire collapse (D5) removed the per-session

@@ -560,43 +560,81 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
   //    always non-null by then.
   let serverRef: ControlServer | null = null;
 
-  // tc-fah2: discriminate user-caused session death from external/unattributed death.
+  // tc-w7r1: discriminate user-caused session death from external/unattributed death.
   //
-  // We want to set _paneExitHeadedCascade = true ONLY when the session dies because
-  // the last pane's process exited naturally (e.g. user typed `exit`), NOT because of
-  // an external kill (kill-server, kill-session, SIGTERM to the tmux server).
+  // We set _paneExitHeadedCascade = true ONLY when the session dies because the last
+  // pane's process exited naturally (e.g. user typed `exit`), NOT because of an
+  // external kill (kill-server, kill-session, SIGTERM to the tmux server).
   //
-  // WHAT TMUX ACTUALLY SENDS (empirically confirmed, tmux 3.4):
-  //   Natural death (pane exits → session dies): %output... %sessions-changed %exit
-  //   External kill (kill-server):               %sessions-changed %exit
+  // THE DECIDER IS TMUX'S OWN STREAM, not driver-side arrival order. tmux 3.4's -CC
+  // transport carries NO usable death REASON — `%exit` is emitted bare for every
+  // cascade (last-pane exit, kill-server, kill-session, detach-client): on
+  // session-destroy the server sends MSG_EXIT with a retval but no message string, so
+  // client_exit_message() has no reason to print (tmux client.c:423-426 vs
+  // server-fn.c:471-472 / server-client.c:1928-1940; verified empirically, tc-w7r1
+  // matrix). The reason machinery serves interactive clients only. So the reason is
+  // ABSENT, not merely ambiguous, and there is nothing to consume from `%exit`.
   //
-  //   Both paths produce %sessions-changed then %exit.  tmux does NOT send %window-close
-  //   to the CC client of the dying session: by the time the async command queue fires
-  //   control_notify_window_unlinked(), c->session is already NULL (set in
-  //   server_destroy_session), so the %window-close write is skipped.  Similarly,
-  //   %pane-exited is a HOOK (not a CC notification) and requires remain-on-exit.
+  //   DO NOT re-propose "attribute cause from the %exit reason" without FIRST re-running
+  //   the tc-w7r1 matrix against the target tmux: the bare-%exit behaviour is what this
+  //   binary (3.4) does, not a law. If a newer tmux populates the -CC %exit reason on
+  //   session-destroy, that reason becomes the primary decider and this adjacency rule
+  //   demotes to a fallback — but confirm it on the wire first, don't assume it from the
+  //   man page (the vocabulary has existed since 2013 yet still isn't emitted here).
   //
-  // THE DISCRIMINATOR (output-recency heuristic):
-  //   When the user types `exit`, the shell echoes back the command and possibly prints
-  //   a logout message — producing %output events within ~100ms of %sessions-changed.
-  //   External kills produce no pane output just before %sessions-changed.
+  // WHAT TMUX DOES EMIT on the -CC stream (empirically pinned, tmux 3.4, tc-w7r1):
+  //   Natural death (last pane's process exits → session dies):
+  //       %output %<pane> <exit-echo>   %sessions-changed   %exit
+  //   External kill (kill-server / kill-session):
+  //       %sessions-changed   %exit          (no pane %output in the fatal cascade)
   //
-  //   So: if a %output/%extended-output event arrived within 500ms of %sessions-changed,
-  //   it is very likely a pane-exit cascade.  If no recent output, it is external.
+  //   tmux does NOT send %window-close / %pane-exited to the CC client of the dying
+  //   session (by the time control_notify_window_unlinked fires, c->session is already
+  //   NULL; %pane-exited is a remain-on-exit HOOK). The model cannot tell them apart
+  //   either: panes.size is unchanged at host.onExit in both cases. The ONLY signal on
+  //   the wire is the dying pane's own terminal %output immediately preceding the
+  //   session-death %sessions-changed.
   //
-  //   The 500ms window is intentionally short: normal typing produces output well
-  //   before the session closes, and external kills arrive without prior output.
+  // THE DISCRIMINATOR — event adjacency (causal, not wall-clock):
+  //   `%sessions-changed` (plural, bare) fires ONLY at session/server teardown, never on
+  //   ordinary activity. A pane-exit cascade delivers the dying pane's %output as the
+  //   IMMEDIATELY-PRECEDING event; an external kill delivers a `%sessions-changed` with
+  //   no adjacent pane output. So: _paneExitHeadedCascade = (the event just before this
+  //   `%sessions-changed`, in stream order, was a post-bootstrap bound-pane %output).
+  //   This is purely ordinal — no timestamp, no window, no tuned constant (superseding
+  //   the old 500ms output-recency window, which mis-fired for a full half-second after
+  //   ANY output and made the oracle depend on the operator login shell's ~810ms delay).
+  //
+  //   DEFAULT DIRECTION (tc-w7r1 operator amendment): where the stream cannot
+  //   discriminate a cascade, attribute "external" — the LOUD direction (a spurious
+  //   "session died" notification self-explains; a silently-swallowed external death does
+  //   not). This adjacency rule already defaults to external for every cascade with no
+  //   adjacent last-pane output. The design forbids ANY timing window; we do not add one
+  //   to sharpen the edge below.
+  //
+  //   DOCUMENTED IRREDUCIBLE LIMITATION (tc-w7r1): an external kill fired within one
+  //   event of UNRELATED recent pane output makes that output adjacent to the kill's
+  //   `%sessions-changed`, so this rule attributes pane-exit (silent) — the one case that
+  //   goes the un-loud direction. No non-fragile tmux signal distinguishes it: gap-timing
+  //   and pty read-chunk coupling carry no signal, and the only real difference is
+  //   prompt-content (a dead shell prints no trailing prompt; a live one prints `$ `),
+  //   which the no-magic / no-content-micro-format doctrine rules out. It is far narrower
+  //   than the retired 500ms window (which mis-fired for a full half-second after ANY
+  //   output); the miss is a single rare missed toast, not data loss. Accepted per the
+  //   amendment rather than closed with a window or a prompt sniff.
   //
   // STARTUP GUARD (_modelStabilized):
-  //   The %output events from shell prompts during session startup are excluded by only
-  //   tracking output AFTER the first onModelChange fires (model bootstrapped).  This
-  //   prevents startup prompts from polluting the kill-server discrimination.
+  //   Output before the first onModelChange (bootstrap shell prompts) is excluded, so
+  //   startup chatter cannot arm the adjacency flag.
   //
   // Declared here (before createRuntimePipeline) so the onTopologyNotify callback
   // below can reference it at closure-creation time (even though it's a let — the
   // callback is only CALLED after start(), by which point the variable is initialized).
   let _paneExitHeadedCascade = false;
-  let _lastOutputTs = 0;   // timestamp of most recent %output/%extended-output event
+  // True iff the most recent parsed event was a post-bootstrap bound-pane %output —
+  // reset by any other event (see the onNotification subscriber below). Read at the
+  // `%sessions-changed` edge to decide adjacency.
+  let _lastEventWasPaneOutput = false;
   let _modelStabilized = false; // true after first onModelChange (bootstrap done)
 
   // tc-j8mx.12: the terminal-farewell fact.  Settled once the host-exit
@@ -667,15 +705,17 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
       // try/catch in host.onData — this is intentional (the throw is the
       // fault-injection path).
       opts.onTopologyNotify?.(kind);
-      // tc-fah2: output-recency discriminator for pane-exit vs external death.
+      // tc-w7r1: adjacency discriminator for pane-exit vs external death.
       //
-      // %sessions-changed fires for BOTH natural pane-exit death AND external
-      // kill-server.  We distinguish them by whether recent pane %output arrived
-      // within the 500ms window (see the comment above the let declarations for
-      // the full rationale).  The flag is rewritten on every %sessions-changed so
-      // the last value before host.onExit fires is always current.
+      // %sessions-changed (plural, bare) fires for BOTH a natural last-pane exit AND an
+      // external kill. They differ only in whether the dying pane's terminal %output was
+      // the IMMEDIATELY-PRECEDING event (see the comment above the let declarations).
+      // onTopologyNotify runs BEFORE this event's own onNotification (pipeline.ts fires
+      // onTopologyNotify then _fireNotificationHandlers), so _lastEventWasPaneOutput still
+      // reflects the event just before this %sessions-changed. The flag is rewritten on
+      // every %sessions-changed so the last value before host.onExit is current.
       if (kind === "sessions-changed") {
-        _paneExitHeadedCascade = _lastOutputTs > 0 && Date.now() - _lastOutputTs < 500;
+        _paneExitHeadedCascade = _lastEventWasPaneOutput;
       }
     },
     onSwitchClientDetected: (outcome: SwitchClientOutcome) => {
@@ -709,23 +749,26 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
   //     always live by then (tc-3si.1).
   pipelineRef = pipeline;
 
-  // 5b. tc-fah2: arm the output-recency tracker for the pane-exit discriminator.
+  // 5b. tc-w7r1: track event adjacency for the pane-exit discriminator.
   //
-  //     We subscribe to onNotification to track %output/%extended-output events.
-  //     The _modelStabilized gate excludes startup shell prompts (which arrive before
-  //     the first onModelChange / bootstrap) from the signal; only post-bootstrap
-  //     output (i.e. interactive user activity) counts toward the 500ms window.
+  //     We subscribe to onNotification and record whether the MOST RECENT parsed event
+  //     was a bound-pane %output: set true on %output/%extended-output, reset to false on
+  //     any other event. Read at the `%sessions-changed` edge (onTopologyNotify above) to
+  //     decide whether the dying pane's terminal output was immediately adjacent to the
+  //     session-death — the only tmux-3.4 signal that discriminates a last-pane exit from
+  //     an external kill (see the comment above the let declarations).
   //
-  //     onModelChange is also used in step 8 for the pane-close latch; these are
+  //     The _modelStabilized gate excludes startup shell prompts (which arrive before the
+  //     first onModelChange / bootstrap) from arming the flag; only post-bootstrap output
+  //     counts. onModelChange is also used in step 8 for the pane-close latch; these are
   //     independent subscribers — the pipeline supports multiple.
   pipeline.onModelChange(() => {
     _modelStabilized = true;
   });
   pipeline.onNotification((event) => {
     if (!_modelStabilized) return;
-    if (event.kind === "output" || event.kind === "extended-output") {
-      _lastOutputTs = Date.now();
-    }
+    _lastEventWasPaneOutput =
+      event.kind === "output" || event.kind === "extended-output";
   });
 
   // 6. Control-plane server.
@@ -1119,9 +1162,9 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
       // Subscribe to host.onExit so that when tmux dies unexpectedly the
       // session-proxy tears down its pipeline and notifies all connected clients.
       host.onExit(() => {
-        // tc-fah2: SIGCHLD (which fires term.onExit in node-pty) can race the
+        // tc-w7r1: SIGCHLD (which fires term.onExit in node-pty) can race the
         // delivery of remaining pty data (e.g. the %sessions-changed notification
-        // that updates _paneExitHeadedCascade via the output-recency discriminator).
+        // that sets _paneExitHeadedCascade via the adjacency discriminator).
         // Defer the teardown and farewell by one event-loop turn so that any pending
         // onData events (which fire in the same "poll" phase libuv iteration) have a
         // chance to be processed by the pipeline's onData handler before we stop it.
@@ -1628,10 +1671,10 @@ export function createSessionProxy(opts: SessionProxyOptions): SessionProxy {
     },
   };
 
-  // tc-fah2: test seam — expose _paneExitHeadedCascade for EB8/DS tests so
-  // they can verify the flag transitions (pane count 0 → true; back to >0 → false).
-  // Non-enumerable, not in SessionProxy interface.
-  // Tests access via: (proxy as any)._paneExitHeadedCascadeForTesting
+  // tc-w7r1: test seam — expose _paneExitHeadedCascade for EB8/DS tests so they can
+  // verify the death-cause attribution (armed by an adjacent pane %output at the
+  // session-death %sessions-changed; false otherwise). Non-enumerable, not in the
+  // SessionProxy interface. Tests access via: (proxy as any)._paneExitHeadedCascadeForTesting
   Object.defineProperty(sessionProxyHandle, "_paneExitHeadedCascadeForTesting", {
     get: () => _paneExitHeadedCascade,
     enumerable: false,
