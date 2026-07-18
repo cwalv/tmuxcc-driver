@@ -1,8 +1,10 @@
 # Ownership & boundary decisions — architecture review tc-4b6k
 
 > Ratified design record, 2026-07-01 (Fable-5 review session, bead tc-4b6k).
-> Companion to the tmuxcc project repo's `docs/ownership-seams.md` (the descriptive map;
-> its §1–§8 taxonomy is adopted as-is) and to the driver's
+> Companion to the tmuxcc project repo's descriptive map (now archived at
+> `projects/tmuxcc/docs/archive/ownership-seams.md`; its §1–§8 taxonomy is
+> adopted as-is, and §8 below graduates its seams into a disposition ledger)
+> and to the driver's
 > [`state-model.md`](./state-model.md). Every finding below cites first-hand file/symbol
 > evidence read during this review and names the design principle it rests on
 > (Ousterhout *A Philosophy of Software Design*; FP-in-Rust principles — see
@@ -37,7 +39,8 @@ O1–O4 answers: §2. Boundary verdict detail: §3. Code smells + design-it-twic
 
 ## 1. The corrected mechanical picture (first-hand)
 
-Three findings from this review revise the map in `ownership-seams.md`. None
+Three findings from this review revise the map in
+`projects/tmuxcc/docs/archive/ownership-seams.md` (archived). None
 weaken its Axis-1/Axis-2 analysis — they sharpen where the fix must land.
 
 ### 1.1 There is no attach-mode decision (O1)
@@ -475,3 +478,279 @@ reserved in §6.3/PROTOCOL.md §12 is re-expressed in per-window terms:
 principles (one-decider-per-concern, no reimplementation of tmux policy, no
 resize-window fallback). tc-cvny.1 pins the upstream semantics relied on.
 tc-cvny.3 (driver) and tc-cvny.4 (extension) are the implementing beads.
+
+---
+
+## 8. Per-seam disposition ledger + design-flaw audit (bead tc-hjo1, 2026-07-18)
+
+> This section **graduates** the descriptive discovery map (archived at
+> `projects/tmuxcc/docs/archive/ownership-seams.md` — see its resolution
+> header) into a per-seam disposition ledger, and carries the design-flaw audit
+> (`projects/tmuxcc/docs/design-flaw-detection.md` §5 option 1,
+> operator-approved 2026-07-18 under epic tc-99h6). It records the **shipped
+> end-state** as of driver `a2b4094` / vscode `994258b` (post-tc-cvny), not the
+> tc-4b6k-era plan above. Where §1–§7 above stated an *intended* fix, this
+> ledger states what actually landed and cites it.
+>
+> Each seam disposition additionally records, per the audit:
+> **(i)** the §3.2 *one-decider* verdict — THE single decider for the seam's
+> concern at BOTH the driver↔tmux and extension↔driver seams (an honest answer
+> containing "and" is a finding); and **(ii)** the §3.1 *state-classification*
+> of the durable state the seam's mechanism holds: (a) own-write cache /
+> (b) re-derivation / (c) earned inference citing a named VS Code API gap /
+> (d) policy-arbitration-mode = violation candidate.
+>
+> Disposition vocabulary: **fix-now** (a fix shipped) / **fix-later** (a real
+> seam, fix tracked but unshipped) / **out-of-scope-by-product-goal** (an
+> operator carve-out). Seam ids follow the archived map's `S1–S5` + `O1`.
+
+### 8.1 The ledger
+
+#### S1 — B vs C: canonical binding intent could not represent per-window render state
+
+- **Disposition: fix-now (SHIPPED).** The D3 cardinality promotion landed.
+  Binding intent is no longer a single shared `@tmuxcc-bound` scalar per pane:
+  each client writes its own option name `paneBoundOptionName(clientId)` =
+  `@tmuxcc-bound-` + `sha1hex(clientId).slice(0,16)` (state-ownership.md §1;
+  driver `state/bootstrap.ts` binding write path). Its axis is durable
+  `ClientIdentity` presented at handshake (D2, tc-4b6k.1; state-ownership.md
+  §3.3, PROTOCOL.md §3.3). The intent is reconstructed on connect (tc-4b6k.2),
+  **not** carried in the bulk `list-panes` requery (reading it into the shared
+  canonical row would re-introduce the illegal state), and carried forward
+  wholesale as the client-local overlay (state-ownership.md §3.2). "Bound in
+  window A, detached in window B" is now representable: two clients binding one
+  pane write two distinct options instead of colliding in one slot.
+- **§3.2 one-decider — concern: binding intent.**
+  - *extension↔driver:* THE decider is **the requesting client** (extension
+    instance). Each client owns only its own `(pane, client)` slot; the driver
+    is the sole *writer* but decides nothing — it serves each client its own
+    binding fact. Single decider per slot. ✓
+  - *driver↔tmux:* THE store is **tmux** (the per-client user-option); tmux
+    decides nothing about binding — it persists and serves. The driver is the
+    sole writer. Single decider. ✓
+  - No "and": the pre-fix "and" (extension in-memory registry C *and* the
+    shared canonical scalar B, neither reconcilable) is exactly what the
+    per-client slot dissolved. The extension's `PaneBindingRegistry` remains,
+    but demoted to **live wiring state only** (which panes *this* session's
+    Pseudoterminals are currently attached to), no longer a competing durable
+    authority.
+- **§3.1 classification — `boundClients` overlay / `@tmuxcc-bound-<hex>` slot:
+  (b) re-derivation.** Adversarial test: is it an own-write cache (a)? No — a
+  cache records "what we last sent"; this is reconstructed from tmux's
+  per-client options on every connect and is the *authoritative* per-client
+  binding truth, not a change-gate. Is it an election (d)? No — there is no
+  arbiter; each client reads and writes only its own slot, so there is no
+  contested resource to arbitrate. It re-derives per-client binding truth from
+  tmux's canonical per-client store. Passes in one sentence: *the driver's
+  reconstruction of each client's own binding intent from tmux's per-client
+  user-options.*
+  - The extension-side `PaneBindingRegistry` (live wiring) is separately
+    **(a) own-write cache** — it records which panes this session currently
+    renders (its own wiring), rebuilt each session from canonical state + live
+    topology; staleness is structurally impossible (no key outlives its
+    referent). One sentence: *a cache of this instance's own live
+    Pseudoterminal↔pane wiring.*
+
+#### S2 / O1 — the full-vs-passive attach-mode "decision"
+
+- **Disposition: fix-now (SHIPPED — the seam did not exist).** O1 is answered
+  (§1.1): there is **no per-session attach-mode decision point**. The driver
+  creates exactly two fixed-mode client kinds (session-proxy south client =
+  always full; watcher = always passive `no-output,ignore-size`); observed
+  sessions get no tmux client at all. The "passive observe" the map traced was
+  the two windows' *watchers*, and "two full clients on one session" was a
+  broker-singleton violation (H), since closed at both the double-spawn
+  (tc-jlyi.8 / tc-kyq4.1 bind-as-lock) and the socket-collision (tc-9im3) axes;
+  the recycle-takeover residual dissolved under D5 (§S5 — no per-session socket
+  to rebind, so no takeover window). There is nothing to fix because there was
+  no decision to fix.
+- **§3.2 one-decider — concern: control-client attach mode.** THE decider is
+  **the driver, statically** (mode is fixed at client-kind construction, not
+  elected). Both seams: no contention — tmux never arbitrates attach mode, and
+  the extension never chooses it. Single decider (a compile-time constant). ✓
+  No "and".
+- **§3.1 classification — attach mode: not durable state.** The mode is a fixed
+  construction-time flag on each tmux client, held nowhere as durable driver
+  state; there is no cache/derivation/inference/election to classify. Recorded
+  as *no state* (the honest one-sentence answer), which is why O1 collapsed to
+  "no decision exists."
+
+#### S3 / D4 — size flap: `latest` + multiple full clients
+
+- **Disposition: fix-now (SHIPPED — mechanism RETIRED, not gated).** The
+  size-ownership arbitration is **retired by report-don't-own** (driver
+  `a2b4094`, epic tc-cvny; see the §7 D4 addendum above and
+  `docs/sizing-report-dont-own.md`). The driver no longer runs an owner
+  election: `runtime/size-ownership.ts` (285 lines, `SizeOwnershipPolicy` +
+  owner gate + candidacy refcounts) is **deleted**; `runtime/manual-window-ledger.ts`
+  is **deleted**; the session-proxy owner gate + `lastResizeByClient` replay,
+  the `client.focus` wire message, and the `size-ownership-activity` WireFeature
+  token are gone (tc-cvny.4). The driver now reports each window's viewport
+  truthfully via `refresh-client -C @<win>:WxH` (tmux ≥ 3.4), participating in
+  tmux's *native* `latest`/`largest`/`smallest` arbitration. The flap is not
+  gated away — it is dissolved: with one decider (tmux) and a truthful report
+  that acts as a downward *ceiling* (a raw client winning `latest` can only
+  shrink below our box — the benign letterbox direction), the corruption
+  direction is unreachable by construction (sizing-report-dont-own.md §3).
+- **§3.2 one-decider — concern: window size.**
+  - *driver↔tmux:* THE decider is **tmux** (its native per-window `latest`
+    arbitration across all clients' reports). The driver *reports*, it does not
+    decide. Single decider. ✓ This is the whole point of report-don't-own:
+    before tc-cvny the answer was "tmux's election **and** the driver's
+    `SizeOwnershipPolicy` election, neither aware of the other" — the textbook
+    two-blind-arbiters "and" this audit exists to catch, now removed.
+  - *extension↔driver:* THE decider of *which box to report* is **the
+    extension** (the rendered window's tab/group box), one report per window;
+    the driver serializes reports on the single ordered wire. For a window shown
+    by two of our own frontends the driver reports the most-recent box change —
+    a report policy, not an arbitration policy (sizing-report-dont-own.md §3).
+    Single decider per report. ✓
+- **§3.1 classification — `SizeReporter` ledger (`runtime/size-report.ts`):
+  (a) own-write cache.** Adversarial test: is it an election (d)? This is the
+  exact rubber-stamp the audit warns against, so test hard: does the ledger
+  hold a contested resource, enter/release a mode, or prioritize contributors?
+  No — it maps `tmux-window-number → our-own-last-reported-size` and exists
+  **only to change-gate** (skip a `refresh-client -C` tmux already has —
+  iTerm2's "It's already that size. Do nothing."). It arbitrates nothing;
+  losing tmux's election changes nothing it stores. Is it re-derivation (b)? No
+  — it is not rebuilt from tmux's notification stream; it records what *we*
+  sent, the definition of an own-write cache. Passes in one sentence: *a cache
+  of our own last-reported per-window sizes, kept only to change-gate reports.*
+  The `participating` flag is part of the same cache (records whether we have
+  begun reporting — an own-write fact), not a mode with a release obligation.
+
+#### S4 — synchronous south side on the shared event loop (D6)
+
+- **Disposition: fix-now (SHIPPED).** The broker's south side is async
+  (`tmux-south.ts` header: "the async replacement for this module's former
+  `spawnSync` calls — D6 / tc-4b6k.6"). `spawnSync` is removed from the broker
+  loop; the timeout/error contract is preserved (`ETIMEDOUT` on SIGKILL) so
+  callers are unchanged. This is not a *seam* in the ownership sense (it is a
+  contention/blocking finding, S4 in the §4 code-smell table, not an
+  ownership-cardinality seam), recorded here for completeness of the S-series.
+- **§3.2 one-decider:** N/A — south-side blocking is not an ownership concern;
+  no decider question applies.
+- **§3.1 classification:** N/A — no durable state; the fix removed a *blocking
+  I/O pattern*, not a state store.
+
+#### S5 — socket-lifecycle machinery (D5)
+
+- **Disposition: fix-now (SHIPPED).** The single-socket wire collapse landed
+  (tc-4b6k.4): one well-known broker socket, per-(client,session) connections
+  bound by a post-handshake `session.attach {sessionId}` step
+  (`session-proxy-supervisor.ts` header §"tc-4b6k.4 (D5)"). The per-session
+  socket + its `_socketPathRefCount`, the `_closeServerFdOnly` rename-aside
+  dance, and the ABA/GAP-1 guards are **deleted** (the only surviving mentions
+  are historical prose in the module docstring). The `@tmuxcc/protocol` package
+  extraction (D5 package re-cut) also landed (`packages/protocol` exists
+  alongside `packages/driver`). Like S4 this is a wire/structure finding, not
+  an ownership-cardinality seam.
+- **§3.2 one-decider:** N/A — socket lifecycle is not an ownership concern.
+- **§3.1 classification:** N/A — the fix *deleted* self-created race-guard
+  state; there is no remaining store to classify.
+
+#### O1 — the attach-mode question
+
+Folded into S2 above (the seams map's O1 and its S2 are the same concern —
+"why does the contested session get a full client from a non-owner"). Answered:
+no attach-mode decision exists; the observation was a broker-singleton
+violation. Disposition **fix-now (SHIPPED)**, decider/classification as S2.
+
+### 8.2 Remaining ownership carve-out (recorded, not a finding)
+
+**Multi-client size/geometry arbitration — out-of-scope-by-product-goal.**
+Operator carve-out (this bead's OPTION comment, 2026-07-07, reaffirming the
+tc-4b6k product-goal note): the reserved parity slots in `state-model.md` §8 /
+`PROTOCOL.md` §12 exist deliberately; nothing builds arbitration modes until the
+operator reopens the space. report-don't-own (S3) deliberately does **not**
+arbitrate multiple size-contributing clients — it reports and lets tmux's one
+arbiter decide. This is a bounded non-goal, not an unclassified state.
+
+- **§3.2 one-decider (for the reserved space):** would be **tmux** (its native
+  arbitration) the day a real constituency appears; any driver-side arbitration
+  mode reintroduced here MUST pass §3.2 first (it would be a (d) candidate by
+  construction). Recorded as a standing gate, not a current decider.
+
+### 8.3 Audit appendix — §4 named candidates classified
+
+Per design-flaw-detection.md §4, each named audit candidate classified in one
+sentence (§3.1). A candidate that does not classify cleanly is a **finding**
+filed as a bead under tc-99h6.
+
+1. **Extension `_inSyncWindows` / render-authority state
+   (`spatial-model.ts`) — (c) earned inference, citing a named VS Code API
+   gap.** Adversarial test: is it an own-write cache (a) of sent dims? No — the
+   dims cache is separate (`_paneDims`, `_pendingConfirmations`); `_inSyncWindows`
+   is a *derived predicate* ("has this window's managed strip been
+   tmux-confirmed?") that gates whether `overrideDimensions` is suppressed. Is
+   it re-derivation (b)? No — tmux exposes no "is this window in the managed
+   shape" fact; the set is *inferred* by matching `pane.resized` replies against
+   sent slot dims (confirm-then-trust, tc-zna.10). Is it an election (d)? No —
+   it arbitrates nothing; it is a per-window boolean the client owns about its
+   own render authority. It **compensates a named VS Code API gap**: no
+   group-membership read, no split/unsplit events, no sash write
+   (`terminalActions.ts:457` — resize acts on the active pane, no target arg),
+   nothing in the proposed-API pipeline (sizing-report-dont-own.md §5). One
+   sentence: *an earned inference of managed-strip authority reconstructed from
+   confirmed resize replies, renting the VS Code group-membership/sash-write
+   read gap.* Classifies cleanly — **not a finding.**
+
+2. **Remaining hydration pre-capture state (post-fwx0-retirement) —
+   (b) re-derivation** (with no state of its own). The pre-capture gate
+   (`hydration.ts` `maybeRefreshBeforeCapture`, tc-cvny) holds **no durable
+   state**: `HydrateOpts.initialViewport` is passed per-call by the `pane.attach`
+   seam, which *reads it from the `SizeReporter` ledger*
+   (`reportedSizeForWindow`) at call time. So the only state behind it is the
+   SizeReporter own-write cache (S3, already classified (a)); the gate itself is
+   a stateless re-issue of that cached report before a capture. Adversarial
+   test: is there hidden hydration-owner state, the old fwx0 owner-resolution?
+   No — that was deleted by tc-cvny (the fwx0 owner-resolution in `hydration.ts`
+   is gone; the pre-capture gate replaced it). One sentence: *a stateless
+   pre-capture re-issue of the SizeReporter's cached window report; no state of
+   its own.* Classifies cleanly — **not a finding.**
+
+3. **The reserved D8 arbitration-modes prose (ownership-seams §2, now
+   PROTOCOL.md §12 / state-model.md §8) — (d) policy-arbitration-mode, held as
+   dormant vocabulary.** This is the one candidate that classifies as a
+   violation *class* — deliberately. It is not built; it is reserved parity
+   vocabulary (client flags, `window-size` mode slots) with **nothing
+   implemented**. Disposition: **dormant vocabulary** — legal precisely because
+   it is inert. The standing rule (recorded in §8.2 and design-flaw-detection.md
+   §4): any future implementation of these modes is a (d) violation candidate
+   and MUST pass §3.2 (name the single decider) before a line is written; the
+   reserved prose licenses nothing on its own. Classifies cleanly as
+   "dormant-(d), gated" — **not a finding** (the gate is the disposition).
+
+4. **The daemon-tax question (sizing doc §5) — classify-and-record only, NOT
+   resolved (per bead scope).** The candidate: features paying the
+   protocol-vocabulary + connection-lifecycle tax without getting daemon
+   (API-product) value — the unexamined-axiom class at the process-architecture
+   level (design-flaw-detection.md §4). It is **not §3.1 state** — it is a
+   process-architecture cost question, so the (a)–(d) lens does not apply; it
+   maps instead to the §3.3 "cite-upstream-or-it-didn't-happen" /
+   §2 unexplored-axiom detector. Recorded, not resolved: the driver-as-separate-
+   process imposes no *capability* limit (every hard geometry limit comes from
+   VS Code, not the split — sizing-report-dont-own.md §5), so its justification
+   is the API-product claim, not technical necessity; feature designs should
+   notice when they pay the daemon tax without daemon value. **Not filed as a
+   finding** because the bead scopes it to classify-and-record only; whether to
+   open it is an operator/architecture call, tracked as an open question here.
+
+5. **Persistence — the contrast / done-right case — (b) re-derivation, by
+   construction.** tmux is the sole persistence layer; the driver idle-exits and
+   re-derives all state from tmux on reconnect — there is **no driver-side
+   survivor state**, which is why this concern has no bug cluster. One sentence:
+   *every driver fact is re-derived from tmux's canonical store on connect;
+   there is no durable driver-private state to own.* This is the positive
+   control — the shape the other seams were measured against. **Not a finding**
+   (it is the reference case).
+
+### 8.4 Audit outcome
+
+Every §4 candidate classified in one sentence; **no candidate failed the
+one-sentence test**, so no finding beads were filed under tc-99h6 from this
+pass. The size-ownership subsystem — the largest bug cluster and the one the
+§3.4 clustering detector would have flagged first — is the one candidate that
+*would* have failed (d) before tc-cvny; it now passes as an (a) own-write cache
+because report-don't-own removed the election. The reserved D8 vocabulary is the
+standing (d)-gate: dormant and legal, re-armed the moment anything implements it.

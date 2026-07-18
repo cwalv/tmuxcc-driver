@@ -302,13 +302,14 @@ in full elsewhere; this section is a set of **pointers**, not a restatement.
 ## 6. Seam ledger
 
 The per-seam catalog of ownership seams and their fix / out-of-scope verdicts —
-the living successor to the descriptive `ownership-seams.md` map — is **not yet
-landed**. Its recommended home is driver
-[`../docs/seams-catalog.md`](../docs/seams-catalog.md) (implementation-facing
-verdicts, next to `state-model.md` and `ownership-seams-decisions.md`); this
-section will link it as its ledger once it lands.
+the living successor to the descriptive map (archived at
+`projects/tmuxcc/docs/archive/ownership-seams.md`) — **landed** as **§8 of
+[`../docs/ownership-seams-decisions.md`](../docs/ownership-seams-decisions.md)**
+(bead tc-hjo1, 2026-07-18), not as the once-proposed standalone
+`seams-catalog.md`. §8 records each seam's disposition (fix-now / fix-later /
+out-of-scope-by-product-goal) against the shipped post-tc-cvny end-state, plus
+the design-flaw audit (one-decider verdict + §3.1 state-classification per seam).
 
-Until then, the ratified seam **decisions** (D1–D9 and the seam findings S1–S7)
-live in
-[`../docs/ownership-seams-decisions.md`](../docs/ownership-seams-decisions.md).
-This document does not restate those verdicts.
+The ratified seam **decisions** (D1–D9 and the seam findings S1–S7) live in the
+same document (§1–§7); the ledger (§8) graduates them into per-seam
+dispositions. This document does not restate those verdicts.
