@@ -47,6 +47,12 @@ import { createSessionProxy } from "./session-proxy.js";
 import type { SessionProxy } from "./session-proxy.js";
 import { trackSocket, killTmuxServer } from "./test-tmux-cleanup.js";
 
+// tc-99h6.1 — hermetic pane shell for waits that depend on pane-shell readiness.
+// tmux bakes default-shell from $SHELL of the server-starting process; without
+// this ZC-FLOOD's send-keys + output waits race the operator's login-shell rc
+// init (~810 ms nominal, unbounded under contention — tc-widw).
+import { hermeticShellOverride } from "../harness/hermetic-shell.js";
+
 // ---------------------------------------------------------------------------
 // tmux guard + socket bookkeeping (mirrors flow-abrupt-death.test.ts).
 // ---------------------------------------------------------------------------
@@ -149,7 +155,7 @@ describe(
         const sock = sockName("z1");
         after(() => killTmuxServer(sock));
         const sessionProxy = createSessionProxy({
-          host: { socketName: sock, sessionName: "fzc-z1", cols: 80, rows: 24 },
+          host: { socketName: sock, sessionName: "fzc-z1", cols: 80, rows: 24, env: hermeticShellOverride() },
           flow: { highWaterBytes: 65_536, lowWaterBytes: 16_384 },
         });
         sessionProxy.host.onError(() => {});

@@ -14,10 +14,6 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { accessSync, constants as fsConstants } from "node:fs";
-import { resolve, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
-
 import {
   BOOTSTRAP_PANES_FORMAT,
   BOOTSTRAP_WINDOWS_FORMAT,
@@ -26,20 +22,16 @@ import {
 } from "./bootstrap.js";
 import { ReplyShapeError } from "./reply-row.js";
 
+// tc-99h6.1: adopt the shared hermetic-shell helper (replaces the hand-rolled
+// $SHELL swap that pre-dated this module — tc-j8mx.9 / tc-widw).
+import { hermeticShellEnv } from "../harness/hermetic-shell.js";
+
 const SOCK = `tmuxcc-test-replyrow-${process.pid}`;
 // tc-j8mx.9: separate socket for the pane_title suite to avoid the sequential
 // socket-reuse race.  kill-server on SOCK may return before the socket file is
 // fully removed; if new-session then runs on the same name, it can connect to
 // the dying server and fail ("no sessions").  A distinct name sidesteps it.
 const TITLE_SOCK = `tmuxcc-test-replyrow-title-${process.pid}`;
-
-// tc-j8mx.9: hermetic pane shell — the pane_title tests assert on #{pane_title}
-// values set by an explicit OSC-0/2 sequence.  The operator's interactive shell
-// (e.g. zprezto zsh) rewrites the terminal title from its precmd hook, racing
-// the asserted value on both read paths.  Point $SHELL at a non-login /bin/sh
-// wrapper for the pane_title server only (see before() below).
-const __dir = dirname(fileURLToPath(import.meta.url));
-const HERMETIC_PANE_SHELL = resolve(__dir, "../harness/hermetic-pane-shell.sh");
 
 function tmuxBytes(args: string[], sock: string = SOCK): Uint8Array {
   const r = spawnSync("tmux", ["-L", sock, ...args], { encoding: "buffer" });
@@ -112,26 +104,18 @@ describe("pane_title Layer-A: control-char policy on both read paths (tc-mysc.2)
   }
 
   before(() => {
-    // tc-j8mx.9: start the server with a hermetic non-login /bin/sh as
-    // default-shell.  tmux derives default-shell from $SHELL of the
-    // server-starting process.  Without this, the operator's interactive shell
-    // (e.g. zprezto zsh) races the asserted #{pane_title}: its precmd hook
-    // fires after initialization and overwrites the OSC-set title.
-    // Loud accessSync: a missing wrapper must not silently fall back to the
-    // operator shell (which would re-arm the race).  Restore $SHELL immediately
-    // after new-session so other tests in this process are unaffected.
-    accessSync(HERMETIC_PANE_SHELL, fsConstants.X_OK);
-    const prevShell = process.env["SHELL"];
-    process.env["SHELL"] = HERMETIC_PANE_SHELL;
-    // A pane that emits the hazardous OSC title once, then idles.
-    tmuxBytes(["new-session", "-d", "-s", "titleprobe", "-x", "80", "-y", "24", HAZARD_OSC], TITLE_SOCK);
-    // Restore $SHELL: the server's default-shell is now baked in; restoring
-    // here keeps other tests in this process on the operator shell.
-    if (prevShell !== undefined) {
-      process.env["SHELL"] = prevShell;
-    } else {
-      delete process.env["SHELL"];
-    }
+    // tc-99h6.1 (adopts tc-j8mx.9): start the server with the shared hermetic
+    // pane shell so tmux bakes a non-login /bin/sh as default-shell.  Without
+    // this the operator's interactive shell (e.g. zprezto zsh) races the
+    // asserted #{pane_title}: its precmd hook fires after initialization and
+    // overwrites the OSC-set title.  hermeticShellEnv() includes the loud
+    // accessSync guard — a missing wrapper fails the suite rather than silently
+    // falling back to the operator shell.
+    spawnSync(
+      "tmux",
+      ["-L", TITLE_SOCK, "new-session", "-d", "-s", "titleprobe", "-x", "80", "-y", "24", HAZARD_OSC],
+      { encoding: "buffer", env: hermeticShellEnv() },
+    );
     // Poll until tmux has processed the OSC and stored the (stripped) title.
     for (let i = 0; i < 50; i++) {
       const t = tmuxText(["list-panes", "-t", "titleprobe", "-F", "#{pane_title}"], TITLE_SOCK).replace(/\n+$/, "");

@@ -64,6 +64,12 @@ import { fileURLToPath } from "node:url";
 // thrown test body and verifies the safety net reaps the orphan.
 import { trackSocket, killTmuxServer, flushAllTracked } from "./test-tmux-cleanup.js";
 
+// tc-99h6.1 — hermetic pane shell for waits that depend on pane-shell readiness.
+// tmux bakes default-shell from $SHELL of the server-starting process; without
+// this the waits (sendInput → output) race the operator's login-shell rc init
+// (~810 ms nominal, unbounded under contention — tc-widw).
+import { hermeticShellOverride } from "../harness/hermetic-shell.js";
+
 // ---------------------------------------------------------------------------
 // SessionProxy internals (within session-proxy/src, no rootDir issue)
 // ---------------------------------------------------------------------------
@@ -286,11 +292,11 @@ export interface E2ESession {
  * Promise.all, then client modules are wired up afterward.
  *
  * @param label - Short label for the socket name (keep it test-unique).
- * @param opts  - Optional session-proxy host overrides (cols, rows, sessionName).
+ * @param opts  - Optional session-proxy host overrides (cols, rows, sessionName, env).
  */
 export async function setupE2E(
   label: string,
-  opts: { cols?: number; rows?: number; sessionName?: string } = {},
+  opts: { cols?: number; rows?: number; sessionName?: string; env?: Record<string, string> } = {},
 ): Promise<E2ESession> {
   const sock = sockName(label);
   // tc-blk — register BEFORE we spawn so a throw between here and teardown
@@ -305,6 +311,7 @@ export async function setupE2E(
       sessionName,
       cols: opts.cols ?? 80,
       rows: opts.rows ?? 24,
+      ...(opts.env !== undefined ? { env: opts.env } : {}),
     },
   });
   sessionProxy.host.onError(() => { /**/ });
@@ -833,7 +840,9 @@ describe(
       "SP2 (REGRESSION): sync ON → send-keys to one pane broadcasts to all panes in window",
       { timeout: 40_000 },
       async () => {
-        const session = await setupE2E("sync-panes");
+        // tc-99h6.1: hermetic pane shell — SP2's send-keys wait races the
+        // operator login-shell rc init (~810 ms); pass env to the host spawn.
+        const session = await setupE2E("sync-panes", { env: hermeticShellOverride() });
         after(() => killServer(session.socketName));
         try {
           const { hook, controller, paneId: pane1Id } = session;
